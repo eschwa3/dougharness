@@ -1,0 +1,83 @@
+{
+ "runId": "wf_7092b963-6a5",
+ "timestamp": "2026-09-06T13:40:31.678Z",
+ "workflowName": "doug-implement",
+ "status": "completed",
+ "durationMs": 1070891,
+ "agentCount": 8,
+ "totalTokens": 248397,
+ "workflowProgress": [
+  {
+   "type": "workflow_agent",
+   "index": 1,
+   "label": "reuse:agents-generator",
+   "phaseTitle": "Implement",
+   "agentId": "a82d340bfaf1bf171",
+   "model": "claude-haiku-4-5-20251001",
+   "state": "done"
+  },
+  {
+   "type": "workflow_agent",
+   "index": 2,
+   "label": "verify:agents-generator",
+   "phaseTitle": "Verify",
+   "agentId": "af0a726afed748647",
+   "model": "claude-opus-5[1m]",
+   "state": "done"
+  },
+  {
+   "type": "workflow_agent",
+   "index": 3,
+   "label": "review:agents-generator",
+   "phaseTitle": "Review",
+   "agentId": "a0aa56a515e7394f4",
+   "model": "claude-opus-5[1m]",
+   "state": "done"
+  },
+  {
+   "type": "workflow_agent",
+   "index": 4,
+   "label": "adversary:agents-generator",
+   "phaseTitle": "Adversary",
+   "agentId": "a40c97fd441c71682",
+   "model": "claude-haiku-4-5-20251001",
+   "state": "done"
+  },
+  {
+   "type": "workflow_agent",
+   "index": 5,
+   "label": "fix:agents-generator:2",
+   "phaseTitle": "Implement",
+   "agentId": "ad2262af4c2ef00c4",
+   "model": "claude-sonnet-5",
+   "state": "done"
+  },
+  {
+   "type": "workflow_agent",
+   "index": 6,
+   "label": "adversary:agents-generator:2",
+   "phaseTitle": "Adversary",
+   "agentId": "a28d0fcac2ea873d9",
+   "model": "claude-haiku-4-5-20251001",
+   "state": "done"
+  },
+  {
+   "type": "workflow_agent",
+   "index": 7,
+   "label": "check:agents-generator:2",
+   "phaseTitle": "Verify",
+   "agentId": "ad7e1c22c06b62cc8",
+   "model": "claude-opus-5[1m]",
+   "state": "done"
+  },
+  {
+   "type": "workflow_agent",
+   "index": 8,
+   "label": "fix:agents-generator:3",
+   "phaseTitle": "Implement",
+   "agentId": "ad851e4a790403cab",
+   "model": "claude-sonnet-5",
+   "state": "done"
+  }
+ ]
+}

@@ -1,0 +1,32 @@
+{
+  "name": "dougharness",
+  "private": true,
+  "version": "1.0.2",
+  "description": "Doug: a native-first harness for Claude Code. Deterministic gates, tailored install, honest memory.",
+  "license": "MIT",
+  "packageManager": "pnpm@9.15.4",
+  "engines": {
+    "node": ">=22.16"
+  },
+  "workspaces": [
+    "plugins/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "bootstrap": "sh scripts/setup.sh",
+    "build": "pnpm -r --filter \"./packages/*\" run build",
+    "test": "vitest run",
+    "test:unit": "vitest run --exclude '**/codex-live.test.ts'",
+    "test:watch": "vitest",
+    "typecheck": "pnpm -r --filter \"./packages/*\" run typecheck",
+    "eval": "node evals/run.mjs",
+    "prepare": "git config core.hooksPath .githooks",
+    "release:check": "node scripts/release.mjs check",
+    "release:stage": "node scripts/release.mjs stage"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.0",
+    "typescript": "^5.6.0",
+    "vitest": "^2.1.0"
+  }
+}

@@ -1,0 +1,10 @@
+{
+  "name": "doug-gates",
+  "displayName": "Doug Gates",
+  "version": "1.0.2",
+  "description": "Deterministic guardrails for Claude Code: protected paths, bash guard, secret scan on edits and commands, format on edit, edit-loop detection, a verification gate on Stop and on SubagentStop, a snapshot of the plan and session into the anchor before compaction and re-anchoring after it, and a run trace of subagents and tool calls. Configured by .doug/config.json.",
+  "author": {
+    "name": "Doug contributors"
+  },
+  "hooks": "./hooks/hooks.json"
+}

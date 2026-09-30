@@ -1,0 +1,116 @@
+{
+  "plan": "Standard agents auto-created by project type",
+  "integrationBranch": "doug/agents-generator-propose-agents",
+  "modelsSource": "CLAUDE.md",
+  "budget": {
+    "agents": 12,
+    "tokens": 400000,
+    "wallMinutes": 40
+  },
+  "ok": true,
+  "levels": [
+    {
+      "index": 0,
+      "integration": {
+        "ok": true,
+        "merged": ["doug/task-agents-generator"],
+        "conflicts": [],
+        "verify": []
+      },
+      "levelAdversary": null,
+      "tasks": [
+        {
+          "id": "agents-generator",
+          "implemented": true,
+          "blockedReason": null,
+          "verified": true,
+          "reviewed": true,
+          "reviewIssues": ["minor: the generator's help text could mention the --dry-run flag"],
+          "inScope": true,
+          "adversary": {
+            "ran": true,
+            "verdict": "pass",
+            "blocked": false,
+            "summary": "F1 is fixed: generated descriptions are quoted and every generated frontmatter block parsed successfully as YAML.",
+            "issues": [],
+            "commandsRun": [],
+            "error": null,
+            "fallback": null
+          },
+          "size": "M",
+          "shape": "full",
+          "gate": "auto",
+          "branch": "doug/task-agents-generator",
+          "commit": "eda723a1c4c45946b582d33f9ff0d5648990e67f",
+          "reused": null,
+          "card": null,
+          "specHash": "3f5e1c2a9d7b4e6081a2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f6071",
+          "passes": 2,
+          "stopReason": null,
+          "attempts": [
+            {
+              "pass": 1,
+              "stages": ["implement", "verify", "review", "adversary"],
+              "commit": "f615b7c7bb70c38c60880a00d4a73fdac9248348",
+              "blockingStage": "adversary",
+              "verified": true,
+              "reviewed": true,
+              "adversary": { "verdict": "fail", "blocked": true },
+              "newFindings": ["F1"],
+              "fixedFindings": [],
+              "ready": false,
+              "retriable": { "ok": true, "reason": "every finding is within the owned files" },
+              "spent": { "agents": 5, "tokens": null, "elapsedMs": null }
+            },
+            {
+              "pass": 2,
+              "stages": ["fix", "check"],
+              "commit": "eda723a1c4c45946b582d33f9ff0d5648990e67f",
+              "blockingStage": null,
+              "verified": true,
+              "reviewed": true,
+              "adversary": { "verdict": "pass", "blocked": false },
+              "newFindings": [],
+              "fixedFindings": ["F1"],
+              "ready": true,
+              "retriable": null,
+              "spent": { "agents": 3, "tokens": null, "elapsedMs": null }
+            }
+          ],
+          "budget": {
+            "limits": { "agents": 12, "tokens": 400000, "wallMinutes": 40 },
+            "spent": { "agents": 8, "tokens": null, "elapsedMs": null },
+            "enforced": ["agents"]
+          },
+          "ledger": [
+            {
+              "id": "F1",
+              "stage": "adversary",
+              "invariant": "verification",
+              "severity": "blocker",
+              "file": "plugins/doug-flow/agents/reviewer.md",
+              "line": 1,
+              "description": "invalid YAML frontmatter; Claude Code would not load the agent",
+              "evidence": null,
+              "status": "fixed",
+              "openedPass": 1,
+              "fixedPass": 2,
+              "fixedCommit": "eda723a1c4c45946b582d33f9ff0d5648990e67f",
+              "confirmedBy": "adversary",
+              "reappeared": false
+            }
+          ],
+          "acceptance": [],
+          "models": {
+            "implement": { "model": "sonnet", "effort": "medium" },
+            "verify": { "model": "opus", "effort": "high" },
+            "review": { "model": "opus", "effort": "high" },
+            "adversary": { "model": "codex", "effort": "low", "relay": "haiku" },
+            "tier": null,
+            "checkout": { "model": "haiku", "effort": "inherit" }
+          }
+        }
+      ]
+    }
+  ]
+}

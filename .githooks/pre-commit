@@ -1,0 +1,194 @@
+#!/bin/sh
+# Checked-in pre-commit gate. Activated by `pnpm install` (the prepare script
+# sets core.hooksPath to this directory). Fails closed: any non-zero step,
+# including a missing pnpm, refuses the commit. No skip switch on purpose.
+set -u
+
+cd "$(git rev-parse --show-toplevel)" || {
+  echo "pre-commit: git rev-parse --show-toplevel failed; commit refused" >&2
+  exit 1
+}
+
+# card stop-gate-credits-pre-commit: the tree this commit is about to record, computed here, before the
+# unset below, while GIT_INDEX_FILE (a `git commit -a` / pathspec commit points it at a temporary index) is
+# still whatever git set it to. write-tree reads that index, so this is the tree of what git is about to
+# commit, not necessarily today's HEAD^{tree}. Failure (no index, detached weirdness, ...) leaves
+# commit_tree empty; the record writer below treats that as fail-closed (write no passing record, remove
+# any stale one) rather than guess.
+commit_tree=$(git write-tree 2>/dev/null)
+write_tree_status=$?
+
+# card stop-gate-credits-pre-commit (round 2, reviewer BLOCKER): the commands below run against the WORKING
+# TREE, but commit_tree above is the committed INDEX - a file staged one way and left different on disk
+# hides a broken committed version behind a passing run, and an untracked file the tests depend on is
+# invisible to write-tree the same way. Captured here, still before the unset below, so `git diff` reads the
+# same GIT_INDEX_FILE write-tree just did (the temporary index a `git commit -a` / pathspec commit points
+# at) - checking this after the unset would compare against the real, not-yet-updated .git/index instead.
+# Any non-excluded unstaged diff or untracked file makes `ok` false below regardless of how the commands
+# themselves do; either git call failing counts as dirty too (fail closed). Exclusions match
+# plugins/doug-gates/lib/baseline.mjs's changedFiles: .doug/.state/ (the hook's own record and logs, and
+# any other project state living there), .doug/anchor.md exactly (the harness's own handoff snapshot), and
+# .claude/worktrees/ (subagent worktrees). Plain --name-only output (no --porcelain) is used, not parsed for
+# quoting, so a path containing a space is never misread; git itself C-quotes a name containing a newline, so
+# such a name arrives as one already-quoted entry that never matches any of the literal exclusion patterns
+# below — an unexcluded entry, correctly read as dirty (fail closed), not silently dropped or split.
+working_tree_diff=$(git diff --name-only 2>/dev/null)
+working_tree_diff_status=$?
+working_tree_untracked=$(git ls-files --others --exclude-standard 2>/dev/null)
+working_tree_untracked_status=$?
+working_tree_dirty=0
+if [ "$working_tree_diff_status" -ne 0 ] || [ "$working_tree_untracked_status" -ne 0 ]; then
+  working_tree_dirty=1
+else
+  combined="$working_tree_diff
+$working_tree_untracked"
+  old_ifs="$IFS"
+  IFS='
+'
+  # Round 3 (reviewer BLOCKER): `for f in $combined` is unquoted, so besides the intended IFS word-splitting
+  # it is also subject to pathname expansion - an untracked file literally named ".doug/anchor.m[d]" is a
+  # valid glob for the tracked ".doug/anchor.md" sitting right next to it, so $f silently became the wrong,
+  # excluded path instead of the real untracked one. `set -f` (noglob) for exactly this loop turns that
+  # expansion off; only `set -u` is on for the rest of the hook, so it is restored right after.
+  set -f
+  for f in $combined; do
+    case "$f" in
+      '') ;;
+      .doug/.state/*) ;;
+      .doug/anchor.md) ;;
+      .claude/worktrees/*) ;;
+      *) working_tree_dirty=1 ;;
+    esac
+  done
+  set +f
+  IFS="$old_ifs"
+fi
+
+# git exports its own location (GIT_DIR, GIT_INDEX_FILE, ...) to hooks. The
+# test suite spawns git in temp repos; with these set, every `git init` and
+# `git commit` in those repos would land in THIS repo instead. Drop them.
+unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_PREFIX GIT_COMMON_DIR \
+  GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_NAMESPACE \
+  GIT_IMPLICIT_WORK_TREE GIT_QUARANTINE_PATH GIT_REFLOG_ACTION
+
+# card gate-output-names-failures: a discarded terminal (like the record
+# commits for 98fd1bb and 2f03658) left nothing to say which test failed.
+# Each step's output is teed into a log under .doug/.state/pre-commit (already
+# gitignored) so the terminal still streams it AND a failing run's full
+# output survives; the log is removed again on success. Piping through tee
+# means pnpm/vitest no longer see a TTY on this path, so a green run's
+# terminal output loses colour and any interactive reporter (review m6).
+mkdir -p .doug/.state/pre-commit || {
+  echo "pre-commit: mkdir -p .doug/.state/pre-commit failed; commit refused" >&2
+  exit 1
+}
+
+# card stop-gate-credits-pre-commit: a machine-readable record of this run, so the Stop gate can credit a
+# passing pre-commit instead of re-running the same commands a second time. commands_json accumulates one
+# {"name","command","exit","durationMs"} object per step, in the order run_step runs them; write_record
+# assembles the full record and writes it via temp file + mv so a half-written file is never read.
+pre_commit_record=".doug/.state/pre-commit/last-run.json"
+pre_commit_commands_json=""
+
+record_command() {
+  # $1=name $2=command $3=exit $4=durationMs $5=totals JSON (optional, card ratchet-pre-commit-credit).
+  # Command strings here are always fixed `pnpm <script>` invocations (no user input), so no JSON escaping is
+  # needed; $5 is JSON.stringify output from node, already valid JSON.
+  totals_field=""
+  if [ -n "${5:-}" ]; then
+    totals_field=",\"totals\":$5"
+  fi
+  entry="{\"name\":\"$1\",\"command\":\"$2\",\"exit\":$3,\"durationMs\":$4${totals_field}}"
+  if [ -z "$pre_commit_commands_json" ]; then
+    pre_commit_commands_json="$entry"
+  else
+    pre_commit_commands_json="${pre_commit_commands_json},${entry}"
+  fi
+}
+
+write_record() {
+  # $1 = steps_ok ("true"/"false"): whether every command run so far exited 0. The record's own `ok` is
+  # true only when steps_ok is true AND the working tree (checked above, before the unset) had nothing
+  # beyond the committed index - round 2's fix. If write-tree (captured before the unset above) failed or
+  # produced nothing, this is fail-closed: never write a passing record for a tree we could not identify,
+  # and never leave a stale one from an earlier run in place either.
+  steps_ok="$1"
+  if [ "$write_tree_status" -ne 0 ] || [ -z "$commit_tree" ]; then
+    rm -f "$pre_commit_record"
+    return
+  fi
+  reason_field=""
+  if [ "$steps_ok" = "true" ] && [ "$working_tree_dirty" -eq 0 ]; then
+    ok="true"
+  else
+    ok="false"
+    if [ "$steps_ok" = "true" ]; then
+      reason_field=',"reason":"working tree differs from the committed index"'
+    fi
+  fi
+  at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  tmp="${pre_commit_record}.tmp.$$"
+  printf '{"version":1,"tree":"%s","ok":%s,"at":"%s","commands":[%s]%s}\n' \
+    "$commit_tree" "$ok" "$at" "$pre_commit_commands_json" "$reason_field" > "$tmp" 2>/dev/null \
+    && mv "$tmp" "$pre_commit_record" 2>/dev/null
+  # A record write failure (unwritable dir, race, ...) must never change the hook's exit status - only
+  # clean up a leftover temp file here; the caller's own exit code is untouched either way.
+  rm -f "$tmp" 2>/dev/null
+}
+
+run_step() {
+  step_name="$1"
+  shift
+  command_str="$*"
+  log=".doug/.state/pre-commit/${step_name}-$(date +%Y%m%d-%H%M%S).log"
+  step_start=$(date +%s)
+  { "$@" 2>&1; echo "$?" > "$log.status"; } | tee "$log"
+  step_end=$(date +%s)
+  duration_ms=$(( (step_end - step_start) * 1000 ))
+  # review B1: a missing, empty, or non-numeric status file (mkdir raced away, .doug/.state not writable,
+  # disk full, the subshell killed before it wrote) must read as failure, never skip the check with a shell
+  # error from `[ -ne ]` on a non-numeric value - the header above promises fail-closed. review B2: that case
+  # is not "the step failed" - it's "we don't know" - so it gets its own message, and never claims a log
+  # exists to read.
+  step_status=$(cat "$log.status" 2>/dev/null)
+  status_readable=1
+  case "$step_status" in
+    '' | *[!0-9]*) step_status=1; status_readable=0 ;;
+  esac
+  rm -f "$log.status"
+  # card ratchet-pre-commit-credit: the step's parsed test totals (lib/test-totals.mjs parseTotals), read from
+  # the log before it is removed below, so the Stop gate can count tests on a credited record. Any failure
+  # (no node, missing module, unreadable log) leaves step_totals empty and the entry without `totals`: the
+  # gate then runs the commands instead of crediting. Never changes the hook's exit status.
+  step_totals=""
+  if [ "$step_status" -eq 0 ] && [ -f "$log" ]; then
+    step_totals=$(node --input-type=module -e '
+import { readFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+import { join } from "node:path";
+const { parseTotals } = await import(pathToFileURL(join(process.cwd(), "plugins/doug-gates/lib/test-totals.mjs")).href);
+process.stdout.write(JSON.stringify(parseTotals(readFileSync(process.argv[1], "utf8"))));
+' "$log" 2>/dev/null) || step_totals=""
+  fi
+  record_command "$step_name" "$command_str" "$step_status" "$duration_ms" "$step_totals"
+  if [ "$step_status" -ne 0 ]; then
+    write_record false
+    if [ "$status_readable" -eq 0 ]; then
+      echo "pre-commit: could not read the exit status of pnpm ${step_name} (${log}.status missing or unreadable); commit refused" >&2
+    elif [ -f "$log" ]; then
+      # review m7: an absolute path, so it still resolves when the committer's own shell cwd is a
+      # subdirectory; $PWD is the repo top-level here, set by the `cd` above.
+      echo "pre-commit: pnpm ${step_name} failed; commit refused; full output kept at ${PWD}/${log}" >&2
+    else
+      echo "pre-commit: pnpm ${step_name} failed; commit refused" >&2
+    fi
+    exit 1
+  fi
+  rm -f "$log"
+}
+
+run_step typecheck pnpm typecheck
+run_step test:unit pnpm test:unit
+
+write_record true
+exit 0

@@ -1,0 +1,70 @@
+{
+  "version": 1,
+  "doug": {
+    "name": "Doug",
+    "version": "1.0.1"
+  },
+  "packageManager": "pnpm",
+  "commands": {
+    "install": "pnpm install --frozen-lockfile",
+    "test": "pnpm test",
+    "test:unit": "pnpm test:unit",
+    "typecheck": "pnpm typecheck",
+    "build": "pnpm build",
+    "adversary": "node {root}/packages/doug-codex/dist/bin.js"
+  },
+  "formatter": null,
+  "protectedPaths": [
+    ".env",
+    ".env.*",
+    ".git/**",
+    "node_modules/**",
+    "pnpm-lock.yaml",
+    "dist/**",
+    ".doug/config.json"
+  ],
+  "allowedOutsidePaths": [],
+  "bash": {
+    "denyNoVerify": true,
+    "denyForcePushTo": [
+      "main",
+      "master"
+    ],
+    "denyDestructive": true,
+    "packageManagerGuard": true
+  },
+  "secrets": {
+    "enabled": true,
+    "ignorePaths": []
+  },
+  "editLoop": {
+    "threshold": 6,
+    "windowMinutes": 30
+  },
+  "stopGate": {
+    "commands": [
+      "typecheck",
+      "test:unit"
+    ],
+    "onlyIfEdited": true,
+    "timeoutMs": 300000,
+    "maxBlocks": 3,
+    "ignoreChangedPaths": [
+      "pnpm-lock.yaml",
+      ".doug/config.json"
+    ],
+    "planScope": true
+  },
+  "checkpoint": {
+    "enabled": false,
+    "mode": "commit"
+  },
+  "budget": {
+    "maxTurns": null
+  },
+  "anchor": [
+    "Use pnpm for installs and scripts. Never mix package managers.",
+    "Run a single test file with: pnpm exec vitest run <path/to/file.test.ts>",
+    "Node >=22.16 (package.json engines.node); node:sqlite with FTS5 is built in from there."
+  ]
+}

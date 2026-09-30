@@ -1,0 +1,17 @@
+{
+  "name": "@dougharness/gates",
+  "version": "1.0.2",
+  "private": true,
+  "description": "Deterministic Claude Code hooks: protected paths, bash guard, secret scan on edits and commands, format on edit, edit-loop detection, stop gate, re-anchor after compaction.",
+  "type": "module",
+  "license": "MIT",
+  "files": [
+    "scripts",
+    "lib",
+    "hooks",
+    ".claude-plugin"
+  ],
+  "engines": {
+    "node": ">=22.16"
+  }
+}

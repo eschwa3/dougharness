@@ -1,0 +1,103 @@
+{
+  "margin": 0.15,
+  "paraphrase": [
+    [
+      "The pre-commit hook re-runs the whole gate, so committing without waiting for tests wastes the developer's time.",
+      "Skipping ahead of the test run before a commit is pointless because the hook repeats every check anyway."
+    ],
+    [
+      "Worktrees under .claude/worktrees are gitignored and safe to delete once a task lands.",
+      "Once a task merges, the per-task checkout folder can be removed since it was never tracked by git."
+    ],
+    [
+      "Plan verify commands should call pnpm test:unit, never the full suite, because pnpm test spawns a live Codex call.",
+      "Use the unit-only test script for a plan's verify step; running the full suite triggers an actual Codex invocation."
+    ],
+    [
+      "A worker nearing its context limit should stop at a clean boundary and report a partial result instead of guessing.",
+      "When an agent's context window is almost full, it ought to pause at a good stopping point and flag the work as unfinished."
+    ],
+    [
+      "node:sqlite requires Node 22.16 or newer, so an older runtime must fail with one clear message rather than a stack trace.",
+      "Running on a Node version below 22.16 needs to produce a single readable error, not a crash dump, since the built-in SQLite module needs that version."
+    ],
+    [
+      "Force-deleting a git branch is blocked by the bash guard; merge it first and use the plain delete flag.",
+      "The shell guard refuses a hard branch removal, so branches must be merged before a normal delete works."
+    ],
+    [
+      "Lessons are append-only: a later insight can supersede an older one but the original text is never rewritten.",
+      "The store never edits a lesson's wording after the fact; a newer entry can mark an old one as replaced instead."
+    ],
+    [
+      "Reviewers should flag a pull request that widens scope beyond what the plan's tasks actually own.",
+      "When a change touches files outside what a task was granted, that overreach is exactly what review should catch."
+    ],
+    [
+      "The adversary review runs on Codex by default, falling back to an Opus pass when Codex can't be reached.",
+      "Codex normally does the adversarial check, but the workflow switches to Opus whenever Codex is unavailable."
+    ],
+    [
+      "Auto memory import should be idempotent, never rewriting files it did not itself create in the memory directory.",
+      "Re-running the import of automatic memory must not touch files outside its own directory and must produce the same result each time."
+    ],
+    [
+      "A swarm's lead splits one task into worker briefs and merges their results before verification starts.",
+      "In a swarm, the lead agent breaks a task into pieces for workers and combines their output ahead of the verify stage."
+    ],
+    [
+      "Keep CLAUDE.md under sixty lines since hooks already enforce most of the guardrails it would otherwise restate.",
+      "The instructions file should stay short, under sixty lines, because the hook layer already covers most of what it would repeat."
+    ]
+  ],
+  "unrelated": [
+    [
+      "The pre-commit hook re-runs the whole test gate before allowing a commit to land.",
+      "Ollama serves an OpenAI-compatible /v1/embeddings endpoint on port 11434 by default."
+    ],
+    [
+      "Worktrees under .claude/worktrees are gitignored and removed once a task merges.",
+      "A pull request title should stay under seventy characters so it reads well in a list view."
+    ],
+    [
+      "pnpm test:unit skips the live Codex test so a plan's verify step never spends real usage.",
+      "Vectors returned by the embedding provider are L2-normalized before they are stored in the database."
+    ],
+    [
+      "A worker close to its context limit should stop at a clean boundary and report a partial result.",
+      "The board's Ready column lists the next three small cards ahead of the larger context-window card."
+    ],
+    [
+      "node:sqlite needs Node 22.16 or newer for the built-in FTS5 support the lessons table relies on.",
+      "The reflect command proposes at most three new lessons per report, filtered by a cheap-row model pass."
+    ],
+    [
+      "Force-deleting a git branch is blocked by the bash guard; use a normal merge and delete instead.",
+      "Voyage AI's embeddings endpoint accepts an output_dimension parameter to control vector width."
+    ],
+    [
+      "Lessons are append-only; an older entry can be superseded but its text is never rewritten.",
+      "The doctor subcommand probes a configured provider or a local Ollama installation and prints what it found."
+    ],
+    [
+      "Review should catch a change that touches files outside what its task was granted to own.",
+      "A hand-track landing records the card id, commit, wall-clock time, and gate line, but has no report file."
+    ],
+    [
+      "The adversary review defaults to Codex and falls back to an Opus pass when Codex cannot run.",
+      "Recall fuses BM25 keyword scores with cosine similarity using reciprocal rank fusion when a provider is configured."
+    ],
+    [
+      "Importing auto memory is idempotent and never rewrites files outside its own memory directory.",
+      "The bash guard also blocks deleting a remote branch directly; ask first or merge it locally."
+    ],
+    [
+      "A swarm's lead agent splits a task into worker briefs and merges their output before verification.",
+      "CLAUDE.md documents only what hooks cannot already enforce, and stays under sixty lines."
+    ],
+    [
+      "Keep CLAUDE.md under sixty lines because the hook layer already enforces most of the guardrails.",
+      "A citation of the form path:line is re-checked against the checkout only when the directory contains a .doug folder."
+    ]
+  ]
+}

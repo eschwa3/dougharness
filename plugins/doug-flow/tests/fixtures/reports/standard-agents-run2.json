@@ -1,0 +1,150 @@
+{
+  "plan": "Standard agents auto-created by project type",
+  "integrationBranch": "doug/agents-generator-propose-agents",
+  "modelsSource": "CLAUDE.md",
+  "budget": {
+    "agents": 12,
+    "tokens": 400000,
+    "wallMinutes": 40
+  },
+  "stoppedAtLevel": 0,
+  "ok": false,
+  "levels": [
+    {
+      "index": 0,
+      "integration": null,
+      "integrationModel": null,
+      "tasks": [
+        {
+          "id": "agents-generator",
+          "implemented": true,
+          "blockedReason": null,
+          "verified": false,
+          "reviewed": false,
+          "inScope": null,
+          "adversary": null,
+          "branch": "doug/task-agents-generator",
+          "commit": "467ca9db7df80677c5c524db478dde2a48e28c9d",
+          "reused": "doug/task-agents-generator",
+          "stopReason": "a fixed finding reappeared: F1; stopped: fix pass 3 made no new commit on doug/task-agents-generator",
+          "budget": {
+            "limits": {
+              "agents": 12,
+              "tokens": 400000,
+              "wallMinutes": 40
+            },
+            "spent": {
+              "agents": 8,
+              "tokens": null,
+              "elapsedMs": null
+            },
+            "enforced": [
+              "agents"
+            ]
+          },
+          "models": {
+            "implement": {
+              "model": "sonnet",
+              "effort": "medium"
+            },
+            "verify": {
+              "model": "opus",
+              "effort": "high"
+            },
+            "review": {
+              "model": "opus",
+              "effort": "high"
+            },
+            "adversary": {
+              "model": "codex",
+              "effort": "low",
+              "relay": "haiku"
+            },
+            "tier": null,
+            "checkout": {
+              "model": "haiku",
+              "effort": "inherit"
+            }
+          },
+          "attempts": [
+            {
+              "pass": 1,
+              "stages": [
+                "reuse",
+                "verify",
+                "review",
+                "adversary"
+              ],
+              "commit": "eda723a1c4c45946b582d33f9ff0d5648990e67f",
+              "blockingStage": "adversary",
+              "verified": true,
+              "reviewed": true,
+              "adversary": {
+                "verdict": "fail",
+                "blocked": true
+              },
+              "newFindings": [
+                "F1"
+              ],
+              "fixedFindings": [],
+              "ready": false,
+              "retriable": {
+                "ok": true,
+                "reason": "every finding is within the owned files"
+              }
+            },
+            {
+              "pass": 2,
+              "stages": [
+                "fix",
+                "adversary",
+                "check"
+              ],
+              "commit": "467ca9db7df80677c5c524db478dde2a48e28c9d",
+              "blockingStage": null,
+              "verified": true,
+              "reviewed": true,
+              "adversary": {
+                "verdict": "pass",
+                "blocked": false
+              },
+              "newFindings": [],
+              "fixedFindings": [],
+              "ready": false,
+              "retriable": {
+                "ok": true,
+                "reason": "every finding is within the owned files"
+              }
+            },
+            {
+              "pass": 3,
+              "stages": [
+                "fix"
+              ],
+              "commit": "467ca9db7df80677c5c524db478dde2a48e28c9d",
+              "blockingStage": null,
+              "verified": false,
+              "reviewed": false,
+              "adversary": null,
+              "newFindings": [],
+              "fixedFindings": [],
+              "ready": false,
+              "retriable": null
+            }
+          ],
+          "ledger": [
+            {
+              "id": "F1",
+              "stage": "adversary",
+              "severity": "blocker",
+              "status": "open",
+              "reappeared": true,
+              "description": "The spec requires tests to assert paths/order for each case and the frontmatter keys. npm-bare never has its paths/order asserted, and the frontmatter test does not verify complete keys per role: it omits descriptions for coder/reviewer/tester and omits `model` checks for architect/reviewer/tester. Substring checks also cannot reject unexpected extra frontmatter keys."
+            }
+          ],
+          "acceptance": []
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,37 @@
+{
+  "name": "@dougharness/cli",
+  "version": "1.0.2",
+  "description": "doug: tailored, approval-gated harness install for Claude Code.",
+  "type": "module",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/eschwa3/dougharness.git",
+    "directory": "packages/doug-cli"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "bin": {
+    "doug": "./dist/bin.js"
+  },
+  "files": [
+    "dist",
+    "templates"
+  ],
+  "engines": {
+    "node": ">=22.16"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "dev": "node --import tsx src/bin.ts"
+  },
+  "dependencies": {
+    "@dougharness/flow": "workspace:*",
+    "@dougharness/gates": "workspace:*"
+  },
+  "devDependencies": {
+    "tsx": "^4.19.0"
+  }
+}

@@ -1,0 +1,78 @@
+{
+  "plan": "2 cards: alpha, beta",
+  "integrationBranch": "doug/a1-flags-b1-a2",
+  "modelsSource": "CLAUDE.md",
+  "ok": true,
+  "levels": [
+    {
+      "index": 0,
+      "tasks": [
+        {
+          "id": "a1",
+          "card": "alpha",
+          "implemented": true,
+          "verified": true,
+          "reviewed": true,
+          "adversary": { "ran": true, "verdict": "pass", "blocked": false },
+          "acceptance": [
+            { "text": "[alpha] alpha thing works", "command": "true", "ok": true, "exitCode": 0 },
+            { "text": "[beta] beta thing works", "command": "true", "ok": false, "exitCode": 1 }
+          ]
+        },
+        {
+          "id": "flags",
+          "card": "alpha",
+          "implemented": true,
+          "verified": true,
+          "reviewed": true,
+          "adversary": { "ran": true, "verdict": "pass", "blocked": false },
+          "acceptance": [
+            { "text": "alpha thing works", "command": "true", "ok": true, "exitCode": 0 },
+            { "text": "beta thing works", "command": "true", "ok": false, "exitCode": 1 }
+          ]
+        }
+      ],
+      "integration": { "ok": true, "verify": [{ "command": "pnpm test:unit", "ok": true, "outputTail": "" }] },
+      "integrationModel": "sonnet / medium"
+    },
+    {
+      "index": 1,
+      "tasks": [
+        {
+          "id": "b1",
+          "card": "beta",
+          "implemented": true,
+          "verified": true,
+          "reviewed": true,
+          "adversary": { "ran": true, "verdict": "pass", "blocked": false },
+          "acceptance": [
+            { "text": "[alpha] alpha thing works", "command": "true", "ok": false, "exitCode": 1 },
+            { "text": "[beta] beta thing works", "command": "true", "ok": true, "exitCode": 0 }
+          ]
+        }
+      ],
+      "integration": { "ok": true, "verify": [{ "command": "pnpm test:unit", "ok": true, "outputTail": "" }] },
+      "integrationModel": "sonnet / medium"
+    },
+    {
+      "index": 2,
+      "tasks": [
+        {
+          "id": "a2",
+          "card": "alpha",
+          "implemented": true,
+          "verified": true,
+          "reviewed": true,
+          "adversary": { "ran": true, "verdict": "pass", "blocked": false },
+          "acceptance": [
+            { "text": "[alpha] alpha thing works", "command": "true", "ok": true, "exitCode": 0 },
+            { "text": "[alpha] alpha real defect", "command": "false", "ok": false, "exitCode": 1 },
+            { "text": "[beta] beta thing works", "command": "true", "ok": false, "exitCode": 1 }
+          ]
+        }
+      ],
+      "integration": { "ok": true, "verify": [{ "command": "pnpm test:unit", "ok": true, "outputTail": "" }] },
+      "integrationModel": "sonnet / medium"
+    }
+  ]
+}

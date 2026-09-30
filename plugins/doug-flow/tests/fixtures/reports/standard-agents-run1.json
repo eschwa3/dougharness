@@ -1,0 +1,191 @@
+{
+  "plan": "Standard agents auto-created by project type",
+  "integrationBranch": "doug/agents-generator-propose-agents",
+  "modelsSource": "CLAUDE.md",
+  "budget": {
+    "agents": 12,
+    "tokens": 400000,
+    "wallMinutes": 40
+  },
+  "stoppedAtLevel": 0,
+  "ok": false,
+  "levels": [
+    {
+      "index": 0,
+      "integration": null,
+      "integrationModel": null,
+      "tasks": [
+        {
+          "id": "agents-generator",
+          "implemented": true,
+          "blockedReason": null,
+          "verified": true,
+          "reviewed": true,
+          "inScope": true,
+          "adversary": {
+            "ran": true,
+            "verdict": "pass",
+            "blocked": false,
+            "summary": "F1 is fixed: generated descriptions are quoted and every generated frontmatter block parsed successfully as YAML. The fix delta adds a regression test without changing production behavior. Required checks passed: agents tests (10/10), typecheck, and unit tests (377 passed, 4 expected/existing skips). Null/multi-value probes, ordering, line limits, final-newline behavior, and marker detection also passed. The working tree remained unchanged."
+          },
+          "branch": "doug/task-agents-generator",
+          "commit": "eda723a1c4c45946b582d33f9ff0d5648990e67f",
+          "reused": null,
+          "stopReason": "open finding: F1; stopped: next attempt would exceed the task budget (agents 15 > 12)",
+          "budget": {
+            "limits": {
+              "agents": 12,
+              "tokens": 400000,
+              "wallMinutes": 40
+            },
+            "spent": {
+              "agents": 11,
+              "tokens": null,
+              "elapsedMs": null
+            },
+            "enforced": [
+              "agents"
+            ]
+          },
+          "models": {
+            "implement": {
+              "model": "sonnet",
+              "effort": "medium"
+            },
+            "verify": {
+              "model": "opus",
+              "effort": "high"
+            },
+            "review": {
+              "model": "opus",
+              "effort": "high"
+            },
+            "adversary": {
+              "model": "codex",
+              "effort": "low",
+              "relay": "haiku"
+            },
+            "tier": null
+          },
+          "attempts": [
+            {
+              "pass": 1,
+              "stages": [
+                "implement",
+                "verify",
+                "review",
+                "adversary"
+              ],
+              "commit": "f615b7c7bb70c38c60880a00d4a73fdac9248348",
+              "blockingStage": "adversary",
+              "verified": true,
+              "reviewed": true,
+              "adversary": {
+                "verdict": "fail",
+                "blocked": true
+              },
+              "newFindings": [
+                "F1"
+              ],
+              "fixedFindings": [],
+              "ready": false,
+              "retriable": {
+                "ok": true,
+                "reason": "every finding is within the owned files"
+              }
+            },
+            {
+              "pass": 2,
+              "stages": [
+                "fix",
+                "adversary",
+                "check"
+              ],
+              "commit": "3953ae73eefd1370a840f0b45e11b0a32d83f381",
+              "blockingStage": null,
+              "verified": true,
+              "reviewed": true,
+              "adversary": {
+                "verdict": "pass",
+                "blocked": false
+              },
+              "newFindings": [],
+              "fixedFindings": [],
+              "ready": false,
+              "retriable": {
+                "ok": true,
+                "reason": "every finding is within the owned files"
+              }
+            },
+            {
+              "pass": 3,
+              "stages": [
+                "fix",
+                "verify",
+                "check",
+                "adversary"
+              ],
+              "commit": "eda723a1c4c45946b582d33f9ff0d5648990e67f",
+              "blockingStage": null,
+              "verified": true,
+              "reviewed": true,
+              "adversary": {
+                "verdict": "pass",
+                "blocked": false
+              },
+              "newFindings": [],
+              "fixedFindings": [],
+              "ready": false,
+              "retriable": {
+                "ok": true,
+                "reason": "every finding is within the owned files"
+              }
+            }
+          ],
+          "ledger": [
+            {
+              "id": "F1",
+              "stage": "adversary",
+              "severity": "blocker",
+              "status": "open",
+              "reappeared": true,
+              "description": "Descriptions are emitted as unquoted YAML scalars. The architect description contains `design: files`, so its required frontmatter is syntactically invalid and cannot be reliably consumed as agent metadata."
+            }
+          ],
+          "acceptance": [
+            {
+              "text": "pnpm exec vitest run packages/doug-cli/tests/agents.test.ts passes: ts-pnpm yields coder/architect/reviewer/tester in order; no-test-framework temp dir yields only coder/architect/reviewer; frontmatter name, one-line description, model: inherit, marker as first body line; architect+reviewer carry tools/disallowedTools; coder+tester carry no disallowedTools; every file under 40 lines; two calls identical.",
+              "command": "pnpm exec vitest run packages/doug-cli/tests/agents.test.ts",
+              "ok": true,
+              "exitCode": 0
+            },
+            {
+              "text": "pnpm exec vitest run packages/doug-cli/tests/proposal.test.ts passes, including 'second run proposes nothing' covering agent files, a user-owned unmarked .claude/agents/coder.md left out with a note, and a stale doug-marked file re-proposed as modify.",
+              "command": "pnpm exec vitest run packages/doug-cli/tests/proposal.test.ts",
+              "ok": true,
+              "exitCode": 0
+            },
+            {
+              "text": "After pnpm build, init --dry-run --no-color on the ts-pnpm fixture prints the four 'create  .claude/agents/*.md' lines, an 'agents' row in the Detected summary, and ends with 'Dry run. Nothing written.'; fixture gains no files.",
+              "command": "pnpm build && node packages/doug-cli/dist/bin.js init packages/doug-cli/tests/fixtures/ts-pnpm --dry-run --no-color",
+              "ok": false,
+              "exitCode": 0
+            },
+            {
+              "text": "grep -q '.claude/agents/' README.md succeeds and the install paragraph names the coder, architect, reviewer, and tester agents.",
+              "command": "grep -q '.claude/agents/' README.md",
+              "ok": false,
+              "exitCode": 1
+            },
+            {
+              "text": "pnpm typecheck and pnpm test:unit pass.",
+              "command": "pnpm typecheck && pnpm test:unit",
+              "ok": true,
+              "exitCode": 0
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,105 @@
+{
+  "suite": "ts-app",
+  "results": [
+    {
+      "task": "big-task",
+      "condition": "pipeline",
+      "run": 1,
+      "costUsd": 4,
+      "turns": 10,
+      "durationMs": 600000,
+      "verified": true,
+      "inScope": true,
+      "success": true,
+      "hidden": { "total": 8, "passed": 6, "rate": 0.75 },
+      "defects": { "judge": "claude", "verdict": "pass", "blocker": 0, "major": 1, "minor": 1, "total": 2, "error": null }
+    },
+    {
+      "task": "big-task",
+      "condition": "pipeline",
+      "run": 2,
+      "costUsd": 5,
+      "turns": 12,
+      "durationMs": 660000,
+      "verified": true,
+      "inScope": true,
+      "success": true,
+      "hidden": { "total": 8, "passed": 4, "rate": 0.5 },
+      "defects": { "judge": "claude", "verdict": "pass", "blocker": 0, "major": 0, "minor": 1, "total": 1, "error": null }
+    },
+    {
+      "task": "big-task",
+      "condition": "pipeline",
+      "run": 3,
+      "costUsd": 6,
+      "turns": 14,
+      "durationMs": 720000,
+      "verified": true,
+      "inScope": true,
+      "success": false,
+      "hidden": { "total": 8, "passed": 8, "rate": 1.0 },
+      "defects": { "judge": "claude", "verdict": "inconclusive", "blocker": 0, "major": 0, "minor": 0, "total": 0, "error": "worktree-modified" }
+    },
+    {
+      "task": "big-task",
+      "condition": "crew",
+      "run": 1,
+      "costUsd": 7,
+      "turns": 8,
+      "durationMs": 540000,
+      "verified": true,
+      "inScope": true,
+      "success": true,
+      "hidden": { "total": 8, "passed": 8, "rate": 1.0 },
+      "defects": { "judge": "claude", "verdict": "pass", "blocker": 0, "major": 0, "minor": 0, "total": 0, "error": null }
+    },
+    {
+      "task": "big-task",
+      "condition": "crew",
+      "run": 2,
+      "costUsd": 8,
+      "turns": 9,
+      "durationMs": 600000,
+      "verified": true,
+      "inScope": true,
+      "success": true,
+      "hidden": { "total": 8, "passed": 7, "rate": 0.875 },
+      "defects": { "judge": "claude", "verdict": "pass", "blocker": 0, "major": 1, "minor": 0, "total": 1, "error": null }
+    },
+    {
+      "task": "big-task",
+      "condition": "crew",
+      "run": 3,
+      "costUsd": 9,
+      "turns": 10,
+      "durationMs": 660000,
+      "verified": true,
+      "inScope": false,
+      "success": false,
+      "hidden": { "total": 8, "passed": 6, "rate": 0.75 },
+      "defects": { "judge": "claude", "verdict": "fail", "blocker": 1, "major": 0, "minor": 0, "total": 1, "error": null }
+    },
+    {
+      "task": "big-task",
+      "condition": "swarm",
+      "run": 1,
+      "costUsd": 3,
+      "turns": 5,
+      "durationMs": 300000,
+      "verified": true,
+      "inScope": true,
+      "success": true
+    },
+    {
+      "task": "big-task",
+      "condition": "swarm",
+      "run": 2,
+      "costUsd": 4,
+      "turns": 6,
+      "durationMs": 360000,
+      "verified": true,
+      "inScope": true,
+      "success": true
+    }
+  ]
+}

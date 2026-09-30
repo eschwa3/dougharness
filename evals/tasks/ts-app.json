@@ -1,0 +1,250 @@
+{
+  "fixture": "ts-app",
+  "setup": ["pnpm install --prefer-offline --silent"],
+  "tasks": [
+    {
+      "id": "priority-feature",
+      "prompt": "Add a priority feature to the task tracker, split across two levels. (1) In src/model/task.ts add type Priority = \"low\" | \"normal\" | \"high\", add a priority field to the Task interface, add parsePriority(s: string): Priority that throws on anything other than the three values, and change createTask to accept an optional priority argument defaulting to \"normal\". In src/store/store.ts, a stored task loaded without a priority field loads as \"normal\". Add or extend tests in tests/model.test.ts and tests/store.test.ts. (2) In src/commands/add.ts accept a --priority <p> flag as the first argument (before the title, when present); a bad value is code 1 with err naming the three allowed values (low, normal, high). In src/commands/list.ts accept a --priority <p> flag (also first, when present) that filters the list to that priority, printing '(no tasks)' when the filter matches none; with no filter, list orders tasks by priority (high, normal, low), then by id within a priority. In src/format.ts, formatTask appends ' (high)' or ' (low)' after the title; normal shows no marker. Extend tests/cli.test.ts for both commands. When .doug/plan.json exists it carries the approved plan for this change: two tasks in two levels. Run the tests and the typecheck to confirm.",
+      "allowedFiles": [
+        "src/commands/add.ts",
+        "src/commands/list.ts",
+        "src/format.ts",
+        "src/model/task.ts",
+        "src/store/store.ts",
+        "tests/cli.test.ts",
+        "tests/model.test.ts",
+        "tests/store.test.ts"
+      ],
+      "heldOut": [{ "from": "ts-app-priority.test.ts", "to": "tests/heldout-priority.test.ts" }],
+      "hidden": [{ "from": "hidden-priority-feature.test.ts", "to": "tests/hidden-priority-feature.test.ts" }],
+      "mustPass": ["pnpm test", "pnpm typecheck"],
+      "mustNotChange": [".env", "pnpm-lock.yaml", "package.json", "README.md", "src/cli.ts", "src/commands/done.ts"],
+      "plan": {
+        "version": 1,
+        "title": "Priority feature for the task tracker",
+        "goal": "Tasks carry a priority; add and list expose it, and list can filter and orders by it",
+        "acceptance": [
+          "createTask defaults priority to 'normal' and parsePriority rejects anything else",
+          "add --priority high then list shows the '(high)' marker; normal shows no marker",
+          "list orders high, normal, low, then id, and list --priority <p> filters to it"
+        ],
+        "verify": ["pnpm test", "pnpm typecheck"],
+        "tasks": [
+          {
+            "id": "priority-model",
+            "title": "Add the Priority type to the model and store",
+            "spec": "In src/model/task.ts add type Priority = \"low\" | \"normal\" | \"high\", a priority field on Task, parsePriority(s) throwing on anything else, and createTask accepting an optional priority defaulting to \"normal\". In src/store/store.ts a stored task without priority loads as \"normal\". Tests in tests/model.test.ts and tests/store.test.ts.",
+            "files": ["src/model/task.ts", "src/store/store.ts", "tests/model.test.ts", "tests/store.test.ts"],
+            "verify": "pnpm test",
+            "dependsOn": []
+          },
+          {
+            "id": "priority-commands",
+            "title": "Wire --priority through add, list, and formatting",
+            "spec": "src/commands/add.ts takes --priority <p> as its first argument when present; a bad value is code 1 naming the three allowed values. src/commands/list.ts takes --priority <p> (also first) to filter, printing '(no tasks)' when nothing matches, and orders unfiltered output high, normal, low, then id. src/format.ts appends ' (high)' or ' (low)'; normal shows no marker. Tests in tests/cli.test.ts.",
+            "files": ["src/commands/add.ts", "src/commands/list.ts", "src/format.ts", "tests/cli.test.ts"],
+            "verify": "pnpm test",
+            "dependsOn": ["priority-model"]
+          }
+        ]
+      },
+      "note": "Card swarm-eval-hard: a lead has something to split along file lines (two independent commands sharing one model); two dependency levels."
+    },
+    {
+      "id": "due-dates",
+      "prompt": "Add due dates to the task tracker, split across two levels, the second with two independent pieces. (1) Create src/model/due.ts exporting parseDue(spec: string, now: Date): string, accepting either 'YYYY-MM-DD' or '+<n>d' (relative to now), returning the ISO date 'YYYY-MM-DD', throwing on anything else; and isOverdue(task, now): boolean, true only for an open task whose due date is before today's date. Dates are UTC: resolve and compare using toISOString().slice(0, 10); \"today\" for isOverdue is now's UTC date. In src/model/task.ts add an optional due field and have createTask accept it. In src/store/store.ts round-trip due. Tests in a new tests/due.test.ts. (2a) In src/commands/add.ts accept a --due <spec> flag as the first argument (before the title, when present); a bad spec is code 1. In src/commands/list.ts accept an --overdue flag (also first, when present) that shows only overdue tasks, printing '(no tasks)' when none are overdue. In src/format.ts, formatTask (which now also takes now) appends ' due <date>' and, when overdue, ' OVERDUE'. Extend tests/cli.test.ts. (2b) Create src/commands/report.ts: a 'report' command that prints exactly 'open: <n>', 'done: <n>', 'overdue: <n>'. Wire it into src/cli.ts's dispatch. Tests in a new tests/report.test.ts. When .doug/plan.json exists it carries the approved plan for this change: three tasks in two levels, two of them independent. Run the tests and the typecheck to confirm.",
+      "allowedFiles": [
+        "src/cli.ts",
+        "src/commands/add.ts",
+        "src/commands/list.ts",
+        "src/commands/report.ts",
+        "src/format.ts",
+        "src/model/due.ts",
+        "src/model/task.ts",
+        "src/store/store.ts",
+        "tests/cli.test.ts",
+        "tests/due.test.ts",
+        "tests/report.test.ts"
+      ],
+      "heldOut": [{ "from": "ts-app-due.test.ts", "to": "tests/heldout-due.test.ts" }],
+      "hidden": [{ "from": "hidden-due-dates.test.ts", "to": "tests/hidden-due-dates.test.ts" }],
+      "mustPass": ["pnpm test", "pnpm typecheck"],
+      "mustNotChange": [".env", "pnpm-lock.yaml", "package.json", "README.md", "src/commands/done.ts", "tests/model.test.ts", "tests/store.test.ts"],
+      "plan": {
+        "version": 1,
+        "title": "Due dates for the task tracker",
+        "goal": "Tasks carry an optional due date; add, list, and a new report command expose it",
+        "acceptance": [
+          "parseDue resolves 'YYYY-MM-DD' and '+<n>d' relative to now, and rejects anything else",
+          "add --due <spec> then list shows the resolved date, and OVERDUE when it is in the past for an open task",
+          "list --overdue filters, and report prints open/done/overdue counts"
+        ],
+        "verify": ["pnpm test", "pnpm typecheck"],
+        "tasks": [
+          {
+            "id": "due-model",
+            "title": "Add parseDue, isOverdue, and the due field",
+            "spec": "New src/model/due.ts: parseDue(spec, now) accepts 'YYYY-MM-DD' or '+<n>d' relative to now, returns 'YYYY-MM-DD', throws otherwise; isOverdue(task, now) is true only for an open task whose due date is before today's date. Dates are UTC: resolve and compare using toISOString().slice(0, 10); \"today\" for isOverdue is now's UTC date. src/model/task.ts gets an optional due field; createTask accepts it. src/store/store.ts round-trips due. Tests in a new tests/due.test.ts.",
+            "files": ["src/model/due.ts", "src/model/task.ts", "src/store/store.ts", "tests/due.test.ts"],
+            "verify": "pnpm test",
+            "dependsOn": []
+          },
+          {
+            "id": "due-commands",
+            "title": "Wire --due and --overdue through add, list, and formatting",
+            "spec": "src/commands/add.ts takes --due <spec> as its first argument when present; a bad spec is code 1. src/commands/list.ts takes --overdue (also first) to show only overdue tasks, printing '(no tasks)' when none are overdue. src/format.ts's formatTask takes now, appends ' due <date>' and ' OVERDUE' when overdue. Tests in tests/cli.test.ts.",
+            "files": ["src/commands/add.ts", "src/commands/list.ts", "src/format.ts", "tests/cli.test.ts"],
+            "verify": "pnpm test",
+            "dependsOn": ["due-model"]
+          },
+          {
+            "id": "due-report",
+            "title": "Add the report command",
+            "spec": "New src/commands/report.ts: 'report' prints exactly 'open: <n>', 'done: <n>', 'overdue: <n>'. src/cli.ts dispatches it. Tests in a new tests/report.test.ts.",
+            "files": ["src/cli.ts", "src/commands/report.ts", "tests/report.test.ts"],
+            "verify": "pnpm test",
+            "dependsOn": ["due-model"]
+          }
+        ]
+      },
+      "note": "Card swarm-eval-hard: three plan tasks in two levels, two of them independent in the same level (due-commands and due-report both depend only on due-model)."
+    },
+    {
+      "id": "tags-feature",
+      "prompt": "Add tags to the task tracker, split across two levels. (1) In src/model/task.ts add an optional tags field to the Task interface (an array of strings) and parseTag(s: string): string that throws on an empty or whitespace-only tag; a task's tags form a set (adding the same tag twice keeps one copy). In src/format.ts, formatTask appends ' [a, b]' after the title (after any other suffix) when a task has one or more tags; a task with no tags renders unchanged. The case tags are stored and printed in, and the order they print in, are not specified here: decide, and keep the decision consistent between add and list. Existing behaviour, existing tests, and stored files written before this change keep working. Tests in a new tests/tags.test.ts. (2) In src/commands/add.ts accept --tag <t> as a repeatable flag, given before the title; an empty or whitespace-only tag is code 1. In src/commands/list.ts accept a --tag <t> flag that filters the list to tasks carrying that tag, printing '(no tasks)' when none do. Extend tests/cli.test.ts for both commands. When .doug/plan.json exists it carries the approved plan for this change: two tasks in two levels. Run the tests and the typecheck to confirm.",
+      "allowedFiles": [
+        "src/commands/add.ts",
+        "src/commands/list.ts",
+        "src/format.ts",
+        "src/model/task.ts",
+        "tests/cli.test.ts",
+        "tests/tags.test.ts"
+      ],
+      "heldOut": [{ "from": "ts-app-tags.test.ts", "to": "tests/heldout-tags.test.ts" }],
+      "hidden": [{ "from": "hidden-tags-feature.test.ts", "to": "tests/hidden-tags-feature.test.ts" }],
+      "mustPass": ["pnpm test", "pnpm typecheck"],
+      "mustNotChange": [".env", "pnpm-lock.yaml", "package.json", "README.md", "src/commands/done.ts", "src/store/store.ts", "tests/model.test.ts", "tests/store.test.ts"],
+      "plan": {
+        "version": 1,
+        "title": "Tags for the task tracker",
+        "goal": "Tasks carry tags; add and list expose them, and existing behaviour keeps working",
+        "acceptance": [
+          "add with two tags in already-sorted order renders '[a, b]' after the title",
+          "list --tag filters to tasks carrying that tag, and '(no tasks)' when none do",
+          "a task with no tags renders unchanged, and an empty tag is code 1"
+        ],
+        "verify": ["pnpm test", "pnpm typecheck"],
+        "tasks": [
+          {
+            "id": "tags-model",
+            "title": "Add tags to the model and formatting",
+            "spec": "In src/model/task.ts add an optional tags field to Task (a string array) and parseTag(s) throwing on an empty or whitespace-only tag; a task's tags are a set (no duplicates). In src/format.ts, formatTask appends ' [a, b]' after the title (after any other suffix) when a task has one or more tags; decide the case and print order and keep it consistent with list; a task with no tags renders unchanged. Tests in a new tests/tags.test.ts.",
+            "files": ["src/format.ts", "src/model/task.ts", "tests/tags.test.ts"],
+            "verify": "pnpm test",
+            "dependsOn": []
+          },
+          {
+            "id": "tags-commands",
+            "title": "Wire --tag through add and list",
+            "spec": "src/commands/add.ts accepts --tag <t> repeatable, given before the title; an empty or whitespace-only tag is code 1. src/commands/list.ts accepts --tag <t> to filter to tasks carrying that tag, printing '(no tasks)' when none do. Use the same case and order decision as tags-model. Tests in tests/cli.test.ts.",
+            "files": ["src/commands/add.ts", "src/commands/list.ts", "tests/cli.test.ts"],
+            "verify": "pnpm test",
+            "dependsOn": ["tags-model"]
+          }
+        ]
+      },
+      "note": "Card eval-accuracy: an ambiguous spec (tag case, print order) plus a cross-cutting change whose regression shows up in tests/model.test.ts, which the task does not own."
+    },
+    {
+      "id": "remove-command",
+      "prompt": "Add remove and clear to the task tracker, split across two levels. (1) In src/commands/remove.ts add remove <id>: deletes the task and prints 'removed #<id>'; an unknown or non-numeric id is code 1, err naming the argument. In src/store/store.ts add a removeTask(tasks, id) helper; a removed task's id must never be reused by a later add - the current nextId is derived only from the tasks currently in the store, which breaks once tasks can be removed. add may change how it allocates an id; tests/store.test.ts's nextId contract stays as it is. Tests in a new tests/remove.test.ts that calls remove(args, ctx) directly, since dispatch is added in level 2. (2) In src/commands/clear.ts add clear: removes every done task and prints 'cleared <n>' ('cleared 0' when none are done). Wire remove and clear into src/cli.ts's dispatch, and list them on the usage line. Tests in a new tests/clear.test.ts. When .doug/plan.json exists it carries the approved plan for this change: two tasks in two levels. Run the tests and the typecheck to confirm.",
+      "allowedFiles": [
+        "src/cli.ts",
+        "src/commands/add.ts",
+        "src/commands/clear.ts",
+        "src/commands/remove.ts",
+        "src/store/store.ts",
+        "tests/clear.test.ts",
+        "tests/remove.test.ts"
+      ],
+      "heldOut": [{ "from": "ts-app-remove.test.ts", "to": "tests/heldout-remove.test.ts" }],
+      "hidden": [{ "from": "hidden-remove-command.test.ts", "to": "tests/hidden-remove-command.test.ts" }],
+      "mustPass": ["pnpm test", "pnpm typecheck"],
+      "mustNotChange": ["tests/cli.test.ts", "tests/store.test.ts", "tests/model.test.ts", "src/commands/done.ts", ".env", "pnpm-lock.yaml", "package.json", "README.md"],
+      "seed": [{ "from": "ts-app-store-latent.ts", "to": "src/store/store.ts" }],
+      "plan": {
+        "version": 1,
+        "title": "Remove and clear commands",
+        "goal": "remove and clear delete tasks without ever reusing an id",
+        "acceptance": [
+          "remove <id> deletes the task and prints 'removed #<id>'; an unknown or non-numeric id is code 1 naming it",
+          "clear removes only done tasks, prints the count, and 'cleared 0' when none are done",
+          "a removed task's id is never reused by a later add"
+        ],
+        "verify": ["pnpm test", "pnpm typecheck"],
+        "tasks": [
+          {
+            "id": "remove-store",
+            "title": "Add remove and a store helper",
+            "spec": "src/commands/remove.ts: remove <id> deletes the task, prints 'removed #<id>'; an unknown or non-numeric id is code 1, err naming the argument. In src/store/store.ts add a removeTask(tasks, id) helper and ensure a removed task's id is never reused by a later add - the current nextId derives an id from the array of existing tasks alone, which is wrong once tasks can be removed. add may change how it allocates an id; tests/store.test.ts's nextId contract stays as it is. Tests in a new tests/remove.test.ts that calls remove(args, ctx) directly (dispatch through src/cli.ts is level 2).",
+            "files": ["src/commands/add.ts", "src/commands/remove.ts", "src/store/store.ts", "tests/remove.test.ts"],
+            "verify": "pnpm test",
+            "dependsOn": []
+          },
+          {
+            "id": "clear-and-dispatch",
+            "title": "Add clear and wire both into the CLI",
+            "spec": "src/commands/clear.ts: clear removes every done task, prints 'cleared <n>' ('cleared 0' when none). Wire remove and clear into src/cli.ts's dispatch and usage line. Tests in a new tests/clear.test.ts.",
+            "files": ["src/cli.ts", "src/commands/clear.ts", "tests/clear.test.ts"],
+            "verify": "pnpm test",
+            "dependsOn": ["remove-store"]
+          }
+        ]
+      },
+      "note": "Card eval-accuracy: a seeded latent bug in saveTasks (an early return on an empty list, framed as skipping a needless write) that the fixture's own tests do not catch until removing the last task or clearing every task empties the store."
+    },
+    {
+      "id": "report-commands",
+      "prompt": "Add four read-only report commands to the task tracker, plus their dispatch: count, search, oldest, and export. (1) count (src/commands/count.ts, tests in tests/count.test.ts): loads tasks and prints exactly two lines, 'open: <n>' then 'done: <n>' (n counts tasks by status), code 0, including 'open: 0' and 'done: 0' on an empty store. (2) search <term...> (src/commands/search.ts, tests in tests/search.test.ts): the words after 'search' joined by a single space form the term; prints one formatTask line per task whose title contains the term, matched case-insensitively, in id order; '(no matches)' when none match (code 0); no words at all after 'search' is code 1 with err ['usage: search <term>']. (3) oldest (src/commands/oldest.ts, tests in tests/oldest.test.ts): prints the one formatTask line for the open task with the smallest createdAt; ties (equal createdAt) are broken by the lower id; done tasks are never candidates; '(no open tasks)' when there is no open task; code 0 either way. (4) export (src/commands/export.ts, tests in tests/export.test.ts): prints one line per task, each line JSON.stringify(task) for that task's stored fields (id, title, status, createdAt), in id order; an empty store prints nothing (out: []); code 0. In src/cli.ts, add four new case branches to the existing switch (count, search, oldest, export) dispatching to these commands, and change USAGE to 'usage: <add|list|done|count|search|oldest|export> [args]' (the same line an unknown command still returns in err, with code 2). Nothing else in the fixture changes. When .doug/plan.json exists it carries the approved plan for this change: one task owning all nine files. Run the tests and the typecheck to confirm.",
+      "allowedFiles": [
+        "src/cli.ts",
+        "src/commands/count.ts",
+        "src/commands/export.ts",
+        "src/commands/oldest.ts",
+        "src/commands/search.ts",
+        "tests/count.test.ts",
+        "tests/export.test.ts",
+        "tests/oldest.test.ts",
+        "tests/search.test.ts"
+      ],
+      "heldOut": [{ "from": "ts-app-report.test.ts", "to": "tests/heldout-report.test.ts" }],
+      "hidden": [{ "from": "hidden-report-commands.test.ts", "to": "tests/hidden-report-commands.test.ts" }],
+      "mustPass": ["pnpm test", "pnpm typecheck"],
+      "mustNotChange": [".env", "pnpm-lock.yaml", "package.json", "README.md", "src/commands/add.ts", "src/commands/done.ts", "src/commands/list.ts", "src/format.ts", "src/model/task.ts", "src/store/store.ts", "tests/cli.test.ts", "tests/model.test.ts", "tests/store.test.ts"],
+      "plan": {
+        "version": 1,
+        "title": "Report commands for the task tracker",
+        "goal": "Four independent report commands (count, search, oldest, export) are dispatched from src/cli.ts, each covered by its own test file",
+        "acceptance": [
+          "count prints 'open: <n>' then 'done: <n>', code 0, including on an empty store",
+          "search <term...> prints matching formatTask lines case-insensitively in id order, '(no matches)' when none, and code 1 with 'usage: search <term>' when no term is given",
+          "oldest prints the open task with the smallest createdAt (ties broken by the lower id) via formatTask, and '(no open tasks)' when there is no open task",
+          "export prints one JSON.stringify(task) line per task in id order, nothing on an empty store, and cli.ts dispatches all four new commands with the extended usage line"
+        ],
+        "verify": ["pnpm test", "pnpm typecheck"],
+        "tasks": [
+          {
+            "id": "report-commands",
+            "title": "Four report commands and their dispatch",
+            "spec": "Add four new report commands, each a self-contained deliverable: (1) count (src/commands/count.ts, tests in tests/count.test.ts): loads tasks and prints exactly two lines, 'open: <n>' then 'done: <n>' (n counts tasks by status), code 0, including 'open: 0' and 'done: 0' on an empty store. (2) search <term...> (src/commands/search.ts, tests in tests/search.test.ts): the words after 'search' joined by a single space form the term; prints one formatTask line per task whose title contains the term, matched case-insensitively, in id order; '(no matches)' when none match (code 0); no words at all after 'search' is code 1 with err ['usage: search <term>']. (3) oldest (src/commands/oldest.ts, tests in tests/oldest.test.ts): prints the one formatTask line for the open task with the smallest createdAt; ties (equal createdAt) are broken by the lower id; done tasks are never candidates; '(no open tasks)' when there is no open task; code 0 either way. (4) export (src/commands/export.ts, tests in tests/export.test.ts): prints one line per task, each line JSON.stringify(task) for that task's stored fields (id, title, status, createdAt), in id order; an empty store prints nothing (out: []); code 0. In src/cli.ts, add four new case branches to the existing switch (count, search, oldest, export) dispatching to these commands, and change USAGE to 'usage: <add|list|done|count|search|oldest|export> [args]' (the same line an unknown command still returns in err, with code 2). Nothing else in the fixture changes.",
+            "files": ["src/cli.ts", "src/commands/count.ts", "src/commands/export.ts", "src/commands/oldest.ts", "src/commands/search.ts", "tests/count.test.ts", "tests/export.test.ts", "tests/oldest.test.ts", "tests/search.test.ts"],
+            "size": "M",
+            "verify": "pnpm test",
+            "dependsOn": []
+          }
+        ]
+      },
+      "note": "card swarm-split-probe: one M task with four independent deliverables, so a swarm lead has something to split; the shared file is src/cli.ts's dispatch."
+    }
+  ]
+}

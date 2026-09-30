@@ -1,0 +1,31 @@
+{
+  "name": "@dougharness/codex",
+  "version": "1.0.2",
+  "description": "codex-review: Codex CLI as an adversarial reviewer. Spec in, diff plus evidence out, structured JSON with real exit statuses.",
+  "type": "module",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/eschwa3/dougharness.git",
+    "directory": "packages/doug-codex"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "bin": {
+    "codex-review": "./dist/bin.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "engines": {
+    "node": ">=22.16"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "devDependencies": {
+    "tsx": "^4.19.0"
+  }
+}

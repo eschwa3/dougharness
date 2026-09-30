@@ -1,0 +1,49 @@
+{
+  "suite": "ts-basic",
+  "options": {
+    "tasks": [
+      "fix-hours"
+    ],
+    "conditions": [
+      "full"
+    ],
+    "runs": 1,
+    "maxTurns": 25,
+    "dryRun": false,
+    "suite": "ts-basic"
+  },
+  "results": [
+    {
+      "task": "fix-hours",
+      "condition": "full",
+      "run": 1,
+      "dir": "/tmp/doug-eval-full-mn5tL0",
+      "status": 0,
+      "durationMs": 39121,
+      "costUsd": 0.40162725,
+      "turns": 10,
+      "result": "Fixed and verified. The hours case in `src/duration.ts:17` multiplied by the minutes constant, so \"2h\" returned 120,000 ms instead of 7,200,000. It now multiplies by 3,600,000.\n\nI added a \"parses hours\" test to `tests/duration.test.ts` covering \"2h\" and the fractional \"1.5h\".\n\nGate results from this session:\n\n- `pnpm test`: 2 files, 5 tests, all passed.\n- `pnpm typecheck`: clean, no errors.",
+      "stderr": "Ignoring 11 permissions.allow entries from .claude/settings.json: this workspace has not been trusted. Run Claude Code interactively here once and accept the trust dialog, or set projects[\"/tmp/doug-eval-full-mn5tL0\"].hasTrustDialogAccepted: true in ~/.claude.json.\n",
+      "changed": [
+        "src/duration.ts",
+        "tests/duration.test.ts"
+      ],
+      "outOfScope": [],
+      "forbidden": [],
+      "mustNotExist": [],
+      "checks": [
+        {
+          "command": "pnpm test",
+          "ok": true
+        },
+        {
+          "command": "pnpm typecheck",
+          "ok": true
+        }
+      ],
+      "verified": true,
+      "inScope": true,
+      "success": true
+    }
+  ]
+}

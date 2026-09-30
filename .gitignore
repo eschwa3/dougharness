@@ -1,0 +1,9 @@
+.env
+.env.local
+.env.*.local
+node_modules/
+dist/
+*.tsbuildinfo
+.doug/.state/
+evals/out/
+.claude/worktrees/

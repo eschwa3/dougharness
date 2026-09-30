@@ -1,0 +1,51 @@
+---
+name: run-report
+description: End a card's run with one command: append the docs/live-runs.md entry for a workflow report (or a hand-track landing), and print the three-line summary that goes in the chat. Called by /doug-next after land and by /core-next after the commit; usable on any saved report.
+allowed-tools: Agent, Read, Bash
+---
+
+# run-report
+
+One card's landing, recorded and summarized. The entry and the summary are rendered by `scripts/board.mjs`, never written by hand, so every run is recorded in the same shape.
+
+## A workflow run (flow track)
+
+With the card id, the report (`.doug/.state/last-report.json` unless another path is given), the run id the Workflow tool printed (`wf_...`), the wall clock, and the landing commit:
+
+1. `node "${CLAUDE_PLUGIN_ROOT}/scripts/cost.mjs" <run-id>`: the run's real cost, summed from the local Claude Code transcripts of every agent in the run and priced from the dated table in the script (no network). Its last lines are the run total and any agent it could not price. The number after `Run total:` is the cost; when the run cannot be found or every agent is unpriced, there is no cost. The workflow itself does not report cost; never estimate one. The Codex line after it, when present, is the Codex adversary's cost: pass its USD as --codex-cost <usd> to record and summary; it is never added to --cost.
+2. Classify every adversary block in the report. A block is a finding the adversary raised as a blocker (its ledger id, `F1`; for a report from before the ledger, `pass-<n>`); `board.mjs record` refuses an id the report does not have and lists the ones it has. This is judgment work and runs on the `review` row: read it with the `plan.mjs models` command, `node "${CLAUDE_PLUGIN_ROOT}/scripts/plan.mjs" models` (`roles.review.model`, `roles.review.effort`), and spawn `Agent({ subagent_type: "doug-flow:reviewer", model: "<review row model>", prompt: "There is no worktree and no diff for this job: read the report at <report path> (repository root, read-only) and classify every adversary block in it as real (a defect a user would hit), marginal (true to the spec, no user impact), or false (wrong), each with a one-line reason drawn from the fix passes and the checks in the report, not from the adversary's summary. Return exactly one line per block, nothing else: F1=<real|marginal|false>: <one-line reason> (pass-<n>=... for a pre-ledger report). Edit nothing." })`. The lead passes each returned line into `--adversary` verbatim and never reclassifies.
+3. `node "${CLAUDE_PLUGIN_ROOT}/scripts/board.mjs" record <id> <report.json> --wall "<m> min" --commit <sha> --cost <usd> [--codex-cost <usd>] --adversary "F1=<class>: <reason>"` with `--adversary` repeated once per block, leaving `--cost` out when step 1 gave no number and `--codex-cost` out when step 1 showed no Codex line. This appends the entry to `docs/live-runs.md`: the measures table with the precision line (n real / n marginal / n false), the per-level, per-task table, and one line per classified block. It also promotes `.doug/.state/research/<id>.md` to `docs/research/<id>.md` when that note exists, printing one line saying so; add that path to the landing commit alongside `docs/live-runs.md`.
+4. `node "${CLAUDE_PLUGIN_ROOT}/scripts/memory.mjs" import`: rolls any auto-memory file written since the last import into the lessons store — it is idempotent, a rewritten file supersedes its old row, and it never writes under the auto-memory directory. Its one-line output goes in the chat; an exit 1 naming Node is said in the chat and the landing goes on, the same as record below.
+5. `node "${CLAUDE_PLUGIN_ROOT}/scripts/memory.mjs" record <report.json> --run <run-id> --card <id> --commit <sha> --adversary "F1=<class>: <reason>"` with `--adversary` repeated once per block, the same values step 3 used, and `--commit` left out for a run that stopped. It appends one row per task of the report to the local outcome log `.doug/.state/memory/memory.db` (uncommitted; run id, card, spec hash, owned files from the plan, size, shape, models, verify and review results, the classified adversary blocks, fix passes, budget, tokens and USD measured from the same transcripts `cost.mjs` read, or null where nothing was measured). It needs Node >=22.16 (node:sqlite). When it exits 1 naming Node, say so in the chat and go on, since the record is a log, not a gate.
+6. `node "${CLAUDE_PLUGIN_ROOT}/scripts/memory.mjs" reflect <report.json> --run <run-id> --card <id> --commit <sha> --adversary "F1=<class>: <reason>"` with `--adversary` repeated once per block, the same values step 5 used. It applies deterministic helpful/harmful counters to any lesson a task's `memoryUsed` names, then runs a cheap-row `claude -p --json-schema` pass that proposes and appends at most three lessons from the report, filtered in code. Its one-line summary (with the measured cost) goes in the chat. An exit 1 naming the LLM pass is said in the chat and the landing goes on regardless — reflect is a log, not a gate, the same as record.
+7. `node "${CLAUDE_PLUGIN_ROOT}/scripts/board.mjs" summary <report.json> --wall "<m> min" --commit <sha> [--codex-cost <usd>]` (same `--cost` rule) and put its three lines in the chat verbatim, in a fenced code block: the outcome, the tasks, and what stopped or was not met.
+
+A run that stopped is recorded the same way, without `--commit`; the summary's third line quotes each task's stop reason.
+
+## A batch (several cards in one plan)
+
+When `.doug/plan.json` carries `cards` (made by `plan.mjs merge`), the run is recorded once per card:
+
+1. `node "${CLAUDE_PLUGIN_ROOT}/scripts/cost.mjs" <run-id> --by-card`: after the usual tables, a per-card table with each card's tasks' agents summed for that card and one row for the shared integration agents (the integrate and level-adversary agents, task `level-<n>`). The card rows are each card's `--cost`; the shared row is `--shared-cost`, the same number for every card. Pass the Codex line's USD as --codex-cost to the first card's record only.
+2. Classify the adversary blocks per card: `board.mjs record` lists only that card's tasks' blocks and refuses the others' ids.
+3. For each card, in the plan's `cards` order: `node "${CLAUDE_PLUGIN_ROOT}/scripts/board.mjs" record <id> <report.json> --wall "<m> min" --commit <sha> --cost <that card's usd> --shared-cost <shared usd> [--codex-cost <usd>, first card only] --adversary ...`. Record reads the batch from the plan file: the entry names the other cards, shows only that card's tasks and the integration rows of their levels, and counts the shared cost once, under the first card.
+4. `node "${CLAUDE_PLUGIN_ROOT}/scripts/memory.mjs" import` once for the whole report, the same as the workflow-run form's step 4: its one-line output goes in the chat, an exit 1 naming Node is said in the chat and the landing goes on, and it is idempotent, a rewritten file supersedes its old row, and it never writes under the auto-memory directory.
+5. `node "${CLAUDE_PLUGIN_ROOT}/scripts/memory.mjs" record <report.json> --run <run-id> --commit <sha> --adversary ...` once for the whole report, with every card's block classes (each task carries its card in a batch report; no `--card`).
+6. `node "${CLAUDE_PLUGIN_ROOT}/scripts/memory.mjs" reflect <report.json> --run <run-id> --commit <sha> --adversary ...` once for the whole report, no `--card` (each appended lesson's card comes from its own task).
+7. `node "${CLAUDE_PLUGIN_ROOT}/scripts/board.mjs" summary <report.json> --card <id> --wall "<m> min" --commit <sha>` per card (same `--cost` rule), and put each card's three lines in the chat. Its "Acceptance not met" line reads only that card's own tasks by their `[<card>] ` tag (or the final integration level's acceptance, when the report carries it), so another card's failing command, or a command that depends on a level not yet run, never shows as this card's; the line names which source it used.
+
+## A hand-track landing
+
+With the card id, the landing commit, the wall clock, and the gate line — one `<command> <exit>` clause per entry of `.doug/config.json` `stopGate.commands`, in that order, joined by `; ` (a test command may add its pass count in parentheses; Doug's own is `typecheck 0; test:unit 0 (<n> passed)`; a pytest project's might be `pytest 0`):
+
+1. `node "${CLAUDE_PLUGIN_ROOT}/scripts/board.mjs" record <id> --hand --commit <sha> --wall "<m> min" --gate "<gate line>"`, with `--note "<one line>"` when something about the build is worth keeping. This appends the hand-track entry to `docs/live-runs.md`; its table is the summary. It also promotes `.doug/.state/research/<id>.md` to `docs/research/<id>.md` when that note exists, printing one line saying so; add that path to the landing commit alongside `docs/live-runs.md`.
+2. `node "${CLAUDE_PLUGIN_ROOT}/scripts/memory.mjs" import`, the same as above: its one-line output goes in the chat, an exit 1 naming Node is said in the chat and the landing goes on, and it is idempotent, supersedes a rewritten file, and never writes under the auto-memory directory.
+3. `node "${CLAUDE_PLUGIN_ROOT}/scripts/memory.mjs" record <id> --hand --commit <sha> --wall "<m> min" --gate "<gate line>" [--note "<one line>"]`, the same values step 1 used. It records one row in the local outcome log `.doug/.state/memory/memory.db` (uncommitted), keyed `hand:<sha>` so re-recording the same commit updates that row and track `hand`; a card that lands twice, in two commits, gets two rows. Its workflow-only columns (verified, review counts, adversary verdict, blocks, fix passes, budget, tokens, USD, the report itself) are null because they do not exist on this track, never because they measured zero: no independent verifier ran, and the gate's own text is the `gate` column instead. It needs Node >=22.16 (node:sqlite). When it exits 1 naming Node, say so in the chat and go on, since the record is a log, not a gate.
+
+`memory.mjs reflect` does not run on a hand-track landing: there is no report for the cheap-row pass to read.
+
+Say the commit, the wall clock, and the gate line in the chat.
+
+## Then
+
+Moving the card and committing the record and the log belong to the calling skill (`/doug-next` step 5, `/core-next` step 4); a record change shows on the served page (`doug board serve`).

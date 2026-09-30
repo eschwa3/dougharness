@@ -1,0 +1,14 @@
+{"query": "why does `parseDuration` compute the h case wrong", "expected": ["duration-hour-bug"], "files": ["src/duration.ts"]}
+{"query": "the library converts hours into milliseconds as though an hour were the same length as a minute", "expected": ["duration-hour-bug"]}
+{"query": "what does `slugify` do with NFKD normalization", "expected": ["slugify-nfkd"], "files": ["src/strings.ts"]}
+{"query": "converting text to a web friendly slug keeps the base letter but removes the accent mark sitting on top of it, because the text is split into a base character plus a separate mark before stripping", "expected": ["slugify-nfkd"]}
+{"query": "what does the dash collapse regex `[^a-z0-9]+` do in strings.ts", "expected": ["strings-dash-collapse"], "files": ["src/strings.ts"]}
+{"query": "runs of punctuation or spaces of any length in the slug get squashed down to exactly one dash", "expected": ["strings-dash-collapse"]}
+{"query": "how does `tests/duration.test.ts` import `duration.ts` under NodeNext resolution", "expected": ["tests-duration-scope"], "files": ["tests/duration.test.ts"]}
+{"query": "a fixture test file imports the compiled file extension even though the actual source file on disk ends differently, because of how the module resolution setting works", "expected": ["tests-duration-scope"]}
+{"query": "does `parseDuration` validate its input with a regex before doing any arithmetic", "expected": ["duration-regex"]}
+{"query": "malformed input is rejected before any unit math ever runs", "expected": ["duration-regex"]}
+{"query": "what happens if src/schedule.ts lands before strings.ts's titleCase", "expected": ["schedule-title-case-dependency"], "files": ["src/schedule.ts", "src/strings.ts"]}
+{"query": "a new helper composing three existing functions can't be typechecked until all three of them already exist", "expected": ["schedule-composition"]}
+{"query": "why does the memory store keep old lesson rows instead of deleting them, given `lessons_no_delete`", "expected": ["memory-lessons-addonly"]}
+{"query": "the database itself refuses to erase or rewrite a row, so superseding old guidance always means adding a new row rather than editing history", "expected": ["memory-lessons-addonly"]}

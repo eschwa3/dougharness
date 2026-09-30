@@ -1,0 +1,14 @@
+{
+  "name": "fixture-ts-pnpm",
+  "private": true,
+  "packageManager": "pnpm@9.0.0",
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "vitest run",
+    "lint": "eslint .",
+    "typecheck": "tsc --noEmit",
+    "format": "prettier --write ."
+  },
+  "devDependencies": { "typescript": "^5", "vitest": "^2", "eslint": "^9", "prettier": "^3" }
+}

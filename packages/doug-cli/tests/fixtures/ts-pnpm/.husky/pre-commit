@@ -1,0 +1,2 @@
+#!/bin/sh
+# Placeholder so git tracks this directory; the detector only checks that .husky exists.
