@@ -148,6 +148,18 @@ declare module "@dougharness/flow/lib/board.mjs" {
   export function recordLanding(dir: string, id: string, markdown: string): { file: string; promoted: string | null };
 }
 
+declare module "@dougharness/flow/lib/memory.mjs" {
+  export function probeSqliteFts5(): { ok: boolean; reason: string | null };
+  export function inspectMemory(dir: string): {
+    file: string;
+    exists: boolean;
+    userVersion: number | null;
+    maxUserVersion: number;
+    quickCheck: string | null;
+    error: string | null;
+  };
+}
+
 declare module "@dougharness/flow/lib/cost.mjs" {
   export function projectSlug(projectDir: string): string;
 }

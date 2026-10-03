@@ -11,12 +11,12 @@ import { cpSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync, existsSync
 import { tmpdir } from "node:os";
 import { dirname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
-import { newBoard, addCard, boardPath, BOARD_RELPATH } from "./board.mjs";
-import { commandEnv } from "./land.mjs";
-import { unwrapReport } from "./plan.mjs";
+import { newBoard, addCard, boardPath, BOARD_RELPATH } from "../plugins/doug-flow/lib/board.mjs";
+import { commandEnv } from "../plugins/doug-flow/lib/land.mjs";
+import { unwrapReport } from "../plugins/doug-flow/lib/plan.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
-export const ROOT = join(here, "../../..");
+export const ROOT = join(here, "..");
 export const PLUGIN_DIR = join(ROOT, "plugins/doug-flow");
 export const PLAN_MJS = join(PLUGIN_DIR, "scripts/plan.mjs");
 export const BOARD_MJS = join(PLUGIN_DIR, "scripts/board.mjs");
@@ -418,9 +418,9 @@ export function prepareFixture({ scenario, dir, tempPrefix } = {}) {
     size: "S",
     track: scenario === "hand" ? "hand" : undefined,
     column: "ready",
-    // /core-next's Start step now refuses a classless card before it stamps the landing's condition
+    // doug-hand's Start step now refuses a classless card before it stamps the landing's condition
     // (scripts/memory.mjs's "condition open"); every fixture card carries one so a rehearsal never trips that
-    // refusal (plugins/doug-flow/skills/core-next/SKILL.md step 2).
+    // refusal (plugins/doug-flow/skills/doug-hand/SKILL.md step 2).
     class: "code",
   });
   mkdirSync(join(target, ".doug"), { recursive: true });
@@ -555,7 +555,7 @@ export function rehearsalNote({ scenario, outcome, stages, cost = null, agentNam
   return `${base}; plugin loading and agent-name resolution asserted in the runtime (plugins: doug-flow; agents resolved: ${(agentNames || []).join(", ") || "none"})`;
 }
 
-// The fixture's own hand-track "| Gate |" line (the fixture's /core-next build session ran board.mjs record
+// The fixture's own hand-track "| Gate |" line (the fixture's doug-hand build session ran board.mjs record
 // --hand on itself): the last such line in the fixture's docs/live-runs.md, or null when there is none, so the
 // real repository's record can carry the same gate text the fixture build reported, or "not observed".
 export function extractGateLine(dir) {
@@ -609,8 +609,8 @@ export const SCENARIO_STAGES = {
       kind: "session",
       name: "gate",
       maxTurns: 12,
-      prompt: () => "/core-next fix-hours",
-      assert: ({ dir, stream }) => assertGateHeld(dir, stream, { plugins: ["doug-flow"], command: "doug-flow:core-next", cardId: "fix-hours", unchangedFiles: ["src/duration.ts"] }),
+      prompt: () => "/doug-next fix-hours",
+      assert: ({ dir, stream }) => assertGateHeld(dir, stream, { plugins: ["doug-flow"], command: "doug-flow:doug-next", cardId: "fix-hours", unchangedFiles: ["src/duration.ts"] }),
     },
     {
       kind: "act",
@@ -620,7 +620,7 @@ export const SCENARIO_STAGES = {
         // card's landing commit), so this act no longer commits it.
         const move = act(BOARD_MJS, ["move", "fix-hours", "flow"], dir);
         if (!move.ok) return fail(`board.mjs move failed: ${move.stderr || move.stdout}`);
-        // /core-next step 2 stamps the landing's condition before the brief (plugins/doug-flow/skills/core-next/SKILL.md):
+        // doug-hand step 2 stamps the landing's condition before the brief (plugins/doug-flow/skills/doug-hand/SKILL.md):
         // `memory.mjs condition open <id>` writes .doug/.state/reports/<id>/condition.json, and refuses a classless
         // card or a dir with no git HEAD — the fixture already has a HEAD (its own baseline commit) regardless of
         // the uncommitted move above. `act()` passes `dir` positionally and spawns with cleanEnv(), so this writes
@@ -637,8 +637,8 @@ export const SCENARIO_STAGES = {
       maxTurns: 60,
       prompt: () =>
         [
-          "/core-next fix-hours",
-          "I answered Start at the start gate and moved the card to In flow myself (it is uncommitted), and I chose by hand. Do not invoke the doug-board skill at any step: this checkout publishes nothing. Do steps 3 and 4, then stop before step 5: do not suggest follow-up cards and do not ask the continue gate.",
+          "/doug-next fix-hours",
+          "I answered Start at the start gate and moved the card to In flow myself (it is uncommitted), and I chose by hand. Do not invoke the doug-board skill at any step: this checkout publishes nothing. Do the doug-hand skill's steps 3 and 4, then stop before step 5: do not suggest follow-up cards and do not ask the continue gate.",
         ].join("\n\n"),
       assert: (ctx) => assertHandBuilt(ctx),
     },
@@ -699,7 +699,7 @@ export const SCENARIO_STAGES = {
   ],
 };
 
-// The hand scenario's build assertion (card workflow-rehearsal-review #1): /core-next's own step 4.3 commits the
+// The hand scenario's build assertion (card workflow-rehearsal-review #1): doug-hand's own step 4.3 commits the
 // board and docs/live-runs.md AFTER the code commit ("Board: <id> done as <sha>"), so HEAD is that board commit,
 // not the code commit — take every commit since the fixture's recorded baseline instead of assuming HEAD is it,
 // require that one of them changes both owned files, and require the board's `source` to name THAT commit.
@@ -731,7 +731,7 @@ export function assertHandBuilt({ dir, baseline }) {
   if (!card || card.column !== "done") return fail("the fixture board does not have fix-hours in done");
   if (!card.source || !String(card.source).includes(codeCommit.slice(0, 7))) return fail(`fix-hours's source does not name the code commit ${codeCommit} (source: ${card.source || "none"})`);
   const runs = existsSync(join(dir, "docs/live-runs.md")) ? readFileSync(join(dir, "docs/live-runs.md"), "utf8") : "";
-  if (!runs.includes("`fix-hours`") || !runs.includes("hand track, decision 0005")) return fail("docs/live-runs.md carries no hand-track entry for fix-hours (board.mjs record --hand did not run)");
+  if (!runs.includes("`fix-hours`") || !runs.includes("hand track: a gated by-hand change")) return fail("docs/live-runs.md carries no hand-track entry for fix-hours (board.mjs record --hand did not run)");
   const held = runHeldOutAndClean(dir);
   if (!held.ok) return held;
   return pass(`built as ${codeCommit}`, { commit: codeCommit });

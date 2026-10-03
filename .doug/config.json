@@ -55,6 +55,11 @@
     ],
     "planScope": true
   },
+  "preCommit": {
+    "noTestPaths": [
+      ".doug/board.json"
+    ]
+  },
   "checkpoint": {
     "enabled": false,
     "mode": "commit"
@@ -66,5 +71,13 @@
     "Use pnpm for installs and scripts. Never mix package managers.",
     "Run a single test file with: pnpm exec vitest run <path/to/file.test.ts>",
     "Node >=22.16 (package.json engines.node); node:sqlite with FTS5 is built in from there."
-  ]
+  ],
+  "memory": {
+    "embeddings": {
+      "provider": "openai-compatible",
+      "baseUrl": "http://localhost:11434",
+      "model": "embeddinggemma",
+      "dims": 512
+    }
+  }
 }

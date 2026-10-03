@@ -45,6 +45,42 @@ export function spliceProjectNotes(generated: string, existing: string): string 
   return generated.slice(0, genMatch.index) + existing.slice(existingMatch.index);
 }
 
+function frontmatterRange(lines: string[]): { start: number; end: number } | null {
+  if (lines[0] !== "---") return null;
+  const end = lines.indexOf("---", 1);
+  return end > 0 ? { start: 1, end } : null;
+}
+
+/**
+ * Returns `generated` with the top-level `skills:` block of `existing`'s frontmatter copied verbatim in
+ * before the `doug: generated` line. The block is user-owned and survives a refresh (card
+ * role-skills-preload); the generator never emits one itself. Returns `generated` unchanged when
+ * `existing` has no such block in its frontmatter or `generated` already has a `skills:` key. Pure.
+ */
+export function spliceSkills(generated: string, existing: string): string {
+  const eol = (t: string) => (t.includes("\r\n") ? "\r\n" : "\n");
+  const strip = (l: string) => (l.endsWith("\r") ? l.slice(0, -1) : l);
+  const exLines = existing.split("\n").map(strip);
+  const exFm = frontmatterRange(exLines);
+  if (!exFm) return generated;
+  const keyIdx = exLines.findIndex((l, i) => i >= exFm.start && i < exFm.end && /^skills:/.test(l));
+  if (keyIdx < 0) return generated;
+  let last = keyIdx;
+  while (last + 1 < exFm.end && /^[\s-]/.test(exLines[last + 1])) last++;
+  const block = exLines.slice(keyIdx, last + 1);
+
+  const genLines = generated.split("\n");
+  const genFm = frontmatterRange(genLines.map(strip));
+  if (!genFm) return generated;
+  const genStripped = genLines.map(strip);
+  for (let i = genFm.start; i < genFm.end; i++) if (/^skills:/.test(genStripped[i])) return generated;
+  const markIdx = genStripped.findIndex((l, i) => i >= genFm.start && i < genFm.end && l === AGENT_MARK);
+  if (markIdx < 0) return generated;
+  const nl = eol(generated);
+  const insert = block.map((l) => (nl === "\r\n" ? l + "\r" : l));
+  return [...genLines.slice(0, markIdx), ...insert, ...genLines.slice(markIdx)].join("\n");
+}
+
 export interface AgentFile {
   path: string;
   content: string;
@@ -174,10 +210,10 @@ export function generateAgents(d: Detection, cfg: DougConfig): AgentFile[] {
     facts: buildFacts(d, cfg, { pm: true }),
     rules: [
       "Answer the one question asked; leave any other researcher's question alone.",
-      "Primary sources first (official docs, the tool's own --help, the package's repository); quote each fact with its URL or the command and its output, and say whether it was observed or documented.",
+      "Primary sources first (official docs, the tool's own --help, the package's repository); quote a page verbatim with its line number in the raw page (curl -sL <url> | grep -n '<phrase>'), or the command and its output, and say whether it was observed or documented; a quote without a line is marked no line.",
       "Never install, write, or change the machine; a fact that needs an install is unverified, with the command that would show it.",
       "Mark anything unconfirmed unverified, with what was tried; never guess.",
-      "Budget: at most 6 WebSearch plus WebFetch calls for your question (research.maxFetches; a hook denies the next one). Try sources in the order the question lists them, and write your findings before the budget runs out, marking anything still unanswered unverified.",
+      "Budget: at most 6 WebSearch, WebFetch, curl, or wget calls for your question, counted together (research.maxFetches; a hook denies the next one). Try sources in the order the question lists them, and write your findings before the budget runs out, marking anything still unanswered unverified.",
     ],
   };
 

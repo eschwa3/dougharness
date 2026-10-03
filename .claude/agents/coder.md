@@ -3,6 +3,8 @@ name: coder
 description: "Implements a requested change in this repository, runs its checks, and reports what it ran"
 model: inherit
 disallowedTools: Agent
+skills:
+  - harness-fix
 doug: generated
 ---
 

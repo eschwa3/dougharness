@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { levelize as libLevelize } from "../lib/plan.mjs";
+import * as board from "../lib/board.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 // The public snapshot leaves out docs the dev repo keeps (ADRs, run log, rehearsals, releasing); scripts/export-public.mjs
@@ -196,6 +197,76 @@ describe("workflow template", () => {
     expect(inlined(tasks).map((l) => l.map((x) => x.id))).toEqual(libLevelize(tasks).map((l) => l.map((x) => x.id)));
     expect(() => inlined([t("a", ["b"]), t("b", ["a"])])).toThrow(/cycle/);
   });
+
+  // Card flow-stop-class: every halt site sets a stopClass from one enum beside the unchanged prose stopReason.
+  describe("stop classes (card flow-stop-class)", () => {
+    // The source with whole-line comments dropped, so a comment that names a halt call or a key counts for nothing.
+    const codeLines = source.split("\n").filter((l) => !l.trim().startsWith("//"));
+    const code = codeLines.join("\n");
+    const enumLiteral = () => {
+      const start = source.indexOf("const STOP_CLASSES = ");
+      expect(start, "the workflow declares const STOP_CLASSES").toBeGreaterThan(-1);
+      return new Function(source.slice(start, source.indexOf("]", start) + 1) + "\nreturn STOP_CLASSES;")();
+    };
+    const haltCalls = () => [...code.matchAll(/\bhalt\(/g)].map((m) => code.slice(m.index, m.index + 80));
+    const retriableSlice = () => {
+      const s = source.indexOf("function retriable(");
+      return source.slice(s, source.indexOf("\n}\n", s) + 3).split("\n").filter((l) => !l.trim().startsWith("//"));
+    };
+    // Every class literal the source assigns: `stopClass: 'x'`, `.stopClass = 'x'`, and halt('x', ...).
+    const literals = () => {
+      const out = new Set();
+      for (const m of code.matchAll(/stopClass(?::|\s*=)\s*'([a-z-]+)'/g)) out.add(m[1]);
+      for (const h of haltCalls()) {
+        const m = /^halt\('([a-z-]+)',/.exec(h);
+        if (m) out.add(m[1]);
+      }
+      return out;
+    };
+
+    it("exports one enum of 15 distinct stop classes from lib/board.mjs", () => {
+      expect(board.STOP_CLASSES).toEqual([
+        "implementer-blocked", "partial", "stage-missing", "spec-contradiction", "environment", "adversary-not-run", "outside-owned",
+        "new-blockers-twice", "fix-attempts-exhausted", "stalled", "budget", "no-new-commit", "dependency-skipped", "stage-threw", "level-adversary",
+      ]);
+      expect(new Set(board.STOP_CLASSES).size).toBe(board.STOP_CLASSES.length);
+    });
+    it("keeps the workflow's STOP_CLASSES literal equal to the board.mjs export", () => {
+      expect(enumLiteral()).toEqual(board.STOP_CLASSES);
+    });
+    it("a: every line that sets a stopReason: key sets a stopClass on it or on the next line", () => {
+      const idx = codeLines.map((l, i) => (/\bstopReason:/.test(l) ? i : -1)).filter((i) => i >= 0);
+      expect(idx.length, "the scan found the stopReason: sites").toBeGreaterThanOrEqual(6);
+      for (const i of idx) {
+        expect(/stopClass/.test(codeLines[i]) || /stopClass/.test(codeLines[i + 1] || ""), `stopClass beside: ${codeLines[i].trim().slice(0, 100)}`).toBe(true);
+      }
+    });
+    it("b: every X.stopReason = assignment sets X.stopClass = in the same block", () => {
+      const hits = codeLines.map((l, i) => ({ m: /(\w+)\.stopReason\s*=[^=]/.exec(l), i })).filter((h) => h.m);
+      expect(hits.length, "the scan found the stopReason assignment").toBeGreaterThanOrEqual(1);
+      for (const { m, i } of hits) {
+        const block = codeLines.slice(i, i + 3).join("\n");
+        expect(block, `${m[1]}.stopClass = beside ${m[0]}`).toMatch(new RegExp(`\\b${m[1]}\\.stopClass\\s*=[^=]`));
+      }
+    });
+    it("c: all 7 halt calls pass a literal class or a decided class, and none is a one-argument halt", () => {
+      const calls = haltCalls();
+      expect(calls.length, "the scan found exactly the seven halt sites").toBe(7);
+      for (const c of calls) expect(c, c).toMatch(/^halt\((?:'([a-z-]+)'|(?:decision|decided)\.stopClass),/);
+    });
+    it("d: every ok:false return in retriable() carries a literal stopClass", () => {
+      const fails = retriableSlice().filter((l) => /return \{ ok: false/.test(l));
+      expect(fails.length, "the scan found the retriable ok:false returns").toBeGreaterThanOrEqual(10);
+      for (const l of fails) expect(l, l.trim()).toMatch(/stopClass: '[a-z-]+'/);
+    });
+    it("e: every class literal in the source is in STOP_CLASSES, and every class in STOP_CLASSES has a site", () => {
+      const used = literals();
+      const declared = enumLiteral();
+      for (const c of used) expect(declared, `${c} is a declared class`).toContain(c);
+      expect([...used].sort()).toEqual([...declared].sort());
+    });
+  });
+
   it("starts a reused task from its branch without an implementer", async () => {
     const start = source.indexOf("async function startTask(");
     const slice = source.slice(start, source.indexOf("\n}\n", start) + 3);
@@ -1267,17 +1338,20 @@ describe("fix loop", () => {
     const noVerifier = scripted({ "implement:a": () => implResult, "review:a": () => passingReview });
     const v = await loadLoop({ agent: noVerifier.agent, fixAttempts: 2 }).runTask(task, "main");
     expect(labelled(noVerifier.calls, "fix:").length).toBe(0);
-    expect(v.attempts[0].retriable).toEqual({ ok: false, reason: "verifier returned nothing" });
+    expect(v.attempts[0].retriable).toEqual({ ok: false, reason: "verifier returned nothing", stopClass: "stage-missing" });
     expect(v.stopReason).toBe("verification failed; not retried: verifier returned nothing");
+    expect(v.stopClass).toBe("stage-missing");
     const noReviewer = scripted({ "implement:a": () => implResult, "verify:a": () => ({ taskId: "a", passed: true, findings: [] }) });
     const w = await loadLoop({ agent: noReviewer.agent, fixAttempts: 2 }).runTask(task, "main");
     expect(labelled(noReviewer.calls, "fix:").length).toBe(0);
-    expect(w.attempts[0].retriable).toEqual({ ok: false, reason: "reviewer returned nothing" });
+    expect(w.attempts[0].retriable).toEqual({ ok: false, reason: "reviewer returned nothing", stopClass: "stage-missing" });
     expect(w.stopReason).toBe("review rejected; not retried: reviewer returned nothing");
+    expect(w.stopClass).toBe("stage-missing");
     // A thunk that throws is a null too, not a rejected pass.
     const throwing = scripted({ "implement:a": () => implResult, "verify:a": () => { throw new Error("dead"); }, "review:a": () => passingReview });
     const t = await loadLoop({ agent: throwing.agent, fixAttempts: 2 }).runTask(task, "main");
     expect(t.stopReason).toBe("verification failed; not retried: verifier returned nothing");
+    expect(t.stopClass).toBe("stage-missing");
   });
 
   it("runs a size-S task as implement plus one focused check, with no verifier, reviewer, or adversary of its own", async () => {
@@ -1449,6 +1523,7 @@ describe("fix loop", () => {
     expect(labelled(calls, "fix:").map((c) => c.opts.label)).toEqual(["fix:a:2", "fix:a:3"]);
     expect(r.attempts.length).toBe(3);
     expect(r.stopReason).toBe("verification failed; stopped: stalled twice (F1 still open after 3 passes)");
+    expect(r.stopClass).toBe("stalled");
     expect(r.supervisor).toEqual({ ran: false, stalled: true, brief: null, signals: [{ kind: "repeat", finding: "F1", passes: [1, 2, 3] }], stop: { kind: "stalled", attempts: 3, findings: ["F1"] } });
     expect(r.attempts[2].supervisor).toBe(r.supervisor);
     // The stop is the loop's, so no verdict was softened: F1 is still open in the ledger.
@@ -1515,8 +1590,9 @@ describe("fix loop", () => {
     expect(labelled(calls, "fix:").length).toBe(0);
     expect(labelled(calls, "verify:").length).toBe(1);
     expect(r.attempts.length).toBe(1);
-    expect(r.attempts[0].retriable).toEqual({ ok: false, reason: "findings name files outside the owned set: src/other.ts" });
+    expect(r.attempts[0].retriable).toEqual({ ok: false, reason: "findings name files outside the owned set: src/other.ts", stopClass: "outside-owned" });
     expect(r.stopReason).toBe("verification failed; not retried: findings name files outside the owned set: src/other.ts");
+    expect(r.stopClass).toBe("outside-owned");
   });
 
   it("never relaunches when fixAttempts is 0", async () => {
@@ -1529,6 +1605,7 @@ describe("fix loop", () => {
     const r = await runTask(task, "main");
     expect(labelled(calls, "fix:").length).toBe(0);
     expect(r.stopReason).toBe("verification failed; fix attempts exhausted (0 of 0)");
+    expect(r.stopClass).toBe("fix-attempts-exhausted");
   });
 
   it("stops with the reason when attempts are exhausted", async () => {
@@ -1548,6 +1625,7 @@ describe("fix loop", () => {
     // The same finding every pass is not a new one, so the two-consecutive rule never fires.
     expect(r.attempts.map((a) => a.newFindings)).toEqual([["F1"], [], []]);
     expect(r.stopReason).toBe("verification failed; fix attempts exhausted (2 of 2)");
+    expect(r.stopClass).toBe("fix-attempts-exhausted");
     expect(fixes[1].prompt).toContain("fix attempt 2 of 2");
   });
 
@@ -1560,12 +1638,14 @@ describe("fix loop", () => {
     const one = await loadLoop({ agent: contradiction.agent, fixAttempts: 3 }).runTask(task, "main");
     expect(labelled(contradiction.calls, "fix:").length).toBe(0);
     expect(one.stopReason).toContain("not retried: spec contradicts acceptance:");
+    expect(one.stopClass).toBe("spec-contradiction");
 
     const blocked = scripted({ "implement:a": () => ({ ...implResult, blocked: true, blockedReason: "needs lib/y.ts" }) });
     const two = await loadLoop({ agent: blocked.agent, fixAttempts: 3 }).runTask(task, "main");
     expect(labelled(blocked.calls, "verify:").length).toBe(0);
     expect(labelled(blocked.calls, "fix:").length).toBe(0);
     expect(two.stopReason).toBe("blocked: needs lib/y.ts; not retried: implementer blocked: needs lib/y.ts");
+    expect(two.stopClass).toBe("implementer-blocked");
 
     const rejected = scripted({
       "implement:a": () => implResult,
@@ -1575,6 +1655,7 @@ describe("fix loop", () => {
     const three = await loadLoop({ agent: rejected.agent, fixAttempts: 3 }).runTask(task, "main");
     expect(labelled(rejected.calls, "fix:").length).toBe(0);
     expect(three.stopReason).toBe("review rejected; not retried: findings name files outside the owned set: lib/y.ts");
+    expect(three.stopClass).toBe("outside-owned");
 
     const absent = scripted({
       "implement:a": () => implResult,
@@ -1585,6 +1666,7 @@ describe("fix loop", () => {
     const four = await loadLoop({ agent: absent.agent, fixAttempts: 3, adversary: { command: "x", timeoutMs: 1 } }).runTask(task, "main");
     expect(labelled(absent.calls, "fix:").length).toBe(0);
     expect(four.stopReason).toContain("not retried: adversary did not run: codex-review not found");
+    expect(four.stopClass).toBe("adversary-not-run");
     // An adversarial review that never ran keeps the task out, but it is not the stage that blocked: only a review
     // that ran and returned a blocking verdict is recorded as `adversary`.
     expect(four.attempts[0].blockingStage).toBeNull();
@@ -1603,6 +1685,7 @@ describe("fix loop", () => {
     expect(labelled(absentLater.calls, "fix:").length).toBe(1);
     expect(five.attempts[1].blockingStage).toBeNull();
     expect(five.stopReason).toContain("not retried: adversary did not run: codex-review not found");
+    expect(five.stopClass).toBe("adversary-not-run");
   });
 
   it("E4: does not retry an environment-only finding from a focused check or the verifier (card reused-s-task-worktree-install)", async () => {
@@ -1614,6 +1697,7 @@ describe("fix loop", () => {
     const s = await loadLoop({ agent: envCheck.agent, fixAttempts: 3 }).runTask(sTask, "main");
     expect(labelled(envCheck.calls, "fix:").length).toBe(0);
     expect(s.stopReason).toContain("not retried: environment, not the code:");
+    expect(s.stopClass).toBe("environment");
     expect(s.stopReason).toContain('ENVIRONMENT ONLY: pnpm exec vitest exited 254 (Command "vitest" not found)');
 
     // Same when an M task's verifier reports the environment problem instead of a check.
@@ -1625,6 +1709,7 @@ describe("fix loop", () => {
     const v = await loadLoop({ agent: envVerify.agent, fixAttempts: 3 }).runTask(task, "main");
     expect(labelled(envVerify.calls, "fix:").length).toBe(0);
     expect(v.stopReason).toContain("not retried: environment, not the code:");
+    expect(v.stopClass).toBe("environment");
   });
 
   it("falls back to a Claude adversary when codex-review could not run and the plan allows it", async () => {
@@ -1824,6 +1909,23 @@ describe("fix loop", () => {
     expect(r.stopReason).toBeNull();
   });
 
+  it("retriable() names a stopClass on every ok:false verdict and none on ok:true (card flow-stop-class)", () => {
+    const { retriable } = loadLoop({ agent: async () => null, fixAttempts: 1, adversary: { command: "x", timeoutMs: 1 } });
+    const full = { impl: implResult, ver: { passed: true, findings: [] }, rev: passingReview, adv: null };
+    const cls = (r) => retriable(task, r).stopClass;
+    expect(cls({ ...full, impl: null })).toBe("stage-missing");
+    expect(cls({ ...full, impl: { ...implResult, blocked: true, blockedReason: "needs lib/y.ts" } })).toBe("implementer-blocked");
+    expect(cls({ ...full, impl: { ...implResult, partial: true } })).toBe("partial");
+    expect(cls({ ...full, stages: ["verify"], ver: null })).toBe("stage-missing");
+    expect(cls({ ...full, stages: ["review"], rev: null })).toBe("stage-missing");
+    expect(cls({ ...full, stages: ["check"], check: null })).toBe("stage-missing");
+    expect(cls({ ...full, ver: { passed: false, findings: ["SPEC CONTRADICTS ACCEPTANCE: x"] } })).toBe("spec-contradiction");
+    expect(cls({ ...full, ver: { passed: false, findings: ["ENVIRONMENT ONLY: vitest not found"] } })).toBe("environment");
+    expect(cls({ ...full, adv: { ran: false, error: "gone" } })).toBe("adversary-not-run");
+    expect(cls({ ...full, ver: { passed: false, findings: ["lib/zzz.ts is wrong"], findingFiles: [{ finding: "lib/zzz.ts is wrong", files: ["lib/zzz.ts"] }] } })).toBe("outside-owned");
+    expect(retriable(task, full)).toEqual({ ok: true, reason: "every finding is within the owned files" });
+  });
+
   it("extracts paths from blocking findings: structured issue files, then prose naming files the run knows", async () => {
     const { findingPaths, retriable } = loadLoop({ agent: async () => null, fixAttempts: 1 });
     // Prose: an absolute worktree path is skipped, ./ is stripped, and a path no plan task owns and the implementer
@@ -1871,7 +1973,7 @@ describe("fix loop", () => {
       "plugins/doug-gates/lib/secret-rules.mjs",
       "plugins/doug-gates/scripts/secret-scan.mjs",
     ]);
-    expect(retriable(gates, { impl, ver: listed, rev: passingReview, adv: null })).toEqual({ ok: false, reason: "findings name files outside the owned set: plugins/doug-gates/lib/bash-rules.mjs" });
+    expect(retriable(gates, { impl, ver: listed, rev: passingReview, adv: null })).toEqual({ ok: false, reason: "findings name files outside the owned set: plugins/doug-gates/lib/bash-rules.mjs", stopClass: "outside-owned" });
     // Suffix both ways: a shortened owned path, and an owned path shortened in the plan.
     const short = { id: "s", title: "S", spec: "s", files: ["secret-rules.mjs"], verify: "true" };
     expect(retriable(short, { impl: { ...impl, taskId: "s" }, ver: { passed: false, findings: ["plugins/doug-gates/lib/secret-rules.mjs is wrong"], findingFiles: [{ finding: "plugins/doug-gates/lib/secret-rules.mjs is wrong", files: ["plugins/doug-gates/lib/secret-rules.mjs"] }] }, rev: passingReview, adv: null })).toEqual({ ok: true, reason: "every finding is within the owned files" });
@@ -1945,6 +2047,7 @@ describe("fix loop", () => {
     expect(r.attempts.map((a) => a.newFindings)).toEqual([["F1"], ["F2"]]);
     expect(r.attempts[1].fixedFindings).toEqual(["F1"]);
     expect(r.stopReason).toContain("two consecutive passes raised new blockers");
+    expect(r.stopClass).toBe("new-blockers-twice");
     expect(r.stopReason).toContain("F1");
     expect(r.stopReason).toContain("F2");
 
@@ -1976,6 +2079,7 @@ describe("fix loop", () => {
     expect(labelled(calls, "check:").length).toBe(0);
     expect(labelled(calls, "adversary:").length).toBe(0);
     expect(r.stopReason).toBe("verification failed; stopped: fix pass 2 made no new commit on doug/task-a");
+    expect(r.stopClass).toBe("no-new-commit");
     expect(r.attempts[1]).toMatchObject({ pass: 2, stages: ["fix"], commit: "c1", ready: false });
 
     // A fix that reports blocked is decided the same way, right after it returns: no stage runs on that pass, even
@@ -1993,8 +2097,9 @@ describe("fix loop", () => {
     expect(labelled(stuck.calls, "check:").length).toBe(0);
     expect(labelled(stuck.calls, "adversary:").length).toBe(0);
     expect(b.stopReason).toBe("blocked: needs lib/y.ts; not retried: implementer blocked: needs lib/y.ts");
+    expect(b.stopClass).toBe("implementer-blocked");
     expect(b.attempts.length).toBe(2);
-    expect(b.attempts[1]).toMatchObject({ pass: 2, stages: ["fix"], commit: "c2", ready: false, retriable: { ok: false, reason: "implementer blocked: needs lib/y.ts" } });
+    expect(b.attempts[1]).toMatchObject({ pass: 2, stages: ["fix"], commit: "c2", ready: false, retriable: { ok: false, reason: "implementer blocked: needs lib/y.ts", stopClass: "implementer-blocked" } });
   });
 
   it("reruns the stage that blocked first and lets the later stages wait for it", async () => {
@@ -2032,6 +2137,7 @@ describe("fix loop", () => {
     expect(s.attempts.length).toBe(4);
     expect(s.attempts[1]).toMatchObject({ pass: 2, stages: ["fix"], commit: "c1", blockingStage: "verify", ready: false, retriable: { ok: true, reason: NO_RESULT } });
     expect(s.stopReason).toBe(`${NO_RESULT}; fix attempts exhausted (3 of 3)`);
+    expect(s.stopClass).toBe("fix-attempts-exhausted");
     // The finding stays open, so every retry is told to fix it, in the worktree it already has.
     const last = labelled(silent.calls, "fix:")[2];
     expect(last.prompt).toContain("F1 [verify/verification]");
@@ -2375,6 +2481,7 @@ describe("fix loop", () => {
     expect(labelled(agents.calls, "fix:").length).toBe(0);
     expect(a.stopReason).toContain("would exceed the task budget");
     expect(a.stopReason).toContain("agents 6 > 4");
+    expect(a.stopClass).toBe("budget");
     expect(a.budget.limits.agents).toBe(4);
     expect(a.budget.spent.agents).toBe(3);
 
@@ -4724,6 +4831,12 @@ describe("dependency gate", () => {
     };
     const parallel = async (fns) => Promise.all(fns.map((f) => f()));
     const report = await body(plan, agent, pipeline, parallel, (x) => x, (m) => logs.push(m), null);
+    // Card flow-stop-class: no task in any report carries a stopReason without a class from the enum.
+    for (const level of report.levels || []) {
+      for (const t of level.tasks || []) {
+        if (t.stopReason) expect(board.STOP_CLASSES, `task ${t.id} stopped (${t.stopReason}) with stopClass ${t.stopClass}`).toContain(t.stopClass);
+      }
+    }
     return { report, logs };
   }
 
@@ -5041,7 +5154,7 @@ describe("dependency gate", () => {
     expect(calls.find((c) => c.label === "check:a:3").prompt).toContain("Worktree: /wt/a-fix");
     expect(calls.find((c) => c.label === "integrate:level-0:2").prompt).toContain("for each of /wt/a-fix.");
     const a = report.levels[0].tasks[0];
-    expect(a).toMatchObject({ branch: "doug/task-a", commit: "c-a-fix", stopReason: null });
+    expect(a).toMatchObject({ branch: "doug/task-a", commit: "c-a-fix", stopReason: null, stopClass: null });
     expect(report.ok).toBe(true);
     expect(logs.some((l) => /fix attempt 2 of 3 in a new worktree on doug\/task-a \(\/wt\/a went with the level.s integration\)/.test(l))).toBe(true);
   });
@@ -5066,8 +5179,9 @@ describe("dependency gate", () => {
     expect(a.attempts.map((x) => x.stages)).toEqual([["implement", "check"], ["level-adversary"], ["fix"], ["fix"]]);
     expect(a.attempts[2]).toMatchObject({ pass: 3, commit: "c-a", blockingStage: "adversary", retriable: { ok: true, reason: NO_RESULT } });
     expect(a.stopReason).toBe(`${NO_RESULT}; fix attempts exhausted (3 of 3)`);
+    expect(a.stopClass, "a task already stopped keeps its own class, not level-adversary").toBe("fix-attempts-exhausted");
     expect(a.stopReason).not.toContain("task stage threw");
-    expect(report.levels[0].levelAdversary.fixed).toEqual([{ task: "a", ready: false, stopReason: a.stopReason }]);
+    expect(report.levels[0].levelAdversary.fixed).toEqual([{ task: "a", ready: false, stopReason: a.stopReason, stopClass: "fix-attempts-exhausted" }]);
     expect(report.stoppedAtLevel).toBe(0);
     expect(report.ok).toBe(false);
   });
@@ -5078,12 +5192,14 @@ describe("dependency gate", () => {
     expect(report.stoppedAtLevel).toBe(0);
     expect(report.ok).toBe(false);
     expect(report.levels[0].tasks[0].stopReason).toBe("level adversary still blocked after a fix pass: the level is wrong");
+    expect(report.levels[0].tasks[0].stopClass).toBe("level-adversary");
     expect(report.levels[0].levelAdversary.confirm).toMatchObject({ blocked: true });
     const nobody = shapedRun(["fail"], { blockerFile: "lib/z.js" });
     const r2 = await runWorkflow(nobody.plan, nobody.agent);
     expect(nobody.calls.map((c) => c.label).filter((l) => l.startsWith("fix:") || l.includes("confirm"))).toEqual([]);
     expect(r2.report.levels[0].levelAdversary).toMatchObject({ blocked: true, unowned: ["lib/z.js"], fixed: [] });
     expect(r2.report.levels[0].tasks[0].stopReason).toBe("level adversary blocked on lib/z.js: the level is wrong");
+    expect(r2.report.levels[0].tasks[0].stopClass).toBe("level-adversary");
     expect(r2.report.stoppedAtLevel).toBe(0);
     expect(r2.logs).toContain("level 0 adversary blocked on files no task of this level owns: lib/z.js; no fix pass");
     // A fix pass whose check still fails is not re-integrated, and the level stops with the task's own reason.
@@ -5131,6 +5247,7 @@ describe("dependency gate", () => {
     // null) even though the level stopped on it.
     const b = report.levels[0].tasks.find((t) => t.id === "b");
     expect(b.stopReason).toBe("level adversary still blocked after a fix pass: the level is wrong");
+    expect(b.stopClass).toBe("level-adversary");
     expect(report.levels[0].levelAdversary.confirm).toMatchObject({ blocked: true });
     expect(report.stoppedAtLevel).toBe(0);
     expect(report.ok).toBe(false);
@@ -5197,6 +5314,7 @@ describe("dependency gate", () => {
     expect(b.implemented).toBe(false);
     expect(b.blockedReason).toBe("dependency a was not integrated");
     expect(b.stopReason).toBe("dependency a was not integrated");
+    expect(b.stopClass).toBe("dependency-skipped");
     expect(b.stages).toEqual([]);
     expect(b.passes).toBe(0);
     expect(logs).toContain("b not launched: dependency a was not integrated");
@@ -5356,6 +5474,7 @@ describe("dependency gate", () => {
     expect(a.branch).toBe("doug/task-a");
     expect(a.commit).toBeNull();
     expect(a.stopReason).toBe("task stage threw (agent error, unknown agent type, or user skip)");
+    expect(a.stopClass).toBe("stage-threw");
     const b = report.levels[0].tasks[1];
     expect(b.implemented).toBe(false);
     expect(b.branch).toBe("doug/task-b-stale-1");
@@ -5396,7 +5515,11 @@ describe("plugin layout", () => {
     // Card research-fetch-cap: researchers ran unbounded searches/fetches and took a computer down; Method rule 6
     // states the budget the research-cap.mjs hook enforces, exactly (tester's brief).
     expect(researcherText).toContain(
-      "6. Budget: at most 6 WebSearch plus WebFetch calls for your question (research.maxFetches; a hook denies the next one). Try sources in the order the question lists them, and write your findings before the budget runs out, marking anything still unanswered unverified.",
+      "6. Budget: at most 6 WebSearch, WebFetch, curl, or wget calls for your question, counted together (research.maxFetches; a hook denies the next one). Try sources in the order the question lists them, and write your findings before the budget runs out, marking anything still unanswered unverified.",
+    );
+    // Card researcher-line-numbers: the Source bullet asks for each quote with its line number from the raw page.
+    expect(researcherText).toContain(
+      "- **Source**: a page quoted verbatim with its line number in the raw page (`curl -sL <url> | grep -n '<phrase>'`), or the command you ran with its relevant output quoted; one source per fact. Say `observed` for a command's output and `documented` for a page. A quote you could read only without a line number (a WebFetch summary, a rendered page) is marked `no line`: the research skill keeps a fact the design depends on unverified until it has the line.",
     );
     const planner = parseFrontmatter(readFileSync(join(root, "agents/planner.md"), "utf8"));
     expect(planner.disallowedTools).toContain("Edit");
@@ -5444,54 +5567,34 @@ describe("plugin layout", () => {
     const next = readFileSync(join(root, "skills/doug-next/SKILL.md"), "utf8");
     expect(next).toContain("any task whose implementer is not on the implement row");
   });
-  it("ships twelve skills and only the user can invoke approve, implement, next, core-next, and doug-swarm", () => {
+  it("ships eleven skills (doug-hand, not core-next); the user alone invokes approve, implement, next, and doug-swarm, and doug-hand is model-invocable so /doug-next can route to it", () => {
     const skills = readdirSync(join(root, "skills")).sort();
-    expect(skills).toEqual(["core-next", "doug-approve", "doug-decide", "doug-implement", "doug-learn", "doug-next", "doug-plan", "doug-swarm", "harness-fix", "research", "run-report", "swarm-launch"]);
+    expect(skills).toEqual(["doug-approve", "doug-decide", "doug-hand", "doug-implement", "doug-learn", "doug-next", "doug-plan", "doug-swarm", "research", "run-report", "swarm-launch"]);
+    // The harness-fix skill is Doug-only and lives in .claude/skills (card op-harness-fix-local), not in the plugin.
+    expect(existsSync(join(root, "skills/harness-fix"))).toBe(false);
     for (const s of skills) {
       const fm = parseFrontmatter(readFileSync(join(root, "skills", s, "SKILL.md"), "utf8"));
       expect(fm.name).toBe(s);
       expect(fm.description.length).toBeGreaterThan(40);
     }
-    for (const s of ["doug-approve", "doug-implement", "doug-next", "core-next", "doug-swarm"]) {
+    for (const s of ["doug-approve", "doug-implement", "doug-next", "doug-swarm"]) {
       const fm = parseFrontmatter(readFileSync(join(root, "skills", s, "SKILL.md"), "utf8"));
       expect(fm["disable-model-invocation"]).toBe("true");
     }
+    // ADR 0005 amendment 2026-10-01: /core-next is retired; /doug-next invokes doug-hand through the Skill tool,
+    // so doug-hand carries no disable-model-invocation flag (the way run-report and research carry none).
+    expect(existsSync(join(root, "skills/core-next"))).toBe(false);
+    expect(parseFrontmatter(readFileSync(join(root, "skills/doug-hand/SKILL.md"), "utf8"))["disable-model-invocation"]).toBeUndefined();
     // The hand-track loop has the same two human gates, refuses flow cards, and records through board.mjs.
-    const core = readFileSync(join(root, "skills/core-next/SKILL.md"), "utf8");
+    const core = readFileSync(join(root, "skills/doug-hand/SKILL.md"), "utf8");
     expect(core.match(/AskUserQuestion/g).length).toBeGreaterThanOrEqual(2);
     expect(core).toContain("Starting is never automatic");
     expect(core).toContain("next --track hand");
     expect(core).toContain("record <id> --hand");
     expect(core).toContain("flow-track card");
-    expect(core).toContain("pnpm test:unit");
-    expect(core).toContain("harness-fix");
+    expect(core).toContain("stopGate.commands");
+    expect(core).not.toContain("harness-fix");
     expect(parseFrontmatter(core)["allowed-tools"]).toContain("AskUserQuestion");
-    // harness-fix is the procedure itself: the model may invoke it, and it names a test file for every module.
-    const fix = readFileSync(join(root, "skills/harness-fix/SKILL.md"), "utf8");
-    expect(parseFrontmatter(fix)["disable-model-invocation"]).toBeUndefined();
-    for (const t of ["template.test.mjs", "board.test.mjs", "plan.test.mjs", "replan.test.mjs", "land.test.mjs", "hooks.test.mjs", "proposal.test.ts", "contract.test.ts"]) expect(fix).toContain(t);
-    for (const rule of [".doug/hooks/scripts", "scriptPath", "pnpm test:unit", "Never `pnpm test`", "flow-board.d.ts", "trailers"]) expect(fix).toContain(rule);
-    // Every test file the skill names exists.
-    for (const m of fix.matchAll(/`((?:plugins|packages)\/[^`]+\.test\.(?:mjs|ts))`/g)) expect(existsSync(join(root, "..", "..", m[1])), m[1]).toBe(true);
-    // card mutation-check-contract: a reviewer once deleted the entire mechanism a card existed to add, and all
-    // 631 tests still passed. The skill now demands mutate-run-revert for a mechanism-exists card (rule 7),
-    // proportionate to a line that a prose/message/docs-only change does not need it, and assigns the duty to
-    // the reviewer role (section 0), which also records that the flow track's reviewer (read-only by tool
-    // policy) does not carry this instruction because its verifier and adversary stages run the code afterward
-    // instead.
-    for (const s of [
-      "expected to mutate the mechanism and rerun the test rather than only read the diff",
-      "mutate or remove the mechanism",
-      "run the new test file",
-      "confirm it fails",
-      "revert the mutation",
-      "report which assertion failed",
-      "a card whose acceptance is that a mechanism exists needs it",
-      "prose, a message, or a docs line does not",
-      "plugins/doug-flow/agents/reviewer.md` does not carry this instruction",
-      "read-only by tool policy",
-      "verifier and adversary stages run the code afterward instead",
-    ]) expect(fix, s).toContain(s);
     // Decision A: the flow track's reviewer agent is unchanged and never gets the mutation instruction.
     const flowReviewer = readFileSync(join(root, "agents/reviewer.md"), "utf8");
     expect(flowReviewer, "flow track's reviewer stays free of the mutation rule (mutation-check-contract)").not.toContain("mutate");
@@ -5526,57 +5629,6 @@ describe("plugin layout", () => {
   });
   it("T5 (card artifact-path-removal): the doug-board skill is gone", () => {
     expect(existsSync(join(root, "skills/doug-board"))).toBe(false);
-  });
-  it("harness-fix's module table names a test file for every lib/*.mjs and scripts/*.mjs under plugins/doug-flow, not just an incidental mention elsewhere in section 1 (card harness-fix-memory-row)", () => {
-    const fix = readFileSync(join(root, "skills/harness-fix/SKILL.md"), "utf8");
-    const h1 = fix.indexOf("## 1.");
-    const h2 = fix.indexOf("## 2.");
-    expect(h1, "harness-fix's SKILL.md has no '## 1.' heading — section boundary moved or renamed").toBeGreaterThanOrEqual(0);
-    expect(h2, "harness-fix's SKILL.md has no '## 2.' heading — section boundary moved or renamed").toBeGreaterThanOrEqual(0);
-    const section = fix.slice(h1, h2);
-
-    // Parse each `| module cell | test cell |` row (skipping the header and the `|---|---|` separator), splitting
-    // on the last unescaped "|" so a cell's own text is never mistaken for a column boundary.
-    function parseRow(line) {
-      const body = line.trim().slice(1, -1); // drop the row's leading and trailing "|"
-      let cut = -1;
-      for (let i = body.length - 1; i >= 0; i--) {
-        if (body[i] === "|" && body[i - 1] !== "\\") {
-          cut = i;
-          break;
-        }
-      }
-      if (cut === -1) return null;
-      return { module: body.slice(0, cut).trim(), test: body.slice(cut + 1).trim() };
-    }
-    const rows = section
-      .split("\n")
-      .map((l) => l.trim())
-      .filter((l) => l.startsWith("|") && !/^\|\s*Module\s*\|/.test(l) && !/^\|\s*-+\s*\|/.test(l))
-      .map(parseRow)
-      .filter(Boolean);
-
-    // A row counts as coverage for a module only when its test cell actually names a test file, and only the
-    // headline of its module cell — the text before the first parenthetical aside — counts as a declared module.
-    // Without that second cut, a module named only in passing inside another row's aside (the seams row's `the
-    // reviewIssues report key ... round-tripping into lib/memory.mjs's review_issue_count`, or the decisions
-    // row's `scripts/memory.mjs`'s decision/rule cases, both mentioned after their row's own headline) would
-    // count as that module's row, so deleting the module's real row would leave the pin green.
-    const testFileRe = /\.test\.(mjs|ts)\b/;
-    const headline = (cell) => {
-      const i = cell.indexOf("(");
-      return i === -1 ? cell : cell.slice(0, i);
-    };
-    const covered = rows.filter((r) => testFileRe.test(r.test));
-
-    const modules = [
-      ...readdirSync(join(root, "lib")).filter((f) => f.endsWith(".mjs")).map((f) => `lib/${f}`),
-      ...readdirSync(join(root, "scripts")).filter((f) => f.endsWith(".mjs")).map((f) => `scripts/${f}`),
-    ];
-    for (const m of modules) {
-      const found = covered.some((r) => headline(r.module).includes(m));
-      expect(found, `${m} has no row in harness-fix's module table (section 1) — add one`).toBe(true);
-    }
   });
   // card learn-signals: doug-learn only the user invokes, and it never applies a proposal without asking.
   it("doug-learn asks before applying, one proposal at a time, and only the user invokes it (card learn-signals)", () => {
@@ -5640,7 +5692,7 @@ describe("plugin layout", () => {
   it.skipIf(IS_SNAPSHOT)("docs/rehearsals.md cites only files, commands, and helpers that exist (card rehearsal-docs)", () => {
     const repoRoot = join(root, "..", "..");
     const page = readFileSync(join(repoRoot, "docs/rehearsals.md"), "utf8");
-    const rehearseLib = readFileSync(join(root, "lib/rehearse.mjs"), "utf8");
+    const rehearseLib = readFileSync(join(repoRoot, "scripts/rehearse-lib.mjs"), "utf8");
     const exportedNames = new Set([...rehearseLib.matchAll(/export (?:function|const) ([A-Za-z_]\w*)/g)].map((m) => m[1]));
 
     // A fenced ```...``` code block's own inline backticks (a node -e one-liner quoting JS template literals) are
@@ -5665,7 +5717,11 @@ describe("plugin layout", () => {
       expect(existsSync(join(repoRoot, token)), token).toBe(true);
     }
 
-    // Named helpers: each must appear backticked on the page and be a real export of lib/rehearse.mjs.
+    // The page cites the runner at its root paths, never the old plugin paths (card op-rehearse-local).
+    for (const old of ["plugins/doug-flow/scripts/rehearse.mjs", "plugins/doug-flow/lib/rehearse.mjs", "plugins/doug-flow/tests/rehearse.test.mjs"]) expect(page, old).not.toContain(old);
+    for (const cited of ["scripts/rehearse.mjs", "scripts/rehearse-lib.mjs", "tests/rehearse.test.mjs"]) expect(tokens.some((t) => t.includes(cited)), cited).toBe(true);
+
+    // Named helpers: each must appear backticked on the page and be a real export of scripts/rehearse-lib.mjs.
     const namedHelpers = ["assertGateHeld", "assertFlowGateHeld", "assertImplemented", "assertHandBuilt", "assertTwoParents", "pluginsLoaded", "slashCommandPresent", "unresolvedAgentNames", "sessionCost", "prepareFixture", "ESTIMATES", "SCENARIO_STAGES"];
     for (const name of namedHelpers) {
       expect(tokens.some((t) => t === name || t.startsWith(`${name}(`)), name).toBe(true);
@@ -5677,7 +5733,7 @@ describe("plugin layout", () => {
     // a backticked token that names a function call (an identifier immediately followed by "(", e.g.
     // `assertGateHeld(` or `assertGateHeld(dir, stream, ...)`), that is bare ALL_CAPS, or that is a bare
     // `assert*`-shaped identifier (every assertion helper's own naming convention, so a table cell that just
-    // writes the plain name is checked too) must itself be a real export of lib/rehearse.mjs, except the two env
+    // writes the plain name is checked too) must itself be a real export of scripts/rehearse-lib.mjs, except the two env
     // vars the runner reads (never exports; checked against the module's own text instead).
     for (const raw of tokens) {
       const call = /^([A-Za-z_]\w*)\(/.exec(raw);
@@ -5718,16 +5774,14 @@ describe("plugin layout", () => {
       "{ ok, message }",
     ]) expect(page, s).toContain(s);
 
-    const fix = readFileSync(join(root, "skills/harness-fix/SKILL.md"), "utf8");
-    expect(fix).toContain("docs/rehearsals.md");
     // card readme-scannable: the docs/rehearsals.md mention lives in the Layout section, moved to docs/reference.md.
     const referenceDoc = readFileSync(join(repoRoot, "docs/reference.md"), "utf8");
     expect(referenceDoc).toContain("docs/rehearsals.md");
   });
   // 2026-09-07 (card core-next-swarm-opt-in): a size M or L hand-track card got no parallelism, while the lead
   // model was doing implement/verify/review work itself instead of only orchestrating, on both tracks.
-  it("core-next: a size M or L hand-track card may run as a swarm, and the lead only orchestrates on both tracks (card core-next-swarm-opt-in)", () => {
-    const core = readFileSync(join(root, "skills/core-next/SKILL.md"), "utf8");
+  it("doug-hand: a size M or L hand-track card may run as a swarm, and the lead only orchestrates on both tracks (card core-next-swarm-opt-in)", () => {
+    const core = readFileSync(join(root, "skills/doug-hand/SKILL.md"), "utf8");
     expect(core.match(/AskUserQuestion/g).length).toBeGreaterThanOrEqual(5);
     for (const s of [
       "size",
@@ -5738,8 +5792,8 @@ describe("plugin layout", () => {
       "doug-plan",
       "Approval is never automatic",
       "workflows/doug-implement.js",
-      "plugins/doug-gates/scripts",
-      "plugins/doug-flow/agents",
+      ".doug/hooks/scripts/",
+      "the plugin's agents",
       "record <id> --hand",
       "record <id> <report",
       "`implement` row",
@@ -5753,14 +5807,11 @@ describe("plugin layout", () => {
     expect(coreFm["allowed-tools"]).toContain("Agent");
     expect(coreFm["allowed-tools"]).toContain("Workflow");
     expect(coreFm["allowed-tools"]).toContain("AskUserQuestion");
-    expect(coreFm["disable-model-invocation"]).toBe("true");
+    expect(coreFm["disable-model-invocation"]).toBeUndefined();
     expect(core).not.toContain("board build --artifact");
 
-    const fix = readFileSync(join(root, "skills/harness-fix/SKILL.md"), "utf8");
-    for (const s of ["`implement` row", "`review` row", "lead", "Agent tool", "both tracks"]) expect(fix, s).toContain(s);
-
     const swarmLaunch = readFileSync(join(root, "skills/swarm-launch/SKILL.md"), "utf8");
-    expect(swarmLaunch).toContain("/core-next");
+    expect(swarmLaunch).toContain("doug-hand");
 
     const claude = readFileSync(join(root, "..", "..", "CLAUDE.md"), "utf8");
     expect(claude).toContain("both tracks");
@@ -5817,14 +5868,14 @@ describe("plugin layout", () => {
   // took exactly one. The batch primitive (board.mjs next --batch, plan.mjs merge) was already track-aware, but
   // the skill never called it that way, and by-hand cards have no batch (a batch there is only step 5's loop with
   // fewer gates, not worth collapsing n approvals for).
-  it("core-next: /core-next <id> <id>... or --batch <n> runs several hand-track cards as one swarmed batch; by-hand stays one card at a time (card core-next-batch-swarm)", () => {
-    const core = readFileSync(join(root, "skills/core-next/SKILL.md"), "utf8");
+  it("doug-hand: /doug-hand <id> <id>... or --batch <n> runs several hand-track cards as one swarmed batch; by-hand stays one card at a time (card core-next-batch-swarm)", () => {
+    const core = readFileSync(join(root, "skills/doug-hand/SKILL.md"), "utf8");
 
     // Selection forms reuse /doug-next's batch machinery verbatim: next --batch <n> --track hand, plan.mjs merge,
     // per-card drafts, and the batch's cost/summary reporting forms.
     for (const s of [
-      "/core-next <id> <id>...",
-      "/core-next --batch <n>",
+      "/doug-hand <id> <id>...",
+      "/doug-hand --batch <n>",
       "next --batch <n> --track hand",
       "plan.mjs merge",
       ".doug/.state/drafts/<id>.json",
@@ -5903,28 +5954,24 @@ describe("plugin layout", () => {
 
     // Docs updated where they contrasted /doug-next's batch as if /core-next had none.
     const boardDoc = readFileSync(join(root, "..", "..", "docs/board.md"), "utf8");
-    expect(boardDoc).toContain("`/doug-next`, or `/core-next` with `--track hand`, plans together in one plan");
+    expect(boardDoc).toContain("(the cards `/doug-next`, or `/doug-hand` with `--track hand`, plans together in one plan)");
     // Minor 1 (review): README also contrasted /core-next with /doug-next's batch as flow-track-only.
     // card readme-scannable: this sentence lives in "The board" section, moved to docs/reference.md.
     const readmeBatch = readFileSync(join(root, "..", "..", "docs/reference.md"), "utf8");
-    expect(readmeBatch).toContain("`/core-next <id> <id>...` or `/core-next --batch <n>` does the same for hand-track cards, swarm-only");
+    expect(readmeBatch).toContain("`/doug-hand <id> <id>...` or `/doug-hand --batch <n>` does the same for hand-track cards, swarm-only");
   });
   // 2026-09-13/14 (card hand-track-tester-and-mutations): across seven /core-next cards the opus reviewer's rule-7
   // mutations caught three misses the sonnet coder had reported green, and two further defects came from the
   // lead's brief paraphrasing the workflow instead of quoting it. The coder was choosing its own single mutation
   // (the one its test obviously catches), not the case the card complained about.
-  it("harness-fix rule 7 lists one mutation per case, and core-next spawns a tester before the coder and requires quoted facts (card hand-track-tester-and-mutations)", () => {
-    const harnessFix = readFileSync(join(root, "skills/harness-fix/SKILL.md"), "utf8");
-    const core = readFileSync(join(root, "skills/core-next/SKILL.md"), "utf8");
+  it("doug-hand spawns a tester before the coder and requires quoted facts (card hand-track-tester-and-mutations)", () => {
+    const core = readFileSync(join(root, "skills/doug-hand/SKILL.md"), "utf8");
 
-    // Sentence 1: the mutation-list rule (harness-fix rule 7).
-    const mutationListSentence =
-      "the brief lists one mutation per case the card's goal names, each with the test that must fail; the coder runs every listed mutation and reports each result; the reviewer reruns the list and adds its own";
-    expect(harnessFix, mutationListSentence).toContain(mutationListSentence);
+    // Sentence 1 (harness-fix rule 7) moved to tests/dev-skills.test.mjs with the skill.
 
     // Sentence 2: the tester seat (core-next step 3), in two parts.
     const testerSpawnSentence =
-      "before the coder, spawn the project's `tester` agent (`.claude/agents/tester.md`, on the `implement` row) with the goal as the acceptance list and the test file `harness-fix` names, so the failing tests are written from the card, not from the code";
+      "before the coder, spawn the project's `tester` agent (`.claude/agents/tester.md`, on the `implement` row) with the goal as the acceptance list and the test file step 3 found, so the failing tests are written from the card, not from the code";
     expect(core, testerSpawnSentence).toContain(testerSpawnSentence);
     const testerNoEditSentence =
       "the coder then makes them pass and may not edit a test except with a stated reason in its report; the reviewer checks that rule";
@@ -5944,12 +5991,12 @@ describe("plugin layout", () => {
 
     // The explicit ordering sentence itself (M11: deleting it entirely must fail).
     const orderSentence =
-      "The order is: research (when called for), harness-fix, the brief, the tester, the coder, the reviewer";
+      "The order is: research (when called for), the test file and the project's procedure, the brief, the tester, the coder, the reviewer";
     expect(core, orderSentence).toContain(orderSentence);
 
     // The mutation-list-rule-7 clause in the brief instructions (M13: deleting it must fail).
     const briefMutationListClause =
-      "the mutation list rule 7 now demands (one mutation per case the card's goal names, each with the test that must fail)";
+      "the mutation list step 3 demands (one mutation per case the card's goal names, each with the test that must fail)";
     expect(core, briefMutationListClause).toContain(briefMutationListClause);
 
     // The tester, not the coder, writes the test (M16: deleting this clause must fail; M17: flipping it to
@@ -5971,10 +6018,10 @@ describe("plugin layout", () => {
   });
   // 2026-09-14 (card subagent-stop-gate-tester-red): the tester's own report must end with the
   // tests_red_by_design claim so the SubagentStop gate lets it stop once, instead of retrying the suite.
-  it("T10 core-next step 3 tells the tester to end its report with the tests_red_by_design claim (card subagent-stop-gate-tester-red)", () => {
-    const core = readFileSync(join(root, "skills/core-next/SKILL.md"), "utf8");
+  it("T10 doug-hand step 3 tells the tester to end its report with the tests_red_by_design claim (card subagent-stop-gate-tester-red)", () => {
+    const core = readFileSync(join(root, "skills/doug-hand/SKILL.md"), "utf8");
     const testerSpawnSentence =
-      "before the coder, spawn the project's `tester` agent (`.claude/agents/tester.md`, on the `implement` row) with the goal as the acceptance list and the test file `harness-fix` names, so the failing tests are written from the card, not from the code";
+      "before the coder, spawn the project's `tester` agent (`.claude/agents/tester.md`, on the `implement` row) with the goal as the acceptance list and the test file step 3 found, so the failing tests are written from the card, not from the code";
     const sentence =
       "Tell the tester to end its report with the `tests_red_by_design` claim naming the test files it left red, so the SubagentStop gate lets it stop; the lead's own Stop stays red until the coder's change lands.";
     expect(core).toContain(sentence);
@@ -5992,69 +6039,10 @@ describe("plugin layout", () => {
   });
   // 2026-09-24 (card tester-claim-missed-in-handback, pass 2): the SubagentStop gate now reads the hand-back
   // as a fallback when last_assistant_message holds no claim, so the plain text and the hand-back are both live.
-  it("core-next step 3 tells the tester the claim may sit in plain text or the hand-back, plain text read first (card tester-claim-missed-in-handback)", () => {
-    const core = readFileSync(join(root, "skills/core-next/SKILL.md"), "utf8");
+  it("doug-hand step 3 tells the tester the claim may sit in plain text or the hand-back, plain text read first (card tester-claim-missed-in-handback)", () => {
+    const core = readFileSync(join(root, "skills/doug-hand/SKILL.md"), "utf8");
     expect(core).toContain(
       "The claim may sit in the tester's final plain-text message or in its hand-back call; the gate reads the plain text first, then the last hand-back."
-    );
-  });
-  // 2026-09-14 (card harness-fix-tester-seat-wording): found by the reviewer of hand-track-tester-and-mutations —
-  // core-next step 3 already spawns the project's tester agent to write the failing tests from the card's goal,
-  // but harness-fix's own section 0 still said the coder "implements, tests first" and section 1's intro read
-  // as if the coder wrote the test, contradicting the seat core-next just gave the tester.
-  it("harness-fix names the tester agent on the implement row as the one who writes the test first, and no longer says the coder tests first (card harness-fix-tester-seat-wording)", () => {
-    const fix = readFileSync(join(root, "skills/harness-fix/SKILL.md"), "utf8");
-    const h0 = fix.indexOf("## 0.");
-    const h1 = fix.indexOf("## 1.");
-    const h2 = fix.indexOf("## 2.");
-    expect(h0, "harness-fix's SKILL.md has no '## 0.' heading — section boundary moved or renamed").toBeGreaterThanOrEqual(0);
-    expect(h1, "harness-fix's SKILL.md has no '## 1.' heading — section boundary moved or renamed").toBeGreaterThanOrEqual(0);
-    expect(h2, "harness-fix's SKILL.md has no '## 2.' heading — section boundary moved or renamed").toBeGreaterThanOrEqual(0);
-    const section0 = fix.slice(h0, h1);
-    // Section 1's body, with its own heading line dropped, so "does it open with the old sentence" (assertion 4)
-    // tests the paragraph itself and not the "## 1. Find the test that covers the module" title before it.
-    const section1 = fix.slice(fix.indexOf("\n", h1) + 1, h2).trim();
-
-    // Assertion 1: section 0 names the tester, on the implement row, writing the test file first from the goal,
-    // and the coder implementing against it. The implement-row phrase and the "writes or extends the test file
-    // first, from the goal" phrase are checked as one contiguous substring — not as two separate toContain
-    // calls — so the check is scoped to the tester's own sentence: section 0 also carries the reviewer's "on
-    // the `review` row", so a mutation that swaps only the tester's row to "review" must be caught by this
-    // scoped clause rather than by a bare, unscoped "on the `implement` row" check.
-    expect(section0, 'section 0 should name "the `tester` agent"').toContain("the `tester` agent");
-    const testerSentenceClause =
-      "spawned with the Agent tool on the `implement` row of the CLAUDE.md Models table, writes or extends the test file first, from the goal";
-    expect(section0, testerSentenceClause).toContain(testerSentenceClause);
-    expect(section0, 'section 0 should say "the coder implements against it"').toContain("the coder implements against it");
-    // The coder may not edit a test without a stated reason, and the reviewer checks that rule (review hole 1:
-    // deleting just the first of these left the suite green, since nothing else pinned it).
-    expect(section0, 'section 0 should say "may not edit a test except with a stated reason in its report"').toContain(
-      "may not edit a test except with a stated reason in its report"
-    );
-    expect(section0, 'section 0 should say "checks that rule"').toContain("checks that rule");
-
-    // Assertion 2: the whole skill no longer says the coder tests first.
-    expect(fix, '"implements, tests first" should be gone').not.toContain("implements, tests first");
-
-    // Assertion 3: section 1's intro says the tester writes the test under a card, and that a one-line fix
-    // outside a card has no tester — its author writes the test instead.
-    expect(section1, 'section 1 should say "the tester writes or extends the test"').toContain("the tester writes or extends the test");
-    expect(section1, 'section 1 should say "a one-line fix outside a card"').toContain("a one-line fix outside a card");
-    expect(section1, 'section 1 should say "its author writes the test"').toContain("its author writes the test");
-
-    // Assertion 4: the whole skill no longer carries the old section-1 opening sentence anywhere (review hole 2:
-    // a bare `startsWith` on section1 only checked position, so moving the old sentence later in the same
-    // paragraph left the suite green).
-    expect(fix, '"Write or extend the test before the change" should be gone').not.toContain(
-      "Write or extend the test before the change"
-    );
-  });
-  // 2026-09-24 (card tester-claim-missed-in-handback, pass 2): the SubagentStop gate now reads the hand-back
-  // as a fallback when last_assistant_message holds no claim, so the plain text and the hand-back are both live.
-  it("harness-fix section 0 tells the tester the claim may sit in plain text or the hand-back, gate reads both (card tester-claim-missed-in-handback)", () => {
-    const fix = readFileSync(join(root, "skills/harness-fix/SKILL.md"), "utf8");
-    expect(fix).toContain(
-      "A tester that leaves tests red by design ends with its tests_red_by_design claim, in its final plain-text message or its hand-back call; the SubagentStop gate reads both."
     );
   });
   // 2026-09-14 (card landing-suggests-follow-ups): after proposal-ledger-forgeable landed on 2026-09-12, the
@@ -6063,8 +6051,8 @@ describe("plugin layout", () => {
   // follow-up card got written depended on the user asking. This test pins the new step both skills gain
   // between recording the landing and the continue gate: it gathers the run's own follow-up candidates and
   // offers them with AskUserQuestion before the continue gate, adding accepted ones with `doug board add`.
-  it("K core-next and doug-next gather follow-up candidates and offer them with AskUserQuestion before the continue gate (card landing-suggests-follow-ups)", () => {
-    const core = readFileSync(join(root, "skills/core-next/SKILL.md"), "utf8");
+  it("K doug-hand and doug-next gather follow-up candidates and offer them with AskUserQuestion before the continue gate (card landing-suggests-follow-ups)", () => {
+    const core = readFileSync(join(root, "skills/doug-hand/SKILL.md"), "utf8");
     const dougNext = readFileSync(join(root, "skills/doug-next/SKILL.md"), "utf8");
 
     // K1 position: the new section sits after the landing step and before the (renumbered) continue gate, in
@@ -6072,9 +6060,9 @@ describe("plugin layout", () => {
     const coreRecordIdx = core.indexOf("## 4. Record and land");
     const coreFollowUpIdx = core.indexOf("## 5. Follow-up cards");
     const coreGateIdx = core.indexOf("## 6. Human gate: continue");
-    expect(coreRecordIdx, "core-next: '## 4. Record and land' not found").toBeGreaterThan(-1);
-    expect(coreFollowUpIdx, "core-next: '## 5. Follow-up cards' not found").toBeGreaterThan(-1);
-    expect(coreGateIdx, "core-next: '## 6. Human gate: continue' not found").toBeGreaterThan(-1);
+    expect(coreRecordIdx, "doug-hand: '## 4. Record and land' not found").toBeGreaterThan(-1);
+    expect(coreFollowUpIdx, "doug-hand: '## 5. Follow-up cards' not found").toBeGreaterThan(-1);
+    expect(coreGateIdx, "doug-hand: '## 6. Human gate: continue' not found").toBeGreaterThan(-1);
     expect(coreFollowUpIdx).toBeGreaterThan(coreRecordIdx);
     expect(coreFollowUpIdx).toBeLessThan(coreGateIdx);
 
@@ -6120,10 +6108,10 @@ describe("plugin layout", () => {
     // step had no threshold on out-of-scope findings. Pin the threshold sentence in both skills' follow-up
     // sections.
     const thresholdSentence =
-      "A reviewer's out-of-scope finding is offered only when it is realistic drift (a form a model or a person would plausibly write) or when one card would close the whole class; otherwise it goes in the landing note and the lead recommends none.";
+      "A reviewer's out-of-scope finding is offered only when it is realistic drift (a form a model or a person would plausibly write) or when one card would close the whole class; otherwise it goes in the landing note and is not offered.";
     const coreFollowUpSection = core.slice(coreFollowUpIdx, coreGateIdx);
     const dougFollowUpSection = dougNext.slice(dougFollowUpIdx, dougGateIdx);
-    expect(coreFollowUpSection, "core-next follow-up step: threshold sentence must be present").toContain(
+    expect(coreFollowUpSection, "doug-hand follow-up step: threshold sentence must be present").toContain(
       thresholdSentence
     );
     expect(dougFollowUpSection, "doug-next follow-up step: threshold sentence must be present").toContain(
@@ -6131,8 +6119,8 @@ describe("plugin layout", () => {
     );
 
     // K6 one commit, no republish: the served page shows the new cards live, in both skills.
-    expect(core, "core-next should contain 'follow-ups added:'").toContain("follow-ups added:");
-    expect(core, "core-next should contain the served-page sentence").toContain("shows the new cards without a republish");
+    expect(core, "doug-hand should contain 'follow-ups added:'").toContain("follow-ups added:");
+    expect(core, "doug-hand should contain the served-page sentence").toContain("shows the new cards without a republish");
     expect(dougNext, "doug-next should contain 'follow-ups added:'").toContain("follow-ups added:");
     expect(dougNext, "doug-next should contain the served-page sentence").toContain("shows the new cards without a republish");
 
@@ -6234,7 +6222,7 @@ describe("plugin layout", () => {
     // 2026-09-15 (card follow-up-step-threshold): the K12 batch chain ran eight S cards because the follow-up
     // step had no threshold on out-of-scope findings. Pin the threshold sentence in doug-swarm's section 6.
     const thresholdSentence =
-      "A reviewer's out-of-scope finding is offered only when it is realistic drift (a form a model or a person would plausibly write) or when one card would close the whole class; otherwise it goes in the landing note and the lead recommends none.";
+      "A reviewer's out-of-scope finding is offered only when it is realistic drift (a form a model or a person would plausibly write) or when one card would close the whole class; otherwise it goes in the landing note and is not offered.";
     expect(section6, "doug-swarm follow-up step: threshold sentence must be present").toContain(thresholdSentence);
 
     const dougNextBatchSentence =
@@ -6262,6 +6250,53 @@ describe("plugin layout", () => {
       "doug-swarm: no line whose first letters spell batch followed by a colon, behind any non-letter prefix (whitespace, list marker, hashes, backslashes, blockquote, emphasis, backtick, digits), after the frontmatter",
     ).not.toMatch(/^[^a-z]*batch\s*:/im);
   });
+  // 2026-09-30 (card follow-ups-carry-recommendation): the follow-up question listed two candidates with no
+  // recommendation, so the user had to ask "What do you suggest?". Pin the recommendation sentence in all three
+  // landing loops, appended to the question paragraph.
+  it("follow-up step: the lead recommends add or skip per candidate, in doug-hand, doug-next, and doug-swarm (card follow-ups-carry-recommendation)", () => {
+    const recommendSentence =
+      'The lead recommends: before or in the question, each suggestion says add or skip with a one-line reason drawn from what the run reported; each recommended option\'s label ends with "(Recommended)" and recommended options come first, and when the lead recommends none, the "none" option carries "(Recommended)" and comes first.';
+    const questionSentence =
+      'A landing with no candidates skips the question. Otherwise ask once with `AskUserQuestion`, `multiSelect: true`, one option per suggestion with a proposed id, title, column, size, class, track, and deps on the landed card, plus a "none" option.';
+    for (const skill of ["doug-hand", "doug-next", "doug-swarm"]) {
+      const text = readFileSync(join(root, "skills", skill, "SKILL.md"), "utf8");
+      // T1: the new sentence, verbatim.
+      expect(text, `${skill} T1 recommendation sentence`).toContain(recommendSentence);
+      // T2: the existing question sentence is unchanged.
+      expect(text, `${skill} T2 question sentence`).toContain(questionSentence);
+      // T3: same line, after T2's text, inside the Follow-up cards section.
+      const start = text.indexOf("Follow-up cards");
+      expect(start, `${skill} Follow-up cards heading`).toBeGreaterThan(-1);
+      const next = text.indexOf("\n## ", start + 1);
+      const section = text.slice(start, next === -1 ? undefined : next);
+      const line = section.split("\n").find((l) => l.includes(questionSentence));
+      expect(line, `${skill} T3 question paragraph inside Follow-up cards`).toBeDefined();
+      expect(line.indexOf(recommendSentence), `${skill} T3 recommendation on the question's line`).toBeGreaterThan(-1);
+      expect(line.indexOf(recommendSentence), `${skill} T3 recommendation after the question sentence`).toBeGreaterThan(
+        line.indexOf(questionSentence),
+      );
+      // T4 (card follow-ups-carry-recommendation): "recommends none" now names the question's "none (Recommended)" option, so the threshold sentence's old clause must be gone.
+      expect(text, `${skill} T4 old threshold clause removed`).not.toContain("landing note and the lead recommends none");
+    }
+  });
+  it("research skill: a design-critical fact is verified only by a verbatim, line-numbered quote from the raw source (card research-verbatim-check)", () => {
+    // A claude-code-guide answer quoted sentences the raw sub-agents page does not contain; only curl + grep caught it.
+    const research = readFileSync(join(root, "skills/research/SKILL.md"), "utf8");
+    const rule =
+      "A fact the design depends on is marked verified only when it is quoted verbatim from the raw source with its line number, fetched and searched (for example `curl -sL <url>` then `grep -n`) by the plugin's researcher agent or by a claude-code-guide asked for exact quotes; a guide answer that paraphrases, or cannot give the line, stays `unverified` in the note.";
+    const budget = "The confirming fetch counts against the same research.maxFetches budget.";
+    // T1: the rule sentence, verbatim.
+    expect(research, "T1 rule sentence").toContain(rule);
+    // T2: the budget is unchanged; the confirming fetch shares it.
+    expect(research, "T2 budget sentence").toContain(budget);
+    // T3: both sit inside "## The note", after its heading and before the next "## " heading.
+    const start = research.indexOf("## The note");
+    expect(start, "## The note heading").toBeGreaterThanOrEqual(0);
+    const next = research.indexOf("\n## ", start + 1);
+    const section = research.slice(start, next === -1 ? undefined : next);
+    expect(section, "T3 rule inside The note").toContain(rule);
+    expect(section, "T3 budget inside The note").toContain(budget);
+  });
   it("names a research step before the plan for a card whose goal depends on facts outside the repository", () => {
     // 2026-09-06: run-trace and precompact-anchor each needed the claude-code-guide agent ad hoc; no procedure said so.
     const research = readFileSync(join(root, "skills/research/SKILL.md"), "utf8");
@@ -6284,7 +6319,7 @@ describe("plugin layout", () => {
     expect(research).toContain("no effort parameter");
     expect(research).toContain("effort: high");
     // Both loops and the plan skill say when to take it; the planner names the facts it relied on.
-    for (const f of ["skills/core-next/SKILL.md", "skills/doug-plan/SKILL.md", "skills/doug-next/SKILL.md"]) {
+    for (const f of ["skills/doug-hand/SKILL.md", "skills/doug-plan/SKILL.md", "skills/doug-next/SKILL.md"]) {
       const text = readFileSync(join(root, f), "utf8");
       expect(text, f).toContain("research");
       expect(text, f).toContain("outside the repository");
@@ -6344,14 +6379,14 @@ describe("plugin layout", () => {
     const next = readFileSync(join(root, "skills/doug-next/SKILL.md"), "utf8");
     for (const s of ["## Who does the work", "lead only", "`plan` row", "`review` row", "both tracks", "never plans", 'subagent_type: "doug-flow:planner", model:']) expect(next, s).toContain(s);
 
-    const core = readFileSync(join(root, "skills/core-next/SKILL.md"), "utf8");
+    const core = readFileSync(join(root, "skills/doug-hand/SKILL.md"), "utf8");
     const swarm = readFileSync(join(root, "skills/doug-swarm/SKILL.md"), "utf8");
     expect(swarm).toContain("`plan` row");
     expect(swarm).not.toMatch(/plans? on the `lead` row/);
 
     // Every planner spawn (single card and batch, on both tracks, from a swarm too) carries the plan row's
     // model; none is left bare (card doug-next-lead-only, follow-up).
-    for (const [name, text] of [["doug-next", next], ["doug-plan", dougPlan], ["core-next", core], ["doug-swarm", swarm]]) {
+    for (const [name, text] of [["doug-next", next], ["doug-plan", dougPlan], ["doug-hand", core], ["doug-swarm", swarm]]) {
       const spawns = text.match(/subagent_type: "doug-flow:planner"/g) || [];
       expect(spawns.length, name).toBeGreaterThan(0);
       expect(text.match(/subagent_type: "doug-flow:planner"(?!, model:)/g), name).toBeNull();
@@ -6384,7 +6419,7 @@ describe("plugin layout", () => {
     for (const s of ["promotes `.doug/.state/research/<id>.md` to `docs/research/<id>.md`", "add that path to the landing commit"]) expect(report, s).toContain(s);
     expect(report.match(/promotes `\.doug\/\.state\/research\/<id>\.md` to `docs\/research\/<id>\.md`/g).length).toBe(2);
 
-    const core = readFileSync(join(root, "skills/core-next/SKILL.md"), "utf8");
+    const core = readFileSync(join(root, "skills/doug-hand/SKILL.md"), "utf8");
     expect(core).toContain("docs/research/<id>.md");
 
     // The flow track's own landing commit needs the promoted path too, same as core-next's.
@@ -6403,11 +6438,11 @@ describe("plugin layout", () => {
       expect(text, f).toContain('scriptPath: "${CLAUDE_PLUGIN_ROOT}/workflows/doug-implement.js"');
     }
   });
-  it("core-next stamps the landing condition and classes follow-up cards (card core-next-condition-open)", () => {
+  it("doug-hand stamps the landing condition and classes follow-up cards (card core-next-condition-open)", () => {
     // 2026-09-19: every hand row of the day had harness_commit and class null because the Start bullet never
     // ran `memory.mjs condition open <id>` before the brief, and step 5's `doug board add` line carried no
     // --class, so five of six cards landed with no class.
-    const core = readFileSync(join(root, "skills/core-next/SKILL.md"), "utf8");
+    const core = readFileSync(join(root, "skills/doug-hand/SKILL.md"), "utf8");
     // Reviewer finding: the plugin-root form, like every other command in this file, never this machine's
     // absolute path.
     expect(core, "Start bullet must stamp the condition before the brief, plugin-root form").toContain(
@@ -6598,9 +6633,9 @@ describe("card report-save-wrapper: the saved-report sentence names the result o
     expect(text, "plugins/doug-flow/skills/doug-next/SKILL.md must contain the pinned phrase").toContain(PINNED_PHRASE);
   });
 
-  it("core-next/SKILL.md's save-the-report sentence names the result object", () => {
-    const text = readFileSync(join(root, "skills/core-next/SKILL.md"), "utf8");
-    expect(text, "plugins/doug-flow/skills/core-next/SKILL.md must contain the pinned phrase").toContain(PINNED_PHRASE);
+  it("doug-hand/SKILL.md's save-the-report sentence names the result object", () => {
+    const text = readFileSync(join(root, "skills/doug-hand/SKILL.md"), "utf8");
+    expect(text, "plugins/doug-flow/skills/doug-hand/SKILL.md must contain the pinned phrase").toContain(PINNED_PHRASE);
   });
 
   it("doug-swarm/SKILL.md's save-the-report sentence names the result object", () => {
@@ -6650,12 +6685,12 @@ describe("card run-report-codex-cost: the Codex cost sentences and flag are docu
     );
   });
 
-  it("m-3 (card run-report-codex-cost, review round 1): core-next step 4.1 pairs --codex-cost <usd> with \"when cost.mjs printed a Codex line\" in the same sentence", () => {
-    const text = readFileSync(join(root, "skills/core-next/SKILL.md"), "utf8");
+  it("m-3 (card run-report-codex-cost, review round 1): doug-hand step 4.1 pairs --codex-cost <usd> with \"when cost.mjs printed a Codex line\" in the same sentence", () => {
+    const text = readFileSync(join(root, "skills/doug-hand/SKILL.md"), "utf8");
     const recordAndLandIdx = text.indexOf("## 4. Record and land");
-    expect(recordAndLandIdx, "core-next: '## 4. Record and land' must be present").toBeGreaterThanOrEqual(0);
+    expect(recordAndLandIdx, "doug-hand: '## 4. Record and land' must be present").toBeGreaterThanOrEqual(0);
     const step1Idx = text.indexOf("1. Invoke the `run-report` skill.", recordAndLandIdx);
-    expect(step1Idx, "core-next step 4.1 must be present").toBeGreaterThanOrEqual(0);
+    expect(step1Idx, "doug-hand step 4.1 must be present").toBeGreaterThanOrEqual(0);
     const step1End = text.indexOf("\n2. `node", step1Idx);
     const step1Text = text.slice(step1Idx, step1End === -1 ? undefined : step1End);
     const flagIdx = step1Text.indexOf("--codex-cost <usd>");
@@ -6693,18 +6728,14 @@ describe("card decision-0011-followthrough: ADR 0011's scratch-copy, scratch-loc
     expect(text, ".claude/agents/coder.md must carry the ADR 0011 item 1 sentence").toContain(MUTATION_SCRATCH_COPY);
   });
 
-  it("ADR 0011 item 1: harness-fix's rule 7 carries the scratch-copy-mutation sentence", () => {
-    const text = readFileSync(join(root, "skills/harness-fix/SKILL.md"), "utf8");
-    expect(text, "harness-fix SKILL.md rule 7 must carry the ADR 0011 item 1 sentence").toContain(MUTATION_SCRATCH_COPY);
-  });
 
-  it("ADR 0011 item 1: core-next's '## 3. Build it by hand' carries the scratch-copy-mutation sentence", () => {
-    const text = readFileSync(join(root, "skills/core-next/SKILL.md"), "utf8");
+  it("ADR 0011 item 1: doug-hand's '## 3. Build it by hand' carries the scratch-copy-mutation sentence", () => {
+    const text = readFileSync(join(root, "skills/doug-hand/SKILL.md"), "utf8");
     const idx = text.indexOf("## 3. Build it by hand");
-    expect(idx, "core-next: '## 3. Build it by hand' must be present").toBeGreaterThanOrEqual(0);
+    expect(idx, "doug-hand: '## 3. Build it by hand' must be present").toBeGreaterThanOrEqual(0);
     const nextIdx = text.indexOf("## 4.", idx);
     const section = text.slice(idx, nextIdx === -1 ? undefined : nextIdx);
-    expect(section, "core-next step 3 must carry the ADR 0011 item 1 sentence").toContain(MUTATION_SCRATCH_COPY);
+    expect(section, "doug-hand step 3 must carry the ADR 0011 item 1 sentence").toContain(MUTATION_SCRATCH_COPY);
   });
 
   // ADR item 3: scratch files go under .doug/.state/scratch, never the Claude Code session scratchpad (outside
@@ -6796,17 +6827,17 @@ describe("card agents-gate-timeout-handback: the Bash-timeout-600000 rule in cod
 // runs as tester then reviewer, with no coder. Pins the three sentences verbatim, each in its named file and
 // section (S1 core-next step 3, S2 harness-fix section 0, S3 the generated tester.md). No production code exists
 // yet, so all three are red by design.
-describe("card tests-only-card-skips-coder: the tests-only-card rule in core-next, harness-fix, and tester.md", () => {
-  it("S1: core-next step 3 tells the tester to run a tests-only card alone, as its own paragraph after the tester-spawn paragraph", () => {
-    const core = readFileSync(join(root, "skills/core-next/SKILL.md"), "utf8");
+describe("card tests-only-card-skips-coder: the tests-only-card rule in doug-hand, harness-fix, and tester.md", () => {
+  it("S1: doug-hand step 3 tells the tester to run a tests-only card alone, as its own paragraph after the tester-spawn paragraph", () => {
+    const core = readFileSync(join(root, "skills/doug-hand/SKILL.md"), "utf8");
     const SENTENCE =
       "A tests-only card (its goal says tests only, no production change) runs as tester then reviewer, with no coder: the tester writes the test from the goal, runs the brief's mutation list itself in a scratch copy or git worktree under `.doug/.state`, and reports each result; the reviewer reruns the list and adds its own.";
     expect(core, SENTENCE).toContain(SENTENCE);
 
     const h3 = core.indexOf("## 3. Build it by hand");
     const h4 = core.indexOf("## 4. Record and land");
-    expect(h3, "core-next: '## 3. Build it by hand' not found").toBeGreaterThan(-1);
-    expect(h4, "core-next: '## 4. Record and land' not found").toBeGreaterThan(-1);
+    expect(h3, "doug-hand: '## 3. Build it by hand' not found").toBeGreaterThan(-1);
+    expect(h4, "doug-hand: '## 4. Record and land' not found").toBeGreaterThan(-1);
     const step3 = core.slice(h3, h4);
     expect(step3, "S1 must sit inside step 3").toContain(SENTENCE);
 
@@ -6826,20 +6857,6 @@ describe("card tests-only-card-skips-coder: the tests-only-card rule in core-nex
     expect(SENTENCE).not.toMatch(/skip|instead of the tester|without the tester/i);
   });
 
-  it("S2: harness-fix section 0 tells the tester to run a tests-only card's mutation list itself, as the section's last sentence", () => {
-    const fix = readFileSync(join(root, "skills/harness-fix/SKILL.md"), "utf8");
-    const SENTENCE =
-      "On a tests-only card (the goal says tests only, no production change) there is no coder: the tester runs the brief's mutation list itself in a scratch copy or git worktree under `.doug/.state`, never editing a production file in the live checkout, and reports each result.";
-    expect(fix, SENTENCE).toContain(SENTENCE);
-
-    const h0 = fix.indexOf("## 0. Who does the work");
-    const h1 = fix.indexOf("## 1. Find the test that covers the module");
-    expect(h0, "harness-fix: '## 0. Who does the work' not found").toBeGreaterThan(-1);
-    expect(h1, "harness-fix: '## 1. Find the test that covers the module' not found").toBeGreaterThan(-1);
-    const section0 = fix.slice(h0, h1);
-    expect(section0, "S2 must sit inside section 0").toContain(SENTENCE);
-    expect(section0.trim().endsWith(SENTENCE), "S2 must be the last sentence of section 0's paragraph").toBe(true);
-  });
 
   it("S3: .claude/agents/tester.md tells the tester to run a tests-only card's mutation list in a scratch copy, as the last Rules bullet", () => {
     const tester = readFileSync(join(root, "..", "..", ".claude/agents/tester.md"), "utf8");
@@ -6871,17 +6888,295 @@ describe("card op-learn-gate-shape: the hand-track gate line is project-derived,
     expect(report, "run-report/SKILL.md must carry the pinned gate-rule sentence").toContain(PINNED_GATE_RULE_SENTENCE);
   });
 
-  it("neither run-report/SKILL.md nor core-next/SKILL.md contains the old Doug-only gate literal", () => {
+  it("neither run-report/SKILL.md nor doug-hand/SKILL.md contains the old Doug-only gate literal", () => {
     const report = readFileSync(join(root, "skills/run-report/SKILL.md"), "utf8");
-    const core = readFileSync(join(root, "skills/core-next/SKILL.md"), "utf8");
+    const core = readFileSync(join(root, "skills/doug-hand/SKILL.md"), "utf8");
     expect(report, "run-report/SKILL.md must not contain the old gate literal").not.toContain(OLD_GATE_LITERAL);
-    expect(core, "core-next/SKILL.md must not contain the old gate literal").not.toContain(OLD_GATE_LITERAL);
+    expect(core, "doug-hand/SKILL.md must not contain the old gate literal").not.toContain(OLD_GATE_LITERAL);
   });
 
-  it("both run-report/SKILL.md and core-next/SKILL.md use the --gate \"<gate line>\" placeholder", () => {
+  it("both run-report/SKILL.md and doug-hand/SKILL.md use the --gate \"<gate line>\" placeholder", () => {
     const report = readFileSync(join(root, "skills/run-report/SKILL.md"), "utf8");
-    const core = readFileSync(join(root, "skills/core-next/SKILL.md"), "utf8");
+    const core = readFileSync(join(root, "skills/doug-hand/SKILL.md"), "utf8");
     expect(report, 'run-report/SKILL.md must contain --gate "<gate line>"').toContain('--gate "<gate line>"');
-    expect(core, 'core-next/SKILL.md must contain --gate "<gate line>"').toContain('--gate "<gate line>"');
+    expect(core, 'doug-hand/SKILL.md must contain --gate "<gate line>"').toContain('--gate "<gate line>"');
+  });
+});
+
+// card op-core-next-general (ADR 0005 amendment 2026-10-01, item 2): the by-hand loop becomes the skill
+// doug-hand, generalized (gate from stopGate.commands, test file found from the project, a coder that writes
+// the test first when there is no tester agent); /doug-next routes a hand-track card to it; "core" and
+// "harness" leave user-facing vocabulary in skills and agents.
+describe("card op-core-next-general: doug-hand, /doug-next routing, and the vocabulary sweep", () => {
+  const read = (f) => readFileSync(join(root, f), "utf8");
+  const section3 = (text) => {
+    const h3 = text.indexOf("## 3. Build it by hand");
+    const h4 = text.indexOf("## 4. Record and land");
+    expect(h3, "doug-hand: '## 3. Build it by hand' not found").toBeGreaterThan(-1);
+    expect(h4, "doug-hand: '## 4. Record and land' not found").toBeGreaterThan(h3);
+    return text.slice(h3, h4);
+  };
+
+  it("(a) doug-next routes a hand-track card to the doug-hand skill, in a sentence before 'Move it:'", () => {
+    const next = read("skills/doug-next/SKILL.md");
+    const routeIdx = next.indexOf("invoke the `doug-hand` skill");
+    const moveIdx = next.indexOf("Move it:");
+    expect(routeIdx, "doug-next: routing sentence naming 'invoke the `doug-hand` skill' not found").toBeGreaterThan(-1);
+    expect(moveIdx, "doug-next: 'Move it:' not found").toBeGreaterThan(-1);
+    expect(routeIdx, "doug-next: the routing sentence must come before 'Move it:'").toBeLessThan(moveIdx);
+    // The routing sentence belongs to step 1's id branch, which still reads the card's track.
+    expect(next).toContain('"track": "hand"');
+  });
+
+  it("(a2) doug-next: a hand card in a batch stops the run and says /doug-next <id> takes it alone; the no-id skip line names /doug-next <id>", () => {
+    const next = read("skills/doug-next/SKILL.md");
+    expect(next).toContain("`/doug-next <id>` takes it alone");
+    expect(next).toContain("`/doug-next <id>` takes it");
+  });
+
+  it("(b) doug-next no longer calls a hand card 'harness work' or cites decision 0005", () => {
+    const next = read("skills/doug-next/SKILL.md");
+    expect(next).not.toContain("harness work");
+    expect(next).not.toContain("decision 0005");
+  });
+
+  it("(c) no shipped skill or agent this card touches says core-next, decision 0005, harness, or a Doug source path", () => {
+    for (const f of [
+      "skills/doug-next/SKILL.md",
+      "skills/doug-swarm/SKILL.md",
+      "skills/research/SKILL.md",
+      "skills/swarm-launch/SKILL.md",
+      "skills/run-report/SKILL.md",
+      "skills/doug-learn/SKILL.md",
+      "skills/doug-hand/SKILL.md",
+      "agents/planner.md",
+    ]) {
+      const text = read(f);
+      expect(text, `${f}: must not contain 'core-next'`).not.toContain("core-next");
+      expect(text, `${f}: must not contain 'decision 0005'`).not.toMatch(/decision 0005/i);
+      expect(text, `${f}: must not contain the word harness`).not.toMatch(/\bharness\b/i);
+      expect(text, `${f}: must not contain 'plugins/doug-'`).not.toContain("plugins/doug-");
+      expect(text, `${f}: must not contain 'packages/doug-'`).not.toContain("packages/doug-");
+    }
+  });
+
+  it("(d) doug-hand's gate is the project's stopGate.commands, not Doug's pnpm commands, harness-fix, or the CLI fallback", () => {
+    const core = read("skills/doug-hand/SKILL.md");
+    expect(core).toContain("the commands in `.doug/config.json` `stopGate.commands`");
+    expect(core).not.toContain("pnpm test:unit");
+    expect(core).not.toContain("pnpm typecheck");
+    expect(core).not.toContain("harness-fix");
+    expect(core).not.toContain("packages/doug-cli");
+  });
+
+  it("(e) doug-hand step 3 has the coder write the failing test first when the project has no tester agent, outside the tester paragraph", () => {
+    const core = read("skills/doug-hand/SKILL.md");
+    const SENTENCE =
+      "A project with no `tester` agent (no `.claude/agents/tester.md`) has the coder write the failing test first, from the goal, before the change.";
+    const step3 = section3(core);
+    expect(step3, "the no-tester sentence must sit in step 3").toContain(SENTENCE);
+    const testerIdx = step3.indexOf("Next: before the coder, spawn the project's `tester` agent");
+    expect(testerIdx, "tester-spawn paragraph not found").toBeGreaterThan(-1);
+    const paraEnd = step3.indexOf("\n\n", testerIdx);
+    const testerParagraph = step3.slice(testerIdx, paraEnd === -1 ? undefined : paraEnd);
+    expect(testerParagraph, "the no-tester sentence must not sit in the tester paragraph").not.toContain(SENTENCE);
+    // The tester seat itself is unchanged: with a tester, the coder still does not write tests.
+    expect(step3).toContain("does not write tests");
+  });
+
+  it("(h) doug-next's step-1 hand branch ends the loop and moves nothing (the move belongs to doug-hand's start gate)", () => {
+    const next = read("skills/doug-next/SKILL.md");
+    const at = next.indexOf("invoke the `doug-hand` skill");
+    expect(at, "doug-next: hand branch not found").toBeGreaterThan(-1);
+    const branch = next.slice(next.lastIndexOf("\n", at) + 1, next.indexOf("\n", at));
+    expect(branch, "the hand branch must end doug-next's loop").toContain("end this loop");
+    expect(branch, "the hand branch must not continue below").not.toMatch(/continue below/i);
+    expect(branch, "the hand branch must not move the card").not.toMatch(/move <id> flow|board\.mjs\W+move/);
+  });
+
+  it("(i) doug-hand moves the card only in its Start bullet (step 2), never in step 1", () => {
+    const core = read("skills/doug-hand/SKILL.md");
+    const h1 = core.indexOf("## 1. Pick the card");
+    const h2 = core.indexOf("## 2.", h1);
+    expect(h1, "doug-hand: step 1 heading not found").toBeGreaterThan(-1);
+    expect(h2, "doug-hand: step 2 heading not found").toBeGreaterThan(h1);
+    expect(core.slice(h1, h2), "step 1 must not move the card").not.toContain("move <id> flow");
+    const h2b = core.indexOf("## 2b.", h2);
+    const step2 = core.slice(h2, h2b);
+    const startAt = step2.indexOf("- **Start**");
+    expect(startAt, "doug-hand: the Start bullet not found in step 2").toBeGreaterThan(-1);
+    const startEnd = step2.indexOf("\n- **Skip**", startAt);
+    expect(step2.slice(startAt, startEnd === -1 ? undefined : startEnd), "the Start bullet must move the card").toContain("move <id> flow");
+  });
+
+  it("(j) doug-hand's description says /doug-next invokes it and no longer says only the user invokes it", () => {
+    const fm = parseFrontmatter(read("skills/doug-hand/SKILL.md"));
+    expect(fm.description).toContain("Invoked by `/doug-next`");
+    expect(fm.description).not.toContain("Only the user invokes");
+  });
+
+  it("(k) doug-hand says how a tests-only card runs when the project has no tester", () => {
+    expect(read("skills/doug-hand/SKILL.md")).toContain("a tests-only card runs as coder then reviewer");
+  });
+
+  it("(f) agents/planner.md has no Doug-checkout plan.mjs fallback", () => {
+    expect(read("agents/planner.md")).not.toContain("plugins/doug-flow/scripts/plan.mjs");
+  });
+
+  it("(g) doug-hand's description says /doug-next invokes it for a hand-track card, and /doug-hand works directly", () => {
+    const fm = parseFrontmatter(read("skills/doug-hand/SKILL.md"));
+    expect(fm.name).toBe("doug-hand");
+    expect(fm.description).toContain("/doug-next");
+    expect(fm.description).toContain("/doug-hand");
+  });
+
+  it("doug-hand's by-hand-without-asking list is generic plus the project's own list", () => {
+    const core = read("skills/doug-hand/SKILL.md");
+    expect(core).toContain("plus any list the project's CLAUDE.md, or a procedure it names, gives");
+    expect(core).toContain("workflows/doug-implement.js");
+    expect(core).toContain(".doug/hooks/scripts/");
+    expect(core).toContain("the plugin's agents");
+  });
+
+  it("doug-hand's batch forms and first-card-by-id forms use /doug-hand", () => {
+    const core = read("skills/doug-hand/SKILL.md");
+    expect(core).toContain("/doug-hand <id> <id>...");
+    expect(core).toContain("/doug-hand --batch <n>");
+  });
+});
+
+describe("card op-docs: the track rule is stated once, by size and risk, and the old framing is gone", () => {
+  const repo = join(root, "..", "..");
+  const doc = (p) => readFileSync(join(repo, p), "utf8");
+  const TRACK_RULE =
+    "`flow` (default) or `hand`, picked by the change's size and risk, not by the directory it touches: `hand` is a gated by-hand change (tests first, the project's own gate from `stopGate.commands`, one commit) for a size S card or a tests-only, prose, or docs change; `flow` plans, approves, and runs the workflow for size M or L code that spans modules or needs an approvable plan; a change to a file the running workflow or hooks execute (the workflow file, `.doug/hooks/scripts/`, the plugin's own agents) stays `hand` whatever its size. `/doug-next <id>` routes a hand card to the `doug-hand` loop; `next` without `--track hand` skips it. Decision 0005.";
+
+  it("docs/board.md carries the pinned track-rule sentence exactly once", () => {
+    const text = doc("docs/board.md");
+    expect(text, "docs/board.md must contain the pinned track-rule sentence").toContain(TRACK_RULE);
+    expect(text.split(TRACK_RULE).length - 1, "the track rule is stated once").toBe(1);
+  });
+
+  for (const p of ["README.md", "docs/board.md", "docs/learn.md", "docs/memory.md", "docs/reference.md"]) {
+    it(`${p} has no /core-next, 'harness work', or 'product feature' wording`, () => {
+      const text = doc(p);
+      expect(text, `${p} must not mention /core-next`).not.toContain("/core-next");
+      expect(text, `${p} must not say 'harness work'`).not.toMatch(/harness work/i);
+      expect(text, `${p} must not say 'product feature'`).not.toMatch(/product feature/i);
+    });
+  }
+
+  it.skipIf(IS_SNAPSHOT)("docs/rehearsals.md has no /core-next, 'harness work', or 'product feature' wording (card op-docs-rehearsals)", () => {
+    const text = doc("docs/rehearsals.md");
+    expect(text, "docs/rehearsals.md must not mention /core-next").not.toContain("/core-next");
+    expect(text, "docs/rehearsals.md must not say 'harness work'").not.toMatch(/harness work/i);
+    expect(text, "docs/rehearsals.md must not say 'product feature'").not.toMatch(/product feature/i);
+  });
+
+  it("CLAUDE.md drops the harness-vs-product framing, keeps the pointer to harness-fix, and stays within 60 lines", () => {
+    const text = doc("CLAUDE.md");
+    expect(text).not.toMatch(/harness work/i);
+    expect(text).not.toContain("Product features");
+    expect(text).toContain(".claude/skills/harness-fix/SKILL.md");
+    const lines = text === "" ? 0 : text.endsWith("\n") ? text.split("\n").length - 1 : text.split("\n").length;
+    expect(lines).toBeLessThanOrEqual(60);
+  });
+});
+
+// Card role-skills-preload: a subagent's frontmatter `skills:` names are injected at spawn; a missing name is
+// skipped silently by Claude Code, so this check is the only guard.
+function skillsProblems(repo) {
+  const problems = [];
+  const dirs = [join(repo, "plugins/doug-flow/agents"), join(repo, ".claude/agents")];
+  const resolve = (name) => {
+    const candidates = [join(repo, ".claude/skills", name, "SKILL.md")];
+    const pluginsDir = join(repo, "plugins");
+    if (existsSync(pluginsDir)) for (const p of readdirSync(pluginsDir)) candidates.push(join(pluginsDir, p, "skills", name, "SKILL.md"));
+    return candidates.find((c) => existsSync(c));
+  };
+  for (const dir of dirs) {
+    if (!existsSync(dir)) continue;
+    for (const f of readdirSync(dir).filter((n) => n.endsWith(".md")).sort()) {
+      const m = /^---\n([\s\S]*?)\n---/.exec(readFileSync(join(dir, f), "utf8").replace(/\r\n/g, "\n"));
+      if (!m) continue;
+      const lines = m[1].split("\n");
+      // Fail closed: only the YAML block-list form is checked, so any other `skills:` shape is itself a problem.
+      const at = lines.findIndex((l) => /^skills:/.test(l));
+      if (at < 0) continue;
+      if (!/^skills:\s*$/.test(lines[at])) {
+        problems.push(`${f}: skills: only the YAML block-list form is checked`);
+        continue;
+      }
+      let count = 0;
+      for (const line of lines.slice(at + 1)) {
+        const item = /^\s+-\s+(.+?)\s*$/.exec(line);
+        if (!item) break;
+        count++;
+        const name = item[1];
+        const who = `${f}: ${name}`;
+        if (name.includes(":")) {
+          problems.push(`${who}: namespaced name form is unverified, use the bare name (docs/research/role-skills-preload.md)`);
+          continue;
+        }
+        const found = resolve(name);
+        if (!found) problems.push(`${who}: no SKILL.md at .claude/skills/${name} or plugins/*/skills/${name}`);
+        else if (/^disable-model-invocation:\s*true\s*$/m.test(/^---\n([\s\S]*?)\n---/.exec(readFileSync(found, "utf8"))?.[1] ?? ""))
+          problems.push(`${who}: sets disable-model-invocation, so it cannot be preloaded`);
+      }
+      if (count === 0) problems.push(`${f}: skills: block has no - name items`);
+    }
+  }
+  return problems;
+}
+
+describe("role agents' preloaded skills (card role-skills-preload)", () => {
+  const repoRoot = join(root, "..", "..");
+
+  it("every skills: name in the repo's agent files resolves to a preloadable SKILL.md", () => {
+    expect(skillsProblems(repoRoot)).toEqual([]);
+  });
+
+  it("flags a missing name, a disable-model-invocation skill, and a namespaced name, and passes a good one, even last in a 3-item list", () => {
+    const tmp = mkdtempSync(join(tmpdir(), "doug-skills-"));
+    const mk = (rel, text) => {
+      mkdirSync(dirname(join(tmp, rel)), { recursive: true });
+      writeFileSync(join(tmp, rel), text);
+    };
+    mk(".claude/skills/good/SKILL.md", "---\nname: good\ndescription: x\n---\nbody\n");
+    mk("plugins/p/skills/lead-only/SKILL.md", "---\nname: lead-only\ndescription: x\ndisable-model-invocation: true\n---\nbody\n");
+    const agent = (name, items) => `---\nname: ${name}\ndescription: "x"\nskills:\n${items.map((i) => `  - ${i}`).join("\n")}\ndoug: generated\n---\n`;
+    mk(".claude/agents/ok.md", agent("ok", ["good", "good", "good"]));
+    expect(skillsProblems(tmp)).toEqual([]);
+    mk(".claude/agents/missing.md", agent("missing", ["good", "good", "ghost"]));
+    mk("plugins/doug-flow/agents/off.md", agent("off", ["good", "good", "lead-only"]));
+    mk(".claude/agents/ns.md", agent("ns", ["good", "good", "doug-flow:good"]));
+    const problems = skillsProblems(tmp);
+    expect(problems).toHaveLength(3);
+    expect(problems.filter((p) => p.startsWith("missing.md: ghost"))).toHaveLength(1);
+    expect(problems.filter((p) => p.startsWith("off.md: lead-only") && p.includes("disable-model-invocation"))).toHaveLength(1);
+    expect(problems.filter((p) => p.startsWith("ns.md: doug-flow:good") && p.includes("namespaced"))).toHaveLength(1);
+  });
+
+  it("fails closed on non-block forms, an empty block, and a CRLF block list naming a missing skill", () => {
+    const tmp = mkdtempSync(join(tmpdir(), "doug-skills-"));
+    const mk = (rel, text) => {
+      mkdirSync(dirname(join(tmp, rel)), { recursive: true });
+      writeFileSync(join(tmp, rel), text);
+    };
+    mk(".claude/skills/good/SKILL.md", "---\nname: good\ndescription: x\n---\nbody\n");
+    const fm = (skillsText) => `---\nname: x\ndescription: "x"\n${skillsText}\ndoug: generated\n---\n`;
+    mk(".claude/agents/flow.md", fm("skills: [ghost]"));
+    mk(".claude/agents/scalar.md", fm("skills: ghost"));
+    mk(".claude/agents/comment.md", fm("skills: # c\n  - ghost"));
+    mk(".claude/agents/empty.md", fm("skills:"));
+    mk(".claude/agents/crlf.md", fm("skills:\n  - good\n  - ghost").replace(/\n/g, "\r\n"));
+    mk(".claude/agents/crlfok.md", fm("skills:\n  - good").replace(/\n/g, "\r\n"));
+    const problems = skillsProblems(tmp);
+    for (const f of ["flow", "scalar", "comment"])
+      expect(problems.filter((p) => p.startsWith(`${f}.md:`) && p.includes("only the YAML block-list form is checked")), f).toHaveLength(1);
+    expect(problems.filter((p) => p.startsWith("empty.md:") && p.includes("no - name items"))).toHaveLength(1);
+    expect(problems.filter((p) => p.startsWith("crlf.md: ghost"))).toHaveLength(1);
+    expect(problems.filter((p) => p.startsWith("crlfok.md"))).toHaveLength(0);
+    expect(problems).toHaveLength(5);
   });
 });

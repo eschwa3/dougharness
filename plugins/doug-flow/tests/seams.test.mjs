@@ -179,6 +179,57 @@ describe("seam a: doug-implement.js's report key round-trips into memory, board,
   });
 });
 
+describe("seam e: doug-implement.js's report key stopClass round-trips into board summary and record (card flow-stop-class)", () => {
+  it("a task the fix loop stops with fixAttempts 0 carries stopClass fix-attempts-exhausted, and the board prints it", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "doug-seam-e-"));
+    try {
+      const plan = {
+        version: 1,
+        status: "approved",
+        title: "Seam E stop class",
+        goal: "Prove a stopped task's class reaches the report and the board printers.",
+        install: null,
+        verify: ["true"],
+        acceptance: [],
+        adversary: false,
+        fixAttempts: 0,
+        baseBranch: "main",
+        integrationBranch: "doug/int-seam-e",
+        tasks: [{ id: "x", title: "X", spec: "Do the thing for x, with a test.", files: ["src/x.ts"], verify: "true", card: "seam-e" }],
+      };
+      const agent = async (prompt, opts) => {
+        const label = String(opts.label);
+        const id = label.split(":")[1];
+        if (label.startsWith("implement:")) return { taskId: id, branch: "doug/task-x", worktreePath: `/wt/${id}`, filesTouched: [], commandsRun: [], summary: "done", blocked: false, commit: "c1" };
+        if (label.startsWith("verify:")) return { taskId: id, passed: false, commandsRun: [], findings: ["src/x.ts returns 1, expected 2"], acceptance: [] };
+        if (label.startsWith("review:")) return { taskId: id, specCompliant: true, inScope: true, approve: true, issues: [] };
+        return null;
+      };
+      const report = await runWorkflowBody(withSpecHashes(plan), agent);
+      expect(report.ok).toBe(false);
+      const entry = report.levels[0].tasks[0];
+      expect(entry.stopReason).toMatch(/fix attempts exhausted/);
+      expect(entry.stopClass).toBe("fix-attempts-exhausted");
+
+      const reportPath = join(dir, "report.json");
+      writeFileSync(reportPath, JSON.stringify(report, null, 2));
+      let board = newBoard({ date: "2026-10-01" });
+      board = addCard(board, { id: "seam-e", title: "Seam E", goal: "prove the stop class round trip", column: "flow" }, { date: "2026-10-01" });
+      saveBoard(dir, board);
+
+      const summary = runCli(boardCli, ["summary", reportPath], dir);
+      expect(summary.status, summary.stderr).toBe(0);
+      expect(summary.stdout).toContain('x [fix-attempts-exhausted]: "');
+
+      const rec = runCli(boardCli, ["record", "seam-e", reportPath], dir);
+      expect(rec.status, rec.stderr).toBe(0);
+      expect(readFileSync(join(dir, "docs/live-runs.md"), "utf8")).toContain('Stopped: x [fix-attempts-exhausted]: "');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("seam b: every board.mjs/plan.mjs/memory.mjs/learn.mjs subcommand a skill or doc names is a real dispatch case (card seam-contracts, extended by card learn-signals)", () => {
   function dispatchSet(scriptPath) {
     const src = readFileSync(scriptPath, "utf8");

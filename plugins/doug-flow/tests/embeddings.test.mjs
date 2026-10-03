@@ -229,6 +229,37 @@ describe("createProvider: openai-compatible", () => {
     }
   });
 
+  it("prefixes queries only for mxbai-embed-large and qwen3-embedding, never documents", async () => {
+    const seenInputs = [];
+    const server = await startServer((req, body) => {
+      seenInputs.push(body.input);
+      return { status: 200, json: { data: body.input.map((_, i) => ({ index: i, embedding: [1, 0] })) } };
+    });
+    const mk = (model) => createProvider({ embeddings: { provider: "openai-compatible", baseUrl: serverUrl(server), model, dims: 2 } });
+    const mxbaiPrefix = "Represent this sentence for searching relevant passages: ";
+    const qwenPrefix = "Instruct: Given a web search query, retrieve relevant passages that answer the query\nQuery:";
+    try {
+      for (const model of ["mxbai-embed-large", "mxbai-embed-large:latest"]) {
+        seenInputs.length = 0;
+        await mk(model).embed(["q"], { inputType: "query" });
+        await mk(model).embed(["d"], { inputType: "document" });
+        expect(seenInputs[0]).toEqual([mxbaiPrefix + "q"]);
+        expect(seenInputs[0][0]).toBe("Represent this sentence for searching relevant passages: q");
+        expect(seenInputs[1]).toEqual(["d"]);
+      }
+      for (const model of ["qwen3-embedding:0.6b", "qwen3-embedding"]) {
+        seenInputs.length = 0;
+        await mk(model).embed(["q"], { inputType: "query" });
+        await mk(model).embed(["d"], { inputType: "document" });
+        expect(seenInputs[0]).toEqual([qwenPrefix + "q"]);
+        expect(seenInputs[0][0]).toBe("Instruct: Given a web search query, retrieve relevant passages that answer the query\nQuery:q");
+        expect(seenInputs[1]).toEqual(["d"]);
+      }
+    } finally {
+      server.close();
+    }
+  });
+
   it("sends a Bearer header only when the configured env var is set", async () => {
     const seenAuth = [];
     const server = await startServer((req, body) => {

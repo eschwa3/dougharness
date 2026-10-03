@@ -115,3 +115,137 @@ describe("appendTrace, readTrace, replay, attribution", () => {
     expect(a[1]).toMatchObject({ agentType: "Explore", events: 4, toolCalls: { Grep: 1 }, failedCalls: 1, wallMs: 7000, tokens: { input: 1, output: 2 } });
   });
 });
+
+// card trace-redact-secrets: a traced detail never carries a credential. Every fixture is built by
+// concatenation so this file never holds a whole token (the secret-scan hook would deny the write).
+describe("detailOf redaction (card trace-redact-secrets)", () => {
+  const GH = "ghp_" + "aB3dE5gH7jK9mN1pQ3sT5vX7zA9cE1gI3kM5";
+  const AWS = "AKIA" + "IOSFODNN7EXAMPLE";
+  const PW_VALUE = "hunter2" + "hunter2";
+  const PW = "password = " + PW_VALUE;
+  const now = new Date("2026-09-06T19:00:00.000Z");
+
+  function windows(s, n = 6) {
+    const out = [];
+    for (let i = 0; i + n <= s.length; i++) out.push(s.slice(i, i + n));
+    return out;
+  }
+  function expectNoSubstring(detail, secret) {
+    for (const w of windows(secret)) expect(detail, `detail leaks "${w}"`).not.toContain(w);
+  }
+
+  it("T1 a GitHub token in a Bash command traces as [redacted: githubToken], with no part of the token", () => {
+    const d = detailOf({ command: "curl -H 'Authorization: token " + GH + "' https://api.github.com/user" });
+    expect(d).toBe("[redacted: githubToken]");
+    expectNoSubstring(d, GH);
+  });
+  it("T2 an AWS key id traces as [redacted: awsKeyId], with no part of the key", () => {
+    const d = detailOf({ command: "aws configure set aws_access_key_id " + AWS });
+    expect(d).toBe("[redacted: awsKeyId]");
+    expectNoSubstring(d, AWS);
+  });
+  it("T3 an inline password assignment traces as [redacted: inlineAssignment], with no part of the value", () => {
+    const d = detailOf({ command: "echo " + PW + " >> .env" });
+    expect(d).toBe("[redacted: inlineAssignment]");
+    expectNoSubstring(d, PW_VALUE);
+  });
+  it("T4 a secret that starts after character 150 is still redacted (the full string is scanned, not the clip)", () => {
+    const cmd = "echo " + "x".repeat(150) + " " + GH;
+    const d = detailOf({ command: cmd });
+    expect(d).toBe("[redacted: githubToken]");
+    expectNoSubstring(d, GH);
+  });
+  it("T5 a clean command traces as today's clipped text, exactly", () => {
+    const long = "pnpm exec vitest run " + "plugins/doug-gates/tests/trace.test.mjs ".repeat(8);
+    const d = detailOf({ command: long });
+    const t = long.replace(/\s+/g, " ").trim();
+    expect(t.length).toBeGreaterThan(120);
+    expect(d).toBe(t.slice(0, 119) + "…");
+    expect(detailOf({ command: "pnpm   test\n" })).toBe("pnpm test");
+    expect(detailOf({ file_path: "/p/src/a.ts" })).toBe("/p/src/a.ts");
+  });
+  it("T6 secrets.rules.githubToken:false leaves the token command unredacted; secrets.enabled:false disables redaction", () => {
+    const cmd = "git push https://x:" + GH + "@github.com/o/r.git";
+    const off = detailOf({ command: cmd }, { rules: { githubToken: false } });
+    expect(off).not.toContain("[redacted");
+    expect(off).toContain("git push");
+    const disabled = detailOf({ command: cmd }, { enabled: false });
+    expect(disabled).not.toContain("[redacted");
+    expect(disabled).toContain("git push");
+    // another rule stays on while githubToken is off
+    expect(detailOf({ command: "echo " + AWS }, { rules: { githubToken: false } })).toBe("[redacted: awsKeyId]");
+  });
+  it("T7 a scanner that throws redacts as [redacted: scan-error]; detailOf and traceLine never throw", () => {
+    const secrets = {
+      get rules() {
+        throw new Error("boom");
+      },
+    };
+    const cmd = "echo hello " + GH;
+    expect(() => detailOf({ command: cmd }, secrets)).not.toThrow();
+    expect(detailOf({ command: cmd }, secrets)).toBe("[redacted: scan-error]");
+    let l;
+    expect(() => {
+      l = traceLine({ hook_event_name: "PreToolUse", session_id: "s1", tool_name: "Bash", tool_use_id: "tu1", tool_input: { command: cmd } }, { now, secrets });
+    }).not.toThrow();
+    expect(l.detail).toBe("[redacted: scan-error]");
+  });
+  it("T8 traceLine carries the redacted detail on PreToolUse and PermissionDenied, and no line holds the token", () => {
+    const base = { session_id: "s1", tool_name: "Bash", tool_use_id: "tu1", tool_input: { command: "echo " + GH } };
+    for (const event of ["PreToolUse", "PermissionDenied"]) {
+      const l = traceLine({ ...base, hook_event_name: event }, { now, secrets: {} });
+      expect(l.detail, event).toBe("[redacted: githubToken]");
+      expect(JSON.stringify(l), event).not.toContain(GH.slice(0, 12));
+    }
+    // traceLine without a secrets option still applies the default rules
+    expect(traceLine({ ...base, hook_event_name: "PreToolUse" }, { now }).detail).toBe("[redacted: githubToken]");
+  });
+
+  // card trace-redact-reason: PermissionDenied's reason is scanned the same way detail is.
+  const denied = (reason, secrets) =>
+    traceLine(
+      { hook_event_name: "PermissionDenied", session_id: "s1", tool_name: "Bash", tool_use_id: "tu1", tool_input: { command: "ls" }, denial_reason: reason },
+      secrets === undefined ? { now } : { now, secrets },
+    );
+
+  it("R1 a denial_reason carrying a GitHub token traces as [redacted: githubToken], with no part of the token", () => {
+    const l = denied("Denied: command quotes token " + GH + " in its arguments", {});
+    expect(l.reason).toBe("[redacted: githubToken]");
+    expectNoSubstring(l.reason, GH);
+    expect(JSON.stringify(l)).not.toContain(GH.slice(0, 12));
+  });
+  it("R2 a token that starts after character 150 of the denial_reason is still redacted", () => {
+    const reason = "Denied: " + "x".repeat(150) + " " + GH;
+    expect(reason.indexOf(GH)).toBeGreaterThan(150);
+    const l = denied(reason, {});
+    expect(l.reason).toBe("[redacted: githubToken]");
+    expectNoSubstring(l.reason, GH);
+  });
+  it("R3 a clean denial_reason traces as today's clipped text, exactly", () => {
+    const long = "Denied by rule: " + "path is outside the project root ".repeat(8);
+    const t = long.replace(/\s+/g, " ").trim();
+    expect(t.length).toBeGreaterThan(120);
+    const l = denied(long, {});
+    expect(l.reason).toBe(t.slice(0, 119) + "…");
+    expect(denied("Denied: not allowed", {}).reason).toBe("Denied: not allowed");
+  });
+  it("R4 a scanner that throws redacts the reason as [redacted: scan-error]; traceLine does not throw", () => {
+    const secrets = {
+      get rules() {
+        throw new Error("boom");
+      },
+    };
+    let l;
+    expect(() => {
+      l = denied("Denied: quotes " + GH, secrets);
+    }).not.toThrow();
+    expect(l.reason).toBe("[redacted: scan-error]");
+  });
+  it("R5 secrets.rules.githubToken:false leaves the reason clipped text; secrets.enabled:false disables redaction", () => {
+    const reason = "Denied: quotes " + GH;
+    expect(denied(reason, { rules: { githubToken: false } }).reason).toBe(reason);
+    expect(denied(reason, { enabled: false }).reason).toBe(reason);
+    // another rule stays on while githubToken is off
+    expect(denied("Denied: quotes " + AWS, { rules: { githubToken: false } }).reason).toBe("[redacted: awsKeyId]");
+  });
+});

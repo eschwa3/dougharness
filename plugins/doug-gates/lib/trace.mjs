@@ -7,6 +7,7 @@
 
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { scanText } from "./secret-rules.mjs";
 
 export const TRACE_DIR_RELPATH = ".doug/.state/trace";
 
@@ -28,11 +29,27 @@ function clip(s, n = 120) {
 
 // A one-line summary of a tool's input: the command, the file, the pattern, or the description. Never the whole input.
 // "skill" (card learn-signals) records a Skill tool call's skill name, so trace-derived signals can count
-// which skills actually get invoked.
-export function detailOf(toolInput) {
+// which skills actually get invoked. Card trace-redact-secrets: the full source string is scanned (scanText, the
+// same secrets config as secret-scan) before clipping; a hit records "[redacted: <rule>]", a scanner error
+// records "[redacted: scan-error]" (fail closed to redacting, never throws). Card trace-redact-reason: redactOrClip
+// is that scan-then-clip, shared by detailOf and the PermissionDenied reason.
+export function redactOrClip(s, secrets = {}) {
+  try {
+    if (!(secrets && secrets.enabled === false)) {
+      const hit = scanText(s, secrets || {});
+      if (hit) return "[redacted: " + hit.rule + "]";
+    }
+  } catch {
+    return "[redacted: scan-error]";
+  }
+  return clip(s);
+}
+
+export function detailOf(toolInput, secrets = {}) {
   if (!toolInput || typeof toolInput !== "object") return null;
   for (const key of ["command", "file_path", "notebook_path", "pattern", "description", "prompt", "url", "skill"]) {
-    if (typeof toolInput[key] === "string" && toolInput[key].trim()) return clip(toolInput[key]);
+    const s = toolInput[key];
+    if (typeof s === "string" && s.trim()) return redactOrClip(s, secrets);
   }
   return null;
 }
@@ -90,9 +107,9 @@ export function usageFromTranscript(file) {
 // same as every other event here: InstructionsLoaded's `detail` is the loaded file's path and its `reason` the
 // matcher's load_reason ("session_start", "path_glob_match", ...) - `file_content` is never read off the input,
 // so it can never end up on the line even by accident. PermissionDenied's `detail` is the denied tool's input
-// (via detailOf, same as a Pre/PostToolUse line), `ok` is forced false, and `reason` is the clipped denial_reason.
+// (via detailOf, same as a Pre/PostToolUse line), `ok` is forced false, and `reason` is the denial_reason via redactOrClip (secret-scanned, then clipped).
 // Every other event's `reason` is null.
-export function traceLine(input, { now = new Date(), context = null } = {}) {
+export function traceLine(input, { now = new Date(), context = null, secrets } = {}) {
   const event = input.hook_event_name || null;
   const response = input.tool_response ?? input.tool_output ?? null;
   let ok = null;
@@ -105,10 +122,10 @@ export function traceLine(input, { now = new Date(), context = null } = {}) {
   let detail = null;
   let reason = null;
   if (event === "PreToolUse" || event === "PostToolUse" || event === "PermissionDenied") {
-    detail = detailOf(input.tool_input);
+    detail = detailOf(input.tool_input, secrets);
   }
   if (event === "PermissionDenied") {
-    reason = typeof input.denial_reason === "string" && input.denial_reason.trim() ? clip(input.denial_reason, 120) : null;
+    reason = typeof input.denial_reason === "string" && input.denial_reason.trim() ? redactOrClip(input.denial_reason, secrets) : null;
   } else if (event === "InstructionsLoaded") {
     detail = typeof input.file_path === "string" && input.file_path ? input.file_path : null;
     reason = typeof input.load_reason === "string" && input.load_reason ? input.load_reason : null;

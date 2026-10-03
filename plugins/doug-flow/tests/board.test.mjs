@@ -5,7 +5,7 @@ import { mkdirSync, mkdtempSync, readFileSync, writeFileSync, existsSync } from 
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { loadBoard, saveBoard, boardPath, validateBoard, newBoard, addCard, editCard, removeCard, nextReadyCard, nextReadyCards, moveCard, reorderCard, findCard, runEntry, handEntry, runSummary, appendRun, DEFAULT_COLUMNS, DEFAULT_TAGS, boardTags, adversaryBlocks, classifyBlocks, parseAdversaryClasses, promoteResearchNote, recordLanding } from "../lib/board.mjs";
+import { loadBoard, saveBoard, boardPath, validateBoard, newBoard, addCard, editCard, removeCard, nextReadyCard, nextReadyCards, moveCard, reorderCard, findCard, runEntry, handEntry, runSummary, appendRun, DEFAULT_COLUMNS, DEFAULT_TAGS, boardTags, adversaryBlocks, classifyBlocks, parseAdversaryClasses, promoteResearchNote, recordLanding, STOP_CLASSES } from "../lib/board.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const cli = join(here, "..", "scripts", "board.mjs");
@@ -706,7 +706,7 @@ describe("runEntry and appendRun", () => {
   });
   it("--rehearsal <scenario> replaces the prose line and abbreviates the sha to 7 characters, so the entry reads as a rehearsal, not a landing (card rehearsal-first-live-findings #3)", () => {
     const md = runEntry({ card: { id: "first", title: "First" }, report, cost: 1.4, wallClock: "3 min", mergeCommit: "47fe70cca7eb3444ae8a382ee14018f3950bfe1c", record: ".doug/board.json", date: "2026-09-09", rehearsal: "flow" });
-    expect(md).toContain("Rehearsal flow for card `first` on the ts-basic fixture (plugins/doug-flow/scripts/rehearse.mjs); the commit and gate below are the fixture's, not this repository's.");
+    expect(md).toContain("Rehearsal flow for card `first` on the ts-basic fixture (scripts/rehearse.mjs); the commit and gate below are the fixture's, not this repository's.");
     expect(md).not.toContain("Ran through /doug-next");
     expect(md).toContain("| Landed as | `47fe70c` |");
     expect(md).not.toContain("47fe70cca7eb3444ae8a382ee14018f3950bfe1c");
@@ -716,7 +716,9 @@ describe("runEntry and appendRun", () => {
   it("renders a hand-track entry with the commit, wall clock, gate, and note", () => {
     const md = handEntry({ card: { id: "core-next", title: "Core next" }, commit: "abc1234", wallClock: "25 min", gate: "typecheck 0; unit 380 passed", note: "The CLI parser needed a flag set.", record: ".doug/board.json", date: "2026-09-06" });
     expect(md).toContain("## 2026-09-06, core-next: Core next");
-    expect(md).toContain("Built by hand through /core-next from card `core-next` in `.doug/board.json` (hand track, decision 0005); no workflow run.");
+    expect(md).toContain("Built by hand through doug-hand from card `core-next` in `.doug/board.json` (hand track: a gated by-hand change); no workflow run.");
+    expect(md).not.toContain("/core-next");
+    expect(md).not.toContain("decision 0005");
     expect(md).toContain("| Outcome | landed |");
     expect(md).toContain("| Commit | `abc1234` |");
     expect(md).toContain("| Wall clock | 25 min |");
@@ -731,8 +733,8 @@ describe("runEntry and appendRun", () => {
   });
   it("--rehearsal <scenario> replaces the prose line and abbreviates the sha (card rehearsal-first-live-findings #3)", () => {
     const md = handEntry({ card: { id: "fix-hours", title: "Fix hours" }, commit: "47fe70cca7eb3444ae8a382ee14018f3950bfe1c", wallClock: "3.3 min", gate: "unit 5 passed", record: ".doug/board.json", date: "2026-09-09", rehearsal: "hand" });
-    expect(md).toContain("Rehearsal hand for card `fix-hours` on the ts-basic fixture (plugins/doug-flow/scripts/rehearse.mjs); the commit and gate below are the fixture's, not this repository's.");
-    expect(md).not.toContain("Built by hand through /core-next");
+    expect(md).toContain("Rehearsal hand for card `fix-hours` on the ts-basic fixture (scripts/rehearse.mjs); the commit and gate below are the fixture's, not this repository's.");
+    expect(md).not.toContain("Built by hand through doug-hand");
     expect(md).toContain("| Commit | `47fe70c` |");
     expect(md).not.toContain("47fe70cca7eb3444ae8a382ee14018f3950bfe1c");
   });
@@ -786,6 +788,46 @@ describe("runEntry and appendRun", () => {
     expect(md).toContain("| Outcome | paused at the human gate after level 0; next: b, c |");
     expect(md).toContain("| Landed as | not landed |");
     expect(md).not.toContain("not green");
+  });
+  it("exports the stop-class enum and prints a stopped task's class in the summary and the record (card flow-stop-class)", () => {
+    expect(STOP_CLASSES).toHaveLength(15);
+    expect(new Set(STOP_CLASSES).size).toBe(15);
+    expect(STOP_CLASSES).toEqual(expect.arrayContaining(["budget", "fix-attempts-exhausted", "level-adversary", "dependency-skipped", "stage-threw"]));
+    const done = { id: "a", implemented: true, verified: true, reviewed: true, adversary: { ran: true, verdict: "pass", blocked: false }, attempts: [{ pass: 1 }] };
+    const stopped = (tasks) => ({ plan: "S", ok: false, stoppedAtLevel: 0, levels: [{ index: 0, integration: { ok: true }, tasks }] });
+    const withClass = stopped([{ ...done, stopReason: "verification failed; stopped: next attempt would exceed the task budget (agents 6 > 4)", stopClass: "budget" }]);
+    const summary = runSummary({ report: withClass }).split("\n");
+    expect(summary[2]).toBe('Stopped: a [budget]: "verification failed; stopped: next attempt would exceed the task budget (agents 6 > 4)"');
+    // Two stopped tasks: each carries its own class, a task with none prints as it always did, joined by "; ".
+    const mixed = stopped([
+      { ...done, id: "a", stopReason: "ra", stopClass: "budget" },
+      { ...done, id: "b", stopReason: "rb" },
+      { ...done, id: "c", stopReason: "rc", stopClass: null },
+    ]);
+    expect(runSummary({ report: mixed }).split("\n")[2]).toBe('Stopped: a [budget]: "ra"; b: "rb"; c: "rc"');
+    // The record carries the same clause as one line after the task table.
+    const md = runEntry({ card: { id: "first", title: "First" }, report: mixed, date: "2026-10-01" });
+    expect(md).toContain('\nStopped: a [budget]: "ra"; b: "rb"; c: "rc"\n');
+    expect(md.indexOf("\nStopped: ")).toBeGreaterThan(md.lastIndexOf("| integration |"));
+    expect(md.match(/^Stopped: /gm)).toHaveLength(1);
+    // No stopped task: no Stopped line in the record.
+    expect(runEntry({ card: { id: "first", title: "First" }, report: stopped([done]), date: "2026-10-01" })).not.toContain("Stopped:");
+  });
+  it("prints an old report with no stopClass exactly as before: no bracket, no undefined, no null (card flow-stop-class)", () => {
+    const fixture = (name) => JSON.parse(readFileSync(join(here, "fixtures/reports", name), "utf8"));
+    for (const name of ["standard-agents-run1.json", "standard-agents-run2.json"]) {
+      const report = fixture(name);
+      const reasons = report.levels.flatMap((l) => l.tasks).filter((t) => t.stopReason);
+      expect(reasons.length).toBeGreaterThan(0);
+      expect(reasons.every((t) => t.stopClass === undefined)).toBe(true);
+      const stoppedLine = runSummary({ report }).split("\n")[2];
+      expect(stoppedLine.startsWith("Stopped: ")).toBe(true);
+      expect(stoppedLine).not.toMatch(/undefined|null/);
+      expect(stoppedLine.slice(0, "Stopped: ".length + reasons[0].id.length + 2)).toBe(`Stopped: ${reasons[0].id}: `);
+      const entryLine = runEntry({ card: { id: "first", title: "First" }, report, date: "2026-10-01" }).split("\n").find((l) => l.startsWith("Stopped: "));
+      expect(entryLine, "an old report's record still gets the Stopped line").toBeDefined();
+      expect(entryLine).toBe(`Stopped: ${reasons.map((t) => `${t.id}: "${t.stopReason}"`).join("; ")}`);
+    }
   });
   it("appends to docs/live-runs.md, creating it with a heading when absent", () => {
     const dir = project();
@@ -999,6 +1041,18 @@ describe("board.mjs CLI", () => {
     expect(rec.status).toBe(0);
     expect(readFileSync(join(dir, "docs/live-runs.md"), "utf8")).toContain("| Outcome | paused at the human gate after level 0; next: b |");
   });
+  it("board.mjs summary and record print a stopped task's class (card flow-stop-class)", () => {
+    const dir = project();
+    const stopped = { plan: "S", ok: false, integrationBranch: "doug/a", stoppedAtLevel: 0, levels: [{ index: 0, integration: { ok: true }, tasks: [{ id: "a", implemented: true, verified: false, reviewed: false, adversary: null, stopReason: "over budget", stopClass: "budget" }] }] };
+    const report = join(dir, "stopped.json");
+    writeFileSync(report, JSON.stringify(stopped));
+    const sum = run(["summary", report, "--wall", "5 min"], dir);
+    expect(sum.status, sum.stderr).toBe(0);
+    expect(sum.stdout.split("\n")[2]).toBe('Stopped: a [budget]: "over budget"');
+    const rec = run(["record", "first", report, dir, "--wall", "5 min"], dir);
+    expect(rec.status, rec.stderr).toBe(0);
+    expect(readFileSync(join(dir, "docs/live-runs.md"), "utf8")).toContain('\nStopped: a [budget]: "over budget"\n');
+  });
   // Card report-save-wrapper, M2: the same paused report as above, saved as the Workflow tool's own output shape
   // ({ summary, agentCount, logs, result: <report> }) instead of bare, must give board.mjs summary and record the
   // same outcome (both call sites - record and summary - unwrap what they parsed).
@@ -1034,7 +1088,7 @@ describe("board.mjs CLI", () => {
     writeFileSync(join(byHand, ".doug/board.json"), JSON.stringify(withHand));
     const skipHand = run(["next", byHand], byHand);
     expect(JSON.parse(skipHand.stdout).id).toBe("first");
-    expect(skipHand.stderr).toContain("skipping byhand: hand track (built by hand with /core-next, not by doug-next)");
+    expect(skipHand.stderr).toContain("skipping byhand: hand track (a by-hand card; /doug-next byhand takes it)");
     const handNext = run(["next", byHand, "--track", "hand"], byHand);
     expect(handNext.status, handNext.stderr).toBe(0);
     expect(JSON.parse(handNext.stdout).id).toBe("byhand");

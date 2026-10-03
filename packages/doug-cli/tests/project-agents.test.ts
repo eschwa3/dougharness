@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { detect } from "../src/detect/index.js";
 import { generateConfig } from "../src/generate/config.js";
-import { generateAgents, AGENT_MARK, LEGACY_AGENT_MARK } from "../src/generate/agents.js";
+import { generateAgents, AGENT_MARK, LEGACY_AGENT_MARK, spliceSkills } from "../src/generate/agents.js";
 
 // The repository's own project agents under .claude/agents are the hand-kept reference output that the
 // standard-agents card's generator must reproduce byte for byte on this repository (decision 0005, card
@@ -12,18 +12,36 @@ import { generateAgents, AGENT_MARK, LEGACY_AGENT_MARK } from "../src/generate/a
 const ROOT = fileURLToPath(new URL("../../..", import.meta.url));
 const AGENTS = join(ROOT, ".claude/agents");
 
-function frontmatter(text: string): { fields: Record<string, string>; body: string[] } {
+function frontmatter(text: string): { fields: Record<string, string>; lists: Record<string, string[]>; body: string[] } {
   const lines = text.split("\n");
   expect(lines[0]).toBe("---");
   const end = lines.indexOf("---", 1);
   expect(end).toBeGreaterThan(1);
   const fields: Record<string, string> = {};
+  const lists: Record<string, string[]> = {};
+  let listKey: string | null = null;
   for (const line of lines.slice(1, end)) {
+    // Reason (card role-skills-preload): a frontmatter `skills:` block is a YAML list, so its `  - name` item
+    // lines must parse as items of the open key instead of failing the key: value shape.
+    const item = /^\s+- (.*)$/.exec(line);
+    if (item && listKey) {
+      lists[listKey].push(item[1]);
+      continue;
+    }
+    // Only `skills:` may open a list: a bare `model:` or `tools:` with no value is a malformed field and must
+    // keep failing the key: value shape below instead of parsing as an empty list.
+    const key = /^(skills):$/.exec(line);
+    if (key) {
+      listKey = key[1];
+      lists[listKey] = [];
+      continue;
+    }
+    listKey = null;
     const m = /^([a-zA-Z]+): (.*)$/.exec(line);
     expect(m, line).not.toBeNull();
     fields[(m as RegExpMatchArray)[1]] = (m as RegExpMatchArray)[2];
   }
-  return { fields, body: lines.slice(end + 1) };
+  return { fields, lists, body: lines.slice(end + 1) };
 }
 
 describe("this repository's project agents", () => {
@@ -101,7 +119,11 @@ describe("this repository's project agents", () => {
     // Card research-fetch-cap, pass 2 (P1): the checked-in project researcher carries the whole budget rule,
     // the same full sentence as the plugin one, not just the fragment naming the cap.
     expect(researcher).toContain(
-      "Budget: at most 6 WebSearch plus WebFetch calls for your question (research.maxFetches; a hook denies the next one). Try sources in the order the question lists them, and write your findings before the budget runs out, marking anything still unanswered unverified."
+      "Budget: at most 6 WebSearch, WebFetch, curl, or wget calls for your question, counted together (research.maxFetches; a hook denies the next one). Try sources in the order the question lists them, and write your findings before the budget runs out, marking anything still unanswered unverified."
+    );
+    // Card researcher-line-numbers: quotes carry a line number from the raw page.
+    expect(researcher).toContain(
+      "Primary sources first (official docs, the tool's own --help, the package's repository); quote a page verbatim with its line number in the raw page (curl -sL <url> | grep -n '<phrase>'), or the command and its output, and say whether it was observed or documented; a quote without a line is marked no line."
     );
   });
 
@@ -120,9 +142,13 @@ describe("this repository's project agents", () => {
       const diskPath = join(ROOT, file.path);
       expect(existsSync(diskPath), `${file.path}: generateAgents emits this path but no such file is checked in`).toBe(true);
       const disk = readFileSync(diskPath, "utf8");
-      if (disk === file.content) continue;
+      // Reason (card role-skills-preload): the frontmatter `skills:` block is user-owned by design (like
+      // `## Project notes`), so a refresh keeps it and the generator never emits it; compare against the
+      // generated text with the disk's own block spliced in.
+      const expected = spliceSkills(file.content, disk);
+      if (disk === expected) continue;
       const diskLines = disk.split("\n");
-      const genLines = file.content.split("\n");
+      const genLines = expected.split("\n");
       let line = 1;
       while (diskLines[line - 1] === genLines[line - 1]) line++;
       throw new Error(
@@ -130,6 +156,18 @@ describe("this repository's project agents", () => {
           `  checked-in: ${JSON.stringify(diskLines[line - 1])}\n` +
           `  generated:  ${JSON.stringify(genLines[line - 1])}`
       );
+    }
+  });
+
+  it("preloads exactly harness-fix in coder, tester and reviewer, and nothing in architect and researcher (card role-skills-preload)", () => {
+    for (const name of ["coder", "tester", "reviewer"]) {
+      const { lists } = frontmatter(readFileSync(join(AGENTS, `${name}.md`), "utf8"));
+      expect(lists.skills, name).toEqual(["harness-fix"]);
+    }
+    for (const name of ["architect", "researcher"]) {
+      const { lists, fields } = frontmatter(readFileSync(join(AGENTS, `${name}.md`), "utf8"));
+      expect(lists.skills, name).toBeUndefined();
+      expect(fields.skills, name).toBeUndefined();
     }
   });
 

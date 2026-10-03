@@ -52,6 +52,9 @@ const taskBudget = { ...DEFAULT_BUDGET, ...(plan.budget && typeof plan.budget ==
 // The phrase the verifier and reviewer put at the start of a finding when the spec cannot satisfy the plan's
 // acceptance criteria. Such a block goes back to the planner and is never retried.
 const CONTRADICTION_MARKER = 'SPEC CONTRADICTS ACCEPTANCE'
+// Why a task stopped: every halt site sets one of these as stopClass beside its prose stopReason. Kept equal to
+// STOP_CLASSES in lib/board.mjs by a template test (this file may not import).
+const STOP_CLASSES = ['implementer-blocked', 'partial', 'stage-missing', 'spec-contradiction', 'environment', 'adversary-not-run', 'outside-owned', 'new-blockers-twice', 'fix-attempts-exhausted', 'stalled', 'budget', 'no-new-commit', 'dependency-skipped', 'stage-threw', 'level-adversary']
 // The phrase a verifier, checker, or size-check puts at the start of a finding when a command could not run for
 // an environment reason (a tool missing from the worktree even after the install step, a sandbox denial) rather
 // than a defect in the diff. The fix loop never retries such a finding (card reused-s-task-worktree-install):
@@ -1790,27 +1793,27 @@ function ownedBySibling(task, p) {
 
 // Can this block be fixed by the same implementer, or must a human see it?
 function retriable(task, r) {
-  if (!r.impl) return { ok: false, reason: 'implementer returned nothing' }
+  if (!r.impl) return { ok: false, reason: 'implementer returned nothing', stopClass: 'stage-missing' }
   // A fix pass that returned no structured result changed nothing the loop knows of: the branch and worktree it
   // had are still there, so the same implementer is asked again.
   if (r.noResult) return { ok: true, reason: r.noResult }
-  if (r.impl.blocked) return { ok: false, reason: `implementer blocked: ${r.impl.blockedReason || 'no reason given'}` }
+  if (r.impl.blocked) return { ok: false, reason: `implementer blocked: ${r.impl.blockedReason || 'no reason given'}`, stopClass: 'implementer-blocked' }
   // A partial result is not a check failure, whether it came from the initial worker's one resume or from a fix
   // pass: the fix loop never retries it (card worker-context-handoff).
-  if (r.impl.partial) return { ok: false, reason: 'a partial result is not retried by the fix loop' }
+  if (r.impl.partial) return { ok: false, reason: 'a partial result is not retried by the fix loop', stopClass: 'partial' }
   // Only a stage that actually ran can be missing; a fix pass deliberately skips the stages that did not block.
   const ran = r.stages || []
-  if (ran.includes('verify') && !r.ver) return { ok: false, reason: 'verifier returned nothing' }
-  if (ran.includes('review') && !r.rev) return { ok: false, reason: 'reviewer returned nothing' }
-  if (ran.includes('check') && !r.check) return { ok: false, reason: 'check returned nothing' }
+  if (ran.includes('verify') && !r.ver) return { ok: false, reason: 'verifier returned nothing', stopClass: 'stage-missing' }
+  if (ran.includes('review') && !r.rev) return { ok: false, reason: 'reviewer returned nothing', stopClass: 'stage-missing' }
+  if (ran.includes('check') && !r.check) return { ok: false, reason: 'check returned nothing', stopClass: 'stage-missing' }
   const texts = [...((r.ver && r.ver.findings) || []), ...(((r.rev && r.rev.issues) || []).map(i => i.description))]
   const contradiction = texts.find(t => typeof t === 'string' && t.includes(CONTRADICTION_MARKER))
-  if (contradiction) return { ok: false, reason: `spec contradicts acceptance: ${contradiction}` }
+  if (contradiction) return { ok: false, reason: `spec contradicts acceptance: ${contradiction}`, stopClass: 'spec-contradiction' }
   const environmentOnly = texts.find(t => typeof t === 'string' && t.includes(ENVIRONMENT_MARKER))
-  if (environmentOnly) return { ok: false, reason: `environment, not the code: ${environmentOnly}` }
-  if (adversary && r.adv && !r.adv.ran) return { ok: false, reason: `adversary did not run: ${r.adv.error || 'no reason given'}` }
+  if (environmentOnly) return { ok: false, reason: `environment, not the code: ${environmentOnly}`, stopClass: 'environment' }
+  if (adversary && r.adv && !r.adv.ran) return { ok: false, reason: `adversary did not run: ${r.adv.error || 'no reason given'}`, stopClass: 'adversary-not-run' }
   const outside = [...new Set(findingPaths(r).filter(p => !ownsPath(task, p) && !ownedBySibling(task, p)))]
-  if (outside.length) return { ok: false, reason: `findings name files outside the owned set: ${outside.join(', ')}` }
+  if (outside.length) return { ok: false, reason: `findings name files outside the owned set: ${outside.join(', ')}`, stopClass: 'outside-owned' }
   return { ok: true, reason: 'every finding is within the owned files' }
 }
 
@@ -2338,20 +2341,20 @@ async function runTask(task, baseBranch, resume) {
     })
     // The last supervisor that ran on this task, for the report; null when none did.
     const lastSupervisor = () => { for (let i = attempts.length - 1; i >= 0; i--) if (attempts[i].supervisor) return attempts[i].supervisor; return null }
-    if (ready) return { ...r, attempts, ledger, budget: budgetOf(), stopReason: null, supervisor: lastSupervisor() }
+    if (ready) return { ...r, attempts, ledger, budget: budgetOf(), stopReason: null, stopClass: null, supervisor: lastSupervisor() }
     const why = notReadyWhy(r)
-    const halt = reason => {
+    const halt = (stopClass, reason) => {
       for (const e of ledger) if (e.status === 'open') log(`${task.id} open finding ${e.id} [${e.stage}] ${e.file || '(no file)'}: ${String(e.description).slice(0, 120)}`)
-      return { ...r, attempts, ledger, budget: budgetOf(), stopReason: reason, supervisor: lastSupervisor() }
+      return { ...r, attempts, ledger, budget: budgetOf(), stopReason: reason, stopClass, supervisor: lastSupervisor() }
     }
-    if (!decision.ok) return halt(`${why}; not retried: ${decision.reason}`)
+    if (!decision.ok) return halt(decision.stopClass, `${why}; not retried: ${decision.reason}`)
     // Two passes in a row that each raise a blocker nobody had seen means the checks are exploring, not converging.
     const last = attempts[attempts.length - 1]
     const prior = attempts[attempts.length - 2]
     if (prior && last.newFindings.length && prior.newFindings.length) {
-      return halt(`${why}; stopped: two consecutive passes raised new blockers (${prior.newFindings.join(', ')}; ${last.newFindings.join(', ')})`)
+      return halt('new-blockers-twice', `${why}; stopped: two consecutive passes raised new blockers (${prior.newFindings.join(', ')}; ${last.newFindings.join(', ')})`)
     }
-    if (attempts.length > fixAttempts) return halt(`${why}; fix attempts exhausted (${fixAttempts} of ${fixAttempts})`)
+    if (attempts.length > fixAttempts) return halt('fix-attempts-exhausted', `${why}; fix attempts exhausted (${fixAttempts} of ${fixAttempts})`)
     // The supervisor (card fix-loop-supervisor): before a fix pass after the first, when the stall signals fire. A
     // pass that returned no result attacked nothing, so it is not a stall. A task stalled a second time stops here
     // instead of spending the remaining fix budget; otherwise the supervisor runs after the budget check below, on
@@ -2362,7 +2365,7 @@ async function runTask(task, baseBranch, resume) {
     if (signals.length && attempts.some(a => a.supervisor && a.supervisor.stalled)) {
       const findings = [...new Set(signals.filter(x => x.kind === 'repeat').map(x => x.finding))]
       lastAttempt.supervisor = { ran: false, stalled: true, brief: null, signals, stop: { kind: 'stalled', attempts: attempts.length, findings } }
-      return halt(`${why}; stopped: stalled twice (${describeStall(signals)})`)
+      return halt('stalled', `${why}; stopped: stalled twice (${describeStall(signals)})`)
     }
     const blocking = r.blockingStage || 'verify'
     // What the next pass would cost: the fix agent plus the stages rule 3 would run. The adversary stage spends two
@@ -2391,7 +2394,7 @@ async function runTask(task, baseBranch, resume) {
       const projected = spent.elapsedMs + spent.elapsedMs / passesDone
       if (projected > limit) over = `elapsedMs ${show(projected)} > ${limit}`
     }
-    if (over) return halt(`${why}; stopped: next attempt would exceed the task budget (${over})`)
+    if (over) return halt('budget', `${why}; stopped: next attempt would exceed the task budget (${over})`)
     const pass = r.pass + 1
     let brief = null
     if (signals.length) {
@@ -2447,7 +2450,7 @@ async function runTask(task, baseBranch, resume) {
       r = record({ task, impl, ver: null, rev: null, adv: null, check: null, pass, stages: ['fix'], stageResults: {}, blockingStage: null, commit: fix.commit || null }, prevCommit)
       const decided = fixBlocked ? retriable(task, r) : null
       attempts.push({ pass, stages: ['fix'], commit: r.commit, blockingStage: null, verified: false, reviewed: false, adversary: null, newFindings: r.newFindings || [], fixedFindings: r.fixedFindings || [], notes: r.droppedFindings || [], ready: false, retriable: decided, spent: measure(), commands: passCommands(r) })
-      return halt(fixBlocked ? `${notReadyWhy(r)}; not retried: ${decided.reason}` : `${why}; stopped: fix pass ${pass} made no new commit on ${impl.branch}`)
+      return fixBlocked ? halt(decided.stopClass, `${notReadyWhy(r)}; not retried: ${decided.reason}`) : halt('no-new-commit', `${why}; stopped: fix pass ${pass} made no new commit on ${impl.branch}`)
     }
     const next = { ...fix, branch: r.impl.branch, worktreePath, prevCommit, ...(r.impl.workers ? { workers: r.impl.workers, swarmStages: r.impl.swarmStages, splitReason: r.impl.splitReason, rebrief: r.impl.rebrief, checkFailed: r.impl.checkFailed } : {}) }
     r = record(await runChecks(task, next, pass, baseBranch, { ledger, launch, lead: 'fix', prevCommit, blocking }), prevCommit)
@@ -2507,7 +2510,7 @@ for (let li = 0; li < levels.length; li++) {
     }
     const reason = missing.length > 1 ? `dependencies ${missing.join(', ')} were not integrated` : `dependency ${missing[0]} was not integrated`
     log(`${t.id} not launched: ${reason}`)
-    skipped.set(t, { task: t, impl: null, ver: null, rev: null, adv: null, check: null, attempts: [], ledger: [], budget: null, stages: [], stopReason: reason, skippedReason: reason })
+    skipped.set(t, { task: t, impl: null, ver: null, rev: null, adv: null, check: null, attempts: [], ledger: [], budget: null, stages: [], stopReason: reason, stopClass: 'dependency-skipped', skippedReason: reason })
   }
 
   // Implement (or reuse) -> verify -> review -> adversary -> fix, per task, no barrier between tasks.
@@ -2523,7 +2526,7 @@ for (let li = 0; li < levels.length; li++) {
   // was ever made; blocked:true keeps `implemented` false so reusePlan still refuses to reuse it.
   const threwFallback = task => {
     const reason = 'task stage threw (agent error, unknown agent type, or user skip)'
-    return { task, impl: { taskId: task.id, branch: task.reuse || `doug/task-${task.id}`, worktreePath: '', filesTouched: [], commandsRun: [], summary: reason, blocked: true, blockedReason: reason, commit: null }, ver: null, rev: null, adv: null, check: null, attempts: [], ledger: [], budget: null, stopReason: reason }
+    return { task, impl: { taskId: task.id, branch: task.reuse || `doug/task-${task.id}`, worktreePath: '', filesTouched: [], commandsRun: [], summary: reason, blocked: true, blockedReason: reason, commit: null }, ver: null, rev: null, adv: null, check: null, attempts: [], ledger: [], budget: null, stopReason: reason, stopClass: 'stage-threw' }
   }
   const byTask = new Map(runnable.map((task, i) => [task, results[i] || threwFallback(task)]))
   const ready = level.map(task => byTask.get(task) || skipped.get(task)).filter(isReady)
@@ -2570,7 +2573,7 @@ for (let li = 0; li < levels.length; li++) {
           const adv = { ran: true, verdict: 'fail', summary: levelAdversary.summary, issues, commandsRun: levelAdversary.commandsRun, error: null }
           const again = await runTask(r.task, levelBase, { impl: r.impl, ver: r.ver, rev: r.rev, adv, commit: r.commit, pass: r.pass, attempts: r.attempts, ledger: r.ledger })
           byTask.set(r.task, again)
-          levelAdversary.fixed.push({ task: r.task.id, ready: isReady(again), stopReason: again.stopReason })
+          levelAdversary.fixed.push({ task: r.task.id, ready: isReady(again), stopReason: again.stopReason, stopClass: again.stopClass || null })
         }
         const fixedReady = [...perTask.keys()].map(r => byTask.get(r.task)).filter(isReady)
         if (fixedReady.length === perTask.size) {
@@ -2588,7 +2591,10 @@ for (let li = 0; li < levels.length; li++) {
       if (!cleared) {
         for (const r of new Set([...sReady, ...perTask.keys()])) {
           const cur = byTask.get(r.task) || r
-          if (!cur.stopReason) cur.stopReason = levelAdversary.unowned ? `level adversary blocked on ${levelAdversary.unowned.join(', ')}: ${levelAdversary.summary}` : levelAdversary.confirm ? `level adversary still blocked after a fix pass: ${levelAdversary.confirm.summary}` : levelAdversary.reintegration ? 'the fixed branches did not integrate again' : `level adversary blocked: ${levelAdversary.summary}`
+          if (!cur.stopReason) {
+            cur.stopReason = levelAdversary.unowned ? `level adversary blocked on ${levelAdversary.unowned.join(', ')}: ${levelAdversary.summary}` : levelAdversary.confirm ? `level adversary still blocked after a fix pass: ${levelAdversary.confirm.summary}` : levelAdversary.reintegration ? 'the fixed branches did not integrate again' : `level adversary blocked: ${levelAdversary.summary}`
+            cur.stopClass = 'level-adversary'
+          }
           byTask.set(r.task, cur)
         }
         for (const r of ready) integrated.delete(r.task.id)
@@ -2642,6 +2648,7 @@ for (let li = 0; li < levels.length; li++) {
       attempts: r.attempts,
       passes: r.attempts.length,
       stopReason: r.stopReason,
+      stopClass: r.stopClass || null,
       // The fix-loop supervisor's last word on the task: ran, stalled, the brief it injected, and the stop when the
       // task stalled twice ({ kind: 'stalled', attempts, findings }); null when the loop never stalled.
       supervisor: r.supervisor || null,

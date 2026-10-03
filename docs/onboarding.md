@@ -57,6 +57,14 @@ node <repo>/packages/doug-cli/dist/bin.js
    - Never: writes anything before the diff is approved (`--dry-run` shows
      the diff only); never touches the network; never publishes anything.
 
+   Then `doug doctor <repo>` (`--json` for a machine-readable report) checks the
+   install: Node and SQLite FTS5, the config, the vendored hooks, the hooks
+   registered in settings, `codex` on PATH, the memory store, and the plugin
+   versions. Each check prints ok, warn, fail, or skip and, when not ok, one
+   `fix:` command; the exit status is 1 on any fail.
+   - Writes: nothing.
+   - Never: touches the network; never writes (it reads only).
+
 2. `doug board init <repo>` and `doug board add <id> --title <t> --goal <g>`
    - Writes: `.doug/board.json` only.
    - Never: publishes a board page.
@@ -77,6 +85,7 @@ node <repo>/packages/doug-cli/dist/bin.js
 ## What this never does
 
 - Never writes anything before a diff is approved (`doug init`).
+- Never writes anything (`doug doctor`).
 - Never touches the network beyond the package registry during
   `pnpm install`, and never during `doug init` or `doug board`.
 - Never publishes a board page from `doug board init`/`add`.

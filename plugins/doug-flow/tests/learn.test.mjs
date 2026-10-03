@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, sep } from "node:path";
 import { openMemory, addLesson, recordOutcomes } from "../lib/memory.mjs";
 import { createHash } from "node:crypto";
+import { traceLine } from "../../doug-gates/lib/trace.mjs";
 import { collectSignals, proposeChanges, writeProposals, applyProposal, unifiedDiff, readAppliedLedger, PROPOSAL_LEDGER_RELPATH, LEARN_STATE_RELPATH, readGate } from "../lib/learn.mjs";
 
 // Deterministic proposals from the outcomes/lessons store and the run trace (card learn-signals): log-then-
@@ -165,6 +166,24 @@ describe("collectSignals", () => {
     expect(byIds).toContainEqual([a.id, b.id].sort());
     expect(signals.lessons.repeated.find((r) => r.ids.includes(solo.id))).toMatchObject({ ids: [solo.id], count: 3, kind: "pattern" });
     expect(signals.lessons.repeated.find((r) => r.ids.includes("nope"))).toBeUndefined();
+  });
+
+  it("T10 (card trace-redact-secrets) denials of two different GitHub tokens group into one redacted row with count 2", () => {
+    const dir = tempProject();
+    const tokA = "ghp_" + "aB3dE5gH7jK9mN1pQ3sT5vX7zA9cE1gI3kM5";
+    const tokB = "ghp_" + "zY8xW6vU4tS2rQ0pO8nM6lK4jI2hG0fE8dC6";
+    const denied = (id, tok) => traceLine({ hook_event_name: "PermissionDenied", session_id: "s1", tool_name: "Bash", tool_use_id: id, tool_input: { command: "git push https://x:" + tok + "@github.com/o/r.git" } });
+    writeTrace(dir, "s1.jsonl", [
+      denied("d1", tokA),
+      denied("d2", tokB),
+      { event: "PreToolUse", session: "s1", tool: "Bash", toolUseId: "inflight", detail: "pnpm test" }, // last line: in flight
+    ]);
+    const m = openMemory(dir);
+    const signals = collectSignals(m, { dir });
+    m.close();
+    expect(signals.trace.denials).toHaveLength(1);
+    expect(signals.trace.denials[0]).toMatchObject({ tool: "Bash", detail: "[redacted: githubToken]", count: 2 });
+    expect(JSON.stringify(signals)).not.toContain(tokA.slice(0, 12));
   });
 
   it("splits denials (PermissionDenied only) from unmatched (Pre/Post gaps), excluding Agent/AskUserQuestion/Skill and the file's last line, skills invoked, and InstructionsLoaded grouped with its reasons", () => {
@@ -333,7 +352,7 @@ describe("proposeChanges", () => {
     const busySignals = { outcomes: { rows: [] }, lessons: { repeated: [] }, trace: { files: [], denials: [], skills: [{ skill: "doug-next", count: 9 }] } };
     const longDescription = "x".repeat(401);
     const proposals = proposeChanges(busySignals, { dir: "/nope", claudeMd: CLAUDE_MD, config: {}, skills: [{ name: "quiet-skill", description: longDescription }] });
-    expect(proposals).toEqual([{ id: "01", kind: "tighten", target: "plugins/doug-flow/skills/quiet-skill/SKILL.md", reason: expect.stringContaining("invoked 0 times"), evidence: expect.objectContaining({ descriptionLength: 401 }), diff: null }]);
+    expect(proposals).toEqual([{ id: "01", kind: "tighten", target: "skills/quiet-skill/SKILL.md", reason: expect.stringContaining("invoked 0 times"), evidence: expect.objectContaining({ descriptionLength: 401 }), diff: null }]);
 
     const shortDescription = proposeChanges(busySignals, { dir: "/nope", claudeMd: CLAUDE_MD, config: {}, skills: [{ name: "quiet-skill", description: "short" }] });
     expect(shortDescription).toEqual([]);
@@ -361,7 +380,7 @@ describe("proposeChanges", () => {
     expect(outside[0].target).toBe("/elsewhere/skills/quiet-skill/SKILL.md");
 
     const noFile = proposeChanges(busySignals, { dir, claudeMd: CLAUDE_MD, config: {}, skills: [{ name: "quiet-skill", description: longDescription }] });
-    expect(noFile[0].target).toBe("plugins/doug-flow/skills/quiet-skill/SKILL.md");
+    expect(noFile[0].target).toBe("skills/quiet-skill/SKILL.md");
   });
 
   it("returns [] with no signals at all", () => {

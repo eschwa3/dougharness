@@ -31,7 +31,7 @@ All commands run from the repo root. Iterate on a single test file. The gate is 
 - If a hook blocks an action, do not work around it. Report it. Scratch files go under `.doug/.state/scratch`; protect-paths keeps refusing the Claude Code session scratchpad, which is outside the project.
 - While `.doug/plan.json` is approved, change only files its tasks own. The stop gate blocks anything else; widen the plan and have it re-approved instead.
 - Do not add `Co-Authored-By` or `Claude-Session` trailers to commit messages.
-- Two tracks: harness work in the plugins, packages/doug-codex, and evals is a hand-track card, built directly on main via /core-next. Product features run through /doug-next.
+- Two tracks: a card's track is picked by size and risk (docs/board.md `track`); `/doug-next <id>` routes a hand card to doug-hand. In this repo a hand card follows `.claude/skills/harness-fix/SKILL.md`.
 - Be terse: use the fewest words and tokens that carry the point. No preamble, no recap, no restating the question.
 
 ## Gotchas
@@ -57,4 +57,4 @@ Which model does which work when a Doug plan runs. `inherit` = the session model
 | integrate | sonnet  | medium  |
 | cheap     | haiku   | medium  |
 
-The `lead` and `worker` rows are the swarm's (a plan with `swarm` on): the lead splits a task into worker briefs and merges them. The adversary runs on Codex via `codex-review`, relayed unchanged by a haiku agent. When Codex cannot run, the workflow falls back to `adversary-claude` on the plan's `adversary.fallback` (default Opus, high). Details: docs/worker-contract.md. The `plan` row is the planner's and the research step's researchers'. The rows route work by type on both tracks: the session model is the lead only (it briefs, gates, and records) and never does implement, verify, or review work itself: implement work runs on the `implement` row, review on the `review` row, a swarm's workers on the `worker` row; `/core-next` spawns those through the Agent tool, and the workflow does the same in the flow.
+The `lead` and `worker` rows are the swarm's (a plan with `swarm` on): the lead splits a task into worker briefs and merges them. The adversary runs on Codex via `codex-review`, relayed unchanged by a haiku agent. When Codex cannot run, the workflow falls back to `adversary-claude` on the plan's `adversary.fallback` (default Opus, high). Details: docs/worker-contract.md. The `plan` row is the planner's and the research step's researchers'. The rows route work by type on both tracks: the session model is the lead only (it briefs, gates, and records) and never does implement, verify, or review work itself: implement work runs on the `implement` row, review on the `review` row, a swarm's workers on the `worker` row; `doug-hand` spawns those through the Agent tool, and the workflow does the same in the flow.

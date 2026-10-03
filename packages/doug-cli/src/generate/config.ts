@@ -21,7 +21,14 @@ export interface DougConfig {
   // Card no-nested-agents-gate: Claude Code's per-project subagent nesting depth
   // (https://code.claude.com/docs/en/sub-agents.md). 1 = subagents cannot spawn subagents (the rule: only
   // the session lead orchestrates agents); null = leave the setting alone. No hook reads this key.
-  subagents: { maxSpawnDepth: number | null };
+  // Card init-workflow-settings: promptCacheTtl maps to the top-level subagentPromptCacheTtl setting
+  // ("5m" | "1h"); null = leave alone.
+  // maxConcurrentWorkflowAgents maps to env CLAUDE_CODE_WORKFLOW_MAX_CONCURRENT_AGENTS (1-256); null = leave alone.
+  subagents: {
+    maxSpawnDepth: number | null;
+    promptCacheTtl?: string | null;
+    maxConcurrentWorkflowAgents?: number | null;
+  };
 }
 
 export function generateConfig(d: Detection): DougConfig {
@@ -143,6 +150,6 @@ export function generateConfig(d: Detection): DougConfig {
     checkpoint: { enabled: false, mode: "commit" },
     budget: { maxTurns: null },
     anchor,
-    subagents: { maxSpawnDepth: 1 },
+    subagents: { maxSpawnDepth: 1, promptCacheTtl: "1h", maxConcurrentWorkflowAgents: 4 },
   };
 }

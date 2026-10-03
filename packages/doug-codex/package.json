@@ -1,6 +1,6 @@
 {
   "name": "@dougharness/codex",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "codex-review: Codex CLI as an adversarial reviewer. Spec in, diff plus evidence out, structured JSON with real exit statuses.",
   "type": "module",
   "license": "MIT",

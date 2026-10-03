@@ -217,7 +217,7 @@ describe("doug board next", () => {
     ]);
     const r = await run(["next", dir]);
     expect(r.code).toBe(0);
-    expect(r.stderr).toBe("skipping blocked: waiting on later\nskipping byhand: hand track (built by hand with /core-next, not by doug-next)\n");
+    expect(r.stderr).toBe("skipping blocked: waiting on later\nskipping byhand: hand track (a by-hand card; /doug-next byhand takes it)\n");
     expect(JSON.parse(r.stdout)).toEqual({ id: "go", column: "ready", title: "Go", deps: ["d"], goal: "g" });
   });
   it("--batch <n> prints the first n runnable Ready cards as an array and refuses a bad n", async () => {
@@ -662,7 +662,9 @@ describe("doug board record", () => {
     expect(r.stdout).toBe(`Appended a hand-track entry for h to ${file}.\n`);
     const md = readFileSync(file, "utf8");
     expect(md).toContain("h: Hand card");
-    expect(md).toContain("Built by hand through /core-next from card `h` in `.doug/board.json` (hand track, decision 0005); no workflow run.");
+    expect(md).toContain("Built by hand through doug-hand from card `h` in `.doug/board.json` (hand track: a gated by-hand change); no workflow run.");
+    expect(md).not.toContain("/core-next");
+    expect(md).not.toContain("decision 0005");
     expect(md).toContain("| Commit | `abc123` |");
     expect(md).toContain("| Gate | typecheck 0; unit 380 passed |");
     expect(md).toContain("\none line\n");
@@ -766,6 +768,31 @@ describe("doug board record and board.mjs record agree on the promotion step (ca
     expect(cli.code, cli.stderr).toBe(0);
     expect(cli.stdout).not.toContain("undefined: not green");
     expect(cli.stdout).toBe(plugin.stdout);
+  });
+
+  it('summary and record print a stopped task\'s class and match the plugin CLI byte for byte (card flow-stop-class)', async () => {
+    const stopped = { plan: "p", integrationBranch: "doug/p", ok: false, stoppedAtLevel: 0, levels: [{ index: 0, integration: { ok: true }, tasks: [{ id: "a", implemented: true, verified: false, reviewed: false, adversary: null, attempts: [{ pass: 1 }], stopReason: "over budget", stopClass: "budget" }] }] };
+    const dirA = fresh(); // driven by the plugin script
+    const dirB = fresh(); // driven by the CLI, in-process
+    for (const dir of [dirA, dirB]) {
+      writeBoard(dir, [{ id: "x", column: "done", title: "X card", deps: [], goal: "g" }]);
+      writeFileSync(join(dir, "report.json"), JSON.stringify(stopped));
+    }
+    const flags = ["--wall", "12m", "--commit", "abc123", "--cost", "2"];
+    const plugin = runPlugin(["summary", join(dirA, "report.json"), ...flags], dirA);
+    expect(plugin.status, plugin.stderr).toBe(0);
+    const cli = await run(["summary", join(dirB, "report.json"), ...flags]);
+    expect(cli.code, cli.stderr).toBe(0);
+    expect(cli.stdout).toContain('Stopped: a [budget]: "over budget"');
+    expect(cli.stdout).toBe(plugin.stdout);
+
+    const pluginRec = runPlugin(["record", "x", join(dirA, "report.json"), dirA, ...flags], dirA);
+    expect(pluginRec.status, pluginRec.stderr).toBe(0);
+    const cliRec = await run(["record", "x", join(dirB, "report.json"), dirB, ...flags]);
+    expect(cliRec.code, cliRec.stderr).toBe(0);
+    const md = readFileSync(join(dirB, "docs/live-runs.md"), "utf8");
+    expect(md).toContain('\nStopped: a [budget]: "over budget"\n');
+    expect(md).toBe(readFileSync(join(dirA, "docs/live-runs.md"), "utf8"));
   });
 });
 

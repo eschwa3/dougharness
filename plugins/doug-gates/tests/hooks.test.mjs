@@ -7473,3 +7473,25 @@ describe("stop-gate reuses its last red on an unchanged tree (card stop-gate-no-
     expect(r2.json.systemMessage).toContain("tests red by design: tests/a.test.mjs");
   });
 });
+
+// card trace-redact-secrets (T9): the trace script passes the project's secrets config to the line builder.
+// The token is built by concatenation so this file never holds a whole token.
+describe("trace script redaction (card trace-redact-secrets)", () => {
+  const GH = "ghp_" + "aB3dE5gH7jK9mN1pQ3sT5vX7zA9cE1gI3kM5";
+  const input = { hook_event_name: "PreToolUse", tool_name: "Bash", tool_use_id: "tu1", tool_input: { command: "echo " + GH } };
+  const lines = (dir) =>
+    readFileSync(join(dir, ".doug/.state/trace/test-session.jsonl"), "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l));
+
+  it("T9 default config writes the token redacted; a config disabling githubToken writes it unredacted", () => {
+    const def = makeProject({ config: { trace: { enabled: true } }, git: true });
+    runHookScript("trace", input, { dir: def });
+    const [l1] = lines(def);
+    expect(l1.detail).toBe("[redacted: githubToken]");
+    expect(readFileSync(join(def, ".doug/.state/trace/test-session.jsonl"), "utf8")).not.toContain(GH.slice(0, 12));
+
+    const off = makeProject({ config: { trace: { enabled: true }, secrets: { rules: { githubToken: false } } }, git: true });
+    runHookScript("trace", input, { dir: off });
+    const [l2] = lines(off);
+    expect(l2.detail).toContain(GH);
+  });
+});

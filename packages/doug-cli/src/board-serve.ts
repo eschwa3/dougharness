@@ -27,7 +27,9 @@ interface EventClient {
 
 // Watches the directory of the board record (it is replaced by rename, so a file-inode watch would
 // miss the change) and calls onChange, debounced, whenever the record's own basename is touched.
-// Falls back to polling the record file when fs.watch is unavailable or errors.
+// Also polls the record file alongside fs.watch, because fs.watch can drop a change under load; a
+// repeated trigger is harmless since onRecordChange skips a board the client already has. When
+// fs.watch is unavailable or errors, the poll carries on alone.
 function watchRecord(dir: string, mode: "fs" | "poll", onChange: () => void): { stop(): void } {
   const record = boardPath(dir);
   const recordDir = dirname(record);
@@ -44,9 +46,14 @@ function watchRecord(dir: string, mode: "fs" | "poll", onChange: () => void): { 
   let watcher: FSWatcher | null = null;
   let polling = false;
 
-  const startPolling = (): void => {
+  const startBackstop = (): void => {
     if (polling) return;
     polling = true;
+    watchFile(record, { interval: POLL_INTERVAL_MS }, () => trigger());
+  };
+
+  const startPolling = (): void => {
+    startBackstop();
     if (watcher) {
       try {
         watcher.close();
@@ -55,7 +62,6 @@ function watchRecord(dir: string, mode: "fs" | "poll", onChange: () => void): { 
       }
       watcher = null;
     }
-    watchFile(record, { interval: POLL_INTERVAL_MS }, () => trigger());
   };
 
   if (mode === "poll") {
@@ -67,6 +73,7 @@ function watchRecord(dir: string, mode: "fs" | "poll", onChange: () => void): { 
         trigger();
       });
       watcher.on("error", startPolling);
+      startBackstop();
     } catch {
       startPolling();
     }

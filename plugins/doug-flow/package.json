@@ -1,6 +1,6 @@
 {
   "name": "@dougharness/flow",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "private": true,
   "description": "Plan, approve, implement one task per worktree, verify, review: a Workflow-tool template and subagents for Claude Code.",
   "type": "module",

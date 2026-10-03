@@ -1,6 +1,6 @@
 ---
 name: research
-description: The research step before a plan, for a card whose goal depends on facts outside the repository (a Claude Code hook contract, a CLI's output format, a third-party API). One researcher, or several in parallel with distinct questions, write one cited note the planner and the builder work from; uncertainty is stated, never guessed. Invoked by /core-next, /doug-plan, and /doug-next before planning, or on its own.
+description: The research step before a plan, for a card whose goal depends on facts outside the repository (a Claude Code hook contract, a CLI's output format, a third-party API). One researcher, or several in parallel with distinct questions, write one cited note the planner and the builder work from; uncertainty is stated, never guessed. Invoked by /doug-next, doug-hand, and /doug-plan before planning, or on its own.
 allowed-tools: Agent, Read, Write, Bash(mkdir *), Bash(cat *), Bash(node *plan.mjs *)
 ---
 
@@ -31,11 +31,13 @@ Write the findings to `.doug/.state/research/<card-id>.md` (session state, ignor
 - the sources: a URL, a file path with a line, or a command and its output, one per fact;
 - what stayed unverified, marked `unverified`, with what was tried. Never guess a fact into the note; an unverified line is what keeps the planner from building on it.
 
+A fact the design depends on is marked verified only when it is quoted verbatim from the raw source with its line number, fetched and searched (for example `curl -sL <url>` then `grep -n`) by the plugin's researcher agent or by a claude-code-guide asked for exact quotes; a guide answer that paraphrases, or cannot give the line, stays `unverified` in the note. The confirming fetch counts against the same research.maxFetches budget. On 2026-10-01 a guide answer quoted a sentence the raw sub-agents page does not contain, and only the grep caught it.
+
 The note is written under the card's id, not the question's, because the id is also the promotion key: a note for a card that lands is promoted to `docs/research/<card-id>.md`, `board.mjs record` copying it there when it records the landing so a commit that cites the note has something to read afterward. A note for a card that never lands (dropped, replanned under another id) stays in state and is eventually swept with the rest of `.doug/.state/`.
 
 Then hand it on:
 
 - Flow track (`/doug-plan`, `/doug-next`): give the planner the note's path in its prompt. The planner writes the facts it relied on into the plan's goal with their sources and marks any unverified one.
-- Hand track (`/core-next`): the builder reads the note before the test, cites the sources in the commit message where a fact decided the design, and names the note in the landing's `--note`.
+- Hand track (doug-hand): the builder reads the note before the test, cites the sources in the commit message where a fact decided the design, and names the note in the landing's `--note`.
 
 The step spends agents only when invoked and publishes nothing.

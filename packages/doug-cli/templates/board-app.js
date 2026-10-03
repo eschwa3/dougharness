@@ -56,8 +56,8 @@ function cardHtml(c, columns) {
   const deps = (c.deps || []).length ? `<div class="meta">after <code>${c.deps.map(esc).join("</code> <code>")}</code></div>` : "";
   const opts = columns.map((col) => `<option value="${col.id}"${col.id === c.column ? " selected" : ""}>${esc(col.title)}</option>`).join("");
   const chip = c.component ? `<span class="chip" style="color:var(--c-${esc(c.component)})">${esc(c.component)}</span>` : "";
-  // A hand-track card is built in the checkout, never by /doug-next (decision 0005); the chip says so at a glance.
-  const hand = c.track === "hand" ? `<span class="chip hand" title="hand track: built in the checkout, not by /doug-next">by hand</span>` : "";
+  // A hand-track card is a gated by-hand change; the chip says so at a glance.
+  const hand = c.track === "hand" ? `<span class="chip hand" title="hand track: a gated by-hand change">by hand</span>` : "";
   const tags = c.tags && c.tags.length ? c.tags.map((t) => `<span class="chip tag">${esc(t)}</span>`).join("") : "";
   const cls = c.class ? `<span class="chip class" title="class">${esc(c.class)}</span>` : "";
   const compAttr = c.component ? ` data-component="${esc(c.component)}"` : "";

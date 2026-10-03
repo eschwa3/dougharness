@@ -5,7 +5,7 @@ import type { FileChange } from "../diff.js";
 import { generateConfig, type DougConfig } from "./config.js";
 import { generateClaudeMd } from "./claude-md.js";
 import { mergeSettings, gatesSourceDir } from "./settings.js";
-import { generateAgents, isDougAgent, spliceProjectNotes } from "./agents.js";
+import { generateAgents, isDougAgent, spliceProjectNotes, spliceSkills } from "./agents.js";
 import { generateSkills, isDougSkill } from "./skills.js";
 import { newBoard, BOARD_RELPATH, FALLBACK_RELPATH } from "@dougharness/flow/lib/board.mjs";
 
@@ -111,12 +111,12 @@ export function buildProposal(d: Detection): Proposal {
     if (existing !== null && !isDougAgent(existing)) {
       notes.push(`${file.path} exists and was not written by doug init; left untouched. Add \`doug: generated\` to the frontmatter to let doug init refresh it.`);
     } else {
-      const after = existing !== null ? spliceProjectNotes(file.content, existing) : file.content;
+      const after = existing !== null ? spliceSkills(spliceProjectNotes(file.content, existing), existing) : file.content;
       changes.push({
         path: file.path,
         before: existing,
         after,
-        reason: `Project subagent for the ${file.path.replace(/^.*\//, "").replace(/\.md$/, "")} role; carries only detected commands. Remove \`doug: generated\` from the frontmatter to stop doug init from refreshing it; the \`## Project notes\` section is yours and survives a refresh.`,
+        reason: `Project subagent for the ${file.path.replace(/^.*\//, "").replace(/\.md$/, "")} role; carries only detected commands. Remove \`doug: generated\` from the frontmatter to stop doug init from refreshing it; the \`## Project notes\` section and the \`skills:\` block are yours and survive a refresh.`,
       });
     }
   }

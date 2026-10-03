@@ -2,14 +2,14 @@
 // spawns claude without --spend and a --card (proven with a fake claude and a marker file), the per-stage
 // estimate table, the pure stream assertions on captured stream-json shapes (research §2), real fixture setup
 // (the suite's own setup commands run, so node_modules exists on a fresh checkout), the hand scenario's build
-// assertion against /core-next's real commit order, error handling around a claude binary that cannot run, the
+// assertion against doug-hand's real commit order, error handling around a claude binary that cannot run, the
 // per-stage spend cap, and recording that always goes through the board.mjs CLI. Never spawns the real claude
 // binary; every fixture and temp directory this file creates is removed in afterAll.
 import { describe, it, expect, afterAll } from "vitest";
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, chmodSync, rmSync, existsSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, chmodSync, rmSync, existsSync, readdirSync } from "node:fs";
 import { spawnSync, execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, relative } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import {
   ESTIMATES,
@@ -18,6 +18,12 @@ import {
   BOARD_MJS,
   RESULTS_FILE,
   ROOT,
+  PLUGIN_DIR,
+  FIXTURE_DIR,
+  TASKS_FILE,
+  HELDOUT_FILE,
+  PLAN_MJS,
+  MEMORY_MJS,
   estimateLines,
   scenarioTotal,
   capFor,
@@ -45,8 +51,8 @@ import {
   archiveEvidence,
   cleanEnv,
   dirtyOutsideDoug,
-} from "../lib/rehearse.mjs";
-import { newBoard, addCard, saveBoard, runEntry, BOARD_RELPATH } from "../lib/board.mjs";
+} from "../scripts/rehearse-lib.mjs";
+import { newBoard, addCard, saveBoard, runEntry, BOARD_RELPATH } from "../plugins/doug-flow/lib/board.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const cli = join(here, "..", "scripts", "rehearse.mjs");
@@ -86,7 +92,7 @@ function makeFakeClaude(streamText = "", { marker = null, argvFile = null } = {}
   return bin;
 }
 
-function cannedStream({ plugins = ["doug-flow"], commands = ["doug-flow:core-next"], cost = 0.01 } = {}) {
+function cannedStream({ plugins = ["doug-flow"], commands = ["doug-flow:doug-next"], cost = 0.01 } = {}) {
   const init = { type: "system", subtype: "init", plugins: plugins.map((name) => ({ name, path: "/x", source: `${name}@inline` })), slash_commands: commands };
   const result = { type: "result", total_cost_usd: cost, num_turns: 1 };
   return `${JSON.stringify(init)}\n${JSON.stringify(result)}\n`;
@@ -227,7 +233,7 @@ describe("parseArgs", () => {
 
 describe("stream assertions read the exact stream-json shapes (research §2)", () => {
   it("pluginsLoaded and slashCommandPresent read the init event", () => {
-    const stream = cannedStream({ plugins: ["doug-flow"], commands: ["doug-flow:doug-next", "doug-flow:core-next"] });
+    const stream = cannedStream({ plugins: ["doug-flow"], commands: ["doug-flow:doug-next", "doug-flow:doug-hand"] });
     expect(pluginsLoaded(stream, ["doug-flow"])).toBe(true);
     expect(pluginsLoaded(stream, ["doug-flow", "other-plugin"])).toBe(false);
     expect(slashCommandPresent(stream, "doug-flow:doug-next")).toBe(true);
@@ -488,7 +494,7 @@ describe("runStage and runSessionStage error handling (review #5)", () => {
     const bin = makeFakeClaude(cannedStream(), { argvFile });
     const cap = capFor("hand", "gate");
     expect(cap).toBeCloseTo(0.75, 5);
-    runStage({ dir, prompt: "/core-next fix-hours", maxTurns: 12, stage: "gate", capUsd: cap, claudeBin: bin });
+    runStage({ dir, prompt: "/doug-next fix-hours", maxTurns: 12, stage: "gate", capUsd: cap, claudeBin: bin });
     const argv = JSON.parse(readFileSync(argvFile, "utf8"));
     const i = argv.indexOf("--max-budget-usd");
     expect(i).toBeGreaterThan(-1);
@@ -498,7 +504,7 @@ describe("runStage and runSessionStage error handling (review #5)", () => {
     const dir = trackedTempDir("rehearse-artifact-lockout-");
     const argvFile = join(dir, "argv.json");
     const bin = makeFakeClaude(cannedStream(), { argvFile });
-    runStage({ dir, prompt: "/core-next fix-hours", maxTurns: 12, stage: "gate", claudeBin: bin });
+    runStage({ dir, prompt: "/doug-next fix-hours", maxTurns: 12, stage: "gate", claudeBin: bin });
     const argv = JSON.parse(readFileSync(argvFile, "utf8"));
     const i = argv.indexOf("--disallowedTools");
     expect(i).toBeGreaterThan(-1);
@@ -532,8 +538,8 @@ describe("archiveEvidence (item rehearsal-first-live-findings #2): a passed run'
 });
 
 describe("prepareFixture's setup spawn uses commandEnv (card land-force-color-enables-color)", () => {
-  it("source pin: the setup loop passes commandEnv(cleanEnv()) as env, and lib/rehearse.mjs contains no FORCE_COLOR", () => {
-    const source = readFileSync(join(here, "..", "lib", "rehearse.mjs"), "utf8");
+  it("source pin: the setup loop passes commandEnv(cleanEnv()) as env, and scripts/rehearse-lib.mjs contains no FORCE_COLOR", () => {
+    const source = readFileSync(join(here, "..", "scripts", "rehearse-lib.mjs"), "utf8");
     expect(source).toContain("env: commandEnv(cleanEnv())");
     expect(source).not.toContain("FORCE_COLOR");
   });
@@ -610,24 +616,24 @@ describe("a prepared fixture's Models table is the one doug init generates, uned
 
 describe("rehearse.mjs source no longer defines withWorkerRow (card rehearse-worker-row-noop)", () => {
   it("source pin: the file contains no withWorkerRow (the fixture-time helper this card removes)", () => {
-    const source = readFileSync(join(here, "..", "lib", "rehearse.mjs"), "utf8");
+    const source = readFileSync(join(here, "..", "scripts", "rehearse-lib.mjs"), "utf8");
     expect(source).not.toContain("withWorkerRow");
   });
 });
 
 describe("one dry pass of the hand scenario's gate stage", () => {
-  it.skipIf(!existsSync(CLI))("a fake claude naming doug-flow and doug-flow:core-next passes the gate stage's assertions; one lacking doug-flow fails naming it, and does nothing to the fixture", () => {
+  it.skipIf(!existsSync(CLI))("a fake claude naming doug-flow and doug-flow:doug-next passes the gate stage's assertions; one lacking doug-flow fails naming it, and does nothing to the fixture", () => {
     const { dir, card } = prepareFixture({ scenario: "hand", tempPrefix: TEST_PREFIX });
     tempDirs.push(dir);
     const gate = SCENARIO_STAGES.hand[0];
     expect(gate.name).toBe("gate");
 
-    const goodBin = makeFakeClaude(cannedStream({ plugins: ["doug-flow"], commands: ["doug-flow:core-next"] }));
+    const goodBin = makeFakeClaude(cannedStream({ plugins: ["doug-flow"], commands: ["doug-flow:doug-next"] }));
     const good = runSessionStage(gate, { dir, card, claudeBin: goodBin });
     expect(good.ok, good.message).toBe(true);
     expect(existsSync(good.streamPath)).toBe(true);
 
-    const badBin = makeFakeClaude(cannedStream({ plugins: ["some-other-plugin"], commands: ["doug-flow:core-next"] }));
+    const badBin = makeFakeClaude(cannedStream({ plugins: ["some-other-plugin"], commands: ["doug-flow:doug-next"] }));
     const bad = runSessionStage(gate, { dir, card, claudeBin: badBin });
     expect(bad.ok).toBe(false);
     expect(bad.message).toContain("doug-flow");
@@ -703,7 +709,7 @@ describe("one dry pass of the flow scenario's gate stage (item rehearsal-first-l
 });
 
 // The bug parseDuration ships with (hours computed as minutes) and its one-line fix, plus a test for it, used
-// below to simulate what /core-next's coder does (both owned files, one commit) so the held-out test can pass.
+// below to simulate what doug-hand's coder does (both owned files, one commit) so the held-out test can pass.
 function fixDurationBug(dir) {
   const srcPath = join(dir, "src/duration.ts");
   writeFileSync(srcPath, readFileSync(srcPath, "utf8").replace('return n * 60_000; // bug: should be 3_600_000', "return n * 3_600_000;"));
@@ -735,7 +741,7 @@ function makeHandScenarioFake() {
     "  execFileSync('git', ['add', '-A']);",
     "  execFileSync('git', ['commit', '-q', '-m', 'Board: fix-hours done as ' + codeCommit.slice(0, 7)]);",
     "}",
-    `process.stdout.write(${JSON.stringify(cannedStream({ plugins: ["doug-flow"], commands: ["doug-flow:core-next"] }))});`,
+    `process.stdout.write(${JSON.stringify(cannedStream({ plugins: ["doug-flow"], commands: ["doug-flow:doug-next"] }))});`,
     "process.exit(0);",
   ].join("\n");
   writeFileSync(bin, script);
@@ -783,9 +789,9 @@ describe("scripts/rehearse.mjs: an evidence-archive failure does not abort the r
   );
 });
 
-describe("assertHandBuilt against /core-next's real commit order (review #1, blocker)", () => {
+describe("assertHandBuilt against doug-hand's real commit order (review #1, blocker)", () => {
   it.skipIf(!existsSync(CLI))(
-    "passes when the code commit precedes the board's own 'done' commit (as /core-next step 4.3 leaves it), and fails when the board's source names a different sha",
+    "passes when the code commit precedes the board's own 'done' commit (as doug-hand step 4.3 leaves it), and fails when the board's source names a different sha",
     () => {
       const { dir, baseline } = prepareFixture({ scenario: "hand", tempPrefix: TEST_PREFIX });
       tempDirs.push(dir);
@@ -796,7 +802,7 @@ describe("assertHandBuilt against /core-next's real commit order (review #1, blo
       const codeCommit = git(dir, "rev-parse", "HEAD");
       expect(codeCommit).not.toBe(baseline);
 
-      // Exactly /core-next step 4: record the hand landing (writes docs/live-runs.md), move the card to done
+      // Exactly doug-hand step 4: record the hand landing (writes docs/live-runs.md), move the card to done
       // with the code commit as its source, then commit both as one "board" commit — AFTER the code commit.
       const record = spawnScript(BOARD_MJS, ["record", "fix-hours", "--hand", "--commit", codeCommit, "--gate", "typecheck 0; unit 3 passed", dir]);
       expect(record.status, record.stderr).toBe(0);
@@ -909,7 +915,7 @@ describe("recording always goes through the board.mjs CLI (review #3)", () => {
     recordHandOutcome(tempRepo, "fix-hours", { commit: "47fe70cca7eb3444ae8a382ee14018f3950bfe1c", wallClock: "3 min", gate: "unit 5 passed", rehearsal: "hand" });
     const handText = readFileSync(join(tempRepo, "docs/live-runs.md"), "utf8");
     expect(handText).toContain("Rehearsal hand for card `fix-hours` on the ts-basic fixture");
-    expect(handText).not.toContain("Built by hand through /core-next");
+    expect(handText).not.toContain("Built by hand through doug-hand");
     expect(handText).toContain("| Commit | `47fe70c` |");
 
     const tempRepo2 = tempRepoWithCard();
@@ -957,12 +963,40 @@ describe("readReport", () => {
 });
 
 describe("harness-fix names this test file, which exists (card workflow-rehearsal)", () => {
-  it("the skill's table and rule 8 both reference rehearse.mjs and rehearse.test.mjs", () => {
-    const root = join(here, "..");
-    const fix = readFileSync(join(root, "skills/harness-fix/SKILL.md"), "utf8");
-    expect(fix).toContain("plugins/doug-flow/tests/rehearse.test.mjs");
-    expect(fix).toContain("rehearse.mjs <flow|swarm|hand> --card <id> --spend");
-    expect(existsSync(join(root, "tests/rehearse.test.mjs"))).toBe(true);
+  it("the skill's table and rule 8 both reference rehearse.mjs and rehearse.test.mjs at their root paths (card op-rehearse-local)", () => {
+    const repo = join(here, "..");
+    const fix = readFileSync(join(repo, ".claude/skills/harness-fix/SKILL.md"), "utf8");
+    expect(fix).toContain("| `tests/rehearse.test.mjs` |");
+    expect(fix).toContain("`scripts/rehearse.mjs`, `scripts/rehearse-lib.mjs`");
+    expect(fix).toContain("node scripts/rehearse.mjs <flow|swarm|hand> --card <id> --spend");
+    expect(fix).not.toContain("plugins/doug-flow/tests/rehearse.test.mjs");
+    expect(fix).not.toContain("plugins/doug-flow/scripts/rehearse.mjs");
+    expect(existsSync(join(repo, "tests/rehearse.test.mjs"))).toBe(true);
+  });
+});
+
+describe("the rehearsal runner lives at the repository root (card op-rehearse-local)", () => {
+  it("ROOT is the repository root, and every ROOT-relative constant (except the unbuilt CLI) exists on disk", () => {
+    expect(JSON.parse(readFileSync(join(ROOT, "package.json"), "utf8")).name).toBe("dougharness");
+    expect(existsSync(join(ROOT, "pnpm-workspace.yaml"))).toBe(true);
+    expect(ROOT).toBe(join(here, ".."));
+    expect(PLUGIN_DIR).toBe(join(ROOT, "plugins/doug-flow"));
+    for (const [name, path] of Object.entries({ PLUGIN_DIR, FIXTURE_DIR, TASKS_FILE, HELDOUT_FILE, PLAN_MJS, BOARD_MJS, MEMORY_MJS })) {
+      expect(existsSync(path), `${name} = ${path}`).toBe(true);
+    }
+  });
+  it("nothing named rehearse remains under plugins/doug-flow", () => {
+    const found = [];
+    const walk = (dir) => {
+      for (const e of readdirSync(dir, { withFileTypes: true })) {
+        if (e.name === "node_modules") continue;
+        const full = join(dir, e.name);
+        if (e.name.includes("rehearse")) found.push(relative(ROOT, full));
+        if (e.isDirectory()) walk(full);
+      }
+    };
+    walk(join(ROOT, "plugins/doug-flow"));
+    expect(found).toEqual([]);
   });
 });
 
@@ -1088,6 +1122,21 @@ describe("T4 (R3): the hand build prompt stops before step 5 (follow-up cards), 
     expect(prompt).toContain("I answered Start");
     expect(prompt).toContain("Do not invoke the doug-board skill at any step: this checkout publishes nothing.");
     expect(prompt).not.toContain("stop at step 6");
+  });
+  // card op-core-next-general (ADR 0005 amendment 2026-10-01): the user types /doug-next; /core-next is retired
+  // and doug-hand is the skill /doug-next hands a hand-track card to.
+  it("the hand scenario's gate and build prompts start with /doug-next fix-hours; the build prompt names the doug-hand skill's steps 3 and 4 and never core-next", () => {
+    const gate = SCENARIO_STAGES.hand[0];
+    expect(gate.name).toBe("gate");
+    expect(gate.prompt({ card: { id: "fix-hours" } })).toBe("/doug-next fix-hours");
+    const build = SCENARIO_STAGES.hand[2];
+    const prompt = build.prompt({ card: { id: "fix-hours" } });
+    expect(prompt.startsWith("/doug-next fix-hours")).toBe(true);
+    expect(prompt).toContain("the doug-hand skill's steps 3 and 4, then stop before step 5");
+    expect(prompt).toContain("I answered Start");
+    expect(prompt).toContain("Do not invoke the doug-board skill at any step: this checkout publishes nothing.");
+    expect(prompt).not.toContain("core-next");
+    expect(gate.prompt({ card: { id: "fix-hours" } })).not.toContain("core-next");
   });
 });
 

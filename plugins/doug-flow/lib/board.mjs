@@ -18,6 +18,29 @@ export const DONE = "done";
 export const SIZES = ["S", "M", "L"];
 export const TRACKS = ["flow", "hand"];
 export const CLASSES = ["tests-only", "prose", "gate-script", "code", "docs", "eval", "decision"];
+// Why a task stopped, as a closed set: every halt site in the doug-implement workflow sets one beside its prose
+// stopReason. The workflow carries its own literal copy (it may not import); a template test keeps them equal.
+export const STOP_CLASSES = [
+  "implementer-blocked",
+  "partial",
+  "stage-missing",
+  "spec-contradiction",
+  "environment",
+  "adversary-not-run",
+  "outside-owned",
+  "new-blockers-twice",
+  "fix-attempts-exhausted",
+  "stalled",
+  "budget",
+  "no-new-commit",
+  "dependency-skipped",
+  "stage-threw",
+  "level-adversary",
+];
+// "<id> [<class>]: "<reason>"" for a stopped task; an old report has no class and prints "<id>: "<reason>"".
+function stopText(t) {
+  return `${t.id}${t.stopClass ? ` [${t.stopClass}]` : ""}: "${t.stopReason}"`;
+}
 export const DEFAULT_TAGS = ["bug", "feature", "chore", "docs", "refactor", "spike"];
 
 export const DEFAULT_COLUMNS = [
@@ -197,7 +220,7 @@ export function findCard(board, id) {
 // The first Ready card, in board order, whose dependencies are all Done. Ready cards that are waiting
 // on something are reported so the user can see why they were skipped.
 // The first Ready card on the given track whose deps are Done. A card on the hand track is built directly in the
-// checkout (tests, gate, commit) by /core-next, never by /doug-next; a flow card the other way round. A Ready card on
+// checkout (tests, gate, commit) through doug-hand, which /doug-next hands it to by id; a flow card the other way round. A Ready card on
 // the other track is skipped with hand: true or flow: true so the skill can say so. Decision 0005.
 // `tag`, when given, filters to Ready cards carrying it: a card without it is skipped SILENTLY (not pushed onto
 // `skipped`, since a caller-requested filter should not print a "skipping" line per card it filters out); a `tag`
@@ -588,7 +611,7 @@ export function runEntry({ card, report, cost = null, codexCost = null, wallCloc
   const batchNote = inBatch ? `, in one plan with ${listOthers(batch, card.id)} (one approval, one run, one landing)` : "";
   lines.push(
     rehearsal
-      ? `Rehearsal ${rehearsal} for card \`${card.id}\` on the ts-basic fixture (plugins/doug-flow/scripts/rehearse.mjs); the commit and gate below are the fixture's, not this repository's.`
+      ? `Rehearsal ${rehearsal} for card \`${card.id}\` on the ts-basic fixture (scripts/rehearse.mjs); the commit and gate below are the fixture's, not this repository's.`
       : `Ran through /doug-next on this repo from card \`${card.id}\`${record ? ` in \`${record}\`` : ""}${batchNote}. Plan "${report.plan}", integration branch \`${report.integrationBranch}\`${report.modelsSource ? `, models from ${report.modelsSource}` : ""}.`,
   );
   lines.push("");
@@ -634,6 +657,11 @@ export function runEntry({ card, report, cost = null, codexCost = null, wallCloc
     }
     lines.push(`| ${level.index} | integration | ${level.integration ? (level.integration.ok ? "ok" : "failed") : "not run"} | | | | ${describeTierCell({ implement: level.integrationModel })} | ${levelAdversaryCell(level.levelAdversary)} |`);
   }
+  const stopped = (report.levels || []).flatMap((l) => (l.tasks || []).filter((t) => t.stopReason));
+  if (stopped.length) {
+    lines.push("");
+    lines.push(`Stopped: ${stopped.map(stopText).join("; ")}`);
+  }
   if (blocks.length) {
     lines.push("");
     lines.push("Adversary blocks, classified (real: a defect a user would hit; marginal: true to the spec, no user impact; false: wrong):");
@@ -644,15 +672,15 @@ export function runEntry({ card, report, cost = null, codexCost = null, wallCloc
 }
 
 // The live-runs entry for a hand-track card (decision 0005): no workflow report and no levels, so it records what
-// /core-next can measure: the landing commit, the wall clock, and the gate result, plus an optional note.
+// doug-hand can measure: the landing commit, the wall clock, and the gate result, plus an optional note.
 export function handEntry({ card, commit = null, wallClock = null, gate = null, note = null, record = null, date = new Date().toISOString().slice(0, 10), rehearsal = null }) {
   const lines = [];
   lines.push(`## ${date}, ${card.id}: ${card.title}`);
   lines.push("");
   lines.push(
     rehearsal
-      ? `Rehearsal ${rehearsal} for card \`${card.id}\` on the ts-basic fixture (plugins/doug-flow/scripts/rehearse.mjs); the commit and gate below are the fixture's, not this repository's.`
-      : `Built by hand through /core-next from card \`${card.id}\`${record ? ` in \`${record}\`` : ""} (hand track, decision 0005); no workflow run.`,
+      ? `Rehearsal ${rehearsal} for card \`${card.id}\` on the ts-basic fixture (scripts/rehearse.mjs); the commit and gate below are the fixture's, not this repository's.`
+      : `Built by hand through doug-hand from card \`${card.id}\`${record ? ` in \`${record}\`` : ""} (hand track: a gated by-hand change); no workflow run.`,
   );
   lines.push("");
   lines.push("| Measure | Value |");
@@ -780,7 +808,7 @@ export function runSummary({ report, cost = null, codexCost = null, wallClock = 
         return `${t.id}: ${impl}, ${passes} pass${passes === 1 ? "" : "es"}, verify ${yesNo(t.verified)}, review ${yesNo(t.reviewed)}, adversary ${adv}`;
       }).join("; ")
     : "no tasks";
-  const stops = tasks.filter(({ task: t }) => t.stopReason).map(({ task: t }) => `${t.id}: "${t.stopReason}"`);
+  const stops = tasks.filter(({ task: t }) => t.stopReason).map(({ task: t }) => stopText(t));
   const { unmet, source, dirty } = acceptanceUnmet(report, tasks);
   const pause = pausedAt(report) ? `Paused at the human gate after level ${pausedAt(report).level}; next: ${listNext(report)}. Open it with plan.mjs gate open ${pausedAt(report).level} and resume the run.` : "";
   const third = pause || stops.length || unmet.length

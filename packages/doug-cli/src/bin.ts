@@ -3,6 +3,7 @@ import { runInit } from "./init.js";
 import { runBoard } from "./board.js";
 import { runAblate } from "./ablate.js";
 import { runTrace } from "./trace.js";
+import { runDoctor } from "./doctor.js";
 
 const HELP = `doug — tailored, approval-gated harness install for Claude Code
 
@@ -26,6 +27,7 @@ Usage:
   doug ablate [dir] [--tasks a,b] [--conditions baseline,gates,full] [--runs <n>] [--max-turns <n>] [--suite <name>]
               [--max-budget-usd <n>] [--judge auto|codex|claude|off] [--judge-model <name>] [--dry-run] [--json]
   doug trace [dir] [--session <id>] [--json]
+  doug doctor [dir] [--json]   Read-only install health check; exit 1 on any fail.
   doug --help
 
 doug init detects the project's tooling deterministically, prints a diff of every file it
@@ -46,6 +48,7 @@ async function main(): Promise<number> {
   if (process.argv[2] === "board") return runBoard(process.argv.slice(3));
   if (process.argv[2] === "ablate") return runAblate(process.argv.slice(3));
   if (process.argv[2] === "trace") return runTrace(process.argv.slice(3));
+  if (process.argv[2] === "doctor") return runDoctor(process.argv.slice(3));
   const { flags, positional } = parse(process.argv.slice(2));
   const command = positional[0];
   if (!command || flags.has("help") || command === "help") {

@@ -1,7 +1,8 @@
 #!/bin/sh
 # Checked-in pre-commit gate. Activated by `pnpm install` (the prepare script
 # sets core.hooksPath to this directory). Fails closed: any non-zero step,
-# including a missing pnpm, refuses the commit. No skip switch on purpose.
+# including a missing pnpm, refuses the commit. No skip switch on purpose. The no-test list (card
+# pre-commit-skip-no-test-paths) is not a switch: it applies only when every staged path is on it.
 set -u
 
 cd "$(git rev-parse --show-toplevel)" || {
@@ -17,6 +18,18 @@ cd "$(git rev-parse --show-toplevel)" || {
 # any stale one) rather than guess.
 commit_tree=$(git write-tree 2>/dev/null)
 write_tree_status=$?
+
+# card pre-commit-skip-no-test-paths: the staged path list, captured here, before the unset below, for the
+# same reason as commit_tree: it must read the index git is about to commit (a temporary index for
+# `git commit -a` / a pathspec commit). Plain --name-only output, one path per line. A non-zero exit leaves
+# staged_status non-zero (git's own error stays visible), which the skip check below treats as "run the full gate" (fail closed).
+staged_paths=$(git diff --cached --name-only --no-renames)
+staged_status=$?
+# --no-renames lists a rename's source path too, so a file moved out of a no-test path is not hidden.
+# The no-test list is read from the same index (`git show :path`), not the working tree, so an unstaged
+# config edit cannot widen the skip; no such path in the index (or any failure) leaves it empty: no skip.
+no_test_config=$(git show :.doug/config.json 2>/dev/null)
+no_test_config_status=$?
 
 # card stop-gate-credits-pre-commit (round 2, reviewer BLOCKER): the commands below run against the WORKING
 # TREE, but commit_tree above is the committed INDEX - a file staged one way and left different on disk
@@ -70,6 +83,25 @@ fi
 unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_PREFIX GIT_COMMON_DIR \
   GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_NAMESPACE \
   GIT_IMPLICIT_WORK_TREE GIT_QUARANTINE_PATH GIT_REFLOG_ACTION
+
+# card pre-commit-skip-no-test-paths: skip both commands when EVERY staged path is on preCommit.noTestPaths
+# in .doug/config.json (an entry matches a path when equal to it, or, ending in `/`, when the path starts
+# with it). Fail closed: an unreadable staged list, an empty one (--allow-empty), a missing or unparseable
+# config, a missing, non-array or empty list, or any node failure runs the full gate as before. The skip
+# removes last-run.json instead of writing one, so the Stop gate never credits a run that did not happen.
+if [ "$staged_status" -eq 0 ] && [ "$no_test_config_status" -eq 0 ] && [ -n "$staged_paths" ] && printf '%s\n' "$staged_paths" | DOUG_NO_TEST_CONFIG="$no_test_config" node --input-type=module -e '
+import { readFileSync } from "node:fs";
+const list = JSON.parse(process.env.DOUG_NO_TEST_CONFIG)?.preCommit?.noTestPaths;
+if (!Array.isArray(list) || list.length === 0 || !list.every((e) => typeof e === "string" && e !== "")) process.exit(1);
+const staged = readFileSync(0, "utf8").split("\n").filter((l) => l !== "");
+if (staged.length === 0) process.exit(1);
+const hit = (p) => list.some((e) => (e.endsWith("/") ? p.startsWith(e) : p === e));
+process.exit(staged.every(hit) ? 0 : 1);
+' >/dev/null 2>&1; then
+  rm -f .doug/.state/pre-commit/last-run.json
+  echo "pre-commit: gate skipped; only no-test paths (preCommit.noTestPaths) are staged" >&2
+  exit 0
+fi
 
 # card gate-output-names-failures: a discarded terminal (like the record
 # commits for 98fd1bb and 2f03658) left nothing to say which test failed.

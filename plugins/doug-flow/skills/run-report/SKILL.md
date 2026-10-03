@@ -1,6 +1,6 @@
 ---
 name: run-report
-description: End a card's run with one command: append the docs/live-runs.md entry for a workflow report (or a hand-track landing), and print the three-line summary that goes in the chat. Called by /doug-next after land and by /core-next after the commit; usable on any saved report.
+description: End a card's run with one command: append the docs/live-runs.md entry for a workflow report (or a hand-track landing), and print the three-line summary that goes in the chat. Called by /doug-next after land and by doug-hand after the commit; usable on any saved report.
 allowed-tools: Agent, Read, Bash
 ---
 
@@ -48,4 +48,4 @@ Say the commit, the wall clock, and the gate line in the chat.
 
 ## Then
 
-Moving the card and committing the record and the log belong to the calling skill (`/doug-next` step 5, `/core-next` step 4); a record change shows on the served page (`doug board serve`).
+Moving the card and committing the record and the log belong to the calling skill (`/doug-next` step 5, doug-hand step 4); a record change shows on the served page (`doug board serve`).

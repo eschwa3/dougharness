@@ -48,7 +48,7 @@ function splitGateClauses(gate) {
 }
 
 // Pure: reads one hand-track gate string into "pass" or "fail" (see the rules in the comment above). Exported
-// for both isGateFailure below and run-report/core-next's own use of the same reading.
+// for both isGateFailure below and run-report/doug-hand's own use of the same reading.
 export function readGate(gate) {
   if (typeof gate !== "string" || !gate.trim()) return "fail";
   const clauses = splitGateClauses(gate);
@@ -474,13 +474,13 @@ const DEMOTE_RULES = [
 ];
 
 // Review MINOR 7: a `tighten` target is the real path readOwnSkills() (scripts/learn.mjs) read the skill's
-// description from (`skill.file`), not a hardcoded `plugins/doug-flow/skills/<name>/SKILL.md` - a caller may
+// description from (`skill.file`), not a hardcoded `skills/<name>/SKILL.md` - a caller may
 // point `learn.mjs` at a checkout laid out differently, or at a skill outside this repository entirely. Made
 // relative to `dir` when the file is really inside it (the common case: readable, and matches how every other
 // proposal's `target` reads), else reported absolute rather than a misleading relative path. Falls back to the
-// historical hardcoded shape only for a caller (or an older test fixture) that supplies no `file` at all.
+// plugin-relative `skills/<name>/SKILL.md` shape only for a caller (or an older test fixture) that supplies no `file` at all.
 function tightenTarget(dir, skill) {
-  if (!skill.file) return `plugins/doug-flow/skills/${skill.name}/SKILL.md`;
+  if (!skill.file) return `skills/${skill.name}/SKILL.md`;
   const resolved = resolve(skill.file);
   if (dir) {
     const base = resolve(dir);

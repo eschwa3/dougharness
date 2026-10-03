@@ -20,6 +20,10 @@ describe("doug help usage text", () => {
     expect(binSrc).toContain("--judge-model");
   });
 
+  it("card doug-doctor: the HELP text lists doug doctor [dir] [--json] with its read-only, exit-1-on-fail summary", () => {
+    expect(binSrc).toContain("  doug doctor [dir] [--json]   Read-only install health check; exit 1 on any fail.");
+  });
+
   it("m-1 (card run-report-codex-cost): board record and summary usage lines carry [--codex-cost <usd>]", () => {
     const recordIdx = binSrc.indexOf("doug board record <id> <report.json>");
     const summaryIdx = binSrc.indexOf("doug board summary <report.json>");
