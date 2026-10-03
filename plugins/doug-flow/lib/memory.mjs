@@ -459,6 +459,44 @@ export function openMemory(dir) {
   };
 }
 
+// Read-only probe for `doug doctor`: can this Node build an FTS5 table in memory? Never throws.
+export function probeSqliteFts5() {
+  try {
+    const db = new DatabaseSync(":memory:");
+    try {
+      db.exec("CREATE VIRTUAL TABLE probe USING fts5(x)");
+    } finally {
+      db.close();
+    }
+    return { ok: true, reason: null };
+  } catch (err) {
+    return { ok: false, reason: err && err.message ? err.message : String(err) };
+  }
+}
+
+// Read-only look at the store for `doug doctor`: creates nothing, migrates nothing, never throws.
+export function inspectMemory(dir) {
+  const file = memoryPath(dir);
+  const out = { file, exists: false, userVersion: null, maxUserVersion: 8, quickCheck: null, error: null };
+  if (!existsSync(file)) return out;
+  out.exists = true;
+  let db;
+  try {
+    db = new DatabaseSync(file, { readOnly: true });
+    out.userVersion = db.prepare("PRAGMA user_version").get().user_version;
+    out.quickCheck = String(db.prepare("PRAGMA quick_check").get().quick_check);
+  } catch (err) {
+    out.error = err && err.message ? err.message : String(err);
+  } finally {
+    try {
+      if (db) db.close();
+    } catch {
+      // already unusable
+    }
+  }
+  return out;
+}
+
 function nowIso() {
   return new Date().toISOString();
 }
@@ -787,13 +825,16 @@ function toRecallLesson(lesson, extra) {
   return { ...rest, hasVector: !!embedding, ...extra };
 }
 
-// --- Hybrid recall -----------------------------------------------------------------------------------------
-// BM25 (FTS5) and cosine-over-stored-vectors fused by reciprocal rank fusion, recency-weighted, scope-boosted,
-// then citation-rechecked against checkoutDir before anything is returned — only when checkoutDir is a real
-// project root (isProjectRoot); otherwise every candidate is returned unchecked (checked: false in the result)
-// rather than either throwing (no checkoutDir given) or marking every row stale forever (a wrong one given).
-// Never throws for a provider or checkout problem (a database problem may still throw, same as every other
-// export here). See design #2 in the memory-recall card for the step-by-step this implements.
+// --- Dense-ranked recall -----------------------------------------------------------------------------------
+// With a provider and vectors stored under its model/dims, every vectored live in-window lesson is ranked by
+// cosine similarity x recency weight x scope boost (memory-benchmark section 9: cosine x recency beat the old
+// 50+50 reciprocal rank fusion); BM25 hits that have no such vector are appended after all vectored lessons, in
+// BM25 order. Without a provider or vectors, BM25 x recency x scope is the ranking (mode keyword-only). Ties
+// break by lesson id ascending. Results are then citation-rechecked against checkoutDir before anything is
+// returned — only when checkoutDir is a real project root (isProjectRoot); otherwise every candidate is
+// returned unchecked (checked: false in the result) rather than either throwing (no checkoutDir given) or
+// marking every row stale forever (a wrong one given). Never throws for a provider or checkout problem (a
+// database problem may still throw, same as every other export here). See design #2 in the memory-recall card.
 export async function recallLessons(m, query, opts = {}) {
   const { files = [], k = 8, now = new Date(), provider = null, checkoutDir = null, staleDays = 30 } = opts;
   const nowDate = now instanceof Date ? now : new Date(now);
@@ -820,11 +861,12 @@ export async function recallLessons(m, query, opts = {}) {
     bm25Ranked = rows.map((r) => r.id).filter((id) => byId.has(id));
   }
 
-  // (c) vector side, only with a provider and rows stored under the same model+dims, top 50.
+  // (c) dense side, only with a provider and rows stored under the same model+dims: cosine (dot of the stored
+  // vectors) for every such row, not only BM25 hits.
   let mode = "keyword-only";
   let reason = "no provider configured";
   let providerName = null;
-  let vectorRanked = [];
+  const cosine = new Map();
   if (provider) {
     providerName = provider.name;
     const vectorRows = freshRows.filter(
@@ -838,40 +880,49 @@ export async function recallLessons(m, query, opts = {}) {
         reason = embedResult.reason;
       } else {
         const qVec = embedResult.vectors[0];
-        const scored = vectorRows.map((l) => {
+        for (const l of vectorRows) {
           const vec = blobToFloats(l.embedding);
           let dot = 0;
           for (let i = 0; i < qVec.length && i < vec.length; i++) dot += qVec[i] * vec[i];
-          return { id: l.id, score: dot };
-        });
-        scored.sort((a, b) => b.score - a.score);
-        vectorRanked = scored.slice(0, 50).map((s) => s.id);
+          cosine.set(l.id, dot);
+        }
         mode = "hybrid";
         reason = null;
       }
     }
   }
 
-  // (d) reciprocal rank fusion, 1/(60+rank) per side, rank starting at 1.
-  const fused = new Map();
-  bm25Ranked.forEach((id, idx) => fused.set(id, (fused.get(id) || 0) + 1 / (60 + idx + 1)));
-  vectorRanked.forEach((id, idx) => fused.set(id, (fused.get(id) || 0) + 1 / (60 + idx + 1)));
-
-  // (e) recency weight, (f) scope boost.
-  const candidates = [];
-  for (const [id, rrfScore] of fused.entries()) {
-    const lesson = byId.get(id);
-    if (!lesson) continue;
+  // (d) scores: recency weight, then scope boost. Dense mode scores cosine; the BM25 order scores 1/(60+rank).
+  const bm25Rank = new Map(bm25Ranked.map((id, idx) => [id, idx]));
+  const weigh = (lesson, base) => {
     const ageDays = ageDaysOf(lesson.confirmed || lesson.created, nowMs);
-    const recency = 0.5 + 0.5 * Math.exp(-ageDays / 90);
-    let score = rrfScore * recency;
+    let score = base * (0.5 + 0.5 * Math.exp(-ageDays / 90));
     if (files.length && (lesson.scope.length === 0 || scopeMatchesFiles(lesson.scope, files))) score *= 1.5;
+    return score;
+  };
+  const byScoreThenId = (a, b) => b.score - a.score || (a.lesson.id < b.lesson.id ? -1 : a.lesson.id > b.lesson.id ? 1 : 0);
+  const sidesOf = (id) => {
     const sides = [];
-    if (bm25Ranked.includes(id)) sides.push("bm25");
-    if (vectorRanked.includes(id)) sides.push("vector");
-    candidates.push({ lesson, score, sides });
+    if (bm25Rank.has(id)) sides.push("bm25");
+    if (cosine.has(id)) sides.push("vector");
+    return sides;
+  };
+  let candidates;
+  if (mode === "hybrid") {
+    // (e) vectored lessons by cosine x recency x scope, then BM25 hits with no vector, in BM25 order.
+    const dense = [...cosine.entries()].map(([id, dot]) => {
+      const lesson = byId.get(id);
+      return { lesson, score: weigh(lesson, dot), sides: sidesOf(id) };
+    });
+    dense.sort(byScoreThenId);
+    const appended = bm25Ranked
+      .filter((id) => !cosine.has(id))
+      .map((id) => ({ lesson: byId.get(id), score: weigh(byId.get(id), 1 / (60 + bm25Rank.get(id) + 1)), sides: sidesOf(id) }));
+    candidates = [...dense, ...appended];
+  } else {
+    candidates = bm25Ranked.map((id) => ({ lesson: byId.get(id), score: weigh(byId.get(id), 1 / (60 + bm25Rank.get(id) + 1)), sides: sidesOf(id) }));
+    candidates.sort(byScoreThenId);
   }
-  candidates.sort((a, b) => b.score - a.score);
 
   // (g) top k. With a real project root, each candidate's citation is re-checked: a failure marks the row
   // stale and drops it, backfilling from the next candidate so k are returned when enough candidates exist,

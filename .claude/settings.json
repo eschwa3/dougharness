@@ -185,8 +185,10 @@
     "type": "command",
     "command": "node .doug/hooks/scripts/statusline.mjs"
   },
+  "subagentPromptCacheTtl": "1h",
   "env": {
-    "CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH": "1"
+    "CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH": "1",
+    "CLAUDE_CODE_WORKFLOW_MAX_CONCURRENT_AGENTS": "4"
   },
   "permissions": {
     "allow": [

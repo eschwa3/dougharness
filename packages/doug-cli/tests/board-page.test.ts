@@ -99,7 +99,7 @@ describe("doug board build", () => {
     );
     const r = await run(["build", dir]);
     expect(r.code).toBe(0);
-    expect(articleFor(r.stdout, "h")).toContain('<span class="chip hand" title="hand track: built in the checkout, not by /doug-next">by hand</span>');
+    expect(articleFor(r.stdout, "h")).toContain('<span class="chip hand" title="hand track: a gated by-hand change">by hand</span>');
     expect(articleFor(r.stdout, "d1")).not.toContain("chip hand");
     const done = r.stdout.slice(r.stdout.indexOf('data-column="done">'));
     expect(done.indexOf('data-id="d2"')).toBeLessThan(done.indexOf('data-id="d1"'));

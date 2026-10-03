@@ -13,6 +13,10 @@ export const HOOK_MARK = "\"$CLAUDE_PROJECT_DIR/.doug/hooks/scripts/";
 export const STATUSLINE_COMMAND = "node .doug/hooks/scripts/statusline.mjs";
 // Card no-nested-agents-gate: Claude Code's per-project subagent spawn depth (settings.md, sub-agents.md).
 export const SUBAGENT_DEPTH_ENV = "CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH";
+// Card init-workflow-settings: cap on concurrent workflow agents (https://code.claude.com/docs/en/workflows).
+export const WORKFLOW_CONCURRENCY_ENV = "CLAUDE_CODE_WORKFLOW_MAX_CONCURRENT_AGENTS";
+// Card init-workflow-settings: subagent prompt cache TTL (https://code.claude.com/docs/en/settings-reference).
+export const PROMPT_CACHE_TTL_KEY = "subagentPromptCacheTtl";
 
 // A hook object as it appears in the generated settings.json: type/command are always present (command is the
 // vendored form), and every other field hooks.json's hook carried (timeout, if, statusMessage, once, args,
@@ -108,8 +112,10 @@ function readHooksJsonFile(path: string): unknown {
 //   4. No hook is excluded from a generated project today: every script hooks.json declares belongs in a
 //      generated project. If that ever stops being true, the exclusion has to be an explicit named list here,
 //      not a loosened comparison against hooks.json.
-//   5. env (card no-nested-agents-gate: CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH) is settings-only too, like
-//      statusLine and permissions; it stays outside this derivation.
+//   5. env entries (card no-nested-agents-gate: CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH; card
+//      init-workflow-settings: CLAUDE_CODE_WORKFLOW_MAX_CONCURRENT_AGENTS) and the top-level
+//      subagentPromptCacheTtl key (not an env entry) are settings-only too, like statusLine and permissions;
+//      they stay outside this derivation.
 export function dougHooks(gatesDir: string = gatesSourceDir()): Record<string, HookEntry[]> {
   const path = join(gatesDir, "hooks/hooks.json");
   const doc = readHooksJsonFile(path);
@@ -242,6 +248,15 @@ export function mergeSettings(existing: Settings | null, d: Detection, cfg: Doug
   const maxSpawnDepth = cfg.subagents ? cfg.subagents.maxSpawnDepth : 1;
   if (maxSpawnDepth !== null) {
     s.env = { ...(s.env || {}), [SUBAGENT_DEPTH_ENV]: String(maxSpawnDepth) };
+  }
+  // Spawn depth is a guardrail and overwrites; the two below are tuning and never overwrite a user's value.
+  const ttl = cfg.subagents?.promptCacheTtl === undefined ? "1h" : cfg.subagents.promptCacheTtl;
+  if (ttl !== null && s[PROMPT_CACHE_TTL_KEY] === undefined) {
+    s[PROMPT_CACHE_TTL_KEY] = ttl;
+  }
+  const conc = cfg.subagents?.maxConcurrentWorkflowAgents === undefined ? 4 : cfg.subagents.maxConcurrentWorkflowAgents;
+  if (conc !== null && s.env?.[WORKFLOW_CONCURRENCY_ENV] === undefined) {
+    s.env = { ...(s.env || {}), [WORKFLOW_CONCURRENCY_ENV]: String(conc) };
   }
   return s;
 }

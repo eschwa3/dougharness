@@ -4,6 +4,8 @@ description: "Reviews a diff against its request, runs the project checks, and r
 model: inherit
 tools: Read, Grep, Glob, Bash
 disallowedTools: Edit, Write, MultiEdit, NotebookEdit
+skills:
+  - harness-fix
 doug: generated
 ---
 

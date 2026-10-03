@@ -1,6 +1,6 @@
 ---
 name: doug-learn
-description: Log-then-propose harness self-improvement (card learn-signals). Counts signals from the outcomes/lessons store and the run trace, renders each candidate change - demote a violated prose rule to a hook, delete a rule nothing references, promote a repeated lesson, tighten a skill description - as a diff, and asks the user to approve each one before applying it. Only the user invokes this; it never applies a change on its own.
+description: Log-then-propose self-improvement (card learn-signals). Counts signals from the outcomes/lessons store and the run trace, renders each candidate change - demote a violated prose rule to a hook, delete a rule nothing references, promote a repeated lesson, tighten a skill description - as a diff, and asks the user to approve each one before applying it. Only the user invokes this; it never applies a change on its own.
 disable-model-invocation: true
 allowed-tools: AskUserQuestion, Read, Bash(node *learn.mjs *), Bash(git *)
 ---

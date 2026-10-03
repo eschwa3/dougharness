@@ -8,6 +8,8 @@ import {
   cpSync,
   rmSync,
   existsSync,
+  readdirSync,
+  statSync,
 } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { join, dirname } from "node:path";
@@ -206,6 +208,32 @@ describe.skipIf(skipStage)(`release stage and npm pack${skipReason ? ` (skipped:
     },
     120000,
   );
+
+  it("no staged skill or agent names plugins/doug-, packages/doug-, or evals/", () => {
+    expect(stageResult.ok).toBe(true);
+    const bundled = join(outDir, "cli/node_modules/@dougharness");
+    const walkFiles = (p) =>
+      statSync(p).isDirectory() ? readdirSync(p).flatMap((n) => walkFiles(join(p, n))) : [p];
+    const hits = [];
+    let scanned = 0;
+    for (const name of readdirSync(bundled)) {
+      for (const sub of ["skills", "agents"]) {
+        const dir = join(bundled, name, sub);
+        if (!existsSync(dir)) continue;
+        for (const file of walkFiles(dir)) {
+          scanned += 1;
+          readFileSync(file, "utf8")
+            .split("\n")
+            .forEach((line, i) => {
+              const m = /plugins\/doug-|packages\/doug-|evals\//.exec(line);
+              if (m) hits.push(`${file}:${i + 1}: ${m[0]}`);
+            });
+        }
+      }
+    }
+    expect(scanned).toBeGreaterThan(0);
+    expect(hits).toEqual([]);
+  });
 
   it(
     "npm pack --dry-run-equivalent (json, offline) succeeds for both staged packages and bundles files",

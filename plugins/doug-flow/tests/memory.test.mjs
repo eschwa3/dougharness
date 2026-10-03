@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, rmSync, existsSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, existsSync, writeFileSync, readdirSync, statSync, chmodSync, copyFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { createHash } from "node:crypto";
@@ -11,6 +11,8 @@ import {
   MEMORY_DB_RELPATH,
   memoryPath,
   openMemory,
+  inspectMemory,
+  probeSqliteFts5,
   addLesson,
   getLesson,
   supersedeLesson,
@@ -122,6 +124,139 @@ describe("openMemory: a store from a future schema version", () => {
 
     expect(() => openMemory(dir)).toThrow(/user_version 9/);
     expect(() => openMemory(dir)).toThrow(/understands up to version 8/);
+  });
+});
+
+// Card doug-doctor: a read-only look at the store for `doug doctor`. openMemory creates the directory and the
+// file and migrates; inspectMemory must do none of that.
+describe("inspectMemory (read-only)", () => {
+  const listing = (root) => {
+    const out = [];
+    const walk = (d) => {
+      for (const e of readdirSync(d, { withFileTypes: true })) {
+        const p = join(d, e.name);
+        out.push(p);
+        if (e.isDirectory()) walk(p);
+      }
+    };
+    walk(root);
+    return out.sort();
+  };
+
+  it("an absent store reports exists:false and creates no file or directory", () => {
+    const r = inspectMemory(dir);
+    expect(r.exists).toBe(false);
+    expect(r.file).toBe(memoryPath(dir));
+    expect(r.error).toBeNull();
+    expect(existsSync(join(dir, ".doug"))).toBe(false);
+    expect(listing(dir)).toEqual([]);
+  });
+
+  it("a seeded store reports user_version 8, the max, and quick_check ok, leaving mtime, size and the directory listing unchanged", () => {
+    m = openMemory(dir);
+    addLesson(m, { text: "keep the gate green", kind: "pattern", source: { agent: "worker" } });
+    m.close();
+    m = null;
+    const file = memoryPath(dir);
+    const before = statSync(file);
+    const listed = listing(dir);
+    const r = inspectMemory(dir);
+    expect(r).toMatchObject({ file, exists: true, userVersion: 8, maxUserVersion: 8, quickCheck: "ok", error: null });
+    const after = statSync(file);
+    expect(after.mtimeMs).toBe(before.mtimeMs);
+    expect(after.size).toBe(before.size);
+    expect(listing(dir)).toEqual(listed);
+  });
+
+  it("opens the store read-only: a store whose file is not writable is still inspected without error", () => {
+    m = openMemory(dir);
+    m.close();
+    m = null;
+    const file = memoryPath(dir);
+    chmodSync(file, 0o444);
+    try {
+      const r = inspectMemory(dir);
+      expect(r.error).toBeNull();
+      expect(r.quickCheck).toBe("ok");
+      expect(r.userVersion).toBe(8);
+    } finally {
+      chmodSync(file, 0o644);
+    }
+  });
+
+  it("leaves the main db file byte-identical when an uncheckpointed WAL exists: a read-write open would fold the WAL into it and delete the -wal", () => {
+    // Behavioural pin on `{ readOnly: true }`. A read-write open + close of a WAL store with committed frames
+    // checkpoints them into the main file and removes the -wal; a read-only open does neither. Observed on this Node.
+    const srcDir = join(dir, "src");
+    mkdirSync(srcDir, { recursive: true });
+    const live = new DatabaseSync(join(srcDir, "memory.db"));
+    try {
+      live.exec("PRAGMA journal_mode=WAL; CREATE TABLE t(x); PRAGMA user_version = 8;");
+      live.exec("INSERT INTO t VALUES (1)");
+      const file = memoryPath(dir);
+      mkdirSync(dirname(file), { recursive: true });
+      copyFileSync(join(srcDir, "memory.db"), file);
+      copyFileSync(join(srcDir, "memory.db-wal"), `${file}-wal`);
+      const before = readFileSync(file);
+      const r = inspectMemory(dir);
+      expect(r.error).toBeNull();
+      expect(r.userVersion).toBe(8);
+      expect(Buffer.compare(readFileSync(file), before)).toBe(0);
+      expect(existsSync(`${file}-wal`)).toBe(true);
+    } finally {
+      live.close();
+    }
+  });
+
+  it("a file that is not a database reports an error and does not throw", () => {
+    const file = memoryPath(dir);
+    mkdirSync(dirname(file), { recursive: true });
+    writeFileSync(file, "this is not a sqlite database, just text padding ".repeat(40));
+    let r;
+    expect(() => {
+      r = inspectMemory(dir);
+    }).not.toThrow();
+    expect(r.exists).toBe(true);
+    expect(typeof r.error === "string" || (r.quickCheck !== null && r.quickCheck !== "ok")).toBe(true);
+  });
+
+  it("a store from a future schema (user_version 9) reports userVersion 9 above maxUserVersion 8, unmigrated", () => {
+    const file = memoryPath(dir);
+    mkdirSync(dirname(file), { recursive: true });
+    const raw = new DatabaseSync(file);
+    raw.exec("CREATE TABLE outcomes (id INTEGER PRIMARY KEY);");
+    raw.exec("PRAGMA user_version = 9");
+    raw.close();
+    const r = inspectMemory(dir);
+    expect(r.userVersion).toBe(9);
+    expect(r.maxUserVersion).toBe(8);
+    expect(r.error).toBeNull();
+    const check = new DatabaseSync(file);
+    expect(check.prepare("PRAGMA user_version").get().user_version).toBe(9);
+    check.close();
+  });
+
+  it("an old store (user_version 1) is reported as is, not migrated", () => {
+    const file = memoryPath(dir);
+    mkdirSync(dirname(file), { recursive: true });
+    const raw = new DatabaseSync(file);
+    raw.exec("CREATE TABLE lessons (id INTEGER PRIMARY KEY);");
+    raw.exec("PRAGMA user_version = 1");
+    raw.close();
+    expect(inspectMemory(dir).userVersion).toBe(1);
+    const check = new DatabaseSync(file);
+    expect(check.prepare("PRAGMA user_version").get().user_version).toBe(1);
+    check.close();
+  });
+});
+
+describe("probeSqliteFts5", () => {
+  it("reports ok on this Node and never throws", () => {
+    let r;
+    expect(() => {
+      r = probeSqliteFts5();
+    }).not.toThrow();
+    expect(r.ok).toBe(true);
   });
 });
 
@@ -1330,7 +1465,7 @@ describe("recallLessons", () => {
     expect(result.lessons).toHaveLength(1);
   });
 
-  it("fuses bm25 and vector ranks by reciprocal rank fusion, reordering a weak keyword match ahead of a strong one when the vector side favors it", async () => {
+  it("ranks the high-cosine weak keyword match ahead of the strong keyword match, with sides naming bm25 and vector", async () => {
     const l1 = addLesson(m, { text: "flaky test needs a retry policy", kind: "pattern", source: { agent: "worker" } });
     const l2 = addLesson(m, { text: "the test suite", kind: "pattern", source: { agent: "worker" } });
     // l1 matches all three query tokens (bm25 rank 1); l2 matches only "test" (bm25 rank 2) but carries a
@@ -1528,6 +1663,135 @@ describe("recallLessons", () => {
     } finally {
       rmSync(checkoutDir, { recursive: true, force: true });
     }
+  });
+});
+
+describe("recallLessons: dense ranking (card recall-dense-ranking)", () => {
+  const now = new Date("2026-09-30T00:00:00.000Z");
+  const daysAgo = (n) => new Date(now.getTime() - n * 86400000).toISOString();
+  const recencyOf = (n) => 0.5 + 0.5 * Math.exp(-n / 90);
+  const MODEL = { model: "fake-model", dims: 3 };
+  const mk = (id, text, created, vector) => {
+    addLesson(m, { id, text, kind: "pattern", source: { agent: "worker" }, created });
+    if (vector) setLessonEmbedding(m, id, { ...MODEL, vector: Float32Array.from(vector) });
+    return id;
+  };
+  const recallIds = async (query, opts = {}) => (await recallLessons(m, query, { checkoutDir: dir, now, ...opts })).lessons.map((l) => l.id);
+
+  beforeEach(() => {
+    m = openMemory(dir);
+  });
+
+  it("A: ranks by cosine x recency, not by RRF fusion, where the two disagree", async () => {
+    // Query vector [1,0,0]; all three lessons are 10 days old, so recency is a common factor.
+    // a1 "alpha beta gamma": bm25 rank 1, cosine 0.6 (vector rank 3)
+    // a2 "alpha delta":      bm25 rank 2, cosine 0.8 (vector rank 2)
+    // a3 "unrelated zzz":    no bm25 hit,  cosine 1.0 (vector rank 1)
+    // RRF (1/(60+rank) per side): a1 = 1/61 + 1/63 = 0.0323, a2 = 1/62 + 1/62 = 0.0323, a3 = 1/61 = 0.0164;
+    //   the keyword hits a1/a2 both outrank a3, so RRF never puts a3 first.
+    // cosine x recency: a3 (1.0) > a2 (0.8) > a1 (0.6), so the order is [a3, a2, a1].
+    const created = daysAgo(10);
+    const a1 = mk("a1", "alpha beta gamma", created, [0.6, 0.8, 0]);
+    const a2 = mk("a2", "alpha delta", created, [0.8, 0.6, 0]);
+    const a3 = mk("a3", "unrelated zzz", created, [1, 0, 0]);
+    const provider = fakeProvider({ vectorFor: () => [1, 0, 0] });
+    const result = await recallLessons(m, "alpha beta", { provider, checkoutDir: dir, now });
+    expect(result.lessons.map((l) => l.id)).toEqual([a3, a2, a1]);
+    const r = recencyOf(10);
+    expect(result.lessons[0].score).toBeCloseTo(1.0 * r, 5);
+    expect(result.lessons[1].score).toBeCloseTo(0.8 * r, 5);
+    expect(result.lessons[2].score).toBeCloseTo(0.6 * r, 5);
+  });
+
+  it("B: recency can reorder lessons that cosine alone would order the other way", async () => {
+    // old: cosine 0.95, 29 days old -> 0.95 * (0.5 + 0.5*exp(-29/90)) = 0.95 * 0.8623 = 0.819
+    // new: cosine 0.90, 0 days old  -> 0.90 * 1.0 = 0.900
+    // cosine alone: old first; cosine x recency: new first. (old is also the only bm25 hit for "zzz", so RRF x
+    // recency = (1/61 + 1/61) * 0.8623 = 0.0283 vs fresh 1/62 = 0.0161 keeps old first: fusion disagrees too.)
+    const old = mk("old", "zzz one", daysAgo(29), [0.95, Math.sqrt(1 - 0.95 * 0.95), 0]);
+    const fresh = mk("fresh", "other two", daysAgo(0), [0.9, Math.sqrt(1 - 0.81), 0]);
+    const provider = fakeProvider({ vectorFor: () => [1, 0, 0] });
+    const ids = await recallIds("zzz", { provider });
+    expect(ids).toEqual([fresh, old]);
+  });
+
+  it("C: breaks an exact score tie by lesson id ascending, whatever the insertion order", async () => {
+    const created = daysAgo(5);
+    const v = [1, 0, 0];
+    mk("t-c", "tie one", created, v);
+    mk("t-a", "tie two", created, v);
+    mk("t-b", "tie three", created, v);
+    const provider = fakeProvider({ vectorFor: () => [1, 0, 0] });
+    expect(await recallIds("qqq", { provider })).toEqual(["t-a", "t-b", "t-c"]);
+  });
+
+  it("D: with no provider, the order is BM25 x recency; with a provider but no vectors for its model/dims, it is keyword-only in the same order", async () => {
+    const created = daysAgo(3);
+    const l1 = mk("d1", "flaky test needs a retry policy", created);
+    const l2 = mk("d2", "the test suite", created);
+    const none = await recallLessons(m, "flaky test retry", { checkoutDir: dir, now });
+    expect(none.mode).toBe("keyword-only");
+    expect(none.lessons.map((l) => l.id)).toEqual([l1, l2]);
+
+    // vectors exist, but under another model: the unmatched lesson stays out, BM25 order stays.
+    setLessonEmbedding(m, l1, { model: "other-model", dims: 3, vector: Float32Array.from([0, 1, 0]) });
+    setLessonEmbedding(m, l2, { model: "other-model", dims: 3, vector: Float32Array.from([1, 0, 0]) });
+    mk("d3", "unrelated zzz", created, null);
+    setLessonEmbedding(m, "d3", { model: "other-model", dims: 3, vector: Float32Array.from([1, 0, 0]) });
+    const provider = fakeProvider({ vectorFor: () => [1, 0, 0] });
+    const other = await recallLessons(m, "flaky test retry", { provider, checkoutDir: dir, now });
+    expect(other.mode).toBe("keyword-only");
+    expect(other.reason).toBe("no vectors stored for fake-model/3");
+    expect(other.lessons.map((l) => l.id)).toEqual([l1, l2]);
+  });
+
+  it("E: ranks every vectored live lesson by cosine (BM25 hit or not), then appends BM25 hits with no vector in BM25 order, even after a negative-cosine vectored lesson", async () => {
+    // Query "flaky retry". Vectored lessons: v1 (no keyword match, cosine 0.9), v2 (keyword match, cosine 0.2),
+    // v3 (no keyword match, cosine -0.5). Unvectored BM25 hits: u1 (both tokens) then u2 (one token), both brand new.
+    // Scores (recency of 25 days = 0.878, of 0 days = 1): v1 = 0.9 * 0.878 = 0.79, v2 = 0.2 * 0.878 = 0.18,
+    // v3 = -0.5 * 0.878 = -0.44; u1 = 1/61 * 1 = 0.0164, u2 = 1/62 * 1 = 0.0161. A merged sort by score would
+    // put v3 (negative) after u1/u2; "append after" keeps it ahead of them.
+    const v1 = mk("v1", "unrelated cache note", daysAgo(25), [0.9, Math.sqrt(1 - 0.81), 0]);
+    const v2 = mk("v2", "flaky retry policy", daysAgo(25), [0.2, Math.sqrt(1 - 0.04), 0]);
+    const v3 = mk("v3", "unrelated queue note", daysAgo(25), [-0.5, Math.sqrt(1 - 0.25), 0]);
+    const u1 = mk("u1", "flaky retry", daysAgo(0), null);
+    const u2 = mk("u2", "flaky handling only", daysAgo(0), null);
+    const provider = fakeProvider({ vectorFor: () => [1, 0, 0] });
+    const ids = await recallIds("flaky retry", { provider });
+    expect(ids).toEqual([v1, v2, v3, u1, u2]);
+  });
+
+  it("F: orders the appended unvectored tail by BM25 rank, not by weighted score", async () => {
+    // u1 matches both tokens (BM25 rank 1) but is 29 days old: 1/61 * 0.862 = 0.0141. u2 matches one token
+    // (rank 2) and is new: 1/62 * 1 = 0.0161. A weighted-score sort of the tail gives [u2, u1]; BM25 order is [u1, u2].
+    const v1 = mk("v1", "unrelated cache note", daysAgo(5), [0.9, Math.sqrt(1 - 0.81), 0]);
+    const u1 = mk("u1", "flaky retry", daysAgo(29), null);
+    const u2 = mk("u2", "flaky handling only", daysAgo(0), null);
+    const provider = fakeProvider({ vectorFor: () => [1, 0, 0] });
+    expect(await recallIds("flaky retry", { provider })).toEqual([v1, u1, u2]);
+  });
+
+  it("G: dense mode applies the x1.5 scope boost when files match a lesson's scope, flipping the order", async () => {
+    // Same age. s-hit scope matches the file, cosine 0.6 -> 0.6 * 1.5 = 0.9 (x recency). s-miss scope does not,
+    // cosine 0.8 -> 0.8. Without the boost s-miss would be first.
+    const created = daysAgo(10);
+    addLesson(m, { id: "s-hit", text: "alpha one", kind: "pattern", scope: ["src/a.mjs"], source: { agent: "worker" }, created });
+    setLessonEmbedding(m, "s-hit", { ...MODEL, vector: Float32Array.from([0.6, 0.8, 0]) });
+    addLesson(m, { id: "s-miss", text: "beta two", kind: "pattern", scope: ["docs/x.md"], source: { agent: "worker" }, created });
+    setLessonEmbedding(m, "s-miss", { ...MODEL, vector: Float32Array.from([0.8, 0.6, 0]) });
+    const provider = fakeProvider({ vectorFor: () => [1, 0, 0] });
+    expect(await recallIds("zzz", { provider, files: ["src/a.mjs"] })).toEqual(["s-hit", "s-miss"]);
+    expect(await recallIds("zzz", { provider })).toEqual(["s-miss", "s-hit"]);
+  });
+
+  it("H: dense recency takes its age from confirmed when set, else created", async () => {
+    // h1 was created 200 days ago but confirmed today: recency 1.0, score 0.8. h2 was created 20 days ago, never
+    // confirmed: recency 0.90, score 0.85 * 0.90 = 0.765. Aging h1 from created (recency 0.555 -> 0.444) puts h2 first.
+    mk("h1", "alpha one", daysAgo(200), [0.8, 0.6, 0]);
+    m.prepare("UPDATE lessons SET confirmed = ? WHERE id = ?").run(daysAgo(0), "h1");
+    mk("h2", "beta two", daysAgo(20), [0.85, Math.sqrt(1 - 0.7225), 0]);
+    const provider = fakeProvider({ vectorFor: () => [1, 0, 0] });
+    expect(await recallIds("zzz", { provider })).toEqual(["h1", "h2"]);
   });
 });
 

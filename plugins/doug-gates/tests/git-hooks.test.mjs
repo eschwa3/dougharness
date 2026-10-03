@@ -401,3 +401,191 @@ describe("checked-in pre-commit hook", () => {
   // sides") — it walks every file under scripts/ and lib/ both ways, so it covers this card's edit (and any
   // new lib module the coder vendors) without a duplicate test here.
 });
+
+// card pre-commit-skip-no-test-paths: when every staged path is on preCommit.noTestPaths (.doug/config.json),
+// the hook skips both commands, says so on one line, and leaves no passing record. Anything else runs the gate.
+describe("no-test paths (card pre-commit-skip-no-test-paths)", () => {
+  const recordPath = (cwd) => join(cwd, ".doug/.state/pre-commit/last-run.json");
+  const SKIP_LINE = "pre-commit: gate skipped";
+
+  // A fixture with one green baseline commit (config + board.json tracked), then a changed board.json staged
+  // and nothing else. `config` is written as-is when it is a string, as JSON otherwise, and omitted for null.
+  function boardRepo(config) {
+    const cwd = makeRepo({ typecheckExit: 0, unitExit: 0 });
+    mkdirSync(join(cwd, ".doug"), { recursive: true });
+    if (config !== null) {
+      writeFileSync(join(cwd, ".doug/config.json"), typeof config === "string" ? config : JSON.stringify(config));
+    }
+    writeFileSync(join(cwd, ".doug/board.json"), '{"cards":[]}\n');
+    git(cwd, ["add", "-A"]);
+    const first = commit(cwd);
+    expect(first.status, first.out).toBe(0);
+    writeFileSync(join(cwd, ".doug/board.json"), '{"cards":["changed"]}\n');
+    git(cwd, ["add", ".doug/board.json"]);
+    return cwd;
+  }
+  const boardConfig = { preCommit: { noTestPaths: [".doug/board.json"] } };
+  const ran = (out) => out.includes("TYPECHECK-MARKER") && out.includes("UNIT-MARKER");
+  const headCount = (cwd) => git(cwd, ["rev-list", "--count", "HEAD"]).stdout.trim();
+
+  it("S1: only the listed board.json staged -> commit succeeds, neither command runs, one skip line is printed", () => {
+    const cwd = boardRepo(boardConfig);
+    const { status, out } = commit(cwd);
+    expect(status, out).toBe(0);
+    expect(headCount(cwd)).toBe("2");
+    expect(out).not.toContain("TYPECHECK-MARKER");
+    expect(out).not.toContain("UNIT-MARKER");
+    expect(out).toContain(SKIP_LINE);
+    expect(out.split("\n").filter((l) => l.includes(SKIP_LINE))).toHaveLength(1);
+  });
+
+  it("S2: board.json plus another staged file -> both commands run, no skip line", () => {
+    const cwd = boardRepo(boardConfig);
+    writeFileSync(join(cwd, "other.txt"), "x");
+    git(cwd, ["add", "other.txt"]);
+    const { status, out } = commit(cwd);
+    expect(status, out).toBe(0);
+    expect(ran(out), out).toBe(true);
+    expect(out).not.toContain(SKIP_LINE);
+  });
+
+  // git puts its own exec-path first on a hook's PATH, and on this machine that directory holds a real `git`,
+  // so a plain PATH shim never reaches the hook (confirmed by experiment; diff.* config errors do not work
+  // either, because `git commit` itself reads them and dies before the hook). Pointing GIT_EXEC_PATH at a
+  // temp directory holding a `git` shim does: git puts that directory first on the hook's PATH. The shim
+  // fails `diff --cached` and runs the real git for every other call.
+  it("S3: `git diff --cached` failing inside the hook -> the full gate runs (fail closed), no skip line", () => {
+    const cwd = boardRepo(boardConfig);
+    const realGit = spawnSync("sh", ["-c", "command -v git"], { encoding: "utf8", env: cleanEnv() }).stdout.trim();
+    const shimDir = mkdtempSync(join(tmpdir(), "doug-githooks-shim-"));
+    writeFileSync(
+      join(shimDir, "git"),
+      `#!/bin/sh\n` +
+        `case " $* " in *" diff --cached "*|*" diff "*" --cached "*) echo "SHIM: git diff --cached refused" >&2; exit 1 ;; esac\n` +
+        `unset GIT_EXEC_PATH\nexec "${realGit}" "$@"\n`,
+      { mode: 0o755 },
+    );
+    const r = git(cwd, ["commit", "-q", "-m", "x"], {
+      GIT_DIR: join(cwd, ".git"),
+      GIT_WORK_TREE: cwd,
+      GIT_EXEC_PATH: shimDir,
+    });
+    const out = `${r.stdout}${r.stderr}`;
+    expect(out, "the shim must be what the hook's `git diff --cached` ran").toContain("SHIM: git diff --cached refused");
+    expect(r.status, out).toBe(0);
+    expect(ran(out), out).toBe(true);
+    expect(out).not.toContain(SKIP_LINE);
+  });
+
+  it("S4: a skipped commit writes no passing record and removes the stale one from the earlier green commit", () => {
+    const cwd = boardRepo(boardConfig);
+    const before = JSON.parse(readFileSync(recordPath(cwd), "utf8"));
+    expect(before.ok, "sanity: the baseline green commit left a passing record").toBe(true);
+    const { status, out } = commit(cwd);
+    expect(status, out).toBe(0);
+    expect(out).toContain(SKIP_LINE);
+    if (existsSync(recordPath(cwd))) {
+      const record = JSON.parse(readFileSync(recordPath(cwd), "utf8"));
+      expect(record.ok, `a skipped run must not leave a passing record: ${JSON.stringify(record)}`).not.toBe(true);
+    }
+  });
+
+  it("S5a: an empty noTestPaths list with only board.json staged -> the gate runs", () => {
+    const cwd = boardRepo({ preCommit: { noTestPaths: [] } });
+    const { status, out } = commit(cwd);
+    expect(status, out).toBe(0);
+    expect(ran(out), out).toBe(true);
+    expect(out).not.toContain(SKIP_LINE);
+  });
+
+  it("S5b: `git commit --allow-empty` with the board config (nothing staged) -> the gate runs", () => {
+    const cwd = boardRepo(boardConfig);
+    git(cwd, ["reset", "-q"]); // nothing staged
+    const r = git(cwd, ["commit", "-q", "--allow-empty", "-m", "e"], { GIT_DIR: join(cwd, ".git"), GIT_WORK_TREE: cwd });
+    const out = `${r.stdout}${r.stderr}`;
+    expect(r.status, out).toBe(0);
+    expect(headCount(cwd)).toBe("2");
+    expect(ran(out), out).toBe(true);
+    expect(out).not.toContain(SKIP_LINE);
+  });
+
+  it("S6a: no .doug/config.json, board.json staged -> the gate runs", () => {
+    const cwd = boardRepo(null);
+    const { status, out } = commit(cwd);
+    expect(status, out).toBe(0);
+    expect(ran(out), out).toBe(true);
+    expect(out).not.toContain(SKIP_LINE);
+  });
+
+  it("S6b: a config without preCommit.noTestPaths (or with a non-array / unparseable one), board.json staged -> the gate runs", () => {
+    for (const config of [{ stopGate: {} }, { preCommit: {} }, { preCommit: { noTestPaths: ".doug/board.json" } }, "{ not json"]) {
+      const cwd = boardRepo(config);
+      const { status, out } = commit(cwd);
+      expect(status, out).toBe(0);
+      expect(ran(out), `config ${JSON.stringify(config)}:\n${out}`).toBe(true);
+      expect(out).not.toContain(SKIP_LINE);
+    }
+  });
+
+  // Reviewer gaps: "any other staged path runs the full gate", fail closed.
+  // Baseline: tracked files (plus .doug/config.json) committed green; the caller then stages its change.
+  function baselineRepo(config, files) {
+    const cwd = makeRepo({ typecheckExit: 0, unitExit: 0 });
+    mkdirSync(join(cwd, ".doug"), { recursive: true });
+    writeFileSync(join(cwd, ".doug/config.json"), JSON.stringify(config));
+    for (const [f, body] of Object.entries(files)) {
+      mkdirSync(dirname(join(cwd, f)), { recursive: true });
+      writeFileSync(join(cwd, f), body);
+    }
+    git(cwd, ["add", "-A"]);
+    const first = commit(cwd);
+    expect(first.status, first.out).toBe(0);
+    return cwd;
+  }
+
+  it("R1: a rename into a listed directory (docs/) -> the gate runs, because the rename's source path counts as staged", () => {
+    const cwd = baselineRepo({ preCommit: { noTestPaths: ["docs/"] } }, { "src/x.txt": "x\n" });
+    mkdirSync(join(cwd, "docs"), { recursive: true });
+    expect(git(cwd, ["mv", "src/x.txt", "docs/x.txt"]).status).toBe(0);
+    const { status, out } = commit(cwd);
+    expect(status, out).toBe(0);
+    expect(ran(out), out).toBe(true);
+    expect(out).not.toContain(SKIP_LINE);
+  });
+
+  it("R2: `git commit -a` with board.json and another tracked file modified, nothing staged -> the gate runs", () => {
+    const cwd = baselineRepo(boardConfig, { ".doug/board.json": "{}\n", "other.txt": "a\n" });
+    // board.json is staged in the real index; other.txt is modified but unstaged. `commit -a` commits both
+    // through a temporary index, so a hook that reads the real index (after git's GIT_INDEX_FILE is gone)
+    // would see only board.json and wrongly skip.
+    writeFileSync(join(cwd, ".doug/board.json"), '{"changed":1}\n');
+    git(cwd, ["add", ".doug/board.json"]);
+    writeFileSync(join(cwd, "other.txt"), "b\n");
+    const r = git(cwd, ["commit", "-a", "-q", "-m", "y"], { GIT_DIR: join(cwd, ".git"), GIT_WORK_TREE: cwd });
+    const out = `${r.stdout}${r.stderr}`;
+    expect(r.status, out).toBe(0);
+    expect(ran(out), out).toBe(true);
+    expect(out).not.toContain(SKIP_LINE);
+  });
+
+  it("R3: only .doug/board.json.bak staged with [\".doug/board.json\"] listed -> the gate runs (no trailing slash means exact match only)", () => {
+    const cwd = baselineRepo(boardConfig, { ".doug/board.json": "{}\n" });
+    writeFileSync(join(cwd, ".doug/board.json.bak"), "{}\n");
+    git(cwd, ["add", ".doug/board.json.bak"]);
+    const { status, out } = commit(cwd);
+    expect(status, out).toBe(0);
+    expect(ran(out), out).toBe(true);
+    expect(out).not.toContain(SKIP_LINE);
+  });
+
+  it("R4: an unstaged edit adding \"src/\" to the working-tree config is not a switch -> only src/a.txt staged still runs the gate", () => {
+    const cwd = baselineRepo(boardConfig, { "src/a.txt": "a\n" });
+    writeFileSync(join(cwd, ".doug/config.json"), JSON.stringify({ preCommit: { noTestPaths: [".doug/board.json", "src/"] } }));
+    writeFileSync(join(cwd, "src/a.txt"), "b\n");
+    git(cwd, ["add", "src/a.txt"]); // config.json stays modified and unstaged
+    const { status, out } = commit(cwd);
+    expect(status, out).toBe(0);
+    expect(ran(out), out).toBe(true);
+    expect(out).not.toContain(SKIP_LINE);
+  });
+});

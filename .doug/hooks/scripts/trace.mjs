@@ -51,7 +51,7 @@ runHook("trace", async (input) => {
     }
   }
 
-  appendTrace(dir, traceLine(input, { context: reading ? reading.pct : null }));
+  appendTrace(dir, traceLine(input, { context: reading ? reading.pct : null, secrets: cfg.secrets }));
 
   if (!reading) return allow();
 

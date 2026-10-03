@@ -12,7 +12,7 @@ import {
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const VERSIONED_MANIFESTS = [
+export const VERSIONED_MANIFESTS = [
   "package.json",
   "packages/doug-cli/package.json",
   "packages/doug-codex/package.json",

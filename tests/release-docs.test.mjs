@@ -93,4 +93,21 @@ describe("release docs", () => {
     expect(releasing).toContain("claude plugin validate");
     expect(releasing).toContain("pnpm publish -r");
   });
+
+  it.skipIf(IS_SNAPSHOT)("docs/releasing.md has a Dev setup section naming the local-plugin steps", () => {
+    const lines = releasing.split("\n");
+    const start = lines.findIndex((l) => l === "## Dev setup");
+    expect(start, "docs/releasing.md has no '## Dev setup' line").toBeGreaterThanOrEqual(0);
+    let end = lines.length;
+    for (let i = start + 1; i < lines.length; i++) {
+      if (lines[i].startsWith("## ")) {
+        end = i;
+        break;
+      }
+    }
+    const section = lines.slice(start, end).join("\n");
+    expect(section).toContain("claude plugin marketplace add");
+    expect(section).toContain("/reload-plugins");
+    expect(section).toContain("pnpm hooks:sync");
+  });
 });

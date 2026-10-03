@@ -12,7 +12,7 @@ The swarm lives inside a plan task (decision 0001 as amended 2026-09-06): the pl
 
 1. `node "${CLAUDE_PLUGIN_ROOT}/scripts/plan.mjs" validate`: the plan must be `approved`. Nothing runs on a draft; approval is the user's act (`/doug-approve`), never this skill's.
 2. `node "${CLAUDE_PLUGIN_ROOT}/scripts/plan.mjs" show` prints `Swarm: on` when the plan opted in with `plan.mjs set swarm on`. Without it the same workflow runs the fixed pipeline; do not set it here on your own, because the opt-in is the user's (each swarm task spends a lead, N workers, and a merge instead of one implementer). The swarm pays on a task with independent deliverables that share no new symbol; a plan of small coupled tasks runs as the pipeline (decision 0001, Amendment 2026-09-20: one brief per task at +2.67 USD and +6.1 min against the pipeline on 2026-09-11; five briefs, 8/8 hidden tests, 8.31 USD, 8.5 min on 2026-09-19).
-3. The caller is a user-invoked skill or command (`/doug-implement`, `/doug-next`, `/doug-swarm`, `/core-next` for a size M or L hand-track card the user chose to swarm): that invocation is the opt-in the Workflow tool requires. No swarm runs in the background or on a schedule.
+3. The caller is a user-invoked skill or command (`/doug-implement`, `/doug-next`, `/doug-swarm`, doug-hand for a size M or L hand-track card the user chose to swarm): that invocation is the opt-in the Workflow tool requires. No swarm runs in the background or on a schedule.
 
 ## Launch
 

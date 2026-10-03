@@ -230,10 +230,22 @@ export async function checkEmbeddingSanity(provider, pairs) {
   };
 }
 
-// Task prefixes the provider layer must add; the server never adds them. Only the two models named in the
-// research note carry a prefix; every other model gets none.
+// Task prefixes the provider layer must add; the server never adds them. Only the models below carry a
+// prefix; every other model gets none. mxbai and qwen3 prefix queries only, documents get "".
 function prefixFor(model, inputType) {
   const m = String(model || "");
+  // https://huggingface.co/mixedbread-ai/mxbai-embed-large-v1 README ("add the prompt for query (not for
+  // documents)"); https://ollama.com/library/mxbai-embed-large
+  if (m.startsWith("mxbai-embed-large")) {
+    return inputType === "query" ? "Represent this sentence for searching relevant passages: " : "";
+  }
+  // https://huggingface.co/Qwen/Qwen3-Embedding-0.6B/raw/main/config_sentence_transformers.json (query prompt;
+  // "document": ""). No space after "Query:".
+  if (m.startsWith("qwen3-embedding")) {
+    return inputType === "query"
+      ? "Instruct: Given a web search query, retrieve relevant passages that answer the query\nQuery:"
+      : "";
+  }
   if (m.startsWith("embeddinggemma")) {
     return inputType === "query" ? "task: search result | query: " : "title: none | text: ";
   }

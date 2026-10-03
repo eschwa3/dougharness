@@ -5,7 +5,7 @@ import { cpSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSyn
 import { tmpdir } from "node:os";
 import { detect } from "../src/detect/index.js";
 import { generateConfig } from "../src/generate/config.js";
-import { generateAgents, AGENT_MARK, LEGACY_AGENT_MARK, isDougAgent, spliceProjectNotes } from "../src/generate/agents.js";
+import { generateAgents, AGENT_MARK, LEGACY_AGENT_MARK, isDougAgent, spliceProjectNotes, spliceSkills } from "../src/generate/agents.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const tsPnpm = join(here, "fixtures", "ts-pnpm");
@@ -277,7 +277,11 @@ describe("generateAgents", () => {
     const researcher = byPath(generateAgents(d, cfg))[".claude/agents/researcher.md"];
     // Pass 2, P1: the generated researcher gets the whole rule, not just the fragment naming the cap.
     expect(researcher).toContain(
-      "Budget: at most 6 WebSearch plus WebFetch calls for your question (research.maxFetches; a hook denies the next one). Try sources in the order the question lists them, and write your findings before the budget runs out, marking anything still unanswered unverified."
+      "Budget: at most 6 WebSearch, WebFetch, curl, or wget calls for your question, counted together (research.maxFetches; a hook denies the next one). Try sources in the order the question lists them, and write your findings before the budget runs out, marking anything still unanswered unverified."
+    );
+    // Card researcher-line-numbers: quotes carry a line number from the raw page.
+    expect(researcher).toContain(
+      "Primary sources first (official docs, the tool's own --help, the package's repository); quote a page verbatim with its line number in the raw page (curl -sL <url> | grep -n '<phrase>'), or the command and its output, and say whether it was observed or documented; a quote without a line is marked no line."
     );
   });
 
@@ -446,7 +450,55 @@ describe("generateAgents", () => {
 
     for (const file of files) {
       const diskPath = join(root, file.path);
-      expect(readFileSync(diskPath, "utf8"), file.path).toBe(file.content);
+      // Stated reason (card role-skills-preload): the frontmatter `skills:` block is user-owned by design,
+      // so disk is compared against the generated text with the disk's own block spliced in.
+      const disk = readFileSync(diskPath, "utf8");
+      expect(disk, file.path).toBe(spliceSkills(file.content, disk));
+    }
+  });
+});
+
+// Card role-skills-preload: the frontmatter `skills:` block is user-owned and survives a refresh.
+describe("spliceSkills", () => {
+  const generated = () => {
+    const d = detect(tsPnpm);
+    return generateAgents(d, generateConfig(d))[0].content;
+  };
+  const existingWith = (block: string, body = "\n## Rules\n") =>
+    `---\nname: coder\ndescription: "old"\nmodel: inherit\n${block}${AGENT_MARK}\n---\n${body}`;
+
+  it("A1 copies a 3-item skills block into the generated frontmatter before doug: generated, in order", () => {
+    const gen = generated();
+    const out = spliceSkills(gen, existingWith("skills:\n  - alpha\n  - beta\n  - gamma\n"));
+    const lines = out.split("\n");
+    const end = lines.indexOf("---", 1);
+    const fm = lines.slice(1, end);
+    const at = fm.indexOf("skills:");
+    expect(at).toBeGreaterThan(-1);
+    expect(fm.slice(at, at + 4)).toEqual(["skills:", "  - alpha", "  - beta", "  - gamma"]);
+    expect(fm[at + 4]).toBe(AGENT_MARK);
+    expect(fm[fm.length - 1]).toBe(AGENT_MARK);
+    expect(out.replace("skills:\n  - alpha\n  - beta\n  - gamma\n", "")).toBe(gen);
+  });
+
+  it("A2 returns generated unchanged when existing has no skills key", () => {
+    const gen = generated();
+    expect(spliceSkills(gen, existingWith(""))).toBe(gen);
+  });
+
+  it("A3 ignores a skills: line in existing's body", () => {
+    const gen = generated();
+    expect(spliceSkills(gen, existingWith("", "\n## Project notes\nskills:\n  - nope\n"))).toBe(gen);
+  });
+
+  it("A4 generateAgents itself emits no skills key for any role", () => {
+    const d = detect(tsPnpm);
+    const files = generateAgents(d, generateConfig(d));
+    expect(files.length).toBeGreaterThan(0);
+    for (const f of files) {
+      const lines = f.content.split("\n");
+      const fm = lines.slice(1, lines.indexOf("---", 1));
+      expect(fm.some((l) => /^skills:/.test(l)), f.path).toBe(false);
     }
   });
 });

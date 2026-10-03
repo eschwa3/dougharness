@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// CLI for the development board, used by the /doug-next and /core-next skills. Deterministic; no agents.
+// CLI for the development board, used by the /doug-next and doug-hand skills. Deterministic; no agents.
 //   board.mjs next [dir] [--track flow|hand] [--tag <tag>]
 //                                                 the first Ready card on that track (default flow) whose deps are
 //                                                 Done, as JSON (exit 1 if none); --tag filters to cards carrying it
@@ -130,7 +130,7 @@ try {
       if (opts.tag !== undefined && opts.tag.includes(",")) fail(`--tag takes one tag here; got "${opts.tag}"`, 2);
       const board = loadBoard(dir);
       const { card, cards, skipped } = batch === null ? nextReadyCard(board, { track, tag: opts.tag }) : nextReadyCards(board, { track, batch, tag: opts.tag });
-      for (const s of skipped) process.stderr.write(s.hand ? `skipping ${s.id}: hand track (built by hand with /core-next, not by doug-next)\n` : s.flow ? `skipping ${s.id}: flow track (run it with /doug-next)\n` : `skipping ${s.id}: waiting on ${s.waitingOn.join(", ")}\n`);
+      for (const s of skipped) process.stderr.write(s.hand ? `skipping ${s.id}: hand track (a by-hand card; /doug-next ${s.id} takes it)\n` : s.flow ? `skipping ${s.id}: flow track (run it with /doug-next)\n` : `skipping ${s.id}: waiting on ${s.waitingOn.join(", ")}\n`);
       if (batch === null ? !card : !cards.length) fail(track === "hand" ? "No Ready hand-track card whose dependencies are Done." : "No Ready card whose dependencies are Done.");
       process.stdout.write(JSON.stringify(batch === null ? card : cards, null, 2) + "\n");
       break;

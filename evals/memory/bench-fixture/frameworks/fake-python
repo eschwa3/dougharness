@@ -1,0 +1,65 @@
+#!/usr/bin/env node
+// Fake "python" for bench-memory tests: the framework protocol (one JSON object per line on stdin, one JSON reply
+// per line on stdout) spoken by a node script, so tests need no Python. Invoked as `fake-python <dir>/<name>.py`;
+// the .py file is only a placeholder. Behaviour comes from the `config` the bench sends in the setup op:
+//   config.variant       "extract" reports 2 LLM calls per lesson, anything else 0
+//   config.pidFile       the child writes its pid there when it receives setup (so tests can check it is killed)
+//   config.configFile    the child writes the whole setup config it received there, as JSON (to check pass-through)
+//   config.hang          "setup" | "search": never reply to that op
+//   config.garbage       "search": reply with a line that is not JSON
+//   config.shape         "search": reply with JSON of the wrong shape ({"keys": "nope"})
+//   config.fail          setup replies {"ok": false, "error": <config.fail>}
+//   config.notInstalled  setup replies {"ok": false, "notInstalled": true, "error": "ModuleNotFoundError: ..."}
+//   config.leak          search also returns ids that are not the bench's keys (the adapter's own ids)
+// Its own ids (fw-1, fw-2, ...) never leave the process unless config.leak is set: only the bench's keys do.
+// Search ranks by the number of distinct query tokens (3+ chars) the lesson text contains, ties by key.
+// No imports: this file must run the same as CommonJS or ESM.
+const fs = process.getBuiltinModule("node:fs");
+let buf = "";
+let table = [];
+let config = {};
+const tokens = (s) => [...new Set(String(s).toLowerCase().match(/[a-z0-9]{3,}/g) || [])];
+const send = (o) => process.stdout.write(JSON.stringify(o) + "\n");
+
+function handle(msg) {
+  if (msg.op === "setup") {
+    config = msg.config || {};
+    if (config.pidFile) fs.writeFileSync(config.pidFile, String(process.pid));
+    if (config.configFile) fs.writeFileSync(config.configFile, JSON.stringify(config));
+    if (config.hang === "setup") return;
+    if (config.notInstalled) return send({ ok: false, notInstalled: true, error: "ModuleNotFoundError: No module named 'fakefw'" });
+    if (config.fail) return send({ ok: false, error: String(config.fail) });
+    table = msg.lessons.map((l, i) => ({ fw: `fw-${i + 1}`, key: l.key, text: l.text }));
+    return send({ ok: true, setupMs: 4321, storageBytes: table.length * 100, llmCalls: config.variant === "extract" ? table.length * 2 : 0 });
+  }
+  if (msg.op === "search") {
+    if (config.hang === "search") return;
+    if (config.garbage === "search") return process.stdout.write("this is not json\n");
+    if (config.shape === "search") return send({ keys: "nope" });
+    const q = tokens(msg.query);
+    const keys = table
+      .map((r) => ({ r, n: q.filter((t) => tokens(r.text).includes(t)).length }))
+      .filter((x) => x.n > 0)
+      .sort((a, b) => b.n - a.n || (a.r.key < b.r.key ? -1 : 1))
+      .slice(0, msg.k)
+      .map((x) => x.r.key);
+    if (config.leak) keys.push("fw-999", table.length ? table[0].fw : "fw-0");
+    return send({ keys, ms: 1.5 });
+  }
+  if (msg.op === "close") {
+    send({ ok: true });
+    process.exit(0);
+  }
+}
+
+process.stdin.setEncoding("utf8");
+process.stdin.on("data", (d) => {
+  buf += d;
+  let i;
+  while ((i = buf.indexOf("\n")) >= 0) {
+    const line = buf.slice(0, i).trim();
+    buf = buf.slice(i + 1);
+    if (line) handle(JSON.parse(line));
+  }
+});
+process.stdin.on("end", () => process.exit(0));

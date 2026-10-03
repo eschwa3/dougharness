@@ -3,6 +3,8 @@ name: tester
 description: "Writes and runs tests with vitest for a named behavior; edits test files only"
 model: inherit
 disallowedTools: Agent
+skills:
+  - harness-fix
 doug: generated
 ---
 

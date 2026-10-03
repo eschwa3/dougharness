@@ -280,7 +280,7 @@ export async function runBoard(argv: string[], io?: BoardIo): Promise<number> {
         for (const s of skipped) {
           out.stderr(
             "hand" in s
-              ? `skipping ${s.id}: hand track (built by hand with /core-next, not by doug-next)\n`
+              ? `skipping ${s.id}: hand track (a by-hand card; /doug-next ${s.id} takes it)\n`
               : "flow" in s
                 ? `skipping ${s.id}: flow track (run it with /doug-next)\n`
                 : `skipping ${s.id}: waiting on ${s.waitingOn.join(", ")}\n`,

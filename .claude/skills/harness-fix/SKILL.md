@@ -1,12 +1,12 @@
 ---
 name: harness-fix
-description: The by-hand procedure for changing Doug's own harness code (plugins/doug-flow, plugins/doug-gates, packages/doug-codex, packages/doug-cli, evals) without running it through the flow (decision 0005). Which test file covers which module, a single test file while iterating, the full gate before a commit, gate scripts copied into .doug/hooks/scripts, no attribution trailers, and a docs/live-runs.md line when a measurement changes. Use it for any edit under those directories, and from /core-next.
+description: The by-hand procedure for changing Doug's own harness code (plugins/doug-flow, plugins/doug-gates, packages/doug-codex, packages/doug-cli, evals) without running it through the flow (decision 0005). Which test file covers which module, a single test file while iterating, the full gate before a commit, gate scripts copied into .doug/hooks/scripts, no attribution trailers, and a docs/live-runs.md line when a measurement changes. Use it for any edit under those directories, and from doug-hand.
 allowed-tools: Read, Edit, Write, Grep, Glob, Bash
 ---
 
 # harness-fix
 
-Harness code is built directly in the checkout: tests first, the full gate, a plain commit. This is the procedure; `/core-next` follows it for every hand-track card, and it applies just as well to a one-line fix made outside a card.
+Harness code is built directly in the checkout: tests first, the full gate, a plain commit. This is the procedure; `/doug-next <id>` follows it for every hand-track card, and it applies just as well to a one-line fix made outside a card.
 
 ## 0. Who does the work
 
@@ -59,7 +59,7 @@ Under a card, the tester writes or extends the test before the change, in the fi
 | `packages/doug-codex/src/contract.ts` and `docs/worker-contract.md` | `packages/doug-codex/tests/contract.test.ts` |
 | `packages/doug-codex/src/bin.ts` (`codex-review`) | `packages/doug-codex/tests/cli.test.ts` |
 | `evals/run.mjs` (the scorer: tool calls from stream-json, leaks, must-run commands) and `evals/tasks/*.json` | `evals/tests/run.test.mjs` |
-| `plugins/doug-flow/scripts/rehearse.mjs`, `lib/rehearse.mjs` (the on-demand live rehearsal runner: estimates, fixture, stream assertions, recording) | `plugins/doug-flow/tests/rehearse.test.mjs` |
+| `scripts/rehearse.mjs`, `scripts/rehearse-lib.mjs` (the on-demand live rehearsal runner: estimates, fixture, stream assertions, recording) | `tests/rehearse.test.mjs` |
 | the `reviewIssues` report key (doug-implement.js) round-tripping into `lib/memory.mjs`'s `review_issue_count`/`review_issues`, through `board.mjs record`, `board.mjs summary`, and `plan.mjs replan` (card seam-contracts) | `plugins/doug-flow/tests/seams.test.mjs` |
 | every `board.mjs`/`plan.mjs`/`memory.mjs` subcommand a `skills/*/SKILL.md`, `CLAUDE.md`, or `docs/worker-contract.md` names being a real dispatch case (card seam-contracts) | `plugins/doug-flow/tests/seams.test.mjs` |
 | `claude plugin validate` actually catching a broken plugin manifest (card seam-contracts) | `plugins/doug-flow/tests/seams.test.mjs` |
@@ -71,12 +71,21 @@ Under a card, the tester writes or extends the test before the change, in the fi
 
 1. The workflow file `doug-implement.js` may not import, call `Date.now` or `Math.random`, or name a model; its template tests assert that, and it must parse when wrapped the way the Workflow runtime wraps it. A top-level `return` in it is expected, so `node --check` fails on it by design.
 2. The Workflow tool runs the plugin copy loaded at session start. An edited workflow is launched with `scriptPath` pointing at the file, or the session is restarted.
-3. After editing a gate script under `plugins/doug-gates/scripts/`, copy it to `.doug/hooks/scripts/` too: this repository has Doug installed on itself and its hooks run from there.
+3. After editing a gate script under `plugins/doug-gates/scripts/`, run `pnpm hooks:sync`, which copies `plugins/doug-gates/scripts/` to `.doug/hooks/scripts/` and `plugins/doug-gates/lib/` to `.doug/hooks/lib/`: this repository has Doug installed on itself and its hooks run from there.
 4. A change to `plugins/doug-flow/lib/board.mjs` or `lib/plan.mjs` reaches `packages/doug-cli` through the `@dougharness/flow` workspace dependency; the CLI's `src/flow-board.d.ts` declares the shapes, so a new field or option is added there as well or `pnpm typecheck` fails.
 5. Keep the change to what the card or fix asks. A defect found on the way becomes its own hand-track card.
 6. If a hook blocks a step, report it; do not work around it.
-7. When the card's acceptance is that a mechanism exists, prove it before reporting done: mutate or remove the mechanism, run the new test file, confirm it fails, then revert the mutation and report which assertion failed. That is the line: a card whose acceptance is that a mechanism exists needs it; a card that only changes prose, a message, or a docs line does not. To prove it, the brief lists one mutation per case the card's goal names, each with the test that must fail; the coder runs every listed mutation and reports each result; the reviewer reruns the list and adds its own. Apply each mutation in a scratch copy or git worktree under `.doug/.state`, run the one test file there, and remove the copy.
-8. A card that changes a workflow's or a skill's user-visible behaviour runs the live scenario that covers it before landing: `node plugins/doug-flow/scripts/rehearse.mjs <flow|swarm|hand> --card <id> --spend`, and its landing note quotes the outcome. The swarm scenario is the one that proves plugin loading and agent-name resolution in the real runtime.
+7. When the card's acceptance is that a mechanism exists, prove it before reporting done: mutate or remove the mechanism, run the new test file, confirm it fails, then revert the mutation and report which assertion failed. That is the line: a card whose acceptance is that a mechanism exists needs it; a card that only changes prose, a message, or a docs line does not. To prove it, the brief lists one mutation per case the card's goal names, each with the test that must fail; the coder runs every listed mutation and reports each result; the reviewer reruns the list and adds its own. Apply each mutation in a scratch copy or git worktree under `.doug/.state`, run the one test file there, and remove the copy. Before trusting a mutation's result, confirm vitest's RUN line prints the scratch copy's path: a run whose RUN line shows the live checkout tested nothing that was mutated.
+8. A card that changes a workflow's or a skill's user-visible behaviour runs the live scenario that covers it before landing: `node scripts/rehearse.mjs <flow|swarm|hand> --card <id> --spend`, and its landing note quotes the outcome. The swarm scenario is the one that proves plugin loading and agent-name resolution in the real runtime.
+
+## Files the workflow cannot rewrite
+
+A card whose goal names any of these is built by hand (doug-hand step 2b):
+
+- `plugins/doug-flow/workflows/doug-implement.js`
+- `plugins/doug-gates/scripts/`
+- `.doug/hooks/scripts/`
+- `plugins/doug-flow/agents/`
 
 ## 3. The gate, the commit, the record
 

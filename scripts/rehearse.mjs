@@ -2,8 +2,8 @@
 // On-demand live rehearsal of the flow, swarm, and hand tracks on a small real card (the ts-basic fixture's
 // fix-hours), spawning the real `claude` binary. It is a script, not a test, and it never runs in the gate:
 // evals/ already spends real money to measure arms and must not gain correctness assertions, and seam-contracts
-// settles the deterministic side without a new top-level suite, so this lives here, next to cost.mjs and
-// board.mjs, as a spend-and-record script of the flow plugin that reads the same skills it exercises.
+// settles the deterministic side without a new top-level suite. It lives in root scripts/ because it depends on
+// this checkout (evals fixtures, the CLI build); it loads the shipped plugin via --plugin-dir.
 //
 //   rehearse.mjs [flow|swarm|hand|all] --card <id> --spend [dir]
 //     no arguments             print the estimate table and exit 2; nothing is spawned
@@ -29,8 +29,8 @@
 
 import { readFileSync, rmSync } from "node:fs";
 import { resolve } from "node:path";
-import { loadBoard, findCard, adversaryBlocks } from "../lib/board.mjs";
-import { parseArgs, estimateLines, SCENARIOS, scenarioTotal, runScenario, recordRunOutcome, recordHandOutcome, rehearsalNote, extractGateLine, archiveEvidence } from "../lib/rehearse.mjs";
+import { loadBoard, findCard, adversaryBlocks } from "../plugins/doug-flow/lib/board.mjs";
+import { parseArgs, estimateLines, SCENARIOS, scenarioTotal, runScenario, recordRunOutcome, recordHandOutcome, rehearsalNote, extractGateLine, archiveEvidence } from "./rehearse-lib.mjs";
 
 function fail(msg, code = 2) {
   process.stderr.write(msg + "\n");

@@ -1,0 +1,8 @@
+{"id":"t1","type":"title","card":"c1","query":"zephyr quartz cache","expected":["quartz-landing.md"]}
+{"id":"g1","type":"goal","card":"c2","query":"parser trailing commas manifest","expected":["marble-landing.md"]}
+{"id":"g2","type":"goal","card":"c3","query":"retry failed job dead letter","expected":["cobalt-landing.md"]}
+{"id":"t2","type":"title","card":"c4","query":"tundra lock crash","expected":["tundra-landing.md"]}
+{"id":"a1","type":"goal","card":"c5","query":"obelisk relic","expected":["ancient-landing.md"]}
+{"id":"m1","type":"goal","card":"c6","query":"saffron blend","expected":["missing-landing.md"]}
+{"id":"p1","type":"paraphrase","card":"c7","query":"why do dates look shifted between tools","expected":["juniper-landing.md"]}
+{"id":"p2","type":"paraphrase","card":"c8","query":"slow down request flooding gateway","expected":["onyx-landing.md"]}

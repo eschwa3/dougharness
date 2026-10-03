@@ -269,18 +269,20 @@ describe("mergeSettings", () => {
       const d = detect(fixture);
       const cfg = generateConfig(d);
       const merged = mergeSettings({} as any, d, cfg) as any;
-      expect(merged.env).toEqual({ CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH: "1" });
+      expect(merged.env).toEqual({ CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH: "1", CLAUDE_CODE_WORKFLOW_MAX_CONCURRENT_AGENTS: "4" });
     });
     it("keeps an existing env key and adds ours alongside it", () => {
       const d = detect(fixture);
       const cfg = generateConfig(d);
       const existing = { hooks: {}, env: { FOO: "bar" } };
       const merged = mergeSettings(existing as any, d, cfg) as any;
-      expect(merged.env).toEqual({ FOO: "bar", CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH: "1" });
+      expect(merged.env).toEqual({ FOO: "bar", CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH: "1", CLAUDE_CODE_WORKFLOW_MAX_CONCURRENT_AGENTS: "4" });
     });
     it("maxSpawnDepth: null leaves an existing env untouched, including a different value of our own variable, and adds no env when there was none", () => {
       const d = detect(fixture);
-      const cfg = { ...generateConfig(d), subagents: { maxSpawnDepth: null } };
+      // Card init-workflow-settings: the two new tuning keys are null here too, so this test keeps pinning only that
+      // maxSpawnDepth: null leaves env alone (an unset new key now defaults to written, which would add an env).
+      const cfg = { ...generateConfig(d), subagents: { maxSpawnDepth: null, promptCacheTtl: null, maxConcurrentWorkflowAgents: null } };
       const existingWithOurVar = { hooks: {}, env: { FOO: "bar", CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH: "3" } };
       const merged = mergeSettings(existingWithOurVar as any, d, cfg) as any;
       expect(merged.env).toEqual({ FOO: "bar", CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH: "3" });
@@ -293,19 +295,98 @@ describe("mergeSettings", () => {
       const cfg = generateConfig(d);
       const once = mergeSettings({} as any, d, cfg) as any;
       const twice = mergeSettings(once, d, cfg) as any;
-      expect(twice.env).toEqual({ CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH: "1" });
+      expect(twice.env).toEqual({ CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH: "1", CLAUDE_CODE_WORKFLOW_MAX_CONCURRENT_AGENTS: "4" });
     });
     it("treats a config with no subagents field at all as 1 (an older config.json)", () => {
       const d = detect(fixture);
       const cfg = generateConfig(d) as any;
       delete cfg.subagents;
       const merged = mergeSettings({} as any, d, cfg) as any;
-      expect(merged.env).toEqual({ CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH: "1" });
+      expect(merged.env).toEqual({ CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH: "1", CLAUDE_CODE_WORKFLOW_MAX_CONCURRENT_AGENTS: "4" });
     });
     it("this repository's own .claude/settings.json carries the setting", () => {
       const settingsPath = join(ROOT, ".claude/settings.json");
       const settings = JSON.parse(readFileSync(settingsPath, "utf8"));
       expect(settings.env?.CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH, `${settingsPath} is missing env.CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH (card no-nested-agents-gate)`).toBe("1");
+    });
+  });
+
+  // Card init-workflow-settings: subagentPromptCacheTtl (top-level) and CLAUDE_CODE_WORKFLOW_MAX_CONCURRENT_AGENTS
+  // (env) are tuning, so unlike spawn depth they never overwrite a user's own value; null in config omits them.
+  describe("workflow settings (card init-workflow-settings)", () => {
+    const CONC = "CLAUDE_CODE_WORKFLOW_MAX_CONCURRENT_AGENTS";
+    const withSub = (sub: any) => {
+      const d = detect(fixture);
+      return { d, cfg: { ...generateConfig(d), subagents: sub } as any };
+    };
+    it("T1 default config on {} writes TTL 1h and concurrency 4", () => {
+      const d = detect(fixture);
+      const merged = mergeSettings({} as any, d, generateConfig(d)) as any;
+      expect(merged.subagentPromptCacheTtl).toBe("1h");
+      expect(merged.env[CONC]).toBe("4");
+    });
+    it("T2 config values are used", () => {
+      const { d, cfg } = withSub({ maxSpawnDepth: 1, promptCacheTtl: "5m", maxConcurrentWorkflowAgents: 8 });
+      const merged = mergeSettings({} as any, d, cfg) as any;
+      expect(merged.env[CONC]).toBe("8");
+      expect(merged.subagentPromptCacheTtl).toBe("5m");
+    });
+    it("T3 an existing user TTL is kept", () => {
+      const d = detect(fixture);
+      const merged = mergeSettings({ subagentPromptCacheTtl: "5m" } as any, d, generateConfig(d)) as any;
+      expect(merged.subagentPromptCacheTtl).toBe("5m");
+    });
+    it("T4 an existing user env value is kept, and other env keys with it", () => {
+      const d = detect(fixture);
+      const merged = mergeSettings({ env: { [CONC]: "32", FOO: "bar" } } as any, d, generateConfig(d)) as any;
+      expect(merged.env[CONC]).toBe("32");
+      expect(merged.env.FOO).toBe("bar");
+    });
+    it("T4b existing empty-string TTL and env value are kept (a present value of any kind wins)", () => {
+      const d = detect(fixture);
+      const merged = mergeSettings({ subagentPromptCacheTtl: "", env: { [CONC]: "" } } as any, d, generateConfig(d)) as any;
+      expect(merged.subagentPromptCacheTtl).toBe("");
+      expect(merged.env[CONC]).toBe("");
+    });
+    it("T5 promptCacheTtl: null omits the TTL key but still writes concurrency", () => {
+      const { d, cfg } = withSub({ maxSpawnDepth: 1, promptCacheTtl: null, maxConcurrentWorkflowAgents: 4 });
+      const merged = mergeSettings({} as any, d, cfg) as any;
+      expect("subagentPromptCacheTtl" in merged).toBe(false);
+      expect(merged.env[CONC]).toBe("4");
+    });
+    it("T6 maxConcurrentWorkflowAgents: null omits the env key but still writes TTL; all null leaves env undefined", () => {
+      const { d, cfg } = withSub({ maxSpawnDepth: 1, promptCacheTtl: "1h", maxConcurrentWorkflowAgents: null });
+      const merged = mergeSettings({} as any, d, cfg) as any;
+      expect(merged.env?.[CONC]).toBeUndefined();
+      expect(merged.subagentPromptCacheTtl).toBe("1h");
+
+      const none = withSub({ maxSpawnDepth: null, promptCacheTtl: null, maxConcurrentWorkflowAgents: null });
+      const merged2 = mergeSettings({} as any, none.d, none.cfg) as any;
+      expect(merged2.env).toBeUndefined();
+    });
+    it("T7 an older config (no subagents, or only maxSpawnDepth) gets both defaults", () => {
+      const d = detect(fixture);
+      const noSub = generateConfig(d) as any;
+      delete noSub.subagents;
+      const a = mergeSettings({} as any, d, noSub) as any;
+      expect(a.subagentPromptCacheTtl).toBe("1h");
+      expect(a.env[CONC]).toBe("4");
+
+      const { cfg } = withSub({ maxSpawnDepth: 1 });
+      const b = mergeSettings({} as any, d, cfg) as any;
+      expect(b.subagentPromptCacheTtl).toBe("1h");
+      expect(b.env[CONC]).toBe("4");
+    });
+    it("T8 generateConfig proposes both keys", () => {
+      const cfg = generateConfig(detect(fixture)) as any;
+      expect(cfg.subagents.promptCacheTtl).toBe("1h");
+      expect(cfg.subagents.maxConcurrentWorkflowAgents).toBe(4);
+    });
+    it("T10 this repository's own .claude/settings.json carries both", () => {
+      const settingsPath = join(ROOT, ".claude/settings.json");
+      const settings = JSON.parse(readFileSync(settingsPath, "utf8"));
+      expect(settings.subagentPromptCacheTtl, `${settingsPath} is missing subagentPromptCacheTtl (card init-workflow-settings)`).toBe("1h");
+      expect(settings.env?.CLAUDE_CODE_WORKFLOW_MAX_CONCURRENT_AGENTS, `${settingsPath} is missing env.CLAUDE_CODE_WORKFLOW_MAX_CONCURRENT_AGENTS (card init-workflow-settings)`).toBe("4");
     });
   });
 });
@@ -613,6 +694,9 @@ describe("buildProposal + applyChanges", () => {
     expect(settings.statusLine.command).toBe("node .doug/hooks/scripts/statusline.mjs");
     // Card no-nested-agents-gate: the generated settings.json carries the subagent spawn depth.
     expect(settings.env.CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH).toBe("1");
+    // Card init-workflow-settings, T9: and the two workflow tuning keys.
+    expect(settings.subagentPromptCacheTtl).toBe("1h");
+    expect(settings.env.CLAUDE_CODE_WORKFLOW_MAX_CONCURRENT_AGENTS).toBe("4");
     const writtenConfig = JSON.parse(readFileSync(join(dir, ".doug/config.json"), "utf8"));
     expect(writtenConfig.doug.name).toBe("Doug");
     expect(writtenConfig.secrets.enabled).toBe(true);
@@ -701,6 +785,18 @@ describe("buildProposal + applyChanges", () => {
     expect(change!.after.endsWith(customNotes)).toBe(true);
     expect(change!.after).not.toContain("stale rule");
     expect(change!.after).toContain(AGENT_MARK);
+  });
+  it("B keeps a user-owned frontmatter skills: block on an existing generated coder.md across a refresh (card role-skills-preload)", () => {
+    const dir = copyFixture();
+    mkdirSync(join(dir, ".claude/agents"), { recursive: true });
+    const existing =
+      `---\nname: coder\ndescription: "stale"\nmodel: inherit\ndisallowedTools: Agent\nskills:\n  - harness-fix\n  - other-skill\n${AGENT_MARK}\n---\n\n## Rules\n\n- stale rule\n\n## Project notes\n`;
+    writeFileSync(join(dir, ".claude/agents/coder.md"), existing);
+    const p = buildProposal(detect(dir));
+    const change = p.changes.find((c) => c.path === ".claude/agents/coder.md");
+    expect(change).toBeDefined();
+    expect(change!.after).toContain(`skills:\n  - harness-fix\n  - other-skill\n${AGENT_MARK}\n---\n`);
+    expect(change!.after).not.toContain("stale rule");
   });
   it("summarizes the standard agents it would propose", () => {
     const d = detect(fixture);
