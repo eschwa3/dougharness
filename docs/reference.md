@@ -5,7 +5,7 @@ Detail moved out of README.md so the top screen stays scannable ([why](../README
 ## Overview
 
 - **Nothing lands without your yes.** A change becomes a written plan first; `plugins/doug-flow/workflows/doug-implement.js` refuses to run an unapproved plan, and `/doug-approve` (`plan.mjs approve`) is what approves one.
-- **A turn blocks on broken or untested work, up to a cap.** The stop gate runs typecheck and tests before Claude's turn finishes and blocks it while they fail, or while the session never ran a check itself, for up to 3 blocks in a row (each subagent counted separately; the count resets on a green gate); past that, or on the gate's own crash or timeout, it stands down and fails open (`plugins/doug-gates/scripts/stop-gate.mjs`).
+- **A turn blocks on broken or untested work, up to a cap.** The stop gate runs typecheck and tests before Claude's turn finishes and blocks it while they fail, or while the session never ran a check itself, for up to 3 blocks in a row (each subagent counted separately; the count resets on a green gate); a turn that changed no code is not verified at all (see the turn-start hook); past that, or on the gate's own crash or timeout, it stands down and fails open (`plugins/doug-gates/scripts/stop-gate.mjs`).
 - **The model can't edit its way around the rules.** `.env` files, the lockfile, migrations, and anything outside the project are denied at the edit itself (`plugins/doug-gates/scripts/protect-paths.mjs`).
 - **A second, different model argues against the first.** After review, `codex-review` re-reads the diff on Codex and tries to refute it; a blocker keeps the change out (`packages/doug-codex`). Codex is optional: without `@dougharness/codex` and the Codex CLI installed, the Claude `adversary-claude` agent stands in instead.
 - **It remembers what went wrong before.** Past lessons are recalled by keyword (semantic recall with `memory.embeddings` set) and put in front of the next task before it starts (`plugins/doug-flow/lib/memory.mjs`).
@@ -19,6 +19,10 @@ Detail moved out of README.md so the top screen stays scannable ([why](../README
 - Cross-model adversary review via Codex, with a Claude fallback (`packages/doug-codex`)
 - Lesson recall and an opt-in code index feeding each task (`plugins/doug-flow/lib/memory.mjs`, [docs/memory.md](memory.md))
 - A live board and a per-run cost report (`doug board serve`, `plugins/doug-flow/scripts/cost.mjs`)
+
+## Semantic memory
+
+Recall is keyword-only until an embedding server is configured. `doug memory setup` finds a local OpenAI-compatible server that is already running (Ollama, LM Studio, llama-server, vLLM, Unsloth Studio), checks the model with a sanity test, and writes `memory.embeddings` on your yes. `doug init` offers it. Doug never installs a runtime. See [docs/memory.md](memory.md).
 
 ## Install from a clone
 
@@ -36,7 +40,7 @@ node packages/doug-cli/dist/bin.js init <path-to-a-typescript-repo>             
 
 `config.subagents.maxSpawnDepth` (`doug init` proposes `1`) is merged into `.claude/settings.json` as `env.CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH`, Claude Code's own per-project subagent nesting limit: `1` means only the session lead orchestrates agents; no subagent can spawn one.
 
-`config.subagents.promptCacheTtl` (default `"1h"`) is written as the top-level `subagentPromptCacheTtl` setting, and `config.subagents.maxConcurrentWorkflowAgents` (default `4`) as `env.CLAUDE_CODE_WORKFLOW_MAX_CONCURRENT_AGENTS`. Set either to `null` to omit it. Unlike the spawn depth, an existing value in `.claude/settings.json` is never overwritten.
+`config.subagents.promptCacheTtl` (default `"1h"`) is written as the top-level `subagentPromptCacheTtl` setting, and `config.subagents.maxConcurrentWorkflowAgents` (default `16`, Claude Code's own default) as `env.CLAUDE_CODE_WORKFLOW_MAX_CONCURRENT_AGENTS`. Set either to `null` to omit it. Unlike the spawn depth, an existing value in `.claude/settings.json` is never overwritten.
 
 The gate is `pnpm typecheck` and `pnpm test:unit`. `pnpm test` additionally runs `packages/doug-codex/tests/codex-live.test.ts`, which spawns Codex and costs usage.
 
@@ -66,6 +70,7 @@ See [docs/onboarding.md](onboarding.md) for what each step writes and never does
 | secret-scan | PreToolUse Edit/Write, Bash | Denies writing text or running a command that carries a credential: AWS access key ids, PEM private-key headers, GitHub and Slack tokens, and inline password/secret/api_key/token assignments with a literal value. Placeholder prefixes are exempt; only new text is scanned, so removing a secret is never blocked. |
 | format-on-edit | PostToolUse Edit/Write | Runs the detected formatter on the edited file. Reports parse failures back to Claude. |
 | edit-loop | PostToolUse Edit/Write | Counts edits per file per session and nudges after the threshold. |
+| turn-start | UserPromptSubmit | Records the working-tree fingerprint at the start of each turn (typed, scheduled, or a background subagent reporting back), whatever `trace.enabled` says; prints nothing. A main Stop whose tree still matches it (paths on `preCommit.noTestPaths` ignored) with no main-agent Edit traced since skips verification and notes any unverified changes left by other agents; a missing record verifies as before. |
 | stop-gate | Stop, SubagentStop | Runs typecheck, lint, and tests when anything changed. Blocks the turn from ending while they fail, up to a cap, and while the session itself has run no test or verify command. Also blocks if a protected file changed through Bash, or if a changed file is outside an approved plan's scope. On green, records a checkpoint if `checkpoint.enabled` is set. On timeout, a command's whole process group is killed, not just its direct child. A green gate records the verified tree in session state, so a later Stop/SubagentStop whose tree still matches skips re-running the commands. Only one gate runs the commands at a time per project; a concurrent gate waits on `.doug/.state/gate.lock`, bounded by `stopGate.timeoutMs` times the number of configured commands, and a waiter that outlives that bound runs its own commands rather than waiting forever. The wait is also bounded by `stopGate.hookTimeoutSec` (default 600, must equal the stop-gate hook's own `timeout`); past that budget a waiter blocks instead of running, and a command that cannot fit before the budget is not run and is named in the block message. |
 | reanchor | SessionStart compact/resume, PostCompact, PreCompact | On SessionStart compact/resume, re-injects tooling facts, commands, and `.doug/anchor.md` (a compaction snapshot in it goes first). Before compaction (PreCompact) it snapshots the plan, task ownership, the decision files, and the session's edited files and recent commands into the anchor between marker lines; PostCompact does nothing further. |
 | session-start-baseline | SessionStart, every source | Captures the dirty-tree baseline as early as the event allows, so a tree the session never touches can skip verification at Stop. Idempotent (only writes when no baseline is recorded yet); labels the capture `session-start` only when the session has not acted yet and the source is `startup`, otherwise `stop`. Never blocks. |
@@ -183,7 +188,7 @@ doug board serve   # the live board page: --open opens a browser, --detach backg
 `doug init` proposes `"statusLine": { "type": "command", "command": "node .doug/hooks/scripts/statusline.mjs" }` in `.claude/settings.json`. The script reads the status-line JSON on stdin and prints one line, e.g.:
 
 ```
-Doug 1.0.3 · Opus · main · ctx 8%
+Doug 1.1.0 · Opus · main · ctx 8%
 ```
 
 The segments are the product name from `.doug/config.json`, the installed `doug-gates` version (`.doug/hooks/VERSION`, falling back to config `doug.version`), `model.display_name`, the current git branch, and the used context-window percentage. Fallbacks: `ctx --` before the first API call or after `/compact`, no branch segment outside a git repo, and the bare line `Doug` on any error. Always exits 0. Tests in `plugins/doug-gates/tests/statusline.test.mjs`.

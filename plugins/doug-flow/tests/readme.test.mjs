@@ -538,3 +538,171 @@ describe("README scannable (card readme-scannable)", () => {
     expect(readme.includes("Doug 0.1.0"), "README.md must not contain 'Doug 0.1.0'").toBe(false);
   });
 });
+
+// Card readme-rewrite: the README's top screen sells five powers, the quickstart is three commands that match
+// init-complete, memory.embeddings links to docs/memory.md, and the recall docs describe the dense ranking.
+//
+// Rule for "the top screen": everything before the '## Quickstart' heading (the title, promise, diagram, and the
+// powers). The quickstart closes the top screen; the powers must come first. Phrases are pinned loosely
+// (alternations), not exact prose.
+function topScreen(readme) {
+  const lines = readme.split("\n");
+  const q = lines.findIndex((l) => /^## Quickstart\s*$/.test(l));
+  expect(q, "README must have a '## Quickstart' heading").toBeGreaterThan(0);
+  return lines.slice(0, q).join("\n");
+}
+
+// The top-level bullets and paragraphs (blank-line separated blocks) of the top screen, outside code fences.
+function topBlocks(readme) {
+  return stripFences(topScreen(readme)).split(/\n\s*\n/).map((b) => b.trim()).filter((b) => b.length > 0);
+}
+
+const POWERS = [
+  ["gates an agent cannot talk past", [/\bgates?\b/i, /(talk(s|ed)? (its way )?past|talk(s)? (its|their) way|edit(s)? (its|their) way|cannot be (talked|argued)|can'?t (be )?(talk|argu)|cannot (be )?(talk|argu)|trust(s|ing)? (the agent|its|their)'?s? word|not (its|their|the agent'?s) word)/i]],
+  ["tests written first", [/tests?[- ](are )?(written )?first|test-first|failing tests?[^.\n]{0,40}first|tests? before (the )?(code|change|implementation)/i]],
+  ["every change mutation-proven", [/mutation/i]],
+  ["an adversary on a different model", [/adversar/i, /(different|second|another|other|separate|independent) model|\bCodex\b/i]],
+  ["memory that makes the next run better", [/\bmemory\b|\blessons?\b/i, /next (run|task|card|session)|before the next|better|improv/i]],
+  ["a board that runs the queue", [/\bboard\b/i, /queue|cards?/i]],
+  ["autopilot", [/autopilot/i]],
+];
+
+describe("README top screen powers (card readme-rewrite)", () => {
+  it("P1: the top screen (everything before '## Quickstart') names each of the five powers by a distinctive phrase", () => {
+    const top = topScreen(readRoot("README.md"));
+    const missing = [];
+    for (const [name, pats] of POWERS) {
+      const failed = pats.filter((p) => !p.test(top));
+      if (failed.length > 0) missing.push(`${name} (${failed.map(String).join(" ; ")})`);
+    }
+    expect(missing, `top screen is missing: ${missing.join(" | ")}`).toEqual([]);
+  });
+
+  it("P2: board and autopilot are named together in one block, with the real autopilot command /doug-next --auto", () => {
+    const blocks = topBlocks(readRoot("README.md"));
+    const hit = blocks.find((b) => /\bboard\b/i.test(b) && /autopilot/i.test(b));
+    expect(hit, "no single top-screen bullet or paragraph names both the board and autopilot").toBeDefined();
+    expect(hit, "the board/autopilot block must name `/doug-next --auto`, the real autopilot command").toContain("/doug-next --auto");
+    const skill = readRoot("plugins/doug-flow/skills/doug-next/SKILL.md");
+    expect(skill, "doug-next must still document --auto").toContain("--auto");
+  });
+
+  it("P3: honesty: mutation proof is a hand-track practice (the flow has no mutation stage), so the block that claims it says 'hand'", () => {
+    const blocks = topBlocks(readRoot("README.md"));
+    const mutationBlocks = blocks.filter((b) => /mutation/i.test(b));
+    expect(mutationBlocks.length, "the top screen must mention mutation proof").toBeGreaterThan(0);
+    // Reviewer finding: strip backtick spans first, or a cited path like `.../doug-hand/SKILL.md` satisfies \bhand\b.
+    const unqualified = mutationBlocks.filter((b) => !/\bhand\b/i.test(b.replace(/`[^`]*`/g, "")));
+    expect(unqualified, `mutation proof must be scoped to the hand track, not claimed for every flow run: ${unqualified.join(" | ")}`).toEqual([]);
+    // The claim stays true of the code: the hand-track skill is where mutations are required; the flow workflow has none.
+    expect(readRoot("plugins/doug-flow/skills/doug-hand/SKILL.md")).toMatch(/mutation/i);
+    expect(readRoot("plugins/doug-flow/workflows/doug-implement.js")).not.toMatch(/mutation (stage|list|proof)/i);
+  });
+
+  it("P4: the top screen stays a screen: the powers and quickstart sit in the first 60 lines", () => {
+    const lines = readRoot("README.md").split("\n");
+    const q = lines.findIndex((l) => /^## Quickstart\s*$/.test(l));
+    expect(q, `'## Quickstart' starts at line ${q + 1}`).toBeLessThan(60);
+  });
+});
+
+describe("README quickstart matches init-complete (card readme-rewrite)", () => {
+  // init-complete settled (docs/getting-started.md, packages/doug-cli/src/doctor.ts): the plugin install is the
+  // three-command chain doctor prints as its fix line, then `doug init`, then `claude` (the final screen's step 1).
+  it("Q1: the Quickstart sh block is exactly 3 commands: the doctor install chain, the cli init, then claude", () => {
+    const readme = readRoot("README.md");
+    const body = sectionBody(readme, "Quickstart");
+    expect(body, "README must have a '## Quickstart' section").not.toBeNull();
+    const blocks = fencedBlocksTyped(body, "sh");
+    expect(blocks.length, "exactly one sh block in Quickstart").toBe(1);
+    const cmds = blocks[0].split("\n").map((l) => l.trim()).filter((l) => l.length > 0);
+    expect(cmds.length, `Quickstart sh block must hold exactly 3 commands, found ${cmds.length}: ${cmds.join(" / ")}`).toBe(3);
+
+    const gs = readRoot("docs/getting-started.md");
+    const shellInstall = fencedBlocksTyped(gs, "sh")[0].split("\n").map((l) => l.trim()).filter(Boolean);
+    expect(shellInstall.length, "getting-started's shell install block is the three plugin commands").toBe(3);
+    const chain = shellInstall.join(" && ");
+    expect(cmds[0], "command 1 is the documented install chain (docs/getting-started.md 'Or from a shell')").toBe(chain);
+    expect(readRoot("packages/doug-cli/src/doctor.ts"), "the chain is the one doug doctor prints as its fix line").toContain(chain);
+
+    expect(cmds[1], "command 2 is the CLI init").toMatch(/^npx @dougharness\/cli init \.$/);
+    expect(gs).toContain("npx @dougharness/cli init");
+    expect(cmds[2], "command 3 is `claude`, step 1 of init's final screen").toBe("claude");
+    expect(gs, "init's final screen (getting-started) starts with `claude`").toMatch(/1\.\s+claude\b/);
+  });
+});
+
+describe("README links memory.embeddings to docs/memory.md (card readme-rewrite)", () => {
+  it("M1: a markdown link whose text names memory.embeddings points at docs/memory.md (an anchor, if any, is a real heading)", () => {
+    const readme = readRoot("README.md");
+    const m = readme.match(/\[[^\]]*memory\.embeddings[^\]]*\]\(docs\/memory\.md(?:#([^)]*))?\)/);
+    expect(m, "no [..memory.embeddings..](docs/memory.md) link in README.md").not.toBeNull();
+    if (m[1]) {
+      const slugs = headings(readRoot("docs/memory.md")).map((h) => githubSlug(h.text));
+      expect(slugs, `docs/memory.md has no heading for #${m[1]}`).toContain(m[1]);
+    }
+  });
+});
+
+describe("recall docs describe the dense ranking (card readme-rewrite, absorbs recall-docs-drift)", () => {
+  const recallSection = () => sectionBody(readRoot("docs/memory.md"), "`memory.mjs recall`");
+
+  it("D1: docs/memory.md's recall section names cosine, recency, scope, lesson-id ties, unembedded BM25 hits appended, and the BM25 fallback", () => {
+    const s = recallSection();
+    expect(s, "docs/memory.md must have the '## `memory.mjs recall`' section").not.toBeNull();
+    const checks = {
+      cosine: /cosine/i,
+      recency: /recency/i,
+      scope: /scope/i,
+      "lesson-id ties": /ties?[^.\n]{0,60}(lesson )?id|(lesson )?id[^.\n]{0,60}ties?/i,
+      "unembedded BM25 hits appended": /(append|after)[^.\n]{0,120}(no vector|without a vector|unembedded|not embedded|no stored vector)|(no vector|without a vector|unembedded|not embedded|no stored vector)[^.\n]{0,120}(append|after)/i,
+      "BM25 fallback": /BM25[^.\n]{0,100}(fall ?back|fallback|keyword-only|without)|(fall ?back|fallback)[^.\n]{0,100}BM25/i,
+    };
+    const missing = Object.entries(checks).filter(([, re]) => !re.test(s)).map(([k]) => k);
+    expect(missing, `recall section is missing: ${missing.join(", ")}`).toEqual([]);
+  });
+
+  it("D2: the recall section no longer says cosine is fused with BM25 by reciprocal rank fusion (the shipped ranking is dense)", () => {
+    const s = recallSection();
+    expect(s).not.toBeNull();
+    expect(s).not.toMatch(/fuses BM25[^.]*reciprocal rank fusion/i);
+  });
+
+  it("D3: the Task prefixes paragraph in docs/memory.md lists the mxbai and qwen3 query prefixes, as lib/embeddings.mjs adds them", () => {
+    const doc = readRoot("docs/memory.md");
+    const start = doc.indexOf("**Task prefixes.**");
+    expect(start, "docs/memory.md must keep its '**Task prefixes.**' paragraph").toBeGreaterThanOrEqual(0);
+    const para = doc.slice(start).split(/\n\s*\n/)[0];
+    expect(para, "mxbai").toMatch(/mxbai/i);
+    expect(para, "qwen3").toMatch(/qwen3/i);
+    expect(para, "mxbai query prefix text").toContain("Represent this sentence for searching relevant passages:");
+    expect(para, "qwen3 query prefix text").toContain("Instruct: Given a web search query, retrieve relevant passages that answer the query");
+    const code = readRoot("plugins/doug-flow/lib/embeddings.mjs");
+    expect(code).toContain("Represent this sentence for searching relevant passages: ");
+    expect(code).toContain("Instruct: Given a web search query, retrieve relevant passages that answer the query");
+  });
+
+  it("D4: the memory.mjs header usage text for `recall` describes the dense ranking", () => {
+    const src = readRoot("plugins/doug-flow/scripts/memory.mjs");
+    const start = src.indexOf("//   memory.mjs recall <query>");
+    expect(start, "memory.mjs header must document `recall`").toBeGreaterThanOrEqual(0);
+    const rest = src.slice(start).split("\n");
+    const entry = [rest[0]];
+    for (const line of rest.slice(1)) {
+      if (/^\/\/   memory\.mjs /.test(line) || !line.startsWith("//")) break;
+      entry.push(line);
+    }
+    const text = entry.map((l) => l.replace(/^\/\/\s*/, "")).join(" ").replace(/\s+/g, " ");
+    const checks = {
+      cosine: /cosine/i,
+      recency: /recency/i,
+      scope: /scope|--files/i,
+      "lesson-id ties": /ties?[^.;]{0,60}\bid\b|\bid\b[^.;]{0,60}ties?/i,
+      "unembedded BM25 hits appended": /append/i,
+      "BM25 fallback": /BM25[^.;]{0,100}(fall ?back|keyword-only|without)|(fall ?back|keyword-only)[^.;]{0,100}BM25/i,
+    };
+    const missing = Object.entries(checks).filter(([, re]) => !re.test(text)).map(([k]) => k);
+    expect(missing, `memory.mjs recall usage text is missing: ${missing.join(", ")}`).toEqual([]);
+    expect(text, "usage text must not describe the old reciprocal-rank-fusion ranking as the ranking").not.toMatch(/fused by reciprocal rank fusion with cosine/i);
+  });
+});

@@ -5,7 +5,7 @@
 // settles the deterministic side without a new top-level suite. It lives in root scripts/ because it depends on
 // this checkout (evals fixtures, the CLI build); it loads the shipped plugin via --plugin-dir.
 //
-//   rehearse.mjs [flow|swarm|hand|all] --card <id> --spend [dir]
+//   rehearse.mjs [flow|swarm|hand|auto|all] --card <id> --spend [dir]
 //     no arguments             print the estimate table and exit 2; nothing is spawned
 //     a scenario, no --spend   print that scenario's per-stage estimate and exit 2; nothing is spawned
 //     --spend, no --card       exit 2 ("--card <id> names the card this rehearsal records under"); nothing is spawned
@@ -46,7 +46,7 @@ const opts = parseArgs(process.argv.slice(2));
 
 if (!opts.scenario) {
   printEstimates(null);
-  process.stdout.write("\nusage: rehearse.mjs [flow|swarm|hand|all] --card <id> --spend [dir]\n");
+  process.stdout.write("\nusage: rehearse.mjs [flow|swarm|hand|auto|all] --card <id> --spend [dir]\n");
   process.exit(2);
 }
 if (opts.scenario !== "all" && !SCENARIOS.includes(opts.scenario)) fail(`unknown scenario "${opts.scenario}"; scenarios are ${SCENARIOS.join(", ")}, all`, 2);
@@ -104,7 +104,7 @@ for (const scenario of scenarios) {
 
   try {
     let recorded;
-    if (scenario === "hand") {
+    if (scenario === "hand" || scenario === "auto") {
       recorded = recordHandOutcome(dir, opts.card, { commit: result.commit, wallClock: result.wallClock, gate: extractGateLine(result.fixtureDir) || "not observed", note, rehearsal: scenario });
     } else {
       recorded = recordRunOutcome(dir, opts.card, { reportFile: result.reportFile, wallClock: result.wallClock, cost: result.totalCost, mergeCommit: result.commit, note, rehearsal: scenario });

@@ -22,11 +22,15 @@ export function makeProject({ config = null, git = false } = {}) {
 }
 
 export function runHookScript(name, input, { dir, env = {} } = {}) {
+  // DOUG_STOP_GATE_TREE pins a stop-gate process to one tree; a suite run inside a child gate would inherit it
+  // and pin every SubagentStop here. A test that wants it passes it through `env`.
+  const inherited = { ...process.env };
+  delete inherited.DOUG_STOP_GATE_TREE;
   const res = spawnSync(process.execPath, [join(scriptsDir, name + ".mjs")], {
     cwd: dir,
     input: JSON.stringify({ session_id: "test-session", cwd: dir, ...input }),
     encoding: "utf8",
-    env: { ...process.env, CLAUDE_PROJECT_DIR: dir, ...env },
+    env: { ...inherited, CLAUDE_PROJECT_DIR: dir, ...env },
     timeout: 30000,
   });
   let json = null;

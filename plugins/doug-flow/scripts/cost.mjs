@@ -1,5 +1,8 @@
 #!/usr/bin/env node
 // Real cost of one doug-implement run from the local Claude Code transcripts; no network, nothing estimated.
+//   cost.mjs --session <id|latest> [dir] [--json] [--claude-dir <path>]
+//     --session           price one Claude Code session: its transcript plus every subagent transcript under it
+//                         (latest = the most recently modified one in the project); exit 1 when none is found
 //   cost.mjs <run-id> [dir] [--json] [--claude-dir <path>]
 //     <run-id>            the Workflow run id (wf_...)
 //     [dir]               the project directory whose ~/.claude/projects slug is searched first (default cwd)
@@ -15,7 +18,7 @@
 // with the run total and any unpriced agent. An unreadable/invalid default report is ignored, not a usage error.
 import { readFileSync } from "node:fs";
 import { resolve, join } from "node:path";
-import { costRun, renderCost, costByCard, renderCostByCard } from "../lib/cost.mjs";
+import { costRun, costSession, renderSession, renderCost, costByCard, renderCostByCard } from "../lib/cost.mjs";
 import { loadPlan, REPORT_RELPATH, unwrapReport } from "../lib/plan.mjs";
 
 const argv = process.argv.slice(2);
@@ -35,13 +38,22 @@ for (let i = 0; i < argv.length; i++) {
   opts[name] = argv[i + 1] ?? "";
   i++;
 }
-const [runId, dirArg] = positional;
-if (!runId) {
+const [runId, dirArg] = opts.session !== undefined ? [null, positional[0]] : positional;
+if (opts.session === "") {
+  process.stderr.write("usage: cost.mjs --session <id|latest> [dir] [--json] [--claude-dir <path>]\n");
+  process.exit(2);
+}
+if (!runId && opts.session === undefined) {
   process.stderr.write("usage: cost.mjs <run-id> [dir] [--json] [--claude-dir <path>]\n");
   process.exit(2);
 }
 try {
   const projectDir = resolve(process.env.CLAUDE_PROJECT_DIR || dirArg || process.cwd());
+  if (opts.session !== undefined) {
+    const result = costSession({ session: opts.session, projectDir, claudeDir: opts["claude-dir"] ? resolve(opts["claude-dir"]) : undefined });
+    process.stdout.write(opts.json ? JSON.stringify(result, null, 2) + "\n" : renderSession(result));
+    process.exit(0);
+  }
   let reportPath = opts.report ? resolve(opts.report) : join(projectDir, REPORT_RELPATH);
   let report = null;
   if (opts.report) {

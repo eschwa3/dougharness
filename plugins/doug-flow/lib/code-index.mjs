@@ -545,7 +545,7 @@ function rowsByIdMap(m, ids) {
 // the BM25 side (a precomputed allow-list of matching paths, so the ranking itself runs restricted), in memory
 // for the vector side. Never throws for a provider problem; a query with no FTS tokens simply has no BM25 side.
 export async function searchIndex(m, query, opts = {}) {
-  const { k = 8, files = [], provider = null } = opts;
+  const { k = 8, files = [], provider = null, detectedProvider = null } = opts;
 
   const allowedPaths = files.length
     ? new Set(
@@ -576,14 +576,16 @@ export async function searchIndex(m, query, opts = {}) {
   let reason = "no provider configured";
   let providerName = null;
   let vectorRanked = [];
+  let vectorsForProvider = 0;
   if (provider) {
     providerName = provider.name;
     let vectorRows = m
       .prepare("SELECT id, path, embedding FROM code_chunks WHERE embedding_model = ? AND embedding_dims = ?")
       .all(provider.model, provider.dims);
+    vectorsForProvider = vectorRows.length;
     if (allowedPaths) vectorRows = vectorRows.filter((r) => allowedPaths.has(r.path));
     if (!vectorRows.length) {
-      reason = `no vectors stored for ${provider.model}/${provider.dims}`;
+      reason = vectorsForProvider > 0 ? "no vectors in the filtered paths" : `no vectors stored for ${provider.model}/${provider.dims}`;
     } else {
       const embedResult = await provider.embed([String(query || "")], { inputType: "query" });
       if (!embedResult.ok) {
@@ -602,6 +604,19 @@ export async function searchIndex(m, query, opts = {}) {
         reason = null;
       }
     }
+  }
+
+  // card recall-fallback-warning: a filter that excludes every vector while vectors exist for the provider is
+  // not degraded; hybrid counts chunks without a vector for the provider over the whole index.
+  const anyVectors = () => m.prepare("SELECT 1 FROM code_chunks WHERE embedding IS NOT NULL LIMIT 1").get() !== undefined;
+  const filteredOut = mode === "keyword-only" && !!provider && vectorsForProvider > 0 && reason === "no vectors in the filtered paths";
+  const degraded = mode === "keyword-only" && !filteredOut && (!!provider || anyVectors() || !!detectedProvider);
+  const coverage = {};
+  if (mode === "hybrid") {
+    coverage.total = m.prepare("SELECT COUNT(*) AS n FROM code_chunks").get().n;
+    coverage.unvectored = coverage.total - m
+      .prepare("SELECT COUNT(*) AS n FROM code_chunks WHERE embedding_model = ? AND embedding_dims = ?")
+      .get(provider.model, provider.dims).n;
   }
 
   const fused = new Map();
@@ -625,5 +640,5 @@ export async function searchIndex(m, query, opts = {}) {
     })
     .filter(Boolean);
 
-  return { mode, reason: mode === "hybrid" ? null : reason, provider: providerName, chunks };
+  return { mode, reason: mode === "hybrid" ? null : reason, provider: providerName, degraded, ...coverage, chunks };
 }

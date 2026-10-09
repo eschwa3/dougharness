@@ -44,6 +44,9 @@ function frontmatter(text: string): { fields: Record<string, string>; lists: Rec
   return { fields, lists, body: lines.slice(end + 1) };
 }
 
+const REVIEWER_GATE_RULE =
+  "Run the brief's test files and mutations and the gate's non-test commands, never the full test suite directly; for the full gate run `node .doug/hooks/scripts/verify.mjs` without `--no-credit`, which credits a green verified-tree record of the same tree, and report its gate line and real exit codes.";
+
 describe("this repository's project agents", () => {
   const names = ["coder", "architect", "reviewer", "researcher", "tester"];
 
@@ -125,6 +128,21 @@ describe("this repository's project agents", () => {
     expect(researcher).toContain(
       "Primary sources first (official docs, the tool's own --help, the package's repository); quote a page verbatim with its line number in the raw page (curl -sL <url> | grep -n '<phrase>'), or the command and its output, and say whether it was observed or documented; a quote without a line is marked no line."
     );
+  });
+
+  it("the checked-in coder and reviewer tell the agent to run the gate with verify.mjs (card verified-tree-record)", () => {
+    const coder = readFileSync(join(AGENTS, "coder.md"), "utf8");
+    const reviewer = readFileSync(join(AGENTS, "reviewer.md"), "utf8");
+    expect(coder).toContain("verify.mjs");
+    expect(coder).toContain("Run the gate with `node .doug/hooks/scripts/verify.mjs`");
+    expect(reviewer).toContain("verify.mjs");
+    expect(reviewer).toContain(REVIEWER_GATE_RULE);
+    expect(reviewer).not.toContain("Run the gate with `node .doug/hooks/scripts/verify.mjs`");
+    expect(reviewer).not.toMatch(/(?<!without )`--no-credit`/);
+    const rules = reviewer.slice(reviewer.indexOf("## Rules"), reviewer.includes("## Project notes") ? reviewer.indexOf("## Project notes") : undefined);
+    const gateRule = rules.split("\n").find((l) => l.includes("verify.mjs")) ?? "";
+    expect(gateRule, "F1: the reviewer's gate rule sits in the Rules section").toContain(REVIEWER_GATE_RULE);
+    expect(gateRule, "F1: the reviewer's gate rule names no package manager command").not.toMatch(/pnpm/);
   });
 
   it("reproduces this repository's checked-in agent files byte for byte from this repository's own detection", () => {

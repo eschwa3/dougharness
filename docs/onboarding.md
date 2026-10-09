@@ -58,9 +58,8 @@ node <repo>/packages/doug-cli/dist/bin.js
      the diff only); never touches the network; never publishes anything.
 
    Then `doug doctor <repo>` (`--json` for a machine-readable report) checks the
-   install: Node and SQLite FTS5, the config, the vendored hooks, the hooks
-   registered in settings, `codex` on PATH, the memory store, and the plugin
-   versions. Each check prints ok, warn, fail, or skip and, when not ok, one
+   install; the list of checks is in docs/getting-started.md. Each check
+   prints ok, warn, fail, or skip and, when not ok, one
    `fix:` command; the exit status is 1 on any fail.
    - Writes: nothing.
    - Never: touches the network; never writes (it reads only).

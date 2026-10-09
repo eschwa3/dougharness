@@ -20,6 +20,7 @@ import { statSync } from "node:fs";
 import { runHook, allow, addContext } from "../lib/io.mjs";
 import { loadConfig, projectDir } from "../lib/config.mjs";
 import { appendTrace, traceLine } from "../lib/trace.mjs";
+import { writeAgentStart } from "../lib/baseline.mjs";
 import { loadState, saveState } from "../lib/state.mjs";
 import { agentTranscriptPath, contextReading, recordAgentContext, shouldNotify, noticeText } from "../lib/agent-context.mjs";
 
@@ -52,6 +53,9 @@ runHook("trace", async (input) => {
   }
 
   appendTrace(dir, traceLine(input, { context: reading ? reading.pct : null, secrets: cfg.secrets }));
+
+  // card gate-skip-readonly-researchers: record the tree fingerprint the agent starts from (never throws).
+  if (input.hook_event_name === "SubagentStart" && input.agent_id) writeAgentStart(dir, cfg, input.session_id, input.agent_id);
 
   if (!reading) return allow();
 

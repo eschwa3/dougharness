@@ -31,7 +31,7 @@ const PACKAGE_DIR = resolve(here, "..");
 const REPO_ROOT = resolve(here, "../../..");
 const fixture = join(here, "fixtures", "ts-pnpm");
 const CLI_VERSION = "1.0.2";
-const IDS = ["node", "config", "hooks-vendored", "hooks-registered", "codex", "memory", "plugin-versions"];
+const IDS = ["node", "config", "hooks-vendored", "hooks-registered", "statusline", "subagent-settings", "board", "codex", "adversary", "memory", "embeddings", "plugins", "plugin-versions"];
 
 type Check = { id: string; status: "ok" | "warn" | "fail" | "skip"; detail: string; fix: string | null };
 type Report = {
@@ -207,7 +207,7 @@ describe("doug doctor: arguments, usage, exit codes", () => {
 });
 
 describe("doug doctor: output shapes", () => {
-  it("--json: dir, cliVersion, ok, counts, and exactly the seven checks in order with fix non-null only for warn/fail", async () => {
+  it("--json: dir, cliVersion, ok, counts, and exactly the thirteen checks in order with fix non-null only for warn/fail", async () => {
     const dir = project();
     writeFileSync(join(dir, ".doug", "config.json"), "{"); // a fail
     const { report: rep } = await report(dir, baseDeps({ env: { PATH: emptyBin } })); // plus a warn and skips
@@ -325,7 +325,7 @@ describe("check isolation", () => {
   });
 
   it.skipIf(typeof process.getuid === "function" && process.getuid() === 0)(
-    "a check that throws (unreadable gates scripts/sub) reports fail with the message and a fix, the other six still report, exit 1, --json parses",
+    "a check that throws (unreadable gates scripts/sub) reports fail with the message and a fix, the others still report, exit 1, --json parses",
     async () => {
       const gates = tmp("gates");
       const real = gatesSourceDir();
@@ -687,6 +687,242 @@ describe("check plugin-versions", () => {
     const deps = baseDeps({ env: { PATH: codexBin, CLAUDE_CONFIG_DIR: cfg } });
     delete deps.claudeConfigDir;
     expect((await check(project(), "plugin-versions", deps)).status).toBe("warn");
+  });
+});
+
+function editJson(dir: string, rel: string, fn: (o: Record<string, any>) => void) {
+  const f = join(dir, rel);
+  const o = existsSync(f) ? JSON.parse(readFileSync(f, "utf8")) : {};
+  fn(o);
+  mkdirSync(dirname(f), { recursive: true });
+  writeFileSync(f, JSON.stringify(o));
+}
+
+describe("check statusline", () => {
+  it("ok on a fresh init", async () => {
+    const c = await check(project(), "statusline");
+    expect(c.status).toBe("ok");
+    expect(c.fix).toBeNull();
+  });
+  it("warn with the init fix when no statusLine is set", async () => {
+    const dir = project();
+    editJson(dir, ".claude/settings.json", (s) => delete s.statusLine);
+    const c = await check(dir, "statusline");
+    expect(c.status).toBe("warn");
+    expect(c.detail).toBe("no status line in .claude/settings.json");
+    expect(c.fix).toBe(`doug init ${dir}`);
+  });
+  it("warn when Doug's statusline script is missing", async () => {
+    const dir = project();
+    rmSync(join(dir, ".doug", "hooks", "scripts", "statusline.mjs"));
+    const c = await check(dir, "statusline");
+    expect(c.status).toBe("warn");
+    expect(c.fix).toBe(`doug init ${dir}`);
+  });
+  it("skip for a custom status line, and local settings win", async () => {
+    const dir = project();
+    editJson(dir, ".claude/settings.json", (s) => (s.statusLine = { type: "command", command: "my-line" }));
+    const c = await check(dir, "statusline");
+    expect(c.status).toBe("skip");
+    expect(c.detail).toBe("a custom status line is set; Doug's is not used");
+    const d2 = project();
+    editJson(d2, ".claude/settings.local.json", (s) => (s.statusLine = { type: "command", command: "other" }));
+    expect((await check(d2, "statusline")).status).toBe("skip");
+  });
+  it("skip when settings.json is missing or unparsable", async () => {
+    const dir = project();
+    writeFileSync(join(dir, ".claude", "settings.json"), "{");
+    expect((await check(dir, "statusline")).status).toBe("skip");
+    rmSync(join(dir, ".claude", "settings.json"));
+    expect((await check(dir, "statusline")).status).toBe("skip");
+  });
+});
+
+describe("check subagent-settings", () => {
+  it("ok on a fresh init, naming the values", async () => {
+    const c = await check(project(), "subagent-settings");
+    expect(c.status).toBe("ok");
+    expect(c.detail).toBe("subagent prompt cache 1h, 16 concurrent workflow agents, spawn depth 1");
+    expect(c.fix).toBeNull();
+  });
+  it("warn naming the missing keys, with the init fix", async () => {
+    const dir = project();
+    editJson(dir, ".claude/settings.json", (s) => {
+      delete s.subagentPromptCacheTtl;
+      delete s.env.CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH;
+    });
+    const c = await check(dir, "subagent-settings");
+    expect(c.status).toBe("warn");
+    expect(c.detail).toContain("subagentPromptCacheTtl");
+    expect(c.detail).toContain("CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH");
+    expect(c.detail).not.toContain("CLAUDE_CODE_WORKFLOW_MAX_CONCURRENT_AGENTS");
+    expect(c.fix).toBe(`doug init ${dir}`);
+  });
+  it("local settings supply a missing key", async () => {
+    const dir = project();
+    editJson(dir, ".claude/settings.json", (s) => delete s.subagentPromptCacheTtl);
+    editJson(dir, ".claude/settings.local.json", (s) => (s.subagentPromptCacheTtl = "5m"));
+    const c = await check(dir, "subagent-settings");
+    expect(c.status).toBe("ok");
+    expect(c.detail).toContain("subagent prompt cache 5m");
+  });
+  it("a key whose config value is null is not expected", async () => {
+    const dir = project();
+    editJson(dir, ".doug/config.json", (c) => (c.subagents.promptCacheTtl = null));
+    editJson(dir, ".claude/settings.json", (s) => delete s.subagentPromptCacheTtl);
+    const c = await check(dir, "subagent-settings");
+    expect(c.status).toBe("ok");
+    expect(c.detail).not.toContain("prompt cache");
+  });
+  it("skip when nothing is expected, or settings.json is unparsable", async () => {
+    const dir = project();
+    editJson(dir, ".doug/config.json", (c) => (c.subagents = { promptCacheTtl: null, maxConcurrentWorkflowAgents: null, maxSpawnDepth: null }));
+    expect((await check(dir, "subagent-settings")).status).toBe("skip");
+    const d2 = project();
+    writeFileSync(join(d2, ".claude", "settings.json"), "{");
+    expect((await check(d2, "subagent-settings")).status).toBe("skip");
+  });
+});
+
+describe("check board", () => {
+  it("ok with the card count and the serve hint", async () => {
+    const dir = project();
+    expect(existsSync(join(dir, ".doug", "board.json"))).toBe(true);
+    const c = await check(dir, "board");
+    expect(c.status).toBe("ok");
+    expect(c.detail).toMatch(/^\.doug\/board\.json: \d+ cards; view it with doug board serve --open$/);
+    expect(c.fix).toBeNull();
+  });
+  it("ok from the docs/board.json fallback", async () => {
+    const dir = project();
+    mkdirSync(join(dir, "docs"), { recursive: true });
+    writeFileSync(join(dir, "docs", "board.json"), JSON.stringify({ cards: [{}, {}] }));
+    rmSync(join(dir, ".doug", "board.json"));
+    const c = await check(dir, "board");
+    expect(c.status).toBe("ok");
+    expect(c.detail).toContain("docs/board.json: 2 cards");
+  });
+  it("warn with doug board init when there is no board, carrying the dir argument", async () => {
+    const dir = project();
+    rmSync(join(dir, ".doug", "board.json"));
+    const c = await check(dir, "board");
+    expect(c.status).toBe("warn");
+    expect(c.detail).toBe("no board");
+    expect(c.fix).toBe(`doug board init ${dir}`);
+    const r = await report(dir, baseDeps());
+    expect(r.code).toBe(0);
+    let out = "";
+    await runDoctor([dir, "--json"], { stdout: (s: string) => void (out += s), stderr: () => {} }, baseDeps() as never);
+    expect((JSON.parse(out) as Report).checks.find((x) => x.id === "board")!.fix).toBe(`doug board init ${dir}`);
+  });
+  it("warn with a repair fix when the board is unparsable or has no cards array", async () => {
+    const dir = project();
+    writeFileSync(join(dir, ".doug", "board.json"), "{");
+    const c = await check(dir, "board");
+    expect(c.status).toBe("warn");
+    expect(c.fix).toBe("repair the JSON in .doug/board.json");
+    writeFileSync(join(dir, ".doug", "board.json"), JSON.stringify({ columns: [] }));
+    expect((await check(dir, "board")).status).toBe("warn");
+  });
+});
+
+describe("check adversary", () => {
+  const toolBin = (name: string) => {
+    const d = tmp("tool");
+    writeFileSync(join(d, name), "#!/bin/sh\nexit 0\n");
+    chmodSync(join(d, name), 0o755);
+    return d;
+  };
+  it("ok when codex-review is on the injected PATH, naming the path", async () => {
+    const bin = toolBin("codex-review");
+    const c = await check(project(), "adversary", baseDeps({ env: { PATH: bin } }));
+    expect(c.status).toBe("ok");
+    expect(c.detail).toContain(join(bin, "codex-review"));
+  });
+  it("ok when commands.adversary is configured, even with codex-review absent", async () => {
+    const dir = project();
+    editJson(dir, ".doug/config.json", (c) => ((c.commands ??= {}), (c.commands.adversary = "my-review --x")));
+    const c = await check(dir, "adversary", baseDeps({ env: { PATH: emptyBin } }));
+    expect(c.status).toBe("ok");
+    expect(c.detail).toContain("my-review --x");
+  });
+  it("warn with the npm install fix when neither is present", async () => {
+    const dir = project();
+    editJson(dir, ".doug/config.json", (c) => c.commands && delete c.commands.adversary);
+    const c = await check(dir, "adversary", baseDeps({ env: { PATH: emptyBin } }));
+    expect(c.status).toBe("warn");
+    expect(c.detail).toBe("codex-review is not on PATH; the adversary falls back to the Claude adversary");
+    expect(c.fix).toBe("npm install -g @dougharness/codex");
+    expect(c.code).toBe(0);
+  });
+});
+
+describe("check embeddings", () => {
+  const EMB = { provider: "openai-compatible", baseUrl: "http://127.0.0.1:1234/v1", model: "m1", dims: 8 };
+  it("warn with the memory setup fix when semantic memory is off", async () => {
+    const dir = project();
+    editJson(dir, ".doug/config.json", (c) => c.memory && delete c.memory.embeddings);
+    const c = await check(dir, "embeddings");
+    expect(c.status).toBe("warn");
+    expect(c.detail).toBe("semantic memory is off; recall is keyword-only");
+    expect(c.fix).toBe(`doug memory setup ${dir}`);
+  });
+  it("ok naming provider, model, dims and base URL when set", async () => {
+    const dir = project();
+    editJson(dir, ".doug/config.json", (c) => ((c.memory ??= {}), (c.memory.embeddings = EMB)));
+    const c = await check(dir, "embeddings");
+    expect(c.status).toBe("ok");
+    expect(c.detail).toBe("semantic memory: openai-compatible m1/8 at http://127.0.0.1:1234/v1");
+    expect(c.fix).toBeNull();
+  });
+  it("skip when the config check is not ok", async () => {
+    const dir = project();
+    writeFileSync(join(dir, ".doug", "config.json"), "{");
+    expect((await check(dir, "embeddings")).status).toBe("skip");
+  });
+});
+
+describe("check plugins", () => {
+  const FLOW = "doug-flow@dougharness";
+  const GATES = "doug-gates@dougharness";
+  const FIX =
+    "claude plugin marketplace add eschwa3/dougharness && claude plugin install doug-gates@dougharness && claude plugin install doug-flow@dougharness";
+  const withPlugins = (body: unknown) => {
+    const cfg = tmp("claudecfg");
+    writePlugins(cfg, body);
+    return baseDeps({ claudeConfigDir: cfg });
+  };
+  it("ok when both plugins resolve to a record", async () => {
+    const c = await check(project(), "plugins", withPlugins({ version: 2, plugins: { [FLOW]: [rec("1.0.2")], [GATES]: [rec("1.0.2")] } }));
+    expect(c.status).toBe("ok");
+    expect(c.fix).toBeNull();
+  });
+  it("ok for a project-scoped record matching dir", async () => {
+    const dir = project();
+    const body = { version: 2, plugins: { [FLOW]: [rec("1.0.2", { scope: "project", projectPath: dir })], [GATES]: [rec("1.0.2")] } };
+    expect((await check(dir, "plugins", withPlugins(body))).status).toBe("ok");
+  });
+  it("warn naming the missing plugin, with the --plugin-dir hint and the full fix", async () => {
+    const c = await check(project(), "plugins", withPlugins({ version: 2, plugins: { [FLOW]: [rec("1.0.2")] } }));
+    expect(c.status).toBe("warn");
+    expect(c.detail).toContain(GATES);
+    expect(c.detail).not.toContain(FLOW);
+    expect(c.detail).toContain("a session started with claude --plugin-dir loads them without an install");
+    expect(c.fix).toBe(FIX);
+    expect(c.code).toBe(0);
+  });
+  it("warn when the file is missing, unreadable, or in an unexpected format", async () => {
+    const none = await check(project(), "plugins");
+    expect(none.status).toBe("warn");
+    expect(none.detail).toContain(FLOW);
+    expect(none.detail).toContain(GATES);
+    expect((await check(project(), "plugins", withPlugins("not json"))).status).toBe("warn");
+    const c = await check(project(), "plugins", withPlugins({ version: 1, plugins: {} }));
+    expect(c.status).toBe("warn");
+    expect(c.fix).toBe(FIX);
+  });
+  it("plugin-versions still skips when the plugins are absent", async () => {
+    expect((await check(project(), "plugin-versions")).status).toBe("skip");
   });
 });
 

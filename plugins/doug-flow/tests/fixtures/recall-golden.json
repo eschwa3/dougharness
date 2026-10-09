@@ -1,0 +1,5178 @@
+{
+  "main | keyword, no checkout": {
+    "result": {
+      "mode": "keyword-only",
+      "reason": "no provider configured",
+      "provider": null,
+      "checked": false,
+      "degraded": true,
+      "lessons": [
+        {
+          "id": "r-good",
+          "text": "retry flaky calls good",
+          "kind": "pattern",
+          "scope": [],
+          "citation": "src/a.mjs:2 \"line two\"",
+          "source_agent": "worker",
+          "source_model": null,
+          "task": null,
+          "card": null,
+          "commit_sha": null,
+          "created": "2026-09-25T00:00:00.000Z",
+          "confirmed": null,
+          "helpful": 0,
+          "harmful": 0,
+          "superseded_by": null,
+          "stale": null,
+          "hasVector": true,
+          "score": 0.015950487450055454,
+          "sides": [
+            "bm25"
+          ]
+        },
+        {
+          "id": "r-scoped",
+          "text": "retry flaky uploads scoped",
+          "kind": "pattern",
+          "scope": [
+            "src/**/*.mjs"
+          ],
+          "citation": null,
+          "source_agent": "worker",
+          "source_model": null,
+          "task": null,
+          "card": null,
+          "commit_sha": null,
+          "created": "2026-09-25T00:00:00.000Z",
+          "confirmed": null,
+          "helpful": 0,
+          "harmful": 0,
+          "superseded_by": null,
+          "stale": null,
+          "hasVector": true,
+          "score": 0.015693221523441655,
+          "sides": [
+            "bm25"
+          ]
+        },
+        {
+          "id": "r-unscoped",
+          "text": "retry flaky uploads unscoped",
+          "kind": "pattern",
+          "scope": [],
+          "citation": null,
+          "source_agent": "worker",
+          "source_model": null,
+          "task": null,
+          "card": null,
+          "commit_sha": null,
+          "created": "2026-09-25T00:00:00.000Z",
+          "confirmed": null,
+          "helpful": 0,
+          "harmful": 0,
+          "superseded_by": null,
+          "stale": null,
+          "hasVector": true,
+          "score": 0.015444122769101312,
+          "sides": [
+            "bm25"
+          ]
+        },
+        {
+          "id": "r-elsewhere",
+          "text": "retry flaky uploads elsewhere",
+          "kind": "pattern",
+          "scope": [
+            "docs/**/*.md"
+          ],
+          "citation": null,
+          "source_agent": "worker",
+          "source_model": null,
+          "task": null,
+          "card": null,
+          "commit_sha": null,
+          "created": "2026-09-25T00:00:00.000Z",
+          "confirmed": null,
+          "helpful": 0,
+          "harmful": 0,
+          "superseded_by": null,
+          "stale": null,
+          "hasVector": true,
+          "score": 0.015202808350834105,
+          "sides": [
+            "bm25"
+          ]
+        },
+        {
+          "id": "r-garbled",
+          "text": "retry flaky garbled date",
+          "kind": "pattern",
+          "scope": [],
+          "citation": null,
+          "source_agent": "worker",
+          "source_model": null,
+          "task": null,
+          "card": null,
+          "commit_sha": null,
+          "created": "not-a-date",
+          "confirmed": null,
+          "helpful": 0,
+          "harmful": 0,
+          "superseded_by": null,
+          "stale": null,
+          "hasVector": true,
+          "score": 0.015151515151515152,
+          "sides": [
+            "bm25"
+          ]
+        },
+        {
+          "id": "r-novec2",
+          "text": "flaky retry novec second",
+          "kind": "pattern",
+          "scope": [
+            "src/a.mjs"
+          ],
+          "citation": null,
+          "source_agent": "worker",
+          "source_model": null,
+          "task": null,
+          "card": null,
+          "commit_sha": null,
+          "created": "2026-09-27T00:00:00.000Z",
+          "confirmed": null,
+          "helpful": 0,
+          "harmful": 0,
+          "superseded_by": null,
+          "stale": null,
+          "hasVector": false,
+          "score": 0.015132431542169276,
+          "sides": [
+            "bm25"
+          ]
+        },
+        {
+          "id": "r-confirmed",
+          "text": "retry flaky confirmed lately",
+          "kind": "pattern",
+          "scope": [],
+          "citation": null,
+          "source_agent": "worker",
+          "source_model": null,
+          "task": null,
+          "card": null,
+          "commit_sha": null,
+          "created": "2026-03-14T00:00:00.000Z",
+          "confirmed": "2026-09-28T00:00:00.000Z",
+          "helpful": 0,
+          "harmful": 0,
+          "superseded_by": null,
+          "stale": null,
+          "hasVector": true,
+          "score": 0.014761364720034332,
+          "sides": [
+            "bm25"
+          ]
+        },
+        {
+          "id": "r-bad1",
+          "text": "retry flaky calls bad one",
+          "kind": "pattern",
+          "scope": [],
+          "citation": "src/a.mjs:2 \"line moved\"",
+          "source_agent": "worker",
+          "source_model": null,
+          "task": null,
+          "card": null,
+          "commit_sha": null,
+          "created": "2026-09-25T00:00:00.000Z",
+          "confirmed": null,
+          "helpful": 0,
+          "harmful": 0,
+          "superseded_by": null,
+          "stale": null,
+          "hasVector": true,
+          "score": 0.014308525506667393,
+          "sides": [
+            "bm25"
+          ]
+        }
+      ]
+    },
+    "table": [
+      {
+        "id": "r-ancient",
+        "stale": null,
+        "confirmed": null
+      },
+      {
+        "id": "r-bad1",
+        "stale": null,
+        "confirmed": null
+      },
+      {
+        "id": "r-bad2",
+        "stale": null,
+        "confirmed": null
+      },
+      {
+        "id": "r-confirmed",
+        "stale": null,
+        "confirmed": "2026-09-28T00:00:00.000Z"
+      },
+      {
+        "id": "r-elsewhere",
+        "stale": null,
+        "confirmed": null
+      },
+      {
+        "id": "r-garbled",
+        "stale": null,
+        "confirmed": null
+      },
+      {
+        "id": "r-good",
+        "stale": null,
+        "confirmed": null
+      },
+      {
+        "id": "r-novec",
+        "stale": null,
+        "confirmed": null
+      },
+      {
+        "id": "r-novec2",
+        "stale": null,
+        "confirmed": null
+      },
+      {
+        "id": "r-other",
+        "stale": null,
+        "confirmed": null
+      },
+      {
+        "id": "r-otherdims",
+        "stale": null,
+        "confirmed": null
+      },
+      {
+        "id": "r-scoped",
+        "stale": null,
+        "confirmed": null
+      },
+      {
+        "id": "r-stale",
+        "stale": "2026-09-29T00:00:00.000Z",
+        "confirmed": null
+      },
+      {
+        "id": "r-superseded",
+        "stale": null,
+        "confirmed": null
+      },
+      {
+        "id": "r-unscoped",
+        "stale": null,
+        "confirmed": null
+      },
+      {
+        "id": "r-veconly",
+        "stale": null,
+        "confirmed": null
+      },
+      {
+        "id": "r-veconly-old",
+        "stale": null,
+        "confirmed": null
+      }
+    ]
+  },
+  "main | keyword, checkout": {
+    "result": {
+      "mode": "keyword-only",
+      "reason": "no provider configured",
+      "provider": null,
+      "checked": true,
+      "degraded": true,
+      "lessons": [
+        {
+          "id": "r-good",
+          "text": "retry flaky calls good",
+          "kind": "pattern",
+          "scope": [],
+          "citation": "src/a.mjs:2 \"line two\"",
+          "source_agent": "worker",
+          "source_model": null,
+          "task": null,
+          "card": null,
+          "commit_sha": null,
+          "created": "2026-09-25T00:00:00.000Z",
+          "confirmed": "2026-09-30T00:00:00.000Z",
+          "helpful": 0,
+          "harmful": 0,
+          "superseded_by": null,
+          "stale": null,
+          "hasVector": true,
+          "score": 0.015950487450055454,
+          "sides": [
+            "bm25"
+          ]
+        },
+        {
+          "id": "r-scoped",
+          "text": "retry flaky uploads scoped",
+          "kind": "pattern",
+          "scope": [
+            "src/**/*.mjs"
+          ],
+          "citation": null,
+          "source_agent": "worker",
+          "source_model": null,
+          "task": null,
+          "card": null,
+          "commit_sha": null,
+          "created": "2026-09-25T00:00:00.000Z",
+          "confirmed": "2026-09-30T00:00:00.000Z",
+          "helpful": 0,
+          "harmful": 0,
+          "superseded_by": null,
+          "stale": null,
+          "hasVector": true,
+          "score": 0.015693221523441655,
+          "sides": [
+            "bm25"
+          ]
+        },
+        {
+          "id": "r-unscoped",
+          "text": "retry flaky uploads unscoped",
+          "kind": "pattern",
+          "scope": [],
+          "citation": null,
+          "source_agent": "worker",
+          "source_model": null,
+          "task": null,
+          "card": null,
+          "commit_sha": null,
+          "created": "2026-09-25T00:00:00.000Z",
+          "confirmed": "2026-09-30T00:00:00.000Z",
+          "helpful": 0,
+          "harmful": 0,
+          "superseded_by": null,
+          "stale": null,
+          "hasVector": true,
+          "score": 0.015444122769101312,
+          "sides": [
+            "bm25"
+          ]
+        },
+        {
+          "id": "r-elsewhere",
+          "text": "retry flaky uploads elsewhere",
+          "kind": "pattern",
+          "scope": [
+            "docs/**/*.md"
+          ],
+          "citation": null,
+          "source_agent": "worker",
+          "source_model": null,
+          "task": null,
+          "card": null,
+          "commit_sha": null,
+          "created": "2026-09-25T00:00:00.000Z",
+          "confirmed": "2026-09-30T00:00:00.000Z",
+          "helpful": 0,
+          "harmful": 0,
+          "superseded_by": null,
+          "stale": null,
+          "hasVector": true,
+          "score": 0.015202808350834105,
+          "sides": [
+            "bm25"
+          ]
+        },
+        {
+          "id": "r-garbled",
+          "text": "retry flaky garbled date",
+          "kind": "pattern",
+          "scope": [],
+          "citation": null,
+          "source_agent": "worker",
+          "source_model": null,
+          "task": null,
+          "card": null,
+          "commit_sha": null,
+          "created": "not-a-date",
+          "confirmed": "2026-09-30T00:00:00.000Z",
+          "helpful": 0,
+          "harmful": 0,
+          "superseded_by": null,
+          "stale": null,
+          "hasVector": true,
+          "score": 0.015151515151515152,
+          "sides": [
+            "bm25"
+          ]
+        },
+        {
+          "id": "r-novec2",
+          "text": "flaky retry novec second",
+          "kind": "pattern",
+          "scope": [
+            "src/a.mjs"
+          ],
+          "citation": null,
+          "source_agent": "worker",
+          "source_model": null,
+          "task": null,
+          "card": null,
+          "commit_sha": null,
+          "created": "2026-09-27T00:00:00.000Z",
+          "confirmed": "2026-09-30T00:00:00.000Z",
+          "helpful": 0,
+          "harmful": 0,
+          "superseded_by": null,
+          "stale": null,
+          "hasVector": false,
+          "score": 0.015132431542169276,
+          "sides": [
+            "bm25"
+          ]
+        },
+        {
+          "id": "r-confirmed",
+          "text": "retry flaky confirmed lately",
+          "kind": "pattern",
+          "scope": [],
+          "citation": null,
+          "source_agent": "worker",
+          "source_model": null,
+          "task": null,
+          "card": null,
+          "commit_sha": null,
+          "created": "2026-03-14T00:00:00.000Z",
+          "confirmed": "2026-09-30T00:00:00.000Z",
+          "helpful": 0,
+          "harmful": 0,
+          "superseded_by": null,
+          "stale": null,
+          "hasVector": true,
+          "score": 0.014761364720034332,
+          "sides": [
+            "bm25"
+          ]
+        },
+        {
+          "id": "r-other",
+          "text": "retry flaky calls other model",
+          "kind": "pattern",
+          "scope": [],
+          "citation": null,
+          "source_agent": "worker",
+          "source_model": null,
+          "task": null,
+          "card": null,
+          "commit_sha": null,
+          "created": "2026-09-25T00:00:00.000Z",
+          "confirmed": "2026-09-30T00:00:00.000Z",
+          "helpful": 0,
+          "harmful": 0,
+          "superseded_by": null,
+          "stale": null,
+          "hasVector": true,
+          "score": 0.01370393992187863,
+          "sides": [
+            "bm25"
+          ]
+        }
+      ]
+    },
+    "table": [
+      {
+        "id": "r-ancient",
+        "stale": null,
+        "confirmed": null
+      },
+      {
+        "id": "r-bad1",
+        "stale": "2026-09-30T00:00:00.000Z",
+        "confirmed": null
+      },
+      {
+        "id": "r-bad2",
+        "stale": "2026-09-30T00:00:00.000Z",
+        "confirmed": null
+      },
+      {
+        "id": "r-confirmed",
+        "stale": null,
+        "confirmed": "2026-09-30T00:00:00.000Z"
+      },
+      {
+        "id": "r-elsewhere",
+        "stale": null,
+        "confirmed": "2026-09-30T00:00:00.000Z"
+      },
+      {
+        "id": "r-garbled",
+        "stale": null,
+        "confirmed": "2026-09-30T00:00:00.000Z"
+      },
+      {
+        "id": "r-good",
+        "stale": null,
+        "confirmed": "2026-09-30T00:00:00.000Z"
+      },
+      {
+        "id": "r-novec",
+        "stale": null,
+        "confirmed": null
+      },
+      {
+        "id": "r-novec2",
+        "stale": null,
+        "confirmed": "2026-09-30T00:00:00.000Z"
+      },
+      {
+        "id": "r-other",
+        "stale": null,
+        "confirmed": "2026-09-30T00:00:00.000Z"
+      },
+      {
+        "id": "r-otherdims",
+        "stale": null,
+        "confirmed": null
+      },
+      {
+        "id": "r-scoped",
+        "stale": null,
+        "confirmed": "2026-09-30T00:00:00.000Z"
+      },
+      {
+        "id": "r-stale",
+        "stale": "2026-09-29T00:00:00.000Z",
+        "confirmed": null
+      },
+      {
+        "id": "r-superseded",
+        "stale": null,
+        "confirmed": null
+      },
+      {
+        "id": "r-unscoped",
+        "stale": null,
+        "confirmed": "2026-09-30T00:00:00.000Z"
+      },
+      {
+        "id": "r-veconly",
+        "stale": null,
+        "confirmed": null
+      },
+      {
+        "id": "r-veconly-old",
+        "stale": null,
+        "confirmed": null
+      }
+    ]
+  },
+  "main | keyword, checkout, files, k=3": {
+    "result": {
+      "mode": "keyword-only",
+      "reason": "no provider configured",
+      "provider": null,
+      "checked": true,
+      "degraded": true,
+      "lessons": [
+        {
+          "id": "r-scoped",
+          "text": "retry flaky uploads scoped",
+          "kind": "pattern",
+          "scope": [
+            "src/**/*.mjs"
+          ],
+          "citation": null,
+          "source_agent": "worker",
+          "source_model": null,
+          "task": null,
+          "card": null,
+          "commit_sha": null,
+          "created": "2026-09-25T00:00:00.000Z",
+          "confirmed": "2026-09-30T00:00:00.000Z",
+          "helpful": 0,
+          "harmful": 0,
+          "superseded_by": null,
+          "stale": null,
+          "hasVector": true,
+          "score": 0.023925731175083183,
+          "sides": [
+            "bm25"
+          ]
+        },
+        {
+          "id": "r-unscoped",
+          "text": "retry flaky uploads unscoped",
+          "kind": "pattern",
+          "scope": [],
+          "citation": null,
+          "source_agent": "worker",
+          "source_model": null,
+          "task": null,
+          "card": null,
+          "commit_sha": null,
+          "created": "2026-09-25T00:00:00.000Z",
+          "confirmed": "2026-09-30T00:00:00.000Z",
+          "helpful": 0,
+          "harmful": 0,
+          "superseded_by": null,
+          "stale": null,
+          "hasVector": true,
+          "score": 0.02353983228516248,
+          "sides": [
+            "bm25"
+          ]
+        },
+        {
+          "id": "r-good",
+          "text": "retry flaky calls good",
+          "kind": "pattern",
+          "scope": [],
+          "citation": "src/a.mjs:2 \"line two\"",
+          "source_agent": "worker",
+          "source_model": null,
+          "task": null,
+          "card": null,
+          "commit_sha": null,
+          "created": "2026-09-25T00:00:00.000Z",
+          "confirmed": "2026-09-30T00:00:00.000Z",
+          "helpful": 0,
+          "harmful": 0,
+          "superseded_by": null,
+          "stale": null,
+          "hasVector": true,
+          "score": 0.022804212526251158,
+          "sides": [
+            "bm25"
+          ]
+        }
+      ]
+    },
+    "table": [
+      {
+        "id": "r-ancient",
+        "stale": null,
+        "confirmed": null
+      },
+      {
+        "id": "r-bad1",
+        "stale": null,
+        "confirmed": null
+      },
+      {
+        "id": "r-bad2",
+        "stale": null,
+        "confirmed": null
+      },
+      {
+        "id": "r-confirmed",
+        "stale": null,
+        "confirmed": "2026-09-28T00:00:00.000Z"
+      },
+      {
+        "id": "r-elsewhere",
+        "stale": null,
+        "confirmed": null
+      },
+      {
+        "id": "r-garbled",
+        "stale": null,
+        "confirmed": null
+      },
+      {
+        "id": "r-good",
+        "stale": null,
+        "confirmed": "2026-09-30T00:00:00.000Z"
+      },
+      {
+        "id": "r-novec",
+        "stale": null,
+        "confirmed": null
+      },
+      {
+        "id": "r-novec2",
+        "stale": null,
+        "confirmed": null
+      },
+      {
+        "id": "r-other",
+        "stale": null,
+        "confirmed": null
+      },
+      {
+        "id": "r-otherdims",
+        "stale": null,
+        "confirmed": null
+      },
+      {
+        "id": "r-scoped",
+        "stale": null,
+        "confirmed": "2026-09-30T00:00:00.000Z"
+      },
+      {
+        "id": "r-stale",
+        "stale": "2026-09-29T00:00:00.000Z",
+        "confirmed": null
+      },
+      {
+        "id": "r-superseded",
+        "stale": null,
+        "confirmed": null
+      },
+      {
+        "id": "r-unscoped",
+        "stale": null,
+        "confirmed": "2026-09-30T00:00:00.000Z"
+      },
+      {
+        "id": "r-veconly",
+        "stale": null,
+        "confirmed": null
+      },
+      {
+        "id": "r-veconly-old",
+        "stale": null,
+        "confirmed": null
+      }
+    ]
+  },
+  "main | keyword, narrow staleDays": {
+    "result": {
+      "mode": "keyword-only",
+      "reason": "no provider configured",
+      "provider": null,
+      "checked": true,
+      "degraded": true,
+      "lessons": [
+        {
+          "id": "r-good",
+          "text": "retry flaky calls good",
+          "kind": "pattern",
+          "scope": [],
+          "citation": "src/a.mjs:2 \"line two\"",
+          "source_agent": "worker",
+          "source_model": null,
+          "task": null,
+          "card": null,
+          "commit_sha": null,
+          "created": "2026-09-25T00:00:00.000Z",
+          "confirmed": "2026-09-30T00:00:00.000Z",
+          "helpful": 0,
+          "harmful": 0,
+          "superseded_by": null,
+          "stale": null,
+          "hasVector": true,
+          "score": 0.015950487450055454,
+          "sides": [
+            "bm25"
+          ]
+        },
+        {
+          "id": "r-scoped",
+          "text": "retry flaky uploads scoped",
+          "kind": "pattern",
+          "scope": [
+            "src/**/*.mjs"
+          ],
+          "citation": null,
+          "source_agent": "worker",
+          "source_model": null,
+          "task": null,
+          "card": null,
+          "commit_sha": null,
+          "created": "2026-09-25T00:00:00.000Z",
+          "confirmed": "2026-09-30T00:00:00.000Z",
+          "helpful": 0,
+          "harmful": 0,
+          "superseded_by": null,
+          "stale": null,
+          "hasVector": true,
+          "score": 0.015693221523441655,
+          "sides": [
+            "bm25"
+          ]
+        },
+        {
+          "id": "r-unscoped",
+          "text": "retry flaky uploads unscoped",
+          "kind": "pattern",
+          "scope": [],
+          "citation": null,
+          "source_agent": "worker",
+          "source_model": null,
+          "task": null,
+          "card": null,
+          "commit_sha": null,
+          "created": "2026-09-25T00:00:00.000Z",
+          "confirmed": "2026-09-30T00:00:00.000Z",
+          "helpful": 0,
+          "harmful": 0,
+          "superseded_by": null,
+          "stale": null,
+          "hasVector": true,
+          "score": 0.015444122769101312,
+          "sides": [
+            "bm25"
+          ]
+        },
+        {
+          "id": "r-elsewhere",
+          "text": "retry flaky uploads elsewhere",
+          "kind": "pattern",
+          "scope": [
+            "docs/**/*.md"
+          ],
+          "citation": null,
+          "source_agent": "worker",
+          "source_model": null,
+          "task": null,
+          "card": null,
+          "commit_sha": null,
+          "created": "2026-09-25T00:00:00.000Z",
+          "confirmed": "2026-09-30T00:00:00.000Z",
+          "helpful": 0,
+          "harmful": 0,
+          "superseded_by": null,
+          "stale": null,
+          "hasVector": true,
+          "score": 0.015202808350834105,
+          "sides": [
+            "bm25"
+          ]
+        },
+        {
+          "id": "r-garbled",
+          "text": "retry flaky garbled date",
+          "kind": "pattern",
+          "scope": [],
+          "citation": null,
+          "source_agent": "worker",
+          "source_model": null,
+          "task": null,
+          "card": null,
+          "commit_sha": null,
+          "created": "not-a-date",
+          "confirmed": "2026-09-30T00:00:00.000Z",
+          "helpful": 0,
+          "harmful": 0,
+          "superseded_by": null,
+          "stale": null,
+          "hasVector": true,
+          "score": 0.015151515151515152,
+          "sides": [
+            "bm25"
+          ]
+        },
+        {
+          "id": "r-novec2",
+          "text": "flaky retry novec second",
+          "kind": "pattern",
+          "scope": [
+            "src/a.mjs"
+          ],
+          "citation": null,
+          "source_agent": "worker",
+          "source_model": null,
+          "task": null,
+          "card": null,
+          "commit_sha": null,
+          "created": "2026-09-27T00:00:00.000Z",
+          "confirmed": "2026-09-30T00:00:00.000Z",
+          "helpful": 0,
+          "harmful": 0,
+          "superseded_by": null,
+          "stale": null,
+          "hasVector": false,
+          "score": 0.015132431542169276,
+          "sides": [
+            "bm25"
+          ]
+        },
+        {
+          "id": "r-confirmed",
+          "text": "retry flaky confirmed lately",
+          "kind": "pattern",
+          "scope": [],
+          "citation": null,
+          "source_agent": "worker",
+          "source_model": null,
+          "task": null,
+          "card": null,
+          "commit_sha": null,
+          "created": "2026-03-14T00:00:00.000Z",
+          "confirmed": "2026-09-30T00:00:00.000Z",
+          "helpful": 0,
+          "harmful": 0,
+          "superseded_by": null,
+          "stale": null,
+          "hasVector": true,
+          "score": 0.014761364720034332,
+          "sides": [
+            "bm25"
+          ]
+        },
+        {
+          "id": "r-other",
+          "text": "retry flaky calls other model",
+          "kind": "pattern",
+          "scope": [],
+          "citation": null,
+          "source_agent": "worker",
+          "source_model": null,
+          "task": null,
+          "card": null,
+          "commit_sha": null,
+          "created": "2026-09-25T00:00:00.000Z",
+          "confirmed": "2026-09-30T00:00:00.000Z",
+          "helpful": 0,
+          "harmful": 0,
+          "superseded_by": null,
+          "stale": null,
+          "hasVector": true,
+          "score": 0.013899710492191181,
+          "sides": [
+            "bm25"
+          ]
+        }
+      ]
+    },
+    "table": [
+      {
+        "id": "r-ancient",
+        "stale": null,
+        "confirmed": null
+      },
+      {
+        "id": "r-bad1",
+        "stale": "2026-09-30T00:00:00.000Z",
+        "confirmed": null
+      },
+      {
+        "id": "r-bad2",
+        "stale": "2026-09-30T00:00:00.000Z",
+        "confirmed": null
+      },
+      {
+        "id": "r-confirmed",
+        "stale": null,
+        "confirmed": "2026-09-30T00:00:00.000Z"
+      },
+      {
+        "id": "r-elsewhere",
+        "stale": null,
+        "confirmed": "2026-09-30T00:00:00.000Z"
+      },
+      {
+        "id": "r-garbled",
+        "stale": null,
+        "confirmed": "2026-09-30T00:00:00.000Z"
+      },
+      {
+        "id": "r-good",
+        "stale": null,
+        "confirmed": "2026-09-30T00:00:00.000Z"
+      },
+      {
+        "id": "r-novec",
+        "stale": null,
+        "confirmed": null
+      },
+      {
+        "id": "r-novec2",
+        "stale": null,
+        "confirmed": "2026-09-30T00:00:00.000Z"
+      },
+      {
+        "id": "r-other",
+        "stale": null,
+        "confirmed": "2026-09-30T00:00:00.000Z"
+      },
+      {
+        "id": "r-otherdims",
+        "stale": null,
+        "confirmed": null
+      },
+      {
+        "id": "r-scoped",
+        "stale": null,
+        "confirmed": "2026-09-30T00:00:00.000Z"
+      },
+      {
+        "id": "r-stale",
+        "stale": "2026-09-29T00:00:00.000Z",
+        "confirmed": null
+      },
+      {
+        "id": "r-superseded",
+        "stale": null,
+        "confirmed": null
+      },
+      {
+        "id": "r-unscoped",
+        "stale": null,
+        "confirmed": "2026-09-30T00:00:00.000Z"
+      },
+      {
+        "id": "r-veconly",
+        "stale": null,
+        "confirmed": null
+      },
+      {
+        "id": "r-veconly-old",
+        "stale": null,
+        "confirmed": null
+      }
+    ]
+  },
+  "main | keyword, empty query": {
+    "result": {
+      "mode": "keyword-only",
+      "reason": "no provider configured",
+      "provider": null,
+      "checked": false,
+      "degraded": true,
+      "lessons": []
+    },
+    "table": [
+      {
+        "id": "r-ancient",
+        "stale": null,
+        "confirmed": null
+      },
+      {
+        "id": "r-bad1",
+        "stale": null,
+        "confirmed": null
+      },
+      {
+        "id": "r-bad2",
+        "stale": null,
+        "confirmed": null
+      },
+      {
+        "id": "r-confirmed",
+        "stale": null,
+        "confirmed": "2026-09-28T00:00:00.000Z"
+      },
+      {
+        "id": "r-elsewhere",
+        "stale": null,
+        "confirmed": null
+      },
+      {
+        "id": "r-garbled",
+        "stale": null,
+        "confirmed": null
+      },
+      {
+        "id": "r-good",
+        "stale": null,
+        "confirmed": null
+      },
+      {
+        "id": "r-novec",
+        "stale": null,
+        "confirmed": null
+      },
+      {
+        "id": "r-novec2",
+        "stale": null,
+        "confirmed": null
+      },
+      {
+        "id": "r-other",
+        "stale": null,
+        "confirmed": null
+      },
+      {
+        "id": "r-otherdims",
+        "stale": null,
+        "confirmed": null
+      },
+      {
+        "id": "r-scoped",
+        "stale": null,
+        "confirmed": null
+      },
+      {
+        "id": "r-stale",
+        "stale": "2026-09-29T00:00:00.000Z",
+        "confirmed": null
+      },
+      {
+        "id": "r-superseded",
+        "stale": null,
+        "confirmed": null
+      },
+      {
+        "id": "r-unscoped",
+        "stale": null,
+        "confirmed": null
+      },
+      {
+        "id": "r-veconly",
+        "stale": null,
+        "confirmed": null
+      },
+      {
+        "id": "r-veconly-old",
+        "stale": null,
+        "confirmed": null
+      }
+    ]
+  },
+  "main | hybrid, no checkout": {
+    "result": {
+      "mode": "hybrid",
+      "reason": null,
+      "provider": "fake",
+      "checked": false,
+      "degraded": false,
+      "total": 13,
+      "unvectored": 5,
+      "lessons": [
+        {
+          "id": "r-bad1",
+          "text": "retry flaky calls bad one",
+          "kind": "pattern",
+          "scope": [],
+          "citation": "src/a.mjs:2 \"line moved\"",
+          "source_agent": "worker",
+          "source_model": null,
+          "task": null,
+          "card": null,
+          "commit_sha": null,
+          "created": "2026-09-25T00:00:00.000Z",
+          "confirmed": null,
+          "helpful": 0,
+          "harmful": 0,
+          "superseded_by": null,
+          "stale": null,
+          "hasVector": true,
+          "score": 0.9729797344533827,
+          "sides": [
+            "bm25",
+            "vector"
+          ]
+        },
+        {
+          "id": "r-veconly",
+          "text": "unrelated zzz vector only",
+          "kind": "pattern",
+          "scope": [],
+          "citation": null,
+          "source_agent": "worker",
+          "source_model": null,
+          "task": null,
+          "card": null,
+          "commit_sha": null,
+          "created": "2026-09-25T00:00:00.000Z",
+          "confirmed": null,
+          "helpful": 0,
+          "harmful": 0,
+          "superseded_by": null,
+          "stale": null,
+          "hasVector": true,
+          "score": 0.9243307361318913,
+          "sides": [
+            "vector"
+          ]
+        },
+        {
+          "id": "r-scoped",
+          "text": "retry flaky uploads scoped",
+          "kind": "pattern",
+          "scope": [
+            "src/**/*.mjs"
+          ],
+          "citation": null,
+          "source_agent": "worker",
+          "source_model": null,
+          "task": null,
+          "card": null,
+          "commit_sha": null,
+          "created": "2026-09-25T00:00:00.000Z",
+          "confirmed": null,
+          "helpful": 0,
+          "harmful": 0,
+          "superseded_by": null,
+          "stale": null,
+          "hasVector": true,
+          "score": 0.8756817378103998,
+          "sides": [
+            "bm25",
+            "vector"
+          ]
+        },
+        {
+          "id": "r-elsewhere",
+          "text": "retry flaky uploads elsewhere",
+          "kind": "pattern",
+          "scope": [
+            "docs/**/*.md"
+          ],
+          "citation": null,
+          "source_agent": "worker",
+          "source_model": null,
+          "task": null,
+          "card": null,
+          "commit_sha": null,
+          "created": "2026-09-25T00:00:00.000Z",
+          "confirmed": null,
+          "helpful": 0,
+          "harmful": 0,
+          "superseded_by": null,
+          "stale": null,
+          "hasVector": true,
+          "score": 0.8270327974830198,
+          "sides": [
+            "bm25",
+            "vector"
+          ]
+        },
+        {
+          "id": "r-unscoped",
+          "text": "retry flaky uploads unscoped",
+          "kind": "pattern",
+          "scope": [],
+          "citation": null,
+          "source_agent": "worker",
+          "source_model": null,
+          "task": null,
+          "card": null,
+          "commit_sha": null,
+          "created": "2026-09-25T00:00:00.000Z",
+          "confirmed": null,
+          "helpful": 0,
+          "harmful": 0,
+          "superseded_by": null,
+          "stale": null,
+          "hasVector": true,
+          "score": 0.7783837991615284,
+          "sides": [
+            "bm25",
+            "vector"
+          ]
+        },
+        {
+          "id": "r-confirmed",
+          "text": "retry flaky confirmed lately",
+          "kind": "pattern",
+          "scope": [],
+          "citation": null,
+          "source_agent": "worker",
+          "source_model": null,
+          "task": null,
+          "card": null,
+          "commit_sha": null,
+          "created": "2026-03-14T00:00:00.000Z",
+          "confirmed": "2026-09-28T00:00:00.000Z",
+          "helpful": 0,
+          "harmful": 0,
+          "superseded_by": null,
+          "stale": null,
+          "hasVector": true,
+          "score": 0.6923079935796751,
+          "sides": [
+            "bm25",
+            "vector"
+          ]
+        },
+        {
+          "id": "r-garbled",
+          "text": "retry flaky garbled date",
+          "kind": "pattern",
+          "scope": [],
+          "citation": null,
+          "source_agent": "worker",
+          "source_model": null,
+          "task": null,
+          "card": null,
+          "commit_sha": null,
+          "created": "not-a-date",
+          "confirmed": null,
+          "helpful": 0,
+          "harmful": 0,
+          "superseded_by": null,
+          "stale": null,
+          "hasVector": true,
+          "score": 0.6000000238418579,
+          "sides": [
+            "bm25",
+            "vector"
+          ]
+        },
+        {
+          "id": "r-good",
+          "text": "retry flaky calls good",
+          "kind": "pattern",
+          "scope": [],
+          "citation": "src/a.mjs:2 \"line two\"",
+          "source_agent": "worker",
+          "source_model": null,
+          "task": null,
+          "card": null,
+          "commit_sha": null,
+          "created": "2026-09-25T00:00:00.000Z",
+          "confirmed": null,
+          "helpful": 0,
+          "harmful": 0,
+          "superseded_by": null,
+          "stale": null,
+          "hasVector": true,
+          "score": 0.48648986722669135,
+          "sides": [
+            "bm25",
+            "vector"
+          ]
+        }
+      ]
+    },
+    "table": [
+      {
+        "id": "r-ancient",
+        "stale": null,
+        "confirmed": null
+      },
+      {
+        "id": "r-bad1",
+        "stale": null,
+        "confirmed": null
+      },
+      {
+        "id": "r-bad2",
+        "stale": null,
+        "confirmed": null
+      },
+      {
+        "id": "r-confirmed",
+        "stale": null,
+        "confirmed": "2026-09-28T00:00:00.000Z"
+      },
+      {
+        "id": "r-elsewhere",
+        "stale": null,
+        "confirmed": null
+      },
+      {
+        "id": "r-garbled",
+        "stale": null,
+        "confirmed": null
+      },
+      {
+        "id": "r-good",
+        "stale": null,
+        "confirmed": null
+      },
+      {
+        "id": "r-novec",
+        "stale": null,
+        "confirmed": null
+      },
+      {
+        "id": "r-novec2",
+        "stale": null,
+        "confirmed": null
+      },
+      {
+        "id": "r-other",
+        "stale": null,
+        "confirmed": null
+      },
+      {
+        "id": "r-otherdims",
+        "stale": null,
+        "confirmed": null
+      },
+      {
+        "id": "r-scoped",
+        "stale": null,
+        "confirmed": null
+      },
+      {
+        "id": "r-stale",
+        "stale": "2026-09-29T00:00:00.000Z",
+        "confirmed": null
+      },
+      {
+        "id": "r-superseded",
+        "stale": null,
+        "confirmed": null
+      },
+      {
+        "id": "r-unscoped",
+        "stale": null,
+        "confirmed": null
+      },
+      {
+        "id": "r-veconly",
+        "stale": null,
+        "confirmed": null
+      },
+      {
+        "id": "r-veconly-old",
+        "stale": null,
+        "confirmed": null
+      }
+    ]
+  },
+  "main | hybrid, checkout (stale drop, confirm)": {
+    "result": {
+      "mode": "hybrid",
+      "reason": null,
+      "provider": "fake",
+      "checked": true,
+      "degraded": false,
+      "total": 13,
+      "unvectored": 5,
+      "lessons": [
+        {
+          "id": "r-veconly",
+          "text": "unrelated zzz vector only",
+          "kind": "pattern",
+          "scope": [],
+          "citation": null,
+          "source_agent": "worker",
+          "source_model": null,
+          "task": null,
+          "card": null,
+          "commit_sha": null,
+          "created": "2026-09-25T00:00:00.000Z",
+          "confirmed": "2026-09-30T00:00:00.000Z",
+          "helpful": 0,
+          "harmful": 0,
+          "superseded_by": null,
+          "stale": null,
+          "hasVector": true,
+          "score": 0.9243307361318913,
+          "sides": [
+            "vector"
+          ]
+        },
+        {
+          "id": "r-scoped",
+          "text": "retry flaky uploads scoped",
+          "kind": "pattern",
+          "scope": [
+            "src/**/*.mjs"
+          ],
+          "citation": null,
+          "source_agent": "worker",
+          "source_model": null,
+          "task": null,
+          "card": null,
+          "commit_sha": null,
+          "created": "2026-09-25T00:00:00.000Z",
+          "confirmed": "2026-09-30T00:00:00.000Z",
+          "helpful": 0,
+          "harmful": 0,
+          "superseded_by": null,
+          "stale": null,
+          "hasVector": true,
+          "score": 0.8756817378103998,
+          "sides": [
+            "bm25",
+            "vector"
+          ]
+        },
+        {
+          "id": "r-elsewhere",
+          "text": "retry flaky uploads elsewhere",
+          "kind": "pattern",
+          "scope": [
+            "docs/**/*.md"
+          ],
+          "citation": null,
+          "source_agent": "worker",
+          "source_model": null,
+          "task": null,
+          "card": null,
+          "commit_sha": null,
+          "created": "2026-09-25T00:00:00.000Z",
+          "confirmed": "2026-09-30T00:00:00.000Z",
+          "helpful": 0,
+          "harmful": 0,
+          "superseded_by": null,
+          "stale": null,
+          "hasVector": true,
+          "score": 0.8270327974830198,
+          "sides": [
+            "bm25",
+            "vector"
+          ]
+        },
+        {
+          "id": "r-unscoped",
+          "text": "retry flaky uploads unscoped",
+          "kind": "pattern",
+          "scope": [],
+          "citation": null,
+          "source_agent": "worker",
+          "source_model": null,
+          "task": null,
+          "card": null,
+          "commit_sha": null,
+          "created": "2026-09-25T00:00:00.000Z",
+          "confirmed": "2026-09-30T00:00:00.000Z",
+          "helpful": 0,
+          "harmful": 0,
+          "superseded_by": null,
+          "stale": null,
+          "hasVector": true,
+          "score": 0.7783837991615284,
+          "sides": [
+            "bm25",
+            "vector"
+          ]
+        },
+        {
+          "id": "r-confirmed",
+          "text": "retry flaky confirmed lately",
+          "kind": "pattern",
+          "scope": [],
+          "citation": null,
+          "source_agent": "worker",
+          "source_model": null,
+          "task": null,
+          "card": null,
+          "commit_sha": null,
+          "created": "2026-03-14T00:00:00.000Z",
+          "confirmed": "2026-09-30T00:00:00.000Z",
+          "helpful": 0,
+          "harmful": 0,
+          "superseded_by": null,
+          "stale": null,
+          "hasVector": true,
+          "score": 0.6923079935796751,
+          "sides": [
+            "bm25",
+            "vector"
+          ]
+        },
+        {
+          "id": "r-garbled",
+          "text": "retry flaky garbled date",
+          "kind": "pattern",
+          "scope": [],
+          "citation": null,
+          "source_agent": "worker",
+          "source_model": null,
+          "task": null,
+          "card": null,
+          "commit_sha": null,
+          "created": "not-a-date",
+          "confirmed": "2026-09-30T00:00:00.000Z",
+          "helpful": 0,
+          "harmful": 0,
+          "superseded_by": null,
+          "stale": null,
+          "hasVector": true,
+          "score": 0.6000000238418579,
+          "sides": [
+            "bm25",
+            "vector"
+          ]
+        },
+        {
+          "id": "r-good",
+          "text": "retry flaky calls good",
+          "kind": "pattern",
+          "scope": [],
+          "citation": "src/a.mjs:2 \"line two\"",
+          "source_agent": "worker",
+          "source_model": null,
+          "task": null,
+          "card": null,
+          "commit_sha": null,
+          "created": "2026-09-25T00:00:00.000Z",
+          "confirmed": "2026-09-30T00:00:00.000Z",
+          "helpful": 0,
+          "harmful": 0,
+          "superseded_by": null,
+          "stale": null,
+          "hasVector": true,
+          "score": 0.48648986722669135,
+          "sides": [
+            "bm25",
+            "vector"
+          ]
+        },
+        {
+          "id": "r-novec2",
+          "text": "flaky retry novec second",
+          "kind": "pattern",
+          "scope": [
+            "src/a.mjs"
+          ],
+          "citation": null,
+          "source_agent": "worker",
+          "source_model": null,
+          "task": null,
+          "card": null,
+          "commit_sha": null,
+          "created": "2026-09-27T00:00:00.000Z",
+          "confirmed": "2026-09-30T00:00:00.000Z",
+          "helpful": 0,
+          "harmful": 0,
+          "superseded_by": null,
+          "stale": null,
+          "hasVector": false,
+          "score": 0.015132431542169276,
+          "sides": [
+            "bm25"
+          ]
+        }
+      ]
+    },
+    "table": [
+      {
+        "id": "r-ancient",
+        "stale": null,
+        "confirmed": null
+      },
+      {
+        "id": "r-bad1",
+        "stale": "2026-09-30T00:00:00.000Z",
+        "confirmed": null
+      },
+      {
+        "id": "r-bad2",
+        "stale": null,
+        "confirmed": null
+      },
+      {
+        "id": "r-confirmed",
+        "stale": null,
+        "confirmed": "2026-09-30T00:00:00.000Z"
+      },
+      {
+        "id": "r-elsewhere",
+        "stale": null,
+        "confirmed": "2026-09-30T00:00:00.000Z"
+      },
+      {
+        "id": "r-garbled",
+        "stale": null,
+        "confirmed": "2026-09-30T00:00:00.000Z"
+      },
+      {
+        "id": "r-good",
+        "stale": null,
+        "confirmed": "2026-09-30T00:00:00.000Z"
+      },
+      {
+        "id": "r-novec",
+        "stale": null,
+        "confirmed": null
+      },
+      {
+        "id": "r-novec2",
+        "stale": null,
+        "confirmed": "2026-09-30T00:00:00.000Z"
+      },
+      {
+        "id": "r-other",
+        "stale": null,
+        "confirmed": null
+      },
+      {
+        "id": "r-otherdims",
+        "stale": null,
+        "confirmed": null
+      },
+      {
+        "id": "r-scoped",
+        "stale": null,
+        "confirmed": "2026-09-30T00:00:00.000Z"
+      },
+      {
+        "id": "r-stale",
+        "stale": "2026-09-29T00:00:00.000Z",
+        "confirmed": null
+      },
+      {
+        "id": "r-superseded",
+        "stale": null,
+        "confirmed": null
+      },
+      {
+        "id": "r-unscoped",
+        "stale": null,
+        "confirmed": "2026-09-30T00:00:00.000Z"
+      },
+      {
+        "id": "r-veconly",
+        "stale": null,
+        "confirmed": "2026-09-30T00:00:00.000Z"
+      },
+      {
+        "id": "r-veconly-old",
+        "stale": null,
+        "confirmed": null
+      }
+    ]
+  },
+  "main | hybrid, checkout, k=2 (backfill)": {
+    "result": {
+      "mode": "hybrid",
+      "reason": null,
+      "provider": "fake",
+      "checked": true,
+      "degraded": false,
+      "total": 13,
+      "unvectored": 5,
+      "lessons": [
+        {
+          "id": "r-veconly",
+          "text": "unrelated zzz vector only",
+          "kind": "pattern",
+          "scope": [],
+          "citation": null,
+          "source_agent": "worker",
+          "source_model": null,
+          "task": null,
+          "card": null,
+          "commit_sha": null,
+          "created": "2026-09-25T00:00:00.000Z",
+          "confirmed": "2026-09-30T00:00:00.000Z",
+          "helpful": 0,
+          "harmful": 0,
+          "superseded_by": null,
+          "stale": null,
+          "hasVector": true,
+          "score": 0.9243307361318913,
+          "sides": [
+            "vector"
+          ]
+        },
+        {
+          "id": "r-scoped",
+          "text": "retry flaky uploads scoped",
+          "kind": "pattern",
+          "scope": [
+            "src/**/*.mjs"
+          ],
+          "citation": null,
+          "source_agent": "worker",
+          "source_model": null,
+          "task": null,
+          "card": null,
+          "commit_sha": null,
+          "created": "2026-09-25T00:00:00.000Z",
+          "confirmed": "2026-09-30T00:00:00.000Z",
+          "helpful": 0,
+          "harmful": 0,
+          "superseded_by": null,
+          "stale": null,
+          "hasVector": true,
+          "score": 0.8756817378103998,
+          "sides": [
+            "bm25",
+            "vector"
+          ]
+        }
+      ]
+    },
+    "table": [
+      {
+        "id": "r-ancient",
+        "stale": null,
+        "confirmed": null
+      },
+      {
+        "id": "r-bad1",
+        "stale": "2026-09-30T00:00:00.000Z",
+        "confirmed": null
+      },
+      {
+        "id": "r-bad2",
+        "stale": null,
+        "confirmed": null
+      },
+      {
+        "id": "r-confirmed",
+        "stale": null,
+        "confirmed": "2026-09-28T00:00:00.000Z"
+      },
+      {
+        "id": "r-elsewhere",
+        "stale": null,
+        "confirmed": null
+      },
+      {
+        "id": "r-garbled",
+        "stale": null,
+        "confirmed": null
+      },
+      {
+        "id": "r-good",
+        "stale": null,
+        "confirmed": null
+      },
+      {
+        "id": "r-novec",
+        "stale": null,
+        "confirmed": null
+      },
+      {
+        "id": "r-novec2",
+        "stale": null,
+        "confirmed": null
+      },
+      {
+        "id": "r-other",
+        "stale": null,
+        "confirmed": null
+      },
+      {
+        "id": "r-otherdims",
+        "stale": null,
+        "confirmed": null
+      },
+      {
+        "id": "r-scoped",
+        "stale": null,
+        "confirmed": "2026-09-30T00:00:00.000Z"
+      },
+      {
+        "id": "r-stale",
+        "stale": "2026-09-29T00:00:00.000Z",
+        "confirmed": null
+      },
+      {
+        "id": "r-superseded",
+        "stale": null,
+        "confirmed": null
+      },
+      {
+        "id": "r-unscoped",
+        "stale": null,
+        "confirmed": null
+      },
+      {
+        "id": "r-veconly",
+        "stale": null,
+        "confirmed": "2026-09-30T00:00:00.000Z"
+      },
+      {
+        "id": "r-veconly-old",
+        "stale": null,
+        "confirmed": null
+      }
+    ]
+  },
+  "main | hybrid, checkout, k=1 (backfill past the dropped top hit)": {
+    "result": {
+      "mode": "hybrid",
+      "reason": null,
+      "provider": "fake",
+      "checked": true,
+      "degraded": false,
+      "total": 13,
+      "unvectored": 5,
+      "lessons": [
+        {
+          "id": "r-veconly",
+          "text": "unrelated zzz vector only",
+          "kind": "pattern",
+          "scope": [],
+          "citation": null,
+          "source_agent": "worker",
+          "source_model": null,
+          "task": null,
+          "card": null,
+          "commit_sha": null,
+          "created": "2026-09-25T00:00:00.000Z",
+          "confirmed": "2026-09-30T00:00:00.000Z",
+          "helpful": 0,
+          "harmful": 0,
+          "superseded_by": null,
+          "stale": null,
+          "hasVector": true,
+          "score": 0.9243307361318913,
+          "sides": [
+            "vector"
+          ]
+        }
+      ]
+    },
+    "table": [
+      {
+        "id": "r-ancient",
+        "stale": null,
+        "confirmed": null
+      },
+      {
+        "id": "r-bad1",
+        "stale": "2026-09-30T00:00:00.000Z",
+        "confirmed": null
+      },
+      {
+        "id": "r-bad2",
+        "stale": null,
+        "confirmed": null
+      },
+      {
+        "id": "r-confirmed",
+        "stale": null,
+        "confirmed": "2026-09-28T00:00:00.000Z"
+      },
+      {
+        "id": "r-elsewhere",
+        "stale": null,
+        "confirmed": null
+      },
+      {
+        "id": "r-garbled",
+        "stale": null,
+        "confirmed": null
+      },
+      {
+        "id": "r-good",
+        "stale": null,
+        "confirmed": null
+      },
+      {
+        "id": "r-novec",
+        "stale": null,
+        "confirmed": null
+      },
+      {
+        "id": "r-novec2",
+        "stale": null,
+        "confirmed": null
+      },
+      {
+        "id": "r-other",
+        "stale": null,
+        "confirmed": null
+      },
+      {
+        "id": "r-otherdims",
+        "stale": null,
+        "confirmed": null
+      },
+      {
+        "id": "r-scoped",
+        "stale": null,
+        "confirmed": null
+      },
+      {
+        "id": "r-stale",
+        "stale": "2026-09-29T00:00:00.000Z",
+        "confirmed": null
+      },
+      {
+        "id": "r-superseded",
+        "stale": null,
+        "confirmed": null
+      },
+      {
+        "id": "r-unscoped",
+        "stale": null,
+        "confirmed": null
+      },
+      {
+        "id": "r-veconly",
+        "stale": null,
+        "confirmed": "2026-09-30T00:00:00.000Z"
+      },
+      {
+        "id": "r-veconly-old",
+        "stale": null,
+        "confirmed": null
+      }
+    ]
+  },
+  "main | hybrid, files, k=20": {
+    "result": {
+      "mode": "hybrid",
+      "reason": null,
+      "provider": "fake",
+      "checked": false,
+      "degraded": false,
+      "total": 13,
+      "unvectored": 5,
+      "lessons": [
+        {
+          "id": "r-bad1",
+          "text": "retry flaky calls bad one",
+          "kind": "pattern",
+          "scope": [],
+          "citation": "src/a.mjs:2 \"line moved\"",
+          "source_agent": "worker",
+          "source_model": null,
+          "task": null,
+          "card": null,
+          "commit_sha": null,
+          "created": "2026-09-25T00:00:00.000Z",
+          "confirmed": null,
+          "helpful": 0,
+          "harmful": 0,
+          "superseded_by": null,
+          "stale": null,
+          "hasVector": true,
+          "score": 1.4594696016800741,
+          "sides": [
+            "bm25",
+            "vector"
+          ]
+        },
+        {
+          "id": "r-veconly",
+          "text": "unrelated zzz vector only",
+          "kind": "pattern",
+          "scope": [],
+          "citation": null,
+          "source_agent": "worker",
+          "source_model": null,
+          "task": null,
+          "card": null,
+          "commit_sha": null,
+          "created": "2026-09-25T00:00:00.000Z",
+          "confirmed": null,
+          "helpful": 0,
+          "harmful": 0,
+          "superseded_by": null,
+          "stale": null,
+          "hasVector": true,
+          "score": 1.386496104197837,
+          "sides": [
+            "vector"
+          ]
+        },
+        {
+          "id": "r-scoped",
+          "text": "retry flaky uploads scoped",
+          "kind": "pattern",
+          "scope": [
+            "src/**/*.mjs"
+          ],
+          "citation": null,
+          "source_agent": "worker",
+          "source_model": null,
+          "task": null,
+          "card": null,
+          "commit_sha": null,
+          "created": "2026-09-25T00:00:00.000Z",
+          "confirmed": null,
+          "helpful": 0,
+          "harmful": 0,
+          "superseded_by": null,
+          "stale": null,
+          "hasVector": true,
+          "score": 1.3135226067155998,
+          "sides": [
+            "bm25",
+            "vector"
+          ]
+        },
+        {
+          "id": "r-unscoped",
+          "text": "retry flaky uploads unscoped",
+          "kind": "pattern",
+          "scope": [],
+          "citation": null,
+          "source_agent": "worker",
+          "source_model": null,
+          "task": null,
+          "card": null,
+          "commit_sha": null,
+          "created": "2026-09-25T00:00:00.000Z",
+          "confirmed": null,
+          "helpful": 0,
+          "harmful": 0,
+          "superseded_by": null,
+          "stale": null,
+          "hasVector": true,
+          "score": 1.1675756987422927,
+          "sides": [
+            "bm25",
+            "vector"
+          ]
+        },
+        {
+          "id": "r-confirmed",
+          "text": "retry flaky confirmed lately",
+          "kind": "pattern",
+          "scope": [],
+          "citation": null,
+          "source_agent": "worker",
+          "source_model": null,
+          "task": null,
+          "card": null,
+          "commit_sha": null,
+          "created": "2026-03-14T00:00:00.000Z",
+          "confirmed": "2026-09-28T00:00:00.000Z",
+          "helpful": 0,
+          "harmful": 0,
+          "superseded_by": null,
+          "stale": null,
+          "hasVector": true,
+          "score": 1.0384619903695127,
+          "sides": [
+            "bm25",
+            "vector"
+          ]
+        },
+        {
+          "id": "r-garbled",
+          "text": "retry flaky garbled date",
+          "kind": "pattern",
+          "scope": [],
+          "citation": null,
+          "source_agent": "worker",
+          "source_model": null,
+          "task": null,
+          "card": null,
+          "commit_sha": null,
+          "created": "not-a-date",
+          "confirmed": null,
+          "helpful": 0,
+          "harmful": 0,
+          "superseded_by": null,
+          "stale": null,
+          "hasVector": true,
+          "score": 0.9000000357627869,
+          "sides": [
+            "bm25",
+            "vector"
+          ]
+        },
+        {
+          "id": "r-elsewhere",
+          "text": "retry flaky uploads elsewhere",
+          "kind": "pattern",
+          "scope": [
+            "docs/**/*.md"
+          ],
+          "citation": null,
+          "source_agent": "worker",
+          "source_model": null,
+          "task": null,
+          "card": null,
+          "commit_sha": null,
+          "created": "2026-09-25T00:00:00.000Z",
+          "confirmed": null,
+          "helpful": 0,
+          "harmful": 0,
+          "superseded_by": null,
+          "stale": null,
+          "hasVector": true,
+          "score": 0.8270327974830198,
+          "sides": [
+            "bm25",
+            "vector"
+          ]
+        },
+        {
+          "id": "r-good",
+          "text": "retry flaky calls good",
+          "kind": "pattern",
+          "scope": [],
+          "citation": "src/a.mjs:2 \"line two\"",
+          "source_agent": "worker",
+          "source_model": null,
+          "task": null,
+          "card": null,
+          "commit_sha": null,
+          "created": "2026-09-25T00:00:00.000Z",
+          "confirmed": null,
+          "helpful": 0,
+          "harmful": 0,
+          "superseded_by": null,
+          "stale": null,
+          "hasVector": true,
+          "score": 0.7297348008400371,
+          "sides": [
+            "bm25",
+            "vector"
+          ]
+        },
+        {
+          "id": "r-novec2",
+          "text": "flaky retry novec second",
+          "kind": "pattern",
+          "scope": [
+            "src/a.mjs"
+          ],
+          "citation": null,
+          "source_agent": "worker",
+          "source_model": null,
+          "task": null,
+          "card": null,
+          "commit_sha": null,
+          "created": "2026-09-27T00:00:00.000Z",
+          "confirmed": null,
+          "helpful": 0,
+          "harmful": 0,
+          "superseded_by": null,
+          "stale": null,
+          "hasVector": false,
+          "score": 0.022698647313253915,
+          "sides": [
+            "bm25"
+          ]
+        },
+        {
+          "id": "r-bad2",
+          "text": "retry flaky calls bad two",
+          "kind": "pattern",
+          "scope": [],
+          "citation": "src/missing.mjs:1",
+          "source_agent": "worker",
+          "source_model": null,
+          "task": null,
+          "card": null,
+          "commit_sha": null,
+          "created": "2026-09-25T00:00:00.000Z",
+          "confirmed": null,
+          "helpful": 0,
+          "harmful": 0,
+          "superseded_by": null,
+          "stale": null,
+          "hasVector": false,
+          "score": 0.021151733357682233,
+          "sides": [
+            "bm25"
+          ]
+        },
+        {
+          "id": "r-novec",
+          "text": "retry flaky calls without vector",
+          "kind": "pattern",
+          "scope": [],
+          "citation": null,
+          "source_agent": "worker",
+          "source_model": null,
+          "task": null,
+          "card": null,
+          "commit_sha": null,
+          "created": "2026-09-18T00:00:00.000Z",
+          "confirmed": null,
+          "helpful": 0,
+          "harmful": 0,
+          "superseded_by": null,
+          "stale": null,
+          "hasVector": false,
+          "score": 0.02009114270403158,
+          "sides": [
+            "bm25"
+          ]
+        },
+        {
+          "id": "r-other",
+          "text": "retry flaky calls other model",
+          "kind": "pattern",
+          "scope": [],
+          "citation": null,
+          "source_agent": "worker",
+          "source_model": null,
+          "task": null,
+          "card": null,
+          "commit_sha": null,
+          "created": "2026-09-25T00:00:00.000Z",
+          "confirmed": null,
+          "helpful": 0,
+          "harmful": 0,
+          "superseded_by": null,
+          "stale": null,
+          "hasVector": true,
+          "score": 0.020555909882817948,
+          "sides": [
+            "bm25"
+          ]
+        },
+        {
+          "id": "r-otherdims",
+          "text": "retry flaky calls other dims",
+          "kind": "pattern",
+          "scope": [],
+          "citation": null,
+          "source_agent": "worker",
+          "source_model": null,
+          "task": null,
+          "card": null,
+          "commit_sha": null,
+          "created": "2026-09-25T00:00:00.000Z",
+          "confirmed": null,
+          "helpful": 0,
+          "harmful": 0,
+          "superseded_by": null,
+          "stale": null,
+          "hasVector": true,
+          "score": 0.02027041113444547,
+          "sides": [
+            "bm25"
+          ]
+        }
+      ]
+    },
+    "table": [
+      {
+        "id": "r-ancient",
+        "stale": null,
+        "confirmed": null
+      },
+      {
+        "id": "r-bad1",
+        "stale": null,
+        "confirmed": null
+      },
+      {
+        "id": "r-bad2",
+        "stale": null,
+        "confirmed": null
+      },
+      {
+        "id": "r-confirmed",
+        "stale": null,
+        "confirmed": "2026-09-28T00:00:00.000Z"
+      },
+      {
+        "id": "r-elsewhere",
+        "stale": null,
+        "confirmed": null
+      },
+      {
+        "id": "r-garbled",
+        "stale": null,
+        "confirmed": null
+      },
+      {
+        "id": "r-good",
+        "stale": null,
+        "confirmed": null
+      },
+      {
+        "id": "r-novec",
+        "stale": null,
+        "confirmed": null
+      },
+      {
+        "id": "r-novec2",
+        "stale": null,
+        "confirmed": null
+      },
+      {
+        "id": "r-other",
+        "stale": null,
+        "confirmed": null
+      },
+      {
+        "id": "r-otherdims",
+        "stale": null,
+        "confirmed": null
+      },
+      {
+        "id": "r-scoped",
+        "stale": null,
+        "confirmed": null
+      },
+      {
+        "id": "r-stale",
+        "stale": "2026-09-29T00:00:00.000Z",
+        "confirmed": null
+      },
+      {
+        "id": "r-superseded",
+        "stale": null,
+        "confirmed": null
+      },
+      {
+        "id": "r-unscoped",
+        "stale": null,
+        "confirmed": null
+      },
+      {
+        "id": "r-veconly",
+        "stale": null,
+        "confirmed": null
+      },
+      {
+        "id": "r-veconly-old",
+        "stale": null,
+        "confirmed": null
+      }
+    ]
+  },
+  "main | hybrid, checkout, files, k=5": {
+    "result": {
+      "mode": "hybrid",
+      "reason": null,
+      "provider": "fake",
+      "checked": true,
+      "degraded": false,
+      "total": 13,
+      "unvectored": 5,
+      "lessons": [
+        {
+          "id": "r-veconly",
+          "text": "unrelated zzz vector only",
+          "kind": "pattern",
+          "scope": [],
+          "citation": null,
+          "source_agent": "worker",
+          "source_model": null,
+          "task": null,
+          "card": null,
+          "commit_sha": null,
+          "created": "2026-09-25T00:00:00.000Z",
+          "confirmed": "2026-09-30T00:00:00.000Z",
+          "helpful": 0,
+          "harmful": 0,
+          "superseded_by": null,
+          "stale": null,
+          "hasVector": true,
+          "score": 1.386496104197837,
+          "sides": [
+            "vector"
+          ]
+        },
+        {
+          "id": "r-scoped",
+          "text": "retry flaky uploads scoped",
+          "kind": "pattern",
+          "scope": [
+            "src/**/*.mjs"
+          ],
+          "citation": null,
+          "source_agent": "worker",
+          "source_model": null,
+          "task": null,
+          "card": null,
+          "commit_sha": null,
+          "created": "2026-09-25T00:00:00.000Z",
+          "confirmed": "2026-09-30T00:00:00.000Z",
+          "helpful": 0,
+          "harmful": 0,
+          "superseded_by": null,
+          "stale": null,
+          "hasVector": true,
+          "score": 1.3135226067155998,
+          "sides": [
+            "bm25",
+            "vector"
+          ]
+        },
+        {
+          "id": "r-unscoped",
+          "text": "retry flaky uploads unscoped",
+          "kind": "pattern",
+          "scope": [],
+          "citation": null,
+          "source_agent": "worker",
+          "source_model": null,
+          "task": null,
+          "card": null,
+          "commit_sha": null,
+          "created": "2026-09-25T00:00:00.000Z",
+          "confirmed": "2026-09-30T00:00:00.000Z",
+          "helpful": 0,
+          "harmful": 0,
+          "superseded_by": null,
+          "stale": null,
+          "hasVector": true,
+          "score": 1.1675756987422927,
+          "sides": [
+            "bm25",
+            "vector"
+          ]
+        },
+        {
+          "id": "r-confirmed",
+          "text": "retry flaky confirmed lately",
+          "kind": "pattern",
+          "scope": [],
+          "citation": null,
+          "source_agent": "worker",
+          "source_model": null,
+          "task": null,
+          "card": null,
+          "commit_sha": null,
+          "created": "2026-03-14T00:00:00.000Z",
+          "confirmed": "2026-09-30T00:00:00.000Z",
+          "helpful": 0,
+          "harmful": 0,
+          "superseded_by": null,
+          "stale": null,
+          "hasVector": true,
+          "score": 1.0384619903695127,
+          "sides": [
+            "bm25",
+            "vector"
+          ]
+        },
+        {
+          "id": "r-garbled",
+          "text": "retry flaky garbled date",
+          "kind": "pattern",
+          "scope": [],
+          "citation": null,
+          "source_agent": "worker",
+          "source_model": null,
+          "task": null,
+          "card": null,
+          "commit_sha": null,
+          "created": "not-a-date",
+          "confirmed": "2026-09-30T00:00:00.000Z",
+          "helpful": 0,
+          "harmful": 0,
+          "superseded_by": null,
+          "stale": null,
+          "hasVector": true,
+          "score": 0.9000000357627869,
+          "sides": [
+            "bm25",
+            "vector"
+          ]
+        }
+      ]
+    },
+    "table": [
+      {
+        "id": "r-ancient",
+        "stale": null,
+        "confirmed": null
+      },
+      {
+        "id": "r-bad1",
+        "stale": "2026-09-30T00:00:00.000Z",
+        "confirmed": null
+      },
+      {
+        "id": "r-bad2",
+        "stale": null,
+        "confirmed": null
+      },
+      {
+        "id": "r-confirmed",
+        "stale": null,
+        "confirmed": "2026-09-30T00:00:00.000Z"
+      },
+      {
+        "id": "r-elsewhere",
+        "stale": null,
+        "confirmed": null
+      },
+      {
+        "id": "r-garbled",
+        "stale": null,
+        "confirmed": "2026-09-30T00:00:00.000Z"
+      },
+      {
+        "id": "r-good",
+        "stale": null,
+        "confirmed": null
+      },
+      {
+        "id": "r-novec",
+        "stale": null,
+        "confirmed": null
+      },
+      {
+        "id": "r-novec2",
+        "stale": null,
+        "confirmed": null
+      },
+      {
+        "id": "r-other",
+        "stale": null,
+        "confirmed": null
+      },
+      {
+        "id": "r-otherdims",
+        "stale": null,
+        "confirmed": null
+      },
+      {
+        "id": "r-scoped",
+        "stale": null,
+        "confirmed": "2026-09-30T00:00:00.000Z"
+      },
+      {
+        "id": "r-stale",
+        "stale": "2026-09-29T00:00:00.000Z",
+        "confirmed": null
+      },
+      {
+        "id": "r-superseded",
+        "stale": null,
+        "confirmed": null
+      },
+      {
+        "id": "r-unscoped",
+        "stale": null,
+        "confirmed": "2026-09-30T00:00:00.000Z"
+      },
+      {
+        "id": "r-veconly",
+        "stale": null,
+        "confirmed": "2026-09-30T00:00:00.000Z"
+      },
+      {
+        "id": "r-veconly-old",
+        "stale": null,
+        "confirmed": null
+      }
+    ]
+  },
+  "main | hybrid, a different query vector": {
+    "result": {
+      "mode": "hybrid",
+      "reason": null,
+      "provider": "fake",
+      "checked": false,
+      "degraded": false,
+      "total": 13,
+      "unvectored": 5,
+      "lessons": [
+        {
+          "id": "r-good",
+          "text": "retry flaky calls good",
+          "kind": "pattern",
+          "scope": [],
+          "citation": "src/a.mjs:2 \"line two\"",
+          "source_agent": "worker",
+          "source_model": null,
+          "task": null,
+          "card": null,
+          "commit_sha": null,
+          "created": "2026-09-25T00:00:00.000Z",
+          "confirmed": null,
+          "helpful": 0,
+          "harmful": 0,
+          "superseded_by": null,
+          "stale": null,
+          "hasVector": true,
+          "score": 0.48648986722669135,
+          "sides": [
+            "bm25",
+            "vector"
+          ]
+        },
+        {
+          "id": "r-garbled",
+          "text": "retry flaky garbled date",
+          "kind": "pattern",
+          "scope": [],
+          "citation": null,
+          "source_agent": "worker",
+          "source_model": null,
+          "task": null,
+          "card": null,
+          "commit_sha": null,
+          "created": "not-a-date",
+          "confirmed": null,
+          "helpful": 0,
+          "harmful": 0,
+          "superseded_by": null,
+          "stale": null,
+          "hasVector": true,
+          "score": 0.4000000059604645,
+          "sides": [
+            "bm25",
+            "vector"
+          ]
+        },
+        {
+          "id": "r-confirmed",
+          "text": "retry flaky confirmed lately",
+          "kind": "pattern",
+          "scope": [],
+          "citation": null,
+          "source_agent": "worker",
+          "source_model": null,
+          "task": null,
+          "card": null,
+          "commit_sha": null,
+          "created": "2026-03-14T00:00:00.000Z",
+          "confirmed": "2026-09-28T00:00:00.000Z",
+          "helpful": 0,
+          "harmful": 0,
+          "superseded_by": null,
+          "stale": null,
+          "hasVector": true,
+          "score": 0.29670344266262516,
+          "sides": [
+            "bm25",
+            "vector"
+          ]
+        },
+        {
+          "id": "r-unscoped",
+          "text": "retry flaky uploads unscoped",
+          "kind": "pattern",
+          "scope": [],
+          "citation": null,
+          "source_agent": "worker",
+          "source_model": null,
+          "task": null,
+          "card": null,
+          "commit_sha": null,
+          "created": "2026-09-25T00:00:00.000Z",
+          "confirmed": null,
+          "helpful": 0,
+          "harmful": 0,
+          "superseded_by": null,
+          "stale": null,
+          "hasVector": true,
+          "score": 0.1945959497903821,
+          "sides": [
+            "bm25",
+            "vector"
+          ]
+        },
+        {
+          "id": "r-elsewhere",
+          "text": "retry flaky uploads elsewhere",
+          "kind": "pattern",
+          "scope": [
+            "docs/**/*.md"
+          ],
+          "citation": null,
+          "source_agent": "worker",
+          "source_model": null,
+          "task": null,
+          "card": null,
+          "commit_sha": null,
+          "created": "2026-09-25T00:00:00.000Z",
+          "confirmed": null,
+          "helpful": 0,
+          "harmful": 0,
+          "superseded_by": null,
+          "stale": null,
+          "hasVector": true,
+          "score": 0.14594696596741855,
+          "sides": [
+            "bm25",
+            "vector"
+          ]
+        },
+        {
+          "id": "r-scoped",
+          "text": "retry flaky uploads scoped",
+          "kind": "pattern",
+          "scope": [
+            "src/**/*.mjs"
+          ],
+          "citation": null,
+          "source_agent": "worker",
+          "source_model": null,
+          "task": null,
+          "card": null,
+          "commit_sha": null,
+          "created": "2026-09-25T00:00:00.000Z",
+          "confirmed": null,
+          "helpful": 0,
+          "harmful": 0,
+          "superseded_by": null,
+          "stale": null,
+          "hasVector": true,
+          "score": 0.09729797489519106,
+          "sides": [
+            "bm25",
+            "vector"
+          ]
+        },
+        {
+          "id": "r-veconly",
+          "text": "unrelated zzz vector only",
+          "kind": "pattern",
+          "scope": [],
+          "citation": null,
+          "source_agent": "worker",
+          "source_model": null,
+          "task": null,
+          "card": null,
+          "commit_sha": null,
+          "created": "2026-09-25T00:00:00.000Z",
+          "confirmed": null,
+          "helpful": 0,
+          "harmful": 0,
+          "superseded_by": null,
+          "stale": null,
+          "hasVector": true,
+          "score": 0.04864898744759553,
+          "sides": [
+            "vector"
+          ]
+        },
+        {
+          "id": "r-bad1",
+          "text": "retry flaky calls bad one",
+          "kind": "pattern",
+          "scope": [],
+          "citation": "src/a.mjs:2 \"line moved\"",
+          "source_agent": "worker",
+          "source_model": null,
+          "task": null,
+          "card": null,
+          "commit_sha": null,
+          "created": "2026-09-25T00:00:00.000Z",
+          "confirmed": null,
+          "helpful": 0,
+          "harmful": 0,
+          "superseded_by": null,
+          "stale": null,
+          "hasVector": true,
+          "score": 0,
+          "sides": [
+            "bm25",
+            "vector"
+          ]
+        },
+        {
+          "id": "r-novec2",
+          "text": "flaky retry novec second",
+          "kind": "pattern",
+          "scope": [
+            "src/a.mjs"
+          ],
+          "citation": null,
+          "source_agent": "worker",
+          "source_model": null,
+          "task": null,
+          "card": null,
+          "commit_sha": null,
+          "created": "2026-09-27T00:00:00.000Z",
+          "confirmed": null,
+          "helpful": 0,
+          "harmful": 0,
+          "superseded_by": null,
+          "stale": null,
+          "hasVector": false,
+          "score": 0.015132431542169276,
+          "sides": [
+            "bm25"
+          ]
+        },
+        {
+          "id": "r-bad2",
+          "text": "retry flaky calls bad two",
+          "kind": "pattern",
+          "scope": [],
+          "citation": "src/missing.mjs:1",
+          "source_agent": "worker",
+          "source_model": null,
+          "task": null,
+          "card": null,
+          "commit_sha": null,
+          "created": "2026-09-25T00:00:00.000Z",
+          "confirmed": null,
+          "helpful": 0,
+          "harmful": 0,
+          "superseded_by": null,
+          "stale": null,
+          "hasVector": false,
+          "score": 0.014101155571788156,
+          "sides": [
+            "bm25"
+          ]
+        },
+        {
+          "id": "r-novec",
+          "text": "retry flaky calls without vector",
+          "kind": "pattern",
+          "scope": [],
+          "citation": null,
+          "source_agent": "worker",
+          "source_model": null,
+          "task": null,
+          "card": null,
+          "commit_sha": null,
+          "created": "2026-09-18T00:00:00.000Z",
+          "confirmed": null,
+          "helpful": 0,
+          "harmful": 0,
+          "superseded_by": null,
+          "stale": null,
+          "hasVector": false,
+          "score": 0.013394095136021052,
+          "sides": [
+            "bm25"
+          ]
+        },
+        {
+          "id": "r-other",
+          "text": "retry flaky calls other model",
+          "kind": "pattern",
+          "scope": [],
+          "citation": null,
+          "source_agent": "worker",
+          "source_model": null,
+          "task": null,
+          "card": null,
+          "commit_sha": null,
+          "created": "2026-09-25T00:00:00.000Z",
+          "confirmed": null,
+          "helpful": 0,
+          "harmful": 0,
+          "superseded_by": null,
+          "stale": null,
+          "hasVector": true,
+          "score": 0.01370393992187863,
+          "sides": [
+            "bm25"
+          ]
+        },
+        {
+          "id": "r-otherdims",
+          "text": "retry flaky calls other dims",
+          "kind": "pattern",
+          "scope": [],
+          "citation": null,
+          "source_agent": "worker",
+          "source_model": null,
+          "task": null,
+          "card": null,
+          "commit_sha": null,
+          "created": "2026-09-25T00:00:00.000Z",
+          "confirmed": null,
+          "helpful": 0,
+          "harmful": 0,
+          "superseded_by": null,
+          "stale": null,
+          "hasVector": true,
+          "score": 0.013513607422963647,
+          "sides": [
+            "bm25"
+          ]
+        }
+      ]
+    },
+    "table": [
+      {
+        "id": "r-ancient",
+        "stale": null,
+        "confirmed": null
+      },
+      {
+        "id": "r-bad1",
+        "stale": null,
+        "confirmed": null
+      },
+      {
+        "id": "r-bad2",
+        "stale": null,
+        "confirmed": null
+      },
+      {
+        "id": "r-confirmed",
+        "stale": null,
+        "confirmed": "2026-09-28T00:00:00.000Z"
+      },
+      {
+        "id": "r-elsewhere",
+        "stale": null,
+        "confirmed": null
+      },
+      {
+        "id": "r-garbled",
+        "stale": null,
+        "confirmed": null
+      },
+      {
+        "id": "r-good",
+        "stale": null,
+        "confirmed": null
+      },
+      {
+        "id": "r-novec",
+        "stale": null,
+        "confirmed": null
+      },
+      {
+        "id": "r-novec2",
+        "stale": null,
+        "confirmed": null
+      },
+      {
+        "id": "r-other",
+        "stale": null,
+        "confirmed": null
+      },
+      {
+        "id": "r-otherdims",
+        "stale": null,
+        "confirmed": null
+      },
+      {
+        "id": "r-scoped",
+        "stale": null,
+        "confirmed": null
+      },
+      {
+        "id": "r-stale",
+        "stale": "2026-09-29T00:00:00.000Z",
+        "confirmed": null
+      },
+      {
+        "id": "r-superseded",
+        "stale": null,
+        "confirmed": null
+      },
+      {
+        "id": "r-unscoped",
+        "stale": null,
+        "confirmed": null
+      },
+      {
+        "id": "r-veconly",
+        "stale": null,
+        "confirmed": null
+      },
+      {
+        "id": "r-veconly-old",
+        "stale": null,
+        "confirmed": null
+      }
+    ]
+  },
+  "main | hybrid, narrow staleDays": {
+    "result": {
+      "mode": "hybrid",
+      "reason": null,
+      "provider": "fake",
+      "checked": false,
+      "degraded": false,
+      "total": 12,
+      "unvectored": 4,
+      "lessons": [
+        {
+          "id": "r-bad1",
+          "text": "retry flaky calls bad one",
+          "kind": "pattern",
+          "scope": [],
+          "citation": "src/a.mjs:2 \"line moved\"",
+          "source_agent": "worker",
+          "source_model": null,
+          "task": null,
+          "card": null,
+          "commit_sha": null,
+          "created": "2026-09-25T00:00:00.000Z",
+          "confirmed": null,
+          "helpful": 0,
+          "harmful": 0,
+          "superseded_by": null,
+          "stale": null,
+          "hasVector": true,
+          "score": 0.9729797344533827,
+          "sides": [
+            "bm25",
+            "vector"
+          ]
+        },
+        {
+          "id": "r-veconly",
+          "text": "unrelated zzz vector only",
+          "kind": "pattern",
+          "scope": [],
+          "citation": null,
+          "source_agent": "worker",
+          "source_model": null,
+          "task": null,
+          "card": null,
+          "commit_sha": null,
+          "created": "2026-09-25T00:00:00.000Z",
+          "confirmed": null,
+          "helpful": 0,
+          "harmful": 0,
+          "superseded_by": null,
+          "stale": null,
+          "hasVector": true,
+          "score": 0.9243307361318913,
+          "sides": [
+            "vector"
+          ]
+        },
+        {
+          "id": "r-scoped",
+          "text": "retry flaky uploads scoped",
+          "kind": "pattern",
+          "scope": [
+            "src/**/*.mjs"
+          ],
+          "citation": null,
+          "source_agent": "worker",
+          "source_model": null,
+          "task": null,
+          "card": null,
+          "commit_sha": null,
+          "created": "2026-09-25T00:00:00.000Z",
+          "confirmed": null,
+          "helpful": 0,
+          "harmful": 0,
+          "superseded_by": null,
+          "stale": null,
+          "hasVector": true,
+          "score": 0.8756817378103998,
+          "sides": [
+            "bm25",
+            "vector"
+          ]
+        },
+        {
+          "id": "r-elsewhere",
+          "text": "retry flaky uploads elsewhere",
+          "kind": "pattern",
+          "scope": [
+            "docs/**/*.md"
+          ],
+          "citation": null,
+          "source_agent": "worker",
+          "source_model": null,
+          "task": null,
+          "card": null,
+          "commit_sha": null,
+          "created": "2026-09-25T00:00:00.000Z",
+          "confirmed": null,
+          "helpful": 0,
+          "harmful": 0,
+          "superseded_by": null,
+          "stale": null,
+          "hasVector": true,
+          "score": 0.8270327974830198,
+          "sides": [
+            "bm25",
+            "vector"
+          ]
+        },
+        {
+          "id": "r-unscoped",
+          "text": "retry flaky uploads unscoped",
+          "kind": "pattern",
+          "scope": [],
+          "citation": null,
+          "source_agent": "worker",
+          "source_model": null,
+          "task": null,
+          "card": null,
+          "commit_sha": null,
+          "created": "2026-09-25T00:00:00.000Z",
+          "confirmed": null,
+          "helpful": 0,
+          "harmful": 0,
+          "superseded_by": null,
+          "stale": null,
+          "hasVector": true,
+          "score": 0.7783837991615284,
+          "sides": [
+            "bm25",
+            "vector"
+          ]
+        },
+        {
+          "id": "r-confirmed",
+          "text": "retry flaky confirmed lately",
+          "kind": "pattern",
+          "scope": [],
+          "citation": null,
+          "source_agent": "worker",
+          "source_model": null,
+          "task": null,
+          "card": null,
+          "commit_sha": null,
+          "created": "2026-03-14T00:00:00.000Z",
+          "confirmed": "2026-09-28T00:00:00.000Z",
+          "helpful": 0,
+          "harmful": 0,
+          "superseded_by": null,
+          "stale": null,
+          "hasVector": true,
+          "score": 0.6923079935796751,
+          "sides": [
+            "bm25",
+            "vector"
+          ]
+        },
+        {
+          "id": "r-garbled",
+          "text": "retry flaky garbled date",
+          "kind": "pattern",
+          "scope": [],
+          "citation": null,
+          "source_agent": "worker",
+          "source_model": null,
+          "task": null,
+          "card": null,
+          "commit_sha": null,
+          "created": "not-a-date",
+          "confirmed": null,
+          "helpful": 0,
+          "harmful": 0,
+          "superseded_by": null,
+          "stale": null,
+          "hasVector": true,
+          "score": 0.6000000238418579,
+          "sides": [
+            "bm25",
+            "vector"
+          ]
+        },
+        {
+          "id": "r-good",
+          "text": "retry flaky calls good",
+          "kind": "pattern",
+          "scope": [],
+          "citation": "src/a.mjs:2 \"line two\"",
+          "source_agent": "worker",
+          "source_model": null,
+          "task": null,
+          "card": null,
+          "commit_sha": null,
+          "created": "2026-09-25T00:00:00.000Z",
+          "confirmed": null,
+          "helpful": 0,
+          "harmful": 0,
+          "superseded_by": null,
+          "stale": null,
+          "hasVector": true,
+          "score": 0.48648986722669135,
+          "sides": [
+            "bm25",
+            "vector"
+          ]
+        },
+        {
+          "id": "r-novec2",
+          "text": "flaky retry novec second",
+          "kind": "pattern",
+          "scope": [
+            "src/a.mjs"
+          ],
+          "citation": null,
+          "source_agent": "worker",
+          "source_model": null,
+          "task": null,
+          "card": null,
+          "commit_sha": null,
+          "created": "2026-09-27T00:00:00.000Z",
+          "confirmed": null,
+          "helpful": 0,
+          "harmful": 0,
+          "superseded_by": null,
+          "stale": null,
+          "hasVector": false,
+          "score": 0.015132431542169276,
+          "sides": [
+            "bm25"
+          ]
+        },
+        {
+          "id": "r-bad2",
+          "text": "retry flaky calls bad two",
+          "kind": "pattern",
+          "scope": [],
+          "citation": "src/missing.mjs:1",
+          "source_agent": "worker",
+          "source_model": null,
+          "task": null,
+          "card": null,
+          "commit_sha": null,
+          "created": "2026-09-25T00:00:00.000Z",
+          "confirmed": null,
+          "helpful": 0,
+          "harmful": 0,
+          "superseded_by": null,
+          "stale": null,
+          "hasVector": false,
+          "score": 0.014101155571788156,
+          "sides": [
+            "bm25"
+          ]
+        },
+        {
+          "id": "r-other",
+          "text": "retry flaky calls other model",
+          "kind": "pattern",
+          "scope": [],
+          "citation": null,
+          "source_agent": "worker",
+          "source_model": null,
+          "task": null,
+          "card": null,
+          "commit_sha": null,
+          "created": "2026-09-25T00:00:00.000Z",
+          "confirmed": null,
+          "helpful": 0,
+          "harmful": 0,
+          "superseded_by": null,
+          "stale": null,
+          "hasVector": true,
+          "score": 0.013899710492191181,
+          "sides": [
+            "bm25"
+          ]
+        },
+        {
+          "id": "r-otherdims",
+          "text": "retry flaky calls other dims",
+          "kind": "pattern",
+          "scope": [],
+          "citation": null,
+          "source_agent": "worker",
+          "source_model": null,
+          "task": null,
+          "card": null,
+          "commit_sha": null,
+          "created": "2026-09-25T00:00:00.000Z",
+          "confirmed": null,
+          "helpful": 0,
+          "harmful": 0,
+          "superseded_by": null,
+          "stale": null,
+          "hasVector": true,
+          "score": 0.01370393992187863,
+          "sides": [
+            "bm25"
+          ]
+        }
+      ]
+    },
+    "table": [
+      {
+        "id": "r-ancient",
+        "stale": null,
+        "confirmed": null
+      },
+      {
+        "id": "r-bad1",
+        "stale": null,
+        "confirmed": null
+      },
+      {
+        "id": "r-bad2",
+        "stale": null,
+        "confirmed": null
+      },
+      {
+        "id": "r-confirmed",
+        "stale": null,
+        "confirmed": "2026-09-28T00:00:00.000Z"
+      },
+      {
+        "id": "r-elsewhere",
+        "stale": null,
+        "confirmed": null
+      },
+      {
+        "id": "r-garbled",
+        "stale": null,
+        "confirmed": null
+      },
+      {
+        "id": "r-good",
+        "stale": null,
+        "confirmed": null
+      },
+      {
+        "id": "r-novec",
+        "stale": null,
+        "confirmed": null
+      },
+      {
+        "id": "r-novec2",
+        "stale": null,
+        "confirmed": null
+      },
+      {
+        "id": "r-other",
+        "stale": null,
+        "confirmed": null
+      },
+      {
+        "id": "r-otherdims",
+        "stale": null,
+        "confirmed": null
+      },
+      {
+        "id": "r-scoped",
+        "stale": null,
+        "confirmed": null
+      },
+      {
+        "id": "r-stale",
+        "stale": "2026-09-29T00:00:00.000Z",
+        "confirmed": null
+      },
+      {
+        "id": "r-superseded",
+        "stale": null,
+        "confirmed": null
+      },
+      {
+        "id": "r-unscoped",
+        "stale": null,
+        "confirmed": null
+      },
+      {
+        "id": "r-veconly",
+        "stale": null,
+        "confirmed": null
+      },
+      {
+        "id": "r-veconly-old",
+        "stale": null,
+        "confirmed": null
+      }
+    ]
+  },
+  "main | hybrid, query matching nothing (vector-only candidates)": {
+    "result": {
+      "mode": "hybrid",
+      "reason": null,
+      "provider": "fake",
+      "checked": false,
+      "degraded": false,
+      "total": 13,
+      "unvectored": 5,
+      "lessons": [
+        {
+          "id": "r-bad1",
+          "text": "retry flaky calls bad one",
+          "kind": "pattern",
+          "scope": [],
+          "citation": "src/a.mjs:2 \"line moved\"",
+          "source_agent": "worker",
+          "source_model": null,
+          "task": null,
+          "card": null,
+          "commit_sha": null,
+          "created": "2026-09-25T00:00:00.000Z",
+          "confirmed": null,
+          "helpful": 0,
+          "harmful": 0,
+          "superseded_by": null,
+          "stale": null,
+          "hasVector": true,
+          "score": 0.9729797344533827,
+          "sides": [
+            "vector"
+          ]
+        },
+        {
+          "id": "r-veconly",
+          "text": "unrelated zzz vector only",
+          "kind": "pattern",
+          "scope": [],
+          "citation": null,
+          "source_agent": "worker",
+          "source_model": null,
+          "task": null,
+          "card": null,
+          "commit_sha": null,
+          "created": "2026-09-25T00:00:00.000Z",
+          "confirmed": null,
+          "helpful": 0,
+          "harmful": 0,
+          "superseded_by": null,
+          "stale": null,
+          "hasVector": true,
+          "score": 0.9243307361318913,
+          "sides": [
+            "vector"
+          ]
+        },
+        {
+          "id": "r-scoped",
+          "text": "retry flaky uploads scoped",
+          "kind": "pattern",
+          "scope": [
+            "src/**/*.mjs"
+          ],
+          "citation": null,
+          "source_agent": "worker",
+          "source_model": null,
+          "task": null,
+          "card": null,
+          "commit_sha": null,
+          "created": "2026-09-25T00:00:00.000Z",
+          "confirmed": null,
+          "helpful": 0,
+          "harmful": 0,
+          "superseded_by": null,
+          "stale": null,
+          "hasVector": true,
+          "score": 0.8756817378103998,
+          "sides": [
+            "vector"
+          ]
+        },
+        {
+          "id": "r-elsewhere",
+          "text": "retry flaky uploads elsewhere",
+          "kind": "pattern",
+          "scope": [
+            "docs/**/*.md"
+          ],
+          "citation": null,
+          "source_agent": "worker",
+          "source_model": null,
+          "task": null,
+          "card": null,
+          "commit_sha": null,
+          "created": "2026-09-25T00:00:00.000Z",
+          "confirmed": null,
+          "helpful": 0,
+          "harmful": 0,
+          "superseded_by": null,
+          "stale": null,
+          "hasVector": true,
+          "score": 0.8270327974830198,
+          "sides": [
+            "vector"
+          ]
+        },
+        {
+          "id": "r-unscoped",
+          "text": "retry flaky uploads unscoped",
+          "kind": "pattern",
+          "scope": [],
+          "citation": null,
+          "source_agent": "worker",
+          "source_model": null,
+          "task": null,
+          "card": null,
+          "commit_sha": null,
+          "created": "2026-09-25T00:00:00.000Z",
+          "confirmed": null,
+          "helpful": 0,
+          "harmful": 0,
+          "superseded_by": null,
+          "stale": null,
+          "hasVector": true,
+          "score": 0.7783837991615284,
+          "sides": [
+            "vector"
+          ]
+        },
+        {
+          "id": "r-confirmed",
+          "text": "retry flaky confirmed lately",
+          "kind": "pattern",
+          "scope": [],
+          "citation": null,
+          "source_agent": "worker",
+          "source_model": null,
+          "task": null,
+          "card": null,
+          "commit_sha": null,
+          "created": "2026-03-14T00:00:00.000Z",
+          "confirmed": "2026-09-28T00:00:00.000Z",
+          "helpful": 0,
+          "harmful": 0,
+          "superseded_by": null,
+          "stale": null,
+          "hasVector": true,
+          "score": 0.6923079935796751,
+          "sides": [
+            "vector"
+          ]
+        },
+        {
+          "id": "r-garbled",
+          "text": "retry flaky garbled date",
+          "kind": "pattern",
+          "scope": [],
+          "citation": null,
+          "source_agent": "worker",
+          "source_model": null,
+          "task": null,
+          "card": null,
+          "commit_sha": null,
+          "created": "not-a-date",
+          "confirmed": null,
+          "helpful": 0,
+          "harmful": 0,
+          "superseded_by": null,
+          "stale": null,
+          "hasVector": true,
+          "score": 0.6000000238418579,
+          "sides": [
+            "vector"
+          ]
+        },
+        {
+          "id": "r-good",
+          "text": "retry flaky calls good",
+          "kind": "pattern",
+          "scope": [],
+          "citation": "src/a.mjs:2 \"line two\"",
+          "source_agent": "worker",
+          "source_model": null,
+          "task": null,
+          "card": null,
+          "commit_sha": null,
+          "created": "2026-09-25T00:00:00.000Z",
+          "confirmed": null,
+          "helpful": 0,
+          "harmful": 0,
+          "superseded_by": null,
+          "stale": null,
+          "hasVector": true,
+          "score": 0.48648986722669135,
+          "sides": [
+            "vector"
+          ]
+        }
+      ]
+    },
+    "table": [
+      {
+        "id": "r-ancient",
+        "stale": null,
+        "confirmed": null
+      },
+      {
+        "id": "r-bad1",
+        "stale": null,
+        "confirmed": null
+      },
+      {
+        "id": "r-bad2",
+        "stale": null,
+        "confirmed": null
+      },
+      {
+        "id": "r-confirmed",
+        "stale": null,
+        "confirmed": "2026-09-28T00:00:00.000Z"
+      },
+      {
+        "id": "r-elsewhere",
+        "stale": null,
+        "confirmed": null
+      },
+      {
+        "id": "r-garbled",
+        "stale": null,
+        "confirmed": null
+      },
+      {
+        "id": "r-good",
+        "stale": null,
+        "confirmed": null
+      },
+      {
+        "id": "r-novec",
+        "stale": null,
+        "confirmed": null
+      },
+      {
+        "id": "r-novec2",
+        "stale": null,
+        "confirmed": null
+      },
+      {
+        "id": "r-other",
+        "stale": null,
+        "confirmed": null
+      },
+      {
+        "id": "r-otherdims",
+        "stale": null,
+        "confirmed": null
+      },
+      {
+        "id": "r-scoped",
+        "stale": null,
+        "confirmed": null
+      },
+      {
+        "id": "r-stale",
+        "stale": "2026-09-29T00:00:00.000Z",
+        "confirmed": null
+      },
+      {
+        "id": "r-superseded",
+        "stale": null,
+        "confirmed": null
+      },
+      {
+        "id": "r-unscoped",
+        "stale": null,
+        "confirmed": null
+      },
+      {
+        "id": "r-veconly",
+        "stale": null,
+        "confirmed": null
+      },
+      {
+        "id": "r-veconly-old",
+        "stale": null,
+        "confirmed": null
+      }
+    ]
+  },
+  "main | provider with no matching vectors": {
+    "result": {
+      "mode": "keyword-only",
+      "reason": "no vectors stored for nomatch-model/3",
+      "provider": "fake",
+      "checked": true,
+      "degraded": true,
+      "lessons": [
+        {
+          "id": "r-good",
+          "text": "retry flaky calls good",
+          "kind": "pattern",
+          "scope": [],
+          "citation": "src/a.mjs:2 \"line two\"",
+          "source_agent": "worker",
+          "source_model": null,
+          "task": null,
+          "card": null,
+          "commit_sha": null,
+          "created": "2026-09-25T00:00:00.000Z",
+          "confirmed": "2026-09-30T00:00:00.000Z",
+          "helpful": 0,
+          "harmful": 0,
+          "superseded_by": null,
+          "stale": null,
+          "hasVector": true,
+          "score": 0.015950487450055454,
+          "sides": [
+            "bm25"
+          ]
+        },
+        {
+          "id": "r-scoped",
+          "text": "retry flaky uploads scoped",
+          "kind": "pattern",
+          "scope": [
+            "src/**/*.mjs"
+          ],
+          "citation": null,
+          "source_agent": "worker",
+          "source_model": null,
+          "task": null,
+          "card": null,
+          "commit_sha": null,
+          "created": "2026-09-25T00:00:00.000Z",
+          "confirmed": "2026-09-30T00:00:00.000Z",
+          "helpful": 0,
+          "harmful": 0,
+          "superseded_by": null,
+          "stale": null,
+          "hasVector": true,
+          "score": 0.015693221523441655,
+          "sides": [
+            "bm25"
+          ]
+        },
+        {
+          "id": "r-unscoped",
+          "text": "retry flaky uploads unscoped",
+          "kind": "pattern",
+          "scope": [],
+          "citation": null,
+          "source_agent": "worker",
+          "source_model": null,
+          "task": null,
+          "card": null,
+          "commit_sha": null,
+          "created": "2026-09-25T00:00:00.000Z",
+          "confirmed": "2026-09-30T00:00:00.000Z",
+          "helpful": 0,
+          "harmful": 0,
+          "superseded_by": null,
+          "stale": null,
+          "hasVector": true,
+          "score": 0.015444122769101312,
+          "sides": [
+            "bm25"
+          ]
+        },
+        {
+          "id": "r-elsewhere",
+          "text": "retry flaky uploads elsewhere",
+          "kind": "pattern",
+          "scope": [
+            "docs/**/*.md"
+          ],
+          "citation": null,
+          "source_agent": "worker",
+          "source_model": null,
+          "task": null,
+          "card": null,
+          "commit_sha": null,
+          "created": "2026-09-25T00:00:00.000Z",
+          "confirmed": "2026-09-30T00:00:00.000Z",
+          "helpful": 0,
+          "harmful": 0,
+          "superseded_by": null,
+          "stale": null,
+          "hasVector": true,
+          "score": 0.015202808350834105,
+          "sides": [
+            "bm25"
+          ]
+        },
+        {
+          "id": "r-garbled",
+          "text": "retry flaky garbled date",
+          "kind": "pattern",
+          "scope": [],
+          "citation": null,
+          "source_agent": "worker",
+          "source_model": null,
+          "task": null,
+          "card": null,
+          "commit_sha": null,
+          "created": "not-a-date",
+          "confirmed": "2026-09-30T00:00:00.000Z",
+          "helpful": 0,
+          "harmful": 0,
+          "superseded_by": null,
+          "stale": null,
+          "hasVector": true,
+          "score": 0.015151515151515152,
+          "sides": [
+            "bm25"
+          ]
+        },
+        {
+          "id": "r-novec2",
+          "text": "flaky retry novec second",
+          "kind": "pattern",
+          "scope": [
+            "src/a.mjs"
+          ],
+          "citation": null,
+          "source_agent": "worker",
+          "source_model": null,
+          "task": null,
+          "card": null,
+          "commit_sha": null,
+          "created": "2026-09-27T00:00:00.000Z",
+          "confirmed": "2026-09-30T00:00:00.000Z",
+          "helpful": 0,
+          "harmful": 0,
+          "superseded_by": null,
+          "stale": null,
+          "hasVector": false,
+          "score": 0.015132431542169276,
+          "sides": [
+            "bm25"
+          ]
+        },
+        {
+          "id": "r-confirmed",
+          "text": "retry flaky confirmed lately",
+          "kind": "pattern",
+          "scope": [],
+          "citation": null,
+          "source_agent": "worker",
+          "source_model": null,
+          "task": null,
+          "card": null,
+          "commit_sha": null,
+          "created": "2026-03-14T00:00:00.000Z",
+          "confirmed": "2026-09-30T00:00:00.000Z",
+          "helpful": 0,
+          "harmful": 0,
+          "superseded_by": null,
+          "stale": null,
+          "hasVector": true,
+          "score": 0.014761364720034332,
+          "sides": [
+            "bm25"
+          ]
+        },
+        {
+          "id": "r-other",
+          "text": "retry flaky calls other model",
+          "kind": "pattern",
+          "scope": [],
+          "citation": null,
+          "source_agent": "worker",
+          "source_model": null,
+          "task": null,
+          "card": null,
+          "commit_sha": null,
+          "created": "2026-09-25T00:00:00.000Z",
+          "confirmed": "2026-09-30T00:00:00.000Z",
+          "helpful": 0,
+          "harmful": 0,
+          "superseded_by": null,
+          "stale": null,
+          "hasVector": true,
+          "score": 0.01370393992187863,
+          "sides": [
+            "bm25"
+          ]
+        }
+      ]
+    },
+    "table": [
+      {
+        "id": "r-ancient",
+        "stale": null,
+        "confirmed": null
+      },
+      {
+        "id": "r-bad1",
+        "stale": "2026-09-30T00:00:00.000Z",
+        "confirmed": null
+      },
+      {
+        "id": "r-bad2",
+        "stale": "2026-09-30T00:00:00.000Z",
+        "confirmed": null
+      },
+      {
+        "id": "r-confirmed",
+        "stale": null,
+        "confirmed": "2026-09-30T00:00:00.000Z"
+      },
+      {
+        "id": "r-elsewhere",
+        "stale": null,
+        "confirmed": "2026-09-30T00:00:00.000Z"
+      },
+      {
+        "id": "r-garbled",
+        "stale": null,
+        "confirmed": "2026-09-30T00:00:00.000Z"
+      },
+      {
+        "id": "r-good",
+        "stale": null,
+        "confirmed": "2026-09-30T00:00:00.000Z"
+      },
+      {
+        "id": "r-novec",
+        "stale": null,
+        "confirmed": null
+      },
+      {
+        "id": "r-novec2",
+        "stale": null,
+        "confirmed": "2026-09-30T00:00:00.000Z"
+      },
+      {
+        "id": "r-other",
+        "stale": null,
+        "confirmed": "2026-09-30T00:00:00.000Z"
+      },
+      {
+        "id": "r-otherdims",
+        "stale": null,
+        "confirmed": null
+      },
+      {
+        "id": "r-scoped",
+        "stale": null,
+        "confirmed": "2026-09-30T00:00:00.000Z"
+      },
+      {
+        "id": "r-stale",
+        "stale": "2026-09-29T00:00:00.000Z",
+        "confirmed": null
+      },
+      {
+        "id": "r-superseded",
+        "stale": null,
+        "confirmed": null
+      },
+      {
+        "id": "r-unscoped",
+        "stale": null,
+        "confirmed": "2026-09-30T00:00:00.000Z"
+      },
+      {
+        "id": "r-veconly",
+        "stale": null,
+        "confirmed": null
+      },
+      {
+        "id": "r-veconly-old",
+        "stale": null,
+        "confirmed": null
+      }
+    ]
+  },
+  "main | provider whose embed fails": {
+    "result": {
+      "mode": "keyword-only",
+      "reason": "timeout",
+      "provider": "fake",
+      "checked": true,
+      "degraded": true,
+      "lessons": [
+        {
+          "id": "r-good",
+          "text": "retry flaky calls good",
+          "kind": "pattern",
+          "scope": [],
+          "citation": "src/a.mjs:2 \"line two\"",
+          "source_agent": "worker",
+          "source_model": null,
+          "task": null,
+          "card": null,
+          "commit_sha": null,
+          "created": "2026-09-25T00:00:00.000Z",
+          "confirmed": "2026-09-30T00:00:00.000Z",
+          "helpful": 0,
+          "harmful": 0,
+          "superseded_by": null,
+          "stale": null,
+          "hasVector": true,
+          "score": 0.015950487450055454,
+          "sides": [
+            "bm25"
+          ]
+        },
+        {
+          "id": "r-scoped",
+          "text": "retry flaky uploads scoped",
+          "kind": "pattern",
+          "scope": [
+            "src/**/*.mjs"
+          ],
+          "citation": null,
+          "source_agent": "worker",
+          "source_model": null,
+          "task": null,
+          "card": null,
+          "commit_sha": null,
+          "created": "2026-09-25T00:00:00.000Z",
+          "confirmed": "2026-09-30T00:00:00.000Z",
+          "helpful": 0,
+          "harmful": 0,
+          "superseded_by": null,
+          "stale": null,
+          "hasVector": true,
+          "score": 0.015693221523441655,
+          "sides": [
+            "bm25"
+          ]
+        },
+        {
+          "id": "r-unscoped",
+          "text": "retry flaky uploads unscoped",
+          "kind": "pattern",
+          "scope": [],
+          "citation": null,
+          "source_agent": "worker",
+          "source_model": null,
+          "task": null,
+          "card": null,
+          "commit_sha": null,
+          "created": "2026-09-25T00:00:00.000Z",
+          "confirmed": "2026-09-30T00:00:00.000Z",
+          "helpful": 0,
+          "harmful": 0,
+          "superseded_by": null,
+          "stale": null,
+          "hasVector": true,
+          "score": 0.015444122769101312,
+          "sides": [
+            "bm25"
+          ]
+        },
+        {
+          "id": "r-elsewhere",
+          "text": "retry flaky uploads elsewhere",
+          "kind": "pattern",
+          "scope": [
+            "docs/**/*.md"
+          ],
+          "citation": null,
+          "source_agent": "worker",
+          "source_model": null,
+          "task": null,
+          "card": null,
+          "commit_sha": null,
+          "created": "2026-09-25T00:00:00.000Z",
+          "confirmed": "2026-09-30T00:00:00.000Z",
+          "helpful": 0,
+          "harmful": 0,
+          "superseded_by": null,
+          "stale": null,
+          "hasVector": true,
+          "score": 0.015202808350834105,
+          "sides": [
+            "bm25"
+          ]
+        },
+        {
+          "id": "r-garbled",
+          "text": "retry flaky garbled date",
+          "kind": "pattern",
+          "scope": [],
+          "citation": null,
+          "source_agent": "worker",
+          "source_model": null,
+          "task": null,
+          "card": null,
+          "commit_sha": null,
+          "created": "not-a-date",
+          "confirmed": "2026-09-30T00:00:00.000Z",
+          "helpful": 0,
+          "harmful": 0,
+          "superseded_by": null,
+          "stale": null,
+          "hasVector": true,
+          "score": 0.015151515151515152,
+          "sides": [
+            "bm25"
+          ]
+        },
+        {
+          "id": "r-novec2",
+          "text": "flaky retry novec second",
+          "kind": "pattern",
+          "scope": [
+            "src/a.mjs"
+          ],
+          "citation": null,
+          "source_agent": "worker",
+          "source_model": null,
+          "task": null,
+          "card": null,
+          "commit_sha": null,
+          "created": "2026-09-27T00:00:00.000Z",
+          "confirmed": "2026-09-30T00:00:00.000Z",
+          "helpful": 0,
+          "harmful": 0,
+          "superseded_by": null,
+          "stale": null,
+          "hasVector": false,
+          "score": 0.015132431542169276,
+          "sides": [
+            "bm25"
+          ]
+        },
+        {
+          "id": "r-confirmed",
+          "text": "retry flaky confirmed lately",
+          "kind": "pattern",
+          "scope": [],
+          "citation": null,
+          "source_agent": "worker",
+          "source_model": null,
+          "task": null,
+          "card": null,
+          "commit_sha": null,
+          "created": "2026-03-14T00:00:00.000Z",
+          "confirmed": "2026-09-30T00:00:00.000Z",
+          "helpful": 0,
+          "harmful": 0,
+          "superseded_by": null,
+          "stale": null,
+          "hasVector": true,
+          "score": 0.014761364720034332,
+          "sides": [
+            "bm25"
+          ]
+        },
+        {
+          "id": "r-other",
+          "text": "retry flaky calls other model",
+          "kind": "pattern",
+          "scope": [],
+          "citation": null,
+          "source_agent": "worker",
+          "source_model": null,
+          "task": null,
+          "card": null,
+          "commit_sha": null,
+          "created": "2026-09-25T00:00:00.000Z",
+          "confirmed": "2026-09-30T00:00:00.000Z",
+          "helpful": 0,
+          "harmful": 0,
+          "superseded_by": null,
+          "stale": null,
+          "hasVector": true,
+          "score": 0.01370393992187863,
+          "sides": [
+            "bm25"
+          ]
+        }
+      ]
+    },
+    "table": [
+      {
+        "id": "r-ancient",
+        "stale": null,
+        "confirmed": null
+      },
+      {
+        "id": "r-bad1",
+        "stale": "2026-09-30T00:00:00.000Z",
+        "confirmed": null
+      },
+      {
+        "id": "r-bad2",
+        "stale": "2026-09-30T00:00:00.000Z",
+        "confirmed": null
+      },
+      {
+        "id": "r-confirmed",
+        "stale": null,
+        "confirmed": "2026-09-30T00:00:00.000Z"
+      },
+      {
+        "id": "r-elsewhere",
+        "stale": null,
+        "confirmed": "2026-09-30T00:00:00.000Z"
+      },
+      {
+        "id": "r-garbled",
+        "stale": null,
+        "confirmed": "2026-09-30T00:00:00.000Z"
+      },
+      {
+        "id": "r-good",
+        "stale": null,
+        "confirmed": "2026-09-30T00:00:00.000Z"
+      },
+      {
+        "id": "r-novec",
+        "stale": null,
+        "confirmed": null
+      },
+      {
+        "id": "r-novec2",
+        "stale": null,
+        "confirmed": "2026-09-30T00:00:00.000Z"
+      },
+      {
+        "id": "r-other",
+        "stale": null,
+        "confirmed": "2026-09-30T00:00:00.000Z"
+      },
+      {
+        "id": "r-otherdims",
+        "stale": null,
+        "confirmed": null
+      },
+      {
+        "id": "r-scoped",
+        "stale": null,
+        "confirmed": "2026-09-30T00:00:00.000Z"
+      },
+      {
+        "id": "r-stale",
+        "stale": "2026-09-29T00:00:00.000Z",
+        "confirmed": null
+      },
+      {
+        "id": "r-superseded",
+        "stale": null,
+        "confirmed": null
+      },
+      {
+        "id": "r-unscoped",
+        "stale": null,
+        "confirmed": "2026-09-30T00:00:00.000Z"
+      },
+      {
+        "id": "r-veconly",
+        "stale": null,
+        "confirmed": null
+      },
+      {
+        "id": "r-veconly-old",
+        "stale": null,
+        "confirmed": null
+      }
+    ]
+  },
+  "main | detectedProvider only": {
+    "result": {
+      "mode": "keyword-only",
+      "reason": "no provider configured",
+      "provider": null,
+      "checked": true,
+      "degraded": true,
+      "lessons": [
+        {
+          "id": "r-good",
+          "text": "retry flaky calls good",
+          "kind": "pattern",
+          "scope": [],
+          "citation": "src/a.mjs:2 \"line two\"",
+          "source_agent": "worker",
+          "source_model": null,
+          "task": null,
+          "card": null,
+          "commit_sha": null,
+          "created": "2026-09-25T00:00:00.000Z",
+          "confirmed": "2026-09-30T00:00:00.000Z",
+          "helpful": 0,
+          "harmful": 0,
+          "superseded_by": null,
+          "stale": null,
+          "hasVector": true,
+          "score": 0.015950487450055454,
+          "sides": [
+            "bm25"
+          ]
+        },
+        {
+          "id": "r-scoped",
+          "text": "retry flaky uploads scoped",
+          "kind": "pattern",
+          "scope": [
+            "src/**/*.mjs"
+          ],
+          "citation": null,
+          "source_agent": "worker",
+          "source_model": null,
+          "task": null,
+          "card": null,
+          "commit_sha": null,
+          "created": "2026-09-25T00:00:00.000Z",
+          "confirmed": "2026-09-30T00:00:00.000Z",
+          "helpful": 0,
+          "harmful": 0,
+          "superseded_by": null,
+          "stale": null,
+          "hasVector": true,
+          "score": 0.015693221523441655,
+          "sides": [
+            "bm25"
+          ]
+        },
+        {
+          "id": "r-unscoped",
+          "text": "retry flaky uploads unscoped",
+          "kind": "pattern",
+          "scope": [],
+          "citation": null,
+          "source_agent": "worker",
+          "source_model": null,
+          "task": null,
+          "card": null,
+          "commit_sha": null,
+          "created": "2026-09-25T00:00:00.000Z",
+          "confirmed": "2026-09-30T00:00:00.000Z",
+          "helpful": 0,
+          "harmful": 0,
+          "superseded_by": null,
+          "stale": null,
+          "hasVector": true,
+          "score": 0.015444122769101312,
+          "sides": [
+            "bm25"
+          ]
+        },
+        {
+          "id": "r-elsewhere",
+          "text": "retry flaky uploads elsewhere",
+          "kind": "pattern",
+          "scope": [
+            "docs/**/*.md"
+          ],
+          "citation": null,
+          "source_agent": "worker",
+          "source_model": null,
+          "task": null,
+          "card": null,
+          "commit_sha": null,
+          "created": "2026-09-25T00:00:00.000Z",
+          "confirmed": "2026-09-30T00:00:00.000Z",
+          "helpful": 0,
+          "harmful": 0,
+          "superseded_by": null,
+          "stale": null,
+          "hasVector": true,
+          "score": 0.015202808350834105,
+          "sides": [
+            "bm25"
+          ]
+        },
+        {
+          "id": "r-garbled",
+          "text": "retry flaky garbled date",
+          "kind": "pattern",
+          "scope": [],
+          "citation": null,
+          "source_agent": "worker",
+          "source_model": null,
+          "task": null,
+          "card": null,
+          "commit_sha": null,
+          "created": "not-a-date",
+          "confirmed": "2026-09-30T00:00:00.000Z",
+          "helpful": 0,
+          "harmful": 0,
+          "superseded_by": null,
+          "stale": null,
+          "hasVector": true,
+          "score": 0.015151515151515152,
+          "sides": [
+            "bm25"
+          ]
+        },
+        {
+          "id": "r-novec2",
+          "text": "flaky retry novec second",
+          "kind": "pattern",
+          "scope": [
+            "src/a.mjs"
+          ],
+          "citation": null,
+          "source_agent": "worker",
+          "source_model": null,
+          "task": null,
+          "card": null,
+          "commit_sha": null,
+          "created": "2026-09-27T00:00:00.000Z",
+          "confirmed": "2026-09-30T00:00:00.000Z",
+          "helpful": 0,
+          "harmful": 0,
+          "superseded_by": null,
+          "stale": null,
+          "hasVector": false,
+          "score": 0.015132431542169276,
+          "sides": [
+            "bm25"
+          ]
+        },
+        {
+          "id": "r-confirmed",
+          "text": "retry flaky confirmed lately",
+          "kind": "pattern",
+          "scope": [],
+          "citation": null,
+          "source_agent": "worker",
+          "source_model": null,
+          "task": null,
+          "card": null,
+          "commit_sha": null,
+          "created": "2026-03-14T00:00:00.000Z",
+          "confirmed": "2026-09-30T00:00:00.000Z",
+          "helpful": 0,
+          "harmful": 0,
+          "superseded_by": null,
+          "stale": null,
+          "hasVector": true,
+          "score": 0.014761364720034332,
+          "sides": [
+            "bm25"
+          ]
+        },
+        {
+          "id": "r-other",
+          "text": "retry flaky calls other model",
+          "kind": "pattern",
+          "scope": [],
+          "citation": null,
+          "source_agent": "worker",
+          "source_model": null,
+          "task": null,
+          "card": null,
+          "commit_sha": null,
+          "created": "2026-09-25T00:00:00.000Z",
+          "confirmed": "2026-09-30T00:00:00.000Z",
+          "helpful": 0,
+          "harmful": 0,
+          "superseded_by": null,
+          "stale": null,
+          "hasVector": true,
+          "score": 0.01370393992187863,
+          "sides": [
+            "bm25"
+          ]
+        }
+      ]
+    },
+    "table": [
+      {
+        "id": "r-ancient",
+        "stale": null,
+        "confirmed": null
+      },
+      {
+        "id": "r-bad1",
+        "stale": "2026-09-30T00:00:00.000Z",
+        "confirmed": null
+      },
+      {
+        "id": "r-bad2",
+        "stale": "2026-09-30T00:00:00.000Z",
+        "confirmed": null
+      },
+      {
+        "id": "r-confirmed",
+        "stale": null,
+        "confirmed": "2026-09-30T00:00:00.000Z"
+      },
+      {
+        "id": "r-elsewhere",
+        "stale": null,
+        "confirmed": "2026-09-30T00:00:00.000Z"
+      },
+      {
+        "id": "r-garbled",
+        "stale": null,
+        "confirmed": "2026-09-30T00:00:00.000Z"
+      },
+      {
+        "id": "r-good",
+        "stale": null,
+        "confirmed": "2026-09-30T00:00:00.000Z"
+      },
+      {
+        "id": "r-novec",
+        "stale": null,
+        "confirmed": null
+      },
+      {
+        "id": "r-novec2",
+        "stale": null,
+        "confirmed": "2026-09-30T00:00:00.000Z"
+      },
+      {
+        "id": "r-other",
+        "stale": null,
+        "confirmed": "2026-09-30T00:00:00.000Z"
+      },
+      {
+        "id": "r-otherdims",
+        "stale": null,
+        "confirmed": null
+      },
+      {
+        "id": "r-scoped",
+        "stale": null,
+        "confirmed": "2026-09-30T00:00:00.000Z"
+      },
+      {
+        "id": "r-stale",
+        "stale": "2026-09-29T00:00:00.000Z",
+        "confirmed": null
+      },
+      {
+        "id": "r-superseded",
+        "stale": null,
+        "confirmed": null
+      },
+      {
+        "id": "r-unscoped",
+        "stale": null,
+        "confirmed": "2026-09-30T00:00:00.000Z"
+      },
+      {
+        "id": "r-veconly",
+        "stale": null,
+        "confirmed": null
+      },
+      {
+        "id": "r-veconly-old",
+        "stale": null,
+        "confirmed": null
+      }
+    ]
+  },
+  "only-old-vector | degraded: keyword, no provider": {
+    "result": {
+      "mode": "keyword-only",
+      "reason": "no provider configured",
+      "provider": null,
+      "checked": true,
+      "degraded": true,
+      "lessons": [
+        {
+          "id": "o-fresh1",
+          "text": "retry flaky fresh one",
+          "kind": "pattern",
+          "scope": [],
+          "citation": null,
+          "source_agent": "worker",
+          "source_model": null,
+          "task": null,
+          "card": null,
+          "commit_sha": null,
+          "created": "2026-09-25T00:00:00.000Z",
+          "confirmed": "2026-09-30T00:00:00.000Z",
+          "helpful": 0,
+          "harmful": 0,
+          "superseded_by": null,
+          "stale": null,
+          "hasVector": false,
+          "score": 0.015950487450055454,
+          "sides": [
+            "bm25"
+          ]
+        },
+        {
+          "id": "o-fresh2",
+          "text": "retry flaky fresh two",
+          "kind": "pattern",
+          "scope": [],
+          "citation": null,
+          "source_agent": "worker",
+          "source_model": null,
+          "task": null,
+          "card": null,
+          "commit_sha": null,
+          "created": "2026-09-25T00:00:00.000Z",
+          "confirmed": "2026-09-30T00:00:00.000Z",
+          "helpful": 0,
+          "harmful": 0,
+          "superseded_by": null,
+          "stale": null,
+          "hasVector": false,
+          "score": 0.015693221523441655,
+          "sides": [
+            "bm25"
+          ]
+        }
+      ]
+    },
+    "table": [
+      {
+        "id": "o-fresh1",
+        "stale": null,
+        "confirmed": "2026-09-30T00:00:00.000Z"
+      },
+      {
+        "id": "o-fresh2",
+        "stale": null,
+        "confirmed": "2026-09-30T00:00:00.000Z"
+      },
+      {
+        "id": "o-old",
+        "stale": null,
+        "confirmed": null
+      }
+    ]
+  },
+  "only-old-vector | degraded: provider, no matching vectors": {
+    "result": {
+      "mode": "keyword-only",
+      "reason": "no vectors stored for fake-model/3",
+      "provider": "fake",
+      "checked": true,
+      "degraded": true,
+      "lessons": [
+        {
+          "id": "o-fresh1",
+          "text": "retry flaky fresh one",
+          "kind": "pattern",
+          "scope": [],
+          "citation": null,
+          "source_agent": "worker",
+          "source_model": null,
+          "task": null,
+          "card": null,
+          "commit_sha": null,
+          "created": "2026-09-25T00:00:00.000Z",
+          "confirmed": "2026-09-30T00:00:00.000Z",
+          "helpful": 0,
+          "harmful": 0,
+          "superseded_by": null,
+          "stale": null,
+          "hasVector": false,
+          "score": 0.015950487450055454,
+          "sides": [
+            "bm25"
+          ]
+        },
+        {
+          "id": "o-fresh2",
+          "text": "retry flaky fresh two",
+          "kind": "pattern",
+          "scope": [],
+          "citation": null,
+          "source_agent": "worker",
+          "source_model": null,
+          "task": null,
+          "card": null,
+          "commit_sha": null,
+          "created": "2026-09-25T00:00:00.000Z",
+          "confirmed": "2026-09-30T00:00:00.000Z",
+          "helpful": 0,
+          "harmful": 0,
+          "superseded_by": null,
+          "stale": null,
+          "hasVector": false,
+          "score": 0.015693221523441655,
+          "sides": [
+            "bm25"
+          ]
+        }
+      ]
+    },
+    "table": [
+      {
+        "id": "o-fresh1",
+        "stale": null,
+        "confirmed": "2026-09-30T00:00:00.000Z"
+      },
+      {
+        "id": "o-fresh2",
+        "stale": null,
+        "confirmed": "2026-09-30T00:00:00.000Z"
+      },
+      {
+        "id": "o-old",
+        "stale": null,
+        "confirmed": null
+      }
+    ]
+  },
+  "only-old-vector | degraded: embed fails": {
+    "result": {
+      "mode": "keyword-only",
+      "reason": "no vectors stored for fake-model/3",
+      "provider": "fake",
+      "checked": true,
+      "degraded": true,
+      "lessons": [
+        {
+          "id": "o-fresh1",
+          "text": "retry flaky fresh one",
+          "kind": "pattern",
+          "scope": [],
+          "citation": null,
+          "source_agent": "worker",
+          "source_model": null,
+          "task": null,
+          "card": null,
+          "commit_sha": null,
+          "created": "2026-09-25T00:00:00.000Z",
+          "confirmed": "2026-09-30T00:00:00.000Z",
+          "helpful": 0,
+          "harmful": 0,
+          "superseded_by": null,
+          "stale": null,
+          "hasVector": false,
+          "score": 0.015950487450055454,
+          "sides": [
+            "bm25"
+          ]
+        },
+        {
+          "id": "o-fresh2",
+          "text": "retry flaky fresh two",
+          "kind": "pattern",
+          "scope": [],
+          "citation": null,
+          "source_agent": "worker",
+          "source_model": null,
+          "task": null,
+          "card": null,
+          "commit_sha": null,
+          "created": "2026-09-25T00:00:00.000Z",
+          "confirmed": "2026-09-30T00:00:00.000Z",
+          "helpful": 0,
+          "harmful": 0,
+          "superseded_by": null,
+          "stale": null,
+          "hasVector": false,
+          "score": 0.015693221523441655,
+          "sides": [
+            "bm25"
+          ]
+        }
+      ]
+    },
+    "table": [
+      {
+        "id": "o-fresh1",
+        "stale": null,
+        "confirmed": "2026-09-30T00:00:00.000Z"
+      },
+      {
+        "id": "o-fresh2",
+        "stale": null,
+        "confirmed": "2026-09-30T00:00:00.000Z"
+      },
+      {
+        "id": "o-old",
+        "stale": null,
+        "confirmed": null
+      }
+    ]
+  },
+  "no-vectors | no vectors: keyword, no provider (not degraded)": {
+    "result": {
+      "mode": "keyword-only",
+      "reason": "no provider configured",
+      "provider": null,
+      "checked": true,
+      "degraded": false,
+      "lessons": [
+        {
+          "id": "n-1",
+          "text": "retry flaky plain one",
+          "kind": "pattern",
+          "scope": [],
+          "citation": null,
+          "source_agent": "worker",
+          "source_model": null,
+          "task": null,
+          "card": null,
+          "commit_sha": null,
+          "created": "2026-09-25T00:00:00.000Z",
+          "confirmed": "2026-09-30T00:00:00.000Z",
+          "helpful": 0,
+          "harmful": 0,
+          "superseded_by": null,
+          "stale": null,
+          "hasVector": false,
+          "score": 0.015950487450055454,
+          "sides": [
+            "bm25"
+          ]
+        },
+        {
+          "id": "n-2",
+          "text": "retry flaky plain two",
+          "kind": "pattern",
+          "scope": [],
+          "citation": null,
+          "source_agent": "worker",
+          "source_model": null,
+          "task": null,
+          "card": null,
+          "commit_sha": null,
+          "created": "2026-09-25T00:00:00.000Z",
+          "confirmed": "2026-09-30T00:00:00.000Z",
+          "helpful": 0,
+          "harmful": 0,
+          "superseded_by": null,
+          "stale": null,
+          "hasVector": false,
+          "score": 0.015693221523441655,
+          "sides": [
+            "bm25"
+          ]
+        }
+      ]
+    },
+    "table": [
+      {
+        "id": "n-1",
+        "stale": null,
+        "confirmed": "2026-09-30T00:00:00.000Z"
+      },
+      {
+        "id": "n-2",
+        "stale": null,
+        "confirmed": "2026-09-30T00:00:00.000Z"
+      }
+    ]
+  },
+  "no-vectors | no vectors: provider": {
+    "result": {
+      "mode": "keyword-only",
+      "reason": "no vectors stored for fake-model/3",
+      "provider": "fake",
+      "checked": true,
+      "degraded": true,
+      "lessons": [
+        {
+          "id": "n-1",
+          "text": "retry flaky plain one",
+          "kind": "pattern",
+          "scope": [],
+          "citation": null,
+          "source_agent": "worker",
+          "source_model": null,
+          "task": null,
+          "card": null,
+          "commit_sha": null,
+          "created": "2026-09-25T00:00:00.000Z",
+          "confirmed": "2026-09-30T00:00:00.000Z",
+          "helpful": 0,
+          "harmful": 0,
+          "superseded_by": null,
+          "stale": null,
+          "hasVector": false,
+          "score": 0.015950487450055454,
+          "sides": [
+            "bm25"
+          ]
+        },
+        {
+          "id": "n-2",
+          "text": "retry flaky plain two",
+          "kind": "pattern",
+          "scope": [],
+          "citation": null,
+          "source_agent": "worker",
+          "source_model": null,
+          "task": null,
+          "card": null,
+          "commit_sha": null,
+          "created": "2026-09-25T00:00:00.000Z",
+          "confirmed": "2026-09-30T00:00:00.000Z",
+          "helpful": 0,
+          "harmful": 0,
+          "superseded_by": null,
+          "stale": null,
+          "hasVector": false,
+          "score": 0.015693221523441655,
+          "sides": [
+            "bm25"
+          ]
+        }
+      ]
+    },
+    "table": [
+      {
+        "id": "n-1",
+        "stale": null,
+        "confirmed": "2026-09-30T00:00:00.000Z"
+      },
+      {
+        "id": "n-2",
+        "stale": null,
+        "confirmed": "2026-09-30T00:00:00.000Z"
+      }
+    ]
+  },
+  "dead-vectors | dead vectors: keyword, no provider (not degraded)": {
+    "result": {
+      "mode": "keyword-only",
+      "reason": "no provider configured",
+      "provider": null,
+      "checked": true,
+      "degraded": false,
+      "lessons": [
+        {
+          "id": "d-live1",
+          "text": "retry flaky live one",
+          "kind": "pattern",
+          "scope": [],
+          "citation": null,
+          "source_agent": "worker",
+          "source_model": null,
+          "task": null,
+          "card": null,
+          "commit_sha": null,
+          "created": "2026-09-25T00:00:00.000Z",
+          "confirmed": "2026-09-30T00:00:00.000Z",
+          "helpful": 0,
+          "harmful": 0,
+          "superseded_by": null,
+          "stale": null,
+          "hasVector": false,
+          "score": 0.015950487450055454,
+          "sides": [
+            "bm25"
+          ]
+        },
+        {
+          "id": "d-live2",
+          "text": "retry flaky live two",
+          "kind": "pattern",
+          "scope": [],
+          "citation": null,
+          "source_agent": "worker",
+          "source_model": null,
+          "task": null,
+          "card": null,
+          "commit_sha": null,
+          "created": "2026-09-25T00:00:00.000Z",
+          "confirmed": "2026-09-30T00:00:00.000Z",
+          "helpful": 0,
+          "harmful": 0,
+          "superseded_by": null,
+          "stale": null,
+          "hasVector": false,
+          "score": 0.015693221523441655,
+          "sides": [
+            "bm25"
+          ]
+        }
+      ]
+    },
+    "table": [
+      {
+        "id": "d-live1",
+        "stale": null,
+        "confirmed": "2026-09-30T00:00:00.000Z"
+      },
+      {
+        "id": "d-live2",
+        "stale": null,
+        "confirmed": "2026-09-30T00:00:00.000Z"
+      },
+      {
+        "id": "d-stale",
+        "stale": "2026-09-29T00:00:00.000Z",
+        "confirmed": null
+      },
+      {
+        "id": "d-superseded",
+        "stale": null,
+        "confirmed": null
+      }
+    ]
+  },
+  "dead-vectors | dead vectors: keyword, no checkout": {
+    "result": {
+      "mode": "keyword-only",
+      "reason": "no provider configured",
+      "provider": null,
+      "checked": false,
+      "degraded": false,
+      "lessons": [
+        {
+          "id": "d-live1",
+          "text": "retry flaky live one",
+          "kind": "pattern",
+          "scope": [],
+          "citation": null,
+          "source_agent": "worker",
+          "source_model": null,
+          "task": null,
+          "card": null,
+          "commit_sha": null,
+          "created": "2026-09-25T00:00:00.000Z",
+          "confirmed": null,
+          "helpful": 0,
+          "harmful": 0,
+          "superseded_by": null,
+          "stale": null,
+          "hasVector": false,
+          "score": 0.015950487450055454,
+          "sides": [
+            "bm25"
+          ]
+        },
+        {
+          "id": "d-live2",
+          "text": "retry flaky live two",
+          "kind": "pattern",
+          "scope": [],
+          "citation": null,
+          "source_agent": "worker",
+          "source_model": null,
+          "task": null,
+          "card": null,
+          "commit_sha": null,
+          "created": "2026-09-25T00:00:00.000Z",
+          "confirmed": null,
+          "helpful": 0,
+          "harmful": 0,
+          "superseded_by": null,
+          "stale": null,
+          "hasVector": false,
+          "score": 0.015693221523441655,
+          "sides": [
+            "bm25"
+          ]
+        }
+      ]
+    },
+    "table": [
+      {
+        "id": "d-live1",
+        "stale": null,
+        "confirmed": null
+      },
+      {
+        "id": "d-live2",
+        "stale": null,
+        "confirmed": null
+      },
+      {
+        "id": "d-stale",
+        "stale": "2026-09-29T00:00:00.000Z",
+        "confirmed": null
+      },
+      {
+        "id": "d-superseded",
+        "stale": null,
+        "confirmed": null
+      }
+    ]
+  },
+  "dead-vectors | dead vectors: provider (degraded, no live vectors)": {
+    "result": {
+      "mode": "keyword-only",
+      "reason": "no vectors stored for fake-model/3",
+      "provider": "fake",
+      "checked": true,
+      "degraded": true,
+      "lessons": [
+        {
+          "id": "d-live1",
+          "text": "retry flaky live one",
+          "kind": "pattern",
+          "scope": [],
+          "citation": null,
+          "source_agent": "worker",
+          "source_model": null,
+          "task": null,
+          "card": null,
+          "commit_sha": null,
+          "created": "2026-09-25T00:00:00.000Z",
+          "confirmed": "2026-09-30T00:00:00.000Z",
+          "helpful": 0,
+          "harmful": 0,
+          "superseded_by": null,
+          "stale": null,
+          "hasVector": false,
+          "score": 0.015950487450055454,
+          "sides": [
+            "bm25"
+          ]
+        },
+        {
+          "id": "d-live2",
+          "text": "retry flaky live two",
+          "kind": "pattern",
+          "scope": [],
+          "citation": null,
+          "source_agent": "worker",
+          "source_model": null,
+          "task": null,
+          "card": null,
+          "commit_sha": null,
+          "created": "2026-09-25T00:00:00.000Z",
+          "confirmed": "2026-09-30T00:00:00.000Z",
+          "helpful": 0,
+          "harmful": 0,
+          "superseded_by": null,
+          "stale": null,
+          "hasVector": false,
+          "score": 0.015693221523441655,
+          "sides": [
+            "bm25"
+          ]
+        }
+      ]
+    },
+    "table": [
+      {
+        "id": "d-live1",
+        "stale": null,
+        "confirmed": "2026-09-30T00:00:00.000Z"
+      },
+      {
+        "id": "d-live2",
+        "stale": null,
+        "confirmed": "2026-09-30T00:00:00.000Z"
+      },
+      {
+        "id": "d-stale",
+        "stale": "2026-09-29T00:00:00.000Z",
+        "confirmed": null
+      },
+      {
+        "id": "d-superseded",
+        "stale": null,
+        "confirmed": null
+      }
+    ]
+  }
+}

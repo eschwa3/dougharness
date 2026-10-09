@@ -1,7 +1,9 @@
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi, afterEach } from "vitest";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
-import { mkdtempSync, cpSync, readFileSync, existsSync, writeFileSync, mkdirSync } from "node:fs";
+import { mkdtempSync, cpSync, readFileSync, existsSync, writeFileSync, mkdirSync, rmSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { runInit } from "../src/init.js";
 import { tmpdir } from "node:os";
 
 // Proves walk() in generate/proposal.ts sorts directory listings rather than relying on the filesystem to hand
@@ -109,6 +111,12 @@ describe("generateConfig", () => {
     expect(cfg.checkpoint).toEqual({ enabled: false, mode: "commit" });
     expect(cfg.stopGate.planScope).toBe(true);
     expect(cfg.formatter?.command[2]).toBe("prettier");
+  });
+  it("carries preCommit.noTestPaths for the plan and anchor files (card no-test-paths-plan-files)", () => {
+    expect(cfg.preCommit?.noTestPaths).toEqual([".doug/plan.json", ".doug/anchor.md"]);
+  });
+  it("carries autopilot.contextThreshold at its default of 60 (card autopilot-unlimited)", () => {
+    expect(cfg.autopilot).toEqual({ contextThreshold: 60 });
   });
   it("carries the Doug product name, with no version field to hand-maintain (card statusline-installed-version)", () => {
     expect(cfg.doug).toEqual({ name: "Doug" });
@@ -269,14 +277,14 @@ describe("mergeSettings", () => {
       const d = detect(fixture);
       const cfg = generateConfig(d);
       const merged = mergeSettings({} as any, d, cfg) as any;
-      expect(merged.env).toEqual({ CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH: "1", CLAUDE_CODE_WORKFLOW_MAX_CONCURRENT_AGENTS: "4" });
+      expect(merged.env).toEqual({ CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH: "1", CLAUDE_CODE_WORKFLOW_MAX_CONCURRENT_AGENTS: "16" });
     });
     it("keeps an existing env key and adds ours alongside it", () => {
       const d = detect(fixture);
       const cfg = generateConfig(d);
       const existing = { hooks: {}, env: { FOO: "bar" } };
       const merged = mergeSettings(existing as any, d, cfg) as any;
-      expect(merged.env).toEqual({ FOO: "bar", CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH: "1", CLAUDE_CODE_WORKFLOW_MAX_CONCURRENT_AGENTS: "4" });
+      expect(merged.env).toEqual({ FOO: "bar", CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH: "1", CLAUDE_CODE_WORKFLOW_MAX_CONCURRENT_AGENTS: "16" });
     });
     it("maxSpawnDepth: null leaves an existing env untouched, including a different value of our own variable, and adds no env when there was none", () => {
       const d = detect(fixture);
@@ -295,14 +303,14 @@ describe("mergeSettings", () => {
       const cfg = generateConfig(d);
       const once = mergeSettings({} as any, d, cfg) as any;
       const twice = mergeSettings(once, d, cfg) as any;
-      expect(twice.env).toEqual({ CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH: "1", CLAUDE_CODE_WORKFLOW_MAX_CONCURRENT_AGENTS: "4" });
+      expect(twice.env).toEqual({ CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH: "1", CLAUDE_CODE_WORKFLOW_MAX_CONCURRENT_AGENTS: "16" });
     });
     it("treats a config with no subagents field at all as 1 (an older config.json)", () => {
       const d = detect(fixture);
       const cfg = generateConfig(d) as any;
       delete cfg.subagents;
       const merged = mergeSettings({} as any, d, cfg) as any;
-      expect(merged.env).toEqual({ CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH: "1", CLAUDE_CODE_WORKFLOW_MAX_CONCURRENT_AGENTS: "4" });
+      expect(merged.env).toEqual({ CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH: "1", CLAUDE_CODE_WORKFLOW_MAX_CONCURRENT_AGENTS: "16" });
     });
     it("this repository's own .claude/settings.json carries the setting", () => {
       const settingsPath = join(ROOT, ".claude/settings.json");
@@ -319,11 +327,11 @@ describe("mergeSettings", () => {
       const d = detect(fixture);
       return { d, cfg: { ...generateConfig(d), subagents: sub } as any };
     };
-    it("T1 default config on {} writes TTL 1h and concurrency 4", () => {
+    it("T1 default config on {} writes TTL 1h and concurrency 16", () => {
       const d = detect(fixture);
       const merged = mergeSettings({} as any, d, generateConfig(d)) as any;
       expect(merged.subagentPromptCacheTtl).toBe("1h");
-      expect(merged.env[CONC]).toBe("4");
+      expect(merged.env[CONC]).toBe("16");
     });
     it("T2 config values are used", () => {
       const { d, cfg } = withSub({ maxSpawnDepth: 1, promptCacheTtl: "5m", maxConcurrentWorkflowAgents: 8 });
@@ -370,23 +378,23 @@ describe("mergeSettings", () => {
       delete noSub.subagents;
       const a = mergeSettings({} as any, d, noSub) as any;
       expect(a.subagentPromptCacheTtl).toBe("1h");
-      expect(a.env[CONC]).toBe("4");
+      expect(a.env[CONC]).toBe("16");
 
       const { cfg } = withSub({ maxSpawnDepth: 1 });
       const b = mergeSettings({} as any, d, cfg) as any;
       expect(b.subagentPromptCacheTtl).toBe("1h");
-      expect(b.env[CONC]).toBe("4");
+      expect(b.env[CONC]).toBe("16");
     });
     it("T8 generateConfig proposes both keys", () => {
       const cfg = generateConfig(detect(fixture)) as any;
       expect(cfg.subagents.promptCacheTtl).toBe("1h");
-      expect(cfg.subagents.maxConcurrentWorkflowAgents).toBe(4);
+      expect(cfg.subagents.maxConcurrentWorkflowAgents).toBe(16);
     });
     it("T10 this repository's own .claude/settings.json carries both", () => {
       const settingsPath = join(ROOT, ".claude/settings.json");
       const settings = JSON.parse(readFileSync(settingsPath, "utf8"));
       expect(settings.subagentPromptCacheTtl, `${settingsPath} is missing subagentPromptCacheTtl (card init-workflow-settings)`).toBe("1h");
-      expect(settings.env?.CLAUDE_CODE_WORKFLOW_MAX_CONCURRENT_AGENTS, `${settingsPath} is missing env.CLAUDE_CODE_WORKFLOW_MAX_CONCURRENT_AGENTS (card init-workflow-settings)`).toBe("4");
+      expect(settings.env?.CLAUDE_CODE_WORKFLOW_MAX_CONCURRENT_AGENTS, `${settingsPath} is missing env.CLAUDE_CODE_WORKFLOW_MAX_CONCURRENT_AGENTS (card init-workflow-settings)`).toBe("16");
     });
   });
 });
@@ -696,7 +704,7 @@ describe("buildProposal + applyChanges", () => {
     expect(settings.env.CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH).toBe("1");
     // Card init-workflow-settings, T9: and the two workflow tuning keys.
     expect(settings.subagentPromptCacheTtl).toBe("1h");
-    expect(settings.env.CLAUDE_CODE_WORKFLOW_MAX_CONCURRENT_AGENTS).toBe("4");
+    expect(settings.env.CLAUDE_CODE_WORKFLOW_MAX_CONCURRENT_AGENTS).toBe("16");
     const writtenConfig = JSON.parse(readFileSync(join(dir, ".doug/config.json"), "utf8"));
     expect(writtenConfig.doug.name).toBe("Doug");
     expect(writtenConfig.secrets.enabled).toBe(true);
@@ -971,5 +979,116 @@ describe("buildProposal: generated project skills", () => {
     expect(summary).toContain("not a git repository: pr skipped; run /doug-skills when one exists");
     expect(summary).toContain("no gate commands detected: preflight skipped; run /doug-skills when one exists");
     expect(summary).toContain("no test framework detected: characterization-test skipped; run /doug-skills when one exists");
+  });
+});
+
+// Card init-greenfield: an empty repo gets the tester, a greenfield line, and a CLAUDE.md re-run line.
+const GREENFIELD_LINE =
+  'Empty repository: start with a walking skeleton (https://github.com/eschwa3/dougharness/blob/main/docs/getting-started.md#starting-from-an-empty-repository, "Starting from an empty repository"), then re-run doug init so the gates detect its commands. /doug-start will automate this (ADR 0012).';
+
+const GREENFIELD_URL =
+  "https://github.com/eschwa3/dougharness/blob/main/docs/getting-started.md#starting-from-an-empty-repository";
+const greenfieldDirs: string[] = [];
+afterEach(() => {
+  for (const d of greenfieldDirs.splice(0)) rmSync(d, { recursive: true, force: true });
+});
+
+function gitRepo(files: Record<string, string> = {}): string {
+  const dir = mkdtempSync(join(tmpdir(), "doug-greenfield-"));
+  greenfieldDirs.push(dir);
+  const env: NodeJS.ProcessEnv = {};
+  for (const [k, v] of Object.entries(process.env)) if (!k.startsWith("GIT_")) env[k] = v;
+  execFileSync("git", ["init", "-q"], { cwd: dir, env });
+  for (const [name, content] of Object.entries(files)) {
+    mkdirSync(dirname(join(dir, name)), { recursive: true });
+    writeFileSync(join(dir, name), content);
+  }
+  return dir;
+}
+
+async function dryRunOutput(dir: string): Promise<string> {
+  const saved: Record<string, string | undefined> = {};
+  for (const k of Object.keys(process.env)) {
+    if (k.startsWith("GIT_")) {
+      saved[k] = process.env[k];
+      delete process.env[k];
+    }
+  }
+  let out = "";
+  const spy = vi.spyOn(process.stdout, "write").mockImplementation(((chunk: unknown) => {
+    out += String(chunk);
+    return true;
+  }) as typeof process.stdout.write);
+  try {
+    await runInit({ dir, yes: false, dryRun: true, color: false, quiet: false, showHookFiles: false });
+  } finally {
+    spy.mockRestore();
+    for (const [k, v] of Object.entries(saved)) if (v !== undefined) process.env[k] = v;
+  }
+  return out;
+}
+
+describe("greenfield init (card init-greenfield)", () => {
+  it("G1 an empty git repo proposes tester.md and its dry-run output carries the greenfield line", async () => {
+    const dir = gitRepo();
+    const d = detect(dir);
+    expect(buildProposal(d).changes.map((c) => c.path)).toContain(".claude/agents/tester.md");
+    const out = await dryRunOutput(dir);
+    expect(out).toContain(GREENFIELD_LINE);
+    expect(out).toContain(GREENFIELD_URL);
+    expect(out).toContain(".claude/agents/tester.md");
+    expect(out.indexOf(GREENFIELD_LINE)).toBeLessThan(out.indexOf("Proposed changes"));
+  });
+
+  it("G2 a repo holding only README.md and .gitignore is still empty", async () => {
+    const dir = gitRepo({ "README.md": "# x\n", ".gitignore": "node_modules\n" });
+    const out = await dryRunOutput(dir);
+    expect(out).toContain(GREENFIELD_LINE);
+  });
+
+  it("G3 a repo with a main.go (no detected stack) gets no greenfield line, but still the tester", async () => {
+    const dir = gitRepo({ "main.go": "package main\n" });
+    const out = await dryRunOutput(dir);
+    expect(out).not.toContain("Empty repository");
+    expect(buildProposal(detect(dir)).changes.map((c) => c.path)).toContain(".claude/agents/tester.md");
+  });
+
+  it("G4 the generated CLAUDE.md has the re-run line for an empty repo and not for a fixture", () => {
+    const empty = detect(gitRepo());
+    const emptyMd = generateClaudeMd(empty, generateConfig(empty));
+    expect(emptyMd).toContain("walking skeleton");
+    expect(emptyMd).toContain(GREENFIELD_URL);
+    expect(emptyMd).toContain("re-run `doug init`");
+    const fx = detect(fixture);
+    const fxMd = generateClaudeMd(fx, generateConfig(fx));
+    expect(fxMd).not.toContain("walking skeleton");
+    expect(fxMd).not.toContain("re-run `doug init`");
+  });
+
+  it("G5 a non-git temp dir with nothing in it gets no greenfield line", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "doug-greenfield-"));
+    greenfieldDirs.push(dir);
+    const out = await dryRunOutput(dir);
+    expect(out).not.toContain("Empty repository");
+  });
+
+  it("G6 .editorconfig alone makes a repo non-empty", async () => {
+    const out = await dryRunOutput(gitRepo({ ".editorconfig": "root = true\n" }));
+    expect(out).not.toContain("Empty repository");
+  });
+
+  it("G7 docs/README.md alone makes a repo non-empty", async () => {
+    const out = await dryRunOutput(gitRepo({ "docs/README.md": "# docs\n" }));
+    expect(out).not.toContain("Empty repository");
+  });
+
+  it("G8 a README_assets/ directory makes a repo non-empty", async () => {
+    const out = await dryRunOutput(gitRepo({ "README_assets/src/app.js": "x\n" }));
+    expect(out).not.toContain("Empty repository");
+  });
+
+  it("G9 a lowercase readme.md makes a repo non-empty", async () => {
+    const out = await dryRunOutput(gitRepo({ "readme.md": "# x\n" }));
+    expect(out).not.toContain("Empty repository");
   });
 });

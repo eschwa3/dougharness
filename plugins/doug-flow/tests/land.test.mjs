@@ -7,6 +7,8 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { landPlan, INTEGRATION_WORKTREE, trailerCommits, commandEnv } from "../lib/land.mjs";
 import { integrationBranchFor, loadPlan, savePlan } from "../lib/plan.mjs";
+import { syncHooks } from "../../../scripts/sync-hooks.mjs";
+import { readRecord, writeRecord, computeTree, RECORD_RELPATH } from "../../doug-gates/lib/verified-tree.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const planCli = join(here, "..", "scripts", "plan.mjs");
@@ -385,5 +387,140 @@ describe("plan.mjs land", () => {
     const ok = spawnSync(process.execPath, [planCli, "land", dir], { encoding: "utf8", env: { ...process.env, CLAUDE_PROJECT_DIR: "" } });
     expect(ok.status, ok.stderr).toBe(0);
     expect(ok.stdout).toContain("acceptance ok: greet is present");
+  });
+});
+
+// card verified-tree-record, brief B: land runs plan.verify through the vendored .doug/hooks/scripts/verify.mjs, which
+// credits a verified-tree record of the branch's tree and writes one for the main checkout after a green run.
+describe("landPlan and the verified-tree record (card verified-tree-record)", () => {
+  const gatesRoot = join(here, "..", "..", "doug-gates");
+  const q = (s) => JSON.stringify(s);
+  // main vendors the gates (committed, so main and the branch trees match), ignores .doug/plan.json and .state, and
+  // the integration branch adds src/greet.js on top.
+  function vtRepo(verify) {
+    const dir = mkdtempSync(join(tmpdir(), "doug-land-vt-"));
+    git(dir, "init", "-q", "-b", "main");
+    git(dir, "config", "user.email", "t@example.com");
+    git(dir, "config", "user.name", "t");
+    writeFileSync(join(dir, "README.md"), "# fx\n");
+    writeFileSync(join(dir, ".gitignore"), ".doug/.state/\n.doug/plan.json\n.claude/worktrees/\n");
+    mkdirSync(join(dir, ".doug"), { recursive: true });
+    writeFileSync(join(dir, ".doug/config.json"), JSON.stringify({ stopGate: { commands: [], timeoutMs: 60000 } }));
+    syncHooks({ from: gatesRoot, to: join(dir, ".doug/hooks") });
+    git(dir, "add", "-A");
+    git(dir, "commit", "-q", "-m", "base");
+    const markers = mkdtempSync(join(tmpdir(), "doug-land-markers-"));
+    const verifyMarker = join(markers, "verify.marker");
+    const acceptMarker = join(markers, "accept.marker");
+    const verifyCmd = verify ?? `node -e ${q(`require('fs').appendFileSync(${q(verifyMarker)},'x')`)}`;
+    const p = plan({
+      verify: [verifyCmd],
+      acceptance: ["greet exists", { text: "acceptance ran", command: `node -e ${q(`require('fs').appendFileSync(${q(acceptMarker)},'x')`)}` }],
+    });
+    const branch = integrationBranchFor(p);
+    git(dir, "checkout", "-q", "-b", branch);
+    mkdirSync(join(dir, "src"));
+    writeFileSync(join(dir, "src/greet.js"), "module.exports = (n) => `hi ${n}`;\n");
+    git(dir, "add", "-A");
+    git(dir, "commit", "-q", "-m", "greet");
+    git(dir, "checkout", "-q", "main");
+    savePlan(dir, p);
+    return { dir, branch, verifyCmd, verifyMarker, acceptMarker };
+  }
+  const seedRecord = (dir, branch, cmd, exitCode = 0) => {
+    mkdirSync(join(dir, ".doug/.state"), { recursive: true });
+    writeRecord(dir, {
+      version: 1,
+      tree: git(dir, "rev-parse", `${branch}^{tree}`),
+      node: process.version,
+      at: new Date().toISOString(),
+      by: "verify",
+      commands: [{ name: cmd, command: cmd, exit: exitCode, durationMs: 5 }],
+      totals: {},
+    });
+  };
+
+  it("L1: a record for the branch's tree credits plan.verify; the verify command does not run, the acceptance command does", () => {
+    const { dir, branch, verifyCmd, verifyMarker, acceptMarker } = vtRepo();
+    seedRecord(dir, branch, verifyCmd);
+    const r = landPlan(dir, loadPlan(dir));
+    expect(r.ok, r.reason).toBe(true);
+    expect(existsSync(verifyMarker), "a credited verify command must not run").toBe(false);
+    expect(existsSync(acceptMarker), "acceptance commands always run").toBe(true);
+    const landed = loadPlan(dir).landed;
+    expect(landed.verify[0]).toMatchObject({ command: verifyCmd, ok: true, credited: "verified-tree" });
+  });
+
+  it("LD1: an acceptance command identical to a plan.verify command reuses the verify result and does not run again (card flow-suite-dedupe)", () => {
+    const { dir, verifyCmd, verifyMarker } = vtRepo();
+    const p = loadPlan(dir);
+    p.acceptance = [{ text: "suite", command: verifyCmd }];
+    savePlan(dir, p);
+    const r = landPlan(dir, loadPlan(dir));
+    expect(r.ok, r.reason).toBe(true);
+    expect(readFileSync(verifyMarker, "utf8")).toBe("x");
+    expect(r.acceptance[0]).toMatchObject({ ok: true, reused: "verify" });
+    expect(loadPlan(dir).landed.acceptance[0].reused).toBe("verify");
+  });
+
+  it("LD3: an acceptance command identical to plan.install is run, never marked reused from the install result (card flow-suite-dedupe)", () => {
+    const { dir, acceptMarker } = vtRepo();
+    const cmd = `node -e ${q(`require('fs').appendFileSync(${q(acceptMarker)},'x')`)}`;
+    const p = loadPlan(dir);
+    p.install = cmd;
+    p.acceptance = [{ text: "same as install", command: cmd }];
+    savePlan(dir, p);
+    const r = landPlan(dir, loadPlan(dir));
+    expect(r.ok, r.reason).toBe(true);
+    expect(readFileSync(acceptMarker, "utf8"), "install once, acceptance once").toBe("xx");
+    expect(r.acceptance[0].reused).toBeUndefined();
+  });
+
+  it("LD2: with a credited verify, an acceptance command identical to it does not run either (card flow-suite-dedupe)", () => {
+    const { dir, branch, verifyCmd, verifyMarker } = vtRepo();
+    seedRecord(dir, branch, verifyCmd);
+    const p = loadPlan(dir);
+    p.acceptance = [{ text: "suite", command: verifyCmd }];
+    savePlan(dir, p);
+    const r = landPlan(dir, loadPlan(dir));
+    expect(r.ok, r.reason).toBe(true);
+    expect(existsSync(verifyMarker)).toBe(false);
+  });
+
+  it("L2: a green land with no record runs verify, then leaves a by-land record of the branch tree, which is also the tree of main after the merge", () => {
+    const { dir, branch, verifyMarker } = vtRepo();
+    expect(existsSync(join(dir, RECORD_RELPATH))).toBe(false);
+    const branchTree = git(dir, "rev-parse", `${branch}^{tree}`);
+    const r = landPlan(dir, loadPlan(dir));
+    expect(r.ok, r.reason).toBe(true);
+    expect(readFileSync(verifyMarker, "utf8")).toBe("x");
+    const rec = readRecord(dir);
+    expect(rec, "land must write the record in the main checkout").not.toBeNull();
+    expect(rec.by).toBe("land");
+    expect(rec.tree).toBe(branchTree);
+    expect(computeTree(dir)).toBe(branchTree);
+    expect(rec.commands.every((c) => c.exit === 0)).toBe(true);
+    expect(loadPlan(dir).landed.verify[0].credited).toBeUndefined();
+  });
+
+  it("L3: a red verify on land removes an existing record and refuses with the verify-failed reason", () => {
+    const { dir, branch } = vtRepo(`node -e "process.exit(1)"`);
+    seedRecord(dir, branch, "some other command");
+    expect(existsSync(join(dir, RECORD_RELPATH))).toBe(true);
+    const r = landPlan(dir, loadPlan(dir));
+    expect(r.ok).toBe(false);
+    expect(r.reason).toContain("verify failed");
+    expect(existsSync(join(dir, RECORD_RELPATH)), "a red land must remove the record").toBe(false);
+    expect(git(dir, "rev-list", "--count", "main")).toBe("1");
+  });
+
+  it("L4: a vendored verify.mjs that gives unreadable output refuses the land and does not re-run the commands", () => {
+    const { dir, verifyMarker } = vtRepo();
+    writeFileSync(join(dir, ".doug/hooks/scripts/verify.mjs"), "console.log('not json');\n");
+    const r = landPlan(dir, loadPlan(dir));
+    expect(r.ok).toBe(false);
+    expect(r.reason).toContain("verify failed");
+    expect(r.reason).toContain("no readable result");
+    expect(existsSync(verifyMarker), "no fallback re-run").toBe(false);
   });
 });

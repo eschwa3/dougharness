@@ -1,6 +1,6 @@
 // Proposal builders for docs/decisions/ ADRs and .claude/rules/ conventions (card memory-decisions): the
 // paths are writable only through this proposal path (protect-paths.mjs/stop-gate.mjs in plugins/doug-gates
-// enforce the other half - see hooks.test.mjs). decisions.mjs is pure given its inputs and only ever calls
+// enforce the other half - see hooks-pretool.test.mjs and hooks-stop-gate.test.mjs). decisions.mjs is pure given its inputs and only ever calls
 // writeProposals (lib/learn.mjs) - never docs/decisions/ or .claude/rules/ directly; applyProposal (also
 // learn.mjs) is the one function that ever touches those files, and only for a diff file the caller names.
 import { describe, it, expect } from "vitest";

@@ -626,8 +626,100 @@ describe("fix loop", () => {
     expect(source).toMatch(/const pair = await parallel\(\[\n\s*\(\) => launch\(verifyPrompt\(task, impl, baseBranch\)/);
     expect(source).toMatch(/\(\) => launch\(reviewPrompt\(task, impl, baseBranch\)/);
     expect(source).not.toMatch(/reviewPrompt\(task, impl, ver, baseBranch\)/);
-    // Three batches only: the first-pass verifier plus review crew, the review crew on a fix pass, and the adversary crew.
-    expect(source.match(/await parallel\(/g).length).toBe(4);
+    // Five batches (card flow-adversary-parallel): the first-pass verifier, review crew and adversary crew, the review crew
+    // on a fix pass, the adversary crew's own seats, and the fix pass's focused check beside the adversary.
+    expect(source.match(/await parallel\(/g).length).toBe(5);
+  });
+
+  // Card flow-adversary-parallel: the adversary reviews a tree beside the verifier and the reviewer, and beside the
+  // focused check on a fix pass, instead of waiting for them.
+  const advCodex = { command: "codex-review", timeoutMs: 1000, fallback: false };
+  const advPass = (summary = "could not refute") => ({ taskId: "a", ran: true, verdict: "pass", summary, issues: [], commandsRun: [{ command: "true", ok: true }], error: null });
+  const advFail = (description = "off by one", summary = "off by one") => ({ taskId: "a", ran: true, verdict: "fail", summary, issues: [{ severity: "blocker", file: "src/x.ts", description, evidence: "node -e ..." }], commandsRun: [{ command: "node -e ...", ok: false, exitCode: 1 }], error: null });
+  const recordBatches = (calls) => {
+    const batches = [];
+    const parallel = async (thunks) => {
+      const before = calls.length;
+      const out = await plainParallel(thunks);
+      batches.push(calls.slice(before).map((c) => c.opts.label));
+      return out;
+    };
+    return { batches, parallel };
+  };
+
+  it("T1: launches the adversary in the verifier's and reviewer's batch on a first pass, and records its verdict when the verifier rejects", async () => {
+    const { agent, calls } = scripted({
+      "implement:a": () => implResult,
+      "verify:a": (i) => (i === 0 ? { taskId: "a", passed: false, findings: ["src/x.ts returns 1, expected 2"] } : { taskId: "a", passed: true, findings: [] }),
+      "review:a": () => passingReview,
+      "check:a": () => passingCheck,
+      "fix:a": () => ({ ...implResult, commit: "c2" }),
+      "adversary:a": (i) => (i === 0 ? advFail("loses the last item") : advPass("F2 fixed: keeps the last item")),
+    });
+    const rec = recordBatches(calls);
+    const r = await loadLoop({ agent, fixAttempts: 3, adversary: advCodex, parallel: rec.parallel }).runTask(task, "main");
+    expect(rec.batches[0]).toEqual(["verify:a", "review:a", "adversary:a"]);
+    expect(r.attempts[0].stages).toEqual(["implement", "verify", "review", "adversary"]);
+    expect(r.attempts[0].blockingStage).toBe("verify");
+    expect(r.attempts[0].adversary).toEqual({ ran: true, verdict: "fail", blocked: true, summary: "off by one" });
+    // The verifier blocked, so the adversary's verdict does not stop the task from being fixed.
+    expect(r.attempts[0].retriable.ok).toBe(true);
+    expect(r.attempts[0].newFindings).toEqual(["F1", "F2"]);
+    expect(r.ledger.map((e) => [e.id, e.stage, e.openedPass, e.status])).toEqual([["F1", "verify", 1, "fixed"], ["F2", "adversary", 1, "fixed"]]);
+    expect(r.attempts[1].stages).toEqual(["fix", "verify", "check", "adversary"]);
+    expect(r.stopReason).toBeNull();
+  });
+
+  describe("T2: a fix pass runs the focused check and the adversary in one batch", () => {
+    it("(a) after a verify block, the verifier reruns alone, then the check and the adversary run together; a failing check blocks and the adversary result is still recorded", async () => {
+      const { agent, calls } = scripted({
+        "implement:a": () => implResult,
+        "verify:a": (i) => (i === 0 ? { taskId: "a", passed: false, findings: ["src/x.ts returns 1, expected 2"] } : { taskId: "a", passed: true, findings: [] }),
+        "review:a": () => passingReview,
+        "check:a": () => ({ taskId: "a", passed: false, commandsRun: [], acceptance: [], findings: ["src/x.ts still throws on null"], issues: [], inScope: true }),
+        "fix:a": () => ({ ...implResult, commit: "c2" }),
+        "adversary:a": () => advPass(),
+      });
+      const rec = recordBatches(calls);
+      const r = await loadLoop({ agent, fixAttempts: 1, adversary: advCodex, parallel: rec.parallel }).runTask(task, "main");
+      expect(rec.batches[1]).toEqual(["check:a:2", "adversary:a:2"]);
+      expect(calls.map((c) => c.opts.label)).toEqual(["implement:a", "verify:a", "review:a", "adversary:a", "fix:a:2", "verify:a:2", "check:a:2", "adversary:a:2"]);
+      expect(r.attempts[1].stages).toEqual(["fix", "verify", "check", "adversary"]);
+      expect(r.attempts[1].blockingStage).toBe("check");
+      expect(r.attempts[1].adversary).toEqual({ ran: true, verdict: "pass", blocked: false, summary: "could not refute" });
+    });
+
+    it("(b) after an adversary block, the adversary is first in the batch and in the recorded stages, and wins the blocking stage over a failing check", async () => {
+      const { agent, calls } = scripted({
+        "implement:a": () => implResult,
+        "verify:a": () => ({ taskId: "a", passed: true, findings: [] }),
+        "review:a": () => passingReview,
+        "check:a": () => ({ taskId: "a", passed: false, commandsRun: [], acceptance: [], findings: ["src/x.ts still throws on null"], issues: [], inScope: true }),
+        "fix:a": () => ({ ...implResult, commit: "c2" }),
+        "adversary:a": (i) => (i === 0 ? advFail("loses the last item") : advFail("drops the first item", "still off")),
+      });
+      const rec = recordBatches(calls);
+      const r = await loadLoop({ agent, fixAttempts: 1, adversary: advCodex, parallel: rec.parallel }).runTask(task, "main");
+      expect(r.attempts[0].blockingStage).toBe("adversary");
+      expect(rec.batches[1]).toEqual(["adversary:a:2", "check:a:2"]);
+      expect(r.attempts[1].stages).toEqual(["fix", "adversary", "check"]);
+      expect(r.attempts[1].blockingStage).toBe("adversary");
+    });
+
+    it("(c) a size S task has no adversary of its own: its fix pass runs the check without a batch", async () => {
+      const sTask = { ...task, size: "S" };
+      const { agent, calls } = scripted({
+        "implement:a": () => implResult,
+        "check:a": (i) => (i === 0 ? { taskId: "a", passed: false, commandsRun: [], acceptance: [], findings: ["src/x.ts returns 1, expected 2"], issues: [], inScope: true } : passingCheck),
+        "fix:a": () => ({ ...implResult, commit: "c2" }),
+        "adversary:a": () => advPass(),
+      });
+      const rec = recordBatches(calls);
+      const r = await loadLoop({ agent, fixAttempts: 2, adversary: advCodex, parallel: rec.parallel }).runTask(sTask, "main");
+      expect(rec.batches).toEqual([]);
+      expect(labelled(calls, "adversary")).toEqual([]);
+      expect(r.stopReason).toBeNull();
+    });
   });
 
 
@@ -1248,21 +1340,23 @@ describe("fix loop", () => {
     const r1 = batchesOf(reviews.calls);
     const r = await loadLoop({ agent: reviews.agent, fixAttempts: 3, adversary: codex, parallel: r1.parallel }).runTask(crewTask, "main");
     // Pass 1: the verifier and both reviewers in one batch; one rejection makes the merged review reject.
-    expect(r1.batches[0]).toEqual(["verify:a", "review:a", "review-2:a"]);
-    expect(r.attempts[0].stages).toEqual(["implement", "verify", "review", "review-2"]);
+    // Card flow-adversary-parallel: the adversary crew runs in the same first-pass batch; its own seat batch settles first.
+    expect(r1.batches[0]).toEqual(["adversary:a", "adversary-2:a"]);
+    expect(r1.batches[1]).toEqual(["verify:a", "review:a", "review-2:a", "adversary:a", "adversary-2:a"]);
+    expect(r.attempts[0].stages).toEqual(["implement", "verify", "review", "review-2", "adversary", "adversary-2"]);
     expect(r.attempts[0].reviewed).toBe(false);
     expect(r.attempts[0].blockingStage).toBe("review");
     // The issue both reviewers filed collapsed to one ledger id; the blocker got its own.
     expect(r.ledger.map((e) => [e.id, e.stage, e.description])).toEqual([["F1", "review", "returns 1 for empty input"], ["F2", "review", "throws on null"]]);
     // Pass 2: the review crew reruns together, then the check, then both adversaries in one batch; every seat is recorded.
-    expect(r1.batches[1]).toEqual(["review:a:2", "review-2:a:2"]);
-    expect(r1.batches[2]).toEqual(["adversary:a:2", "adversary-2:a:2"]);
+    expect(r1.batches[2]).toEqual(["review:a:2", "review-2:a:2"]);
+    expect(r1.batches[4]).toEqual(["check:a:2", "adversary:a:2", "adversary-2:a:2"]);
     expect(r.attempts[1].stages).toEqual(["fix", "review", "review-2", "check", "adversary", "adversary-2"]);
     expect(r.attempts[1].adversary).toEqual({ ran: true, verdict: "pass", blocked: false, summary: "seat 1: could not refute | seat 2: nothing found" });
     expect(r.stopReason).toBeNull();
-    expect(reviews.calls.length).toBe(4 + 6);
-    expect(r.attempts[1].spent.agents).toBe(10);
-    const seat2 = labelled(reviews.calls, "adversary-2:a")[0];
+    expect(reviews.calls.length).toBe(12);
+    expect(r.attempts[1].spent.agents).toBe(12);
+    const seat2 = labelled(reviews.calls, "adversary-2:a:2")[0];
     expect(seat2.opts).toEqual({ label: "adversary-2:a:2", phase: "Adversary", agentType: "doug-flow:adversary-claude", schema: { schema: "adversary" }, model: "opus", effort: "high" });
     expect(seat2.prompt).toContain("crew seat 2 of 2");
     // Run 2: the reviewers approve and the second adversary refutes; a blocker from either seat blocks, and the crew confirms on the fix pass.
@@ -1280,7 +1374,7 @@ describe("fix loop", () => {
     });
     const r2 = batchesOf(adversaries.calls);
     const a = await loadLoop({ agent: adversaries.agent, fixAttempts: 3, adversary: codex, parallel: r2.parallel }).runTask(crewTask, "main");
-    expect(r2.batches[1]).toEqual(["adversary:a", "adversary-2:a"]);
+    expect(r2.batches[0]).toEqual(["adversary:a", "adversary-2:a"]);
     expect(a.attempts[0].adversary).toEqual({ ran: true, verdict: "fail", blocked: true, summary: "seat 1: could not refute | seat 2: off by one" });
     expect(a.attempts[0].blockingStage).toBe("adversary");
     expect(a.ledger.map((e) => [e.id, e.stage, e.status])).toEqual([["F1", "adversary", "fixed"]]);
@@ -2276,10 +2370,10 @@ describe("fix loop", () => {
     // Card integration-acceptance-recorded wraps both results in enforceIntegrationAcceptance(...) before anything
     // reads .ok; retryOnce still wraps the same integratePrompt(...) call underneath.
     expect(source).toContain(
-      "integration = enforceIntegrationAcceptance(await retryOnce(integratePrompt(li, ready, baseBranch, li === levels.length - 1, sReady.length > 0, !integratedOnce), agentOpts('integrate', null, { label: `integrate:level-${li}`, phase: 'Integrate', schema: INTEGRATE_SCHEMA }), `level-${li}`), li === levels.length - 1, acceptanceEntries(plan.acceptance || []))",
+      "integration = enforceIntegrationAcceptance(await retryOnce(integratePrompt(li, ready, baseBranch, li === levels.length - 1, sReady.length > 0, !integratedOnce), agentOpts('integrate', null, { label: `integrate:level-${li}`, phase: 'Integrate', schema: INTEGRATE_SCHEMA }), `level-${li}`), li === levels.length - 1, acceptanceEntries(plan.acceptance || []), plan.verify || [])",
     );
     expect(source).toContain(
-      "const again = enforceIntegrationAcceptance(await retryOnce(integratePrompt(li, fixedReady, levelBase, li === levels.length - 1, true, false), agentOpts('integrate', null, { label: `integrate:level-${li}:2`, phase: 'Integrate', schema: INTEGRATE_SCHEMA }), `level-${li}`), li === levels.length - 1, acceptanceEntries(plan.acceptance || []))",
+      "const again = enforceIntegrationAcceptance(await retryOnce(integratePrompt(li, fixedReady, levelBase, li === levels.length - 1, true, false), agentOpts('integrate', null, { label: `integrate:level-${li}:2`, phase: 'Integrate', schema: INTEGRATE_SCHEMA }), `level-${li}`), li === levels.length - 1, acceptanceEntries(plan.acceptance || []), plan.verify || [])",
     );
     expect(source).toContain("const adv = await runAdversary(null, null, 1, levelBase, [], (p, o) => retryOnce(p, o, `level-${li}`), [], subject)");
   });
@@ -2382,6 +2476,35 @@ describe("fix loop", () => {
     expect(withoutEffort, "rule: adversary.effort unset adds no --effort").not.toContain("--effort");
   });
 
+  it("A-D1/A-D2/A-D3: codex gets only the task's own verify; the level adversary gets no --verify (card flow-suite-dedupe)", () => {
+    const shellQuoteFn = new Function(fnSlice("function shellQuote(") + "\nreturn shellQuote;")();
+    const confirmationLines = new Function("ledgerText", fnSlice("function confirmationLines(") + "\nreturn confirmationLines;")(ledgerModule().ledgerText);
+    const impl = { branch: "doug/a", worktreePath: "/wt", commit: "c2", prevCommit: "c1" };
+    const mk = () => new Function(
+      "plan", "adversary", "shellQuote", "BLOCKER_GATE", "confirmationLines",
+      fnSlice("function adversaryPrompt(") + "\nreturn adversaryPrompt;",
+    )({ verify: ["pnpm typecheck", "pnpm test:unit"] }, { command: "codex-review", timeoutMs: 1 }, shellQuoteFn, blockerGate(), confirmationLines);
+    const withVerify = mk()({ id: "a", title: "A", spec: "Do S.", files: ["src/x.ts"], verify: "pnpm exec vitest run x.test.ts" }, impl, "main", 1, []);
+    expect(withVerify, "A-D1").toContain("--verify 'pnpm exec vitest run x.test.ts'");
+    expect(withVerify, "A-D1").not.toContain("--verify 'pnpm test:unit'");
+    expect(withVerify.match(/--verify/g)).toHaveLength(1);
+    const noVerify = mk()({ id: "a", title: "A", spec: "Do S.", files: ["src/x.ts"] }, impl, "main", 1, []);
+    expect(noVerify, "A-D2").not.toContain("--verify");
+    const level = new Function(
+      "plan", "adversary", "shellQuote", "integrationBranch", "INTEGRATION_WORKTREE", "levelSpecLines", "BLOCKER_GATE",
+      fnSlice("function levelAdversaryPrompt(") + "\nreturn levelAdversaryPrompt;",
+    )(
+      { verify: ["pnpm typecheck", "pnpm test:unit"], title: "P" },
+      { command: "codex-review", timeoutMs: 1 },
+      shellQuoteFn,
+      "doug/integration",
+      ".claude/worktrees/doug-integration",
+      () => ["Task a: A", "Owned files: src/x.ts", "Do S.", ""],
+      blockerGate(),
+    );
+    expect(level(1, [{ task: { id: "a", title: "A", spec: "Do S.", files: ["src/x.ts"] } }], "main", false), "A-D3").not.toContain("--verify");
+  });
+
   it("E5: levelAdversaryPrompt appends --effort <level> right after --timeout-ms <n> the same way, and the workflow sets adversary.effort from tierFor('adversary').effort so a literal cannot replace the row (card codex-review-effort)", () => {
     const shellQuoteFn = new Function(fnSlice("function shellQuote(") + "\nreturn shellQuote;")();
     const stubLevelSpecLines = () => ["Task a: A", "Owned files: src/x.ts", "Do S.", ""];
@@ -2450,11 +2573,12 @@ describe("fix loop", () => {
       "check:a": () => passingCheck,
       "fix:a": (i) => ({ ...implResult, commit: `c${i + 2}` }),
       "adversary:a": (i) =>
-        i === 0
+        i === 1
           ? { taskId: "a", ran: true, verdict: "pass", summary: "ok", issues: [{ severity: "minor", file: "src/x.ts", line: 3, description: "F1: still returns 1 on the empty input", evidence: null }], commandsRun: [], error: null }
           : { taskId: "a", ran: true, verdict: "pass", summary: "ok", issues: [], commandsRun: [], error: null },
     });
-    const r = await loadLoop({ agent, fixAttempts: 3, adversary: { command: "x", timeoutMs: 1 } }).runTask(task, "main");
+    // Card flow-adversary-parallel: the pass-1 adversary now runs (index 0), so the confirmation adversary is call 1; one more agent fits.
+    const r = await loadLoop({ agent, fixAttempts: 3, adversary: { command: "x", timeoutMs: 1 }, plan: { ...defaultPlan, budget: { agents: 13 } } }).runTask(task, "main");
     // Pass 2: the verifier confirmed F1 fixed, the check passed, and the confirmation adversary reported it again.
     expect(r.attempts[1].stages).toEqual(["fix", "verify", "check", "adversary"]);
     expect(r.attempts[1].ready).toBe(false);
@@ -4196,11 +4320,47 @@ describe("fix loop", () => {
       const start = source.indexOf("function integratePrompt(");
       const slice = source.slice(start, source.indexOf("\n}\n", start) + 3);
       return new Function(
-        "plan", "integrationBranch", "acceptanceEntries",
+        "plan", "integrationBranch", "acceptanceEntries", "shellQuote",
         CONSTS + slice + "\nreturn integratePrompt;",
-      )(plan, integrationBranch, entries);
+      )(plan, integrationBranch, entries, new Function(fnSlice("function shellQuote(") + "\nreturn shellQuote;")());
     };
     const oneResult = { impl: { branch: "doug/task-a", worktreePath: "/wt/a" } };
+
+    it("E-D1: an acceptance command that repeats a verify command takes its result from integration.verify (card flow-suite-dedupe)", () => {
+      const enforce = getEnforce();
+      const r = enforce({ ok: true, verify: [{ command: "pnpm test:unit", ok: true }], acceptance: [] }, true, [{ text: "suite green", command: "pnpm test:unit" }], ["pnpm typecheck", "pnpm test:unit"]);
+      expect(r.ok).toBe(true);
+      expect(r.reason).toBeUndefined();
+      expect(r.acceptance).toEqual([{ text: "suite green", command: "pnpm test:unit", ok: true, exitCode: 0, from: "verify" }]);
+    });
+    it("E-D2: the repeated command's failed verify fails the integration as a failed acceptance command", () => {
+      const enforce = getEnforce();
+      const r = enforce({ ok: true, verify: [{ command: "pnpm test:unit", ok: false }], acceptance: [] }, true, [{ text: "suite green", command: "pnpm test:unit" }], ["pnpm typecheck", "pnpm test:unit"]);
+      expect(r.ok).toBe(false);
+      expect(r.reason).toContain("acceptance command failed: suite green ($ pnpm test:unit");
+    });
+    it("E-D3: a repeated command with no matching verify item counts as not reported", () => {
+      const enforce = getEnforce();
+      const r = enforce({ ok: true, verify: [], acceptance: [] }, true, [{ text: "suite green", command: "pnpm test:unit" }], ["pnpm typecheck", "pnpm test:unit"]);
+      expect(r.ok).toBe(false);
+      expect(r.reason).toContain("acceptance command not reported");
+    });
+    it("P-D1: step 3b lists only acceptance commands that do not repeat a verify command, and names the repeated one as checked by verify (card flow-suite-dedupe)", () => {
+      const plan = { title: "P", install: null, verify: ["pnpm typecheck", "pnpm test:unit"], acceptance: [{ text: "suite green", command: "pnpm test:unit" }, { text: "a works", command: "cmd-a" }] };
+      const text = integratePromptOf(plan)(0, [oneResult], "main", true, false, true);
+      const b = text.slice(text.indexOf("3b."), text.indexOf("\n4."));
+      expect(b).toContain("  $ cmd-a");
+      expect(b).not.toContain("$ pnpm test:unit");
+      expect(b).toContain("suite green");
+    });
+    it("I-D1: the last-level integrate prompt runs plan.verify through the vendored verify.mjs with record and credit dirs (card flow-suite-dedupe)", () => {
+      const plan = { title: "P", install: null, verify: ["pnpm test:unit"], acceptance: [] };
+      const text = integratePromptOf(plan)(0, [oneResult], "main", true, false, true);
+      expect(text).toContain("verify.mjs --json --by integrate");
+      expect(text).toContain("--record-dir .");
+      expect(text).toContain("--command 'pnpm test:unit'");
+      expect(text).toContain("--credit-dir '/wt/a'");
+    });
 
     it("S1: INTEGRATE_SCHEMA carries the verifier's acceptance item shape, still not required", () => {
       const start = source.indexOf("const INTEGRATE_SCHEMA");
@@ -5109,6 +5269,109 @@ describe("dependency gate", () => {
     expect(logs).toContain("a: the level adversary blocked it (1 blocker); fix pass");
   });
 
+  // Card level-adversary-empty-diff: on a level >= 1 the level adversary's --base must be the integration branch's
+  // commit sha captured before that level's merge (reported by the integrate agent as baseCommit), never the
+  // branch name, which on level >= 1 equals --head and diffs nothing.
+  const SHA1 = "a".repeat(40);
+  const SHA2 = "b".repeat(40);
+  function twoLevelRun(opts) {
+    const { level, fallback = false, levelFallback = null } = opts;
+    const base1 = "base1" in opts ? opts.base1 : SHA1;
+    const base2 = "base2" in opts ? opts.base2 : SHA2;
+    const t = (id, extra) => ({ id, title: id.toUpperCase(), spec: "Do it.", files: [`src/${id}.ts`], verify: "true", ...extra });
+    const plan = { status: "approved", title: "P", goal: "G", install: null, verify: ["true"], acceptance: [], adversary: { command: "codex-review", timeoutMs: 1000, fallback }, fixAttempts: 3, baseBranch: "main", integrationBranch: "doug/int", tasks: [t("a", { size: "M" }), t("b", { size: "S", dependsOn: ["a"] })] };
+    const calls = [];
+    let levelCalls = 0;
+    const pass = (id) => ({ taskId: id, ran: true, verdict: "pass", summary: "level", issues: [], commandsRun: [], error: null });
+    const agent = async (prompt, opts) => {
+      const label = String(opts.label);
+      calls.push({ label, prompt, opts });
+      const [stage, id] = label.split(":");
+      if (label === "adversary:level-1-fallback" || label.endsWith("-fallback") && id === "level-1") return levelFallback ? levelFallback(label) : pass(id);
+      if (stage === "implement" || stage === "fix") return { taskId: id, branch: `doug/task-${id}`, worktreePath: `/wt/${id}`, filesTouched: [], commandsRun: [], summary: "done", blocked: false, commit: `c-${id}-${stage}` };
+      if (stage === "check") return { taskId: id, passed: true, commandsRun: [], acceptance: [], findings: [], issues: [], inScope: true };
+      if (stage === "verify") return { taskId: id, passed: true, commandsRun: [], findings: [], acceptance: [] };
+      if (stage === "review") return { taskId: id, specCompliant: true, inScope: true, approve: true, issues: [] };
+      if (stage === "adversary" && id === "a") return pass("a");
+      if (stage === "adversary") {
+        const answer = level[Math.min(levelCalls, level.length - 1)];
+        levelCalls++;
+        if (answer === "down") return { taskId: id, ran: false, verdict: "inconclusive", summary: "", issues: [], commandsRun: [], error: "codex-failed: usage limit" };
+        return answer === "fail"
+          ? { taskId: id, ran: true, verdict: "fail", summary: "wrong", issues: [{ severity: "blocker", file: "src/b.ts", line: 1, description: "returns 1", evidence: "node -e ... exit 1" }], commandsRun: [], error: null }
+          : pass(id);
+      }
+      if (stage === "integrate") {
+        const r = { branch: "doug/int", merged: ["doug/task-a", "doug/task-b"], conflicts: [], verify: [], ok: true };
+        if (label === "integrate:level-1" && base1 !== undefined) r.baseCommit = base1;
+        if (label === "integrate:level-1:2" && base2 !== undefined) r.baseCommit = base2;
+        return r;
+      }
+      return null;
+    };
+    return { plan, agent, calls };
+  }
+
+  it("T1: the level-1 adversary's --base is the sha the integrator reported before the merge, not the integration branch name (card level-adversary-empty-diff)", async () => {
+    const { plan, agent, calls } = twoLevelRun({ level: ["pass"] });
+    await runWorkflow(plan, agent);
+    const adv = calls.find((c) => c.label === "adversary:level-1");
+    expect(adv, "level 1 ran a level adversary").toBeTruthy();
+    expect(adv.prompt).toContain(`--base '${SHA1}' --head 'doug/int'`);
+    expect(adv.prompt).not.toContain("--base 'doug/int'");
+  });
+
+  it("T2: the confirm adversary reuses the FIRST integration's sha, not the re-integration's (card level-adversary-empty-diff)", async () => {
+    const { plan, agent, calls } = twoLevelRun({ level: ["fail", "pass"] });
+    await runWorkflow(plan, agent);
+    const labels = calls.map((c) => c.label);
+    expect(labels).toContain("integrate:level-1:2");
+    const first = calls.find((c) => c.label === "adversary:level-1");
+    const confirm = calls.find((c) => c.label === "adversary:level-1:confirm");
+    expect(confirm, "the confirm adversary ran").toBeTruthy();
+    expect(first.prompt).toContain(`--base '${SHA1}'`);
+    expect(confirm.prompt).toContain(`--base '${SHA1}' --head 'doug/int'`);
+    expect(confirm.prompt).not.toContain(SHA2);
+    expect(confirm.prompt).not.toContain("--base 'doug/int'");
+  });
+
+  it("T3: an integrator that reports no baseCommit, or a non-sha one, leaves the base at today's levelBase and logs the fallback (card level-adversary-empty-diff)", async () => {
+    for (const base1 of [undefined, "main", "abc123", "A".repeat(40)]) {
+      const { plan, agent, calls } = twoLevelRun({ level: ["pass"], base1 });
+      const { logs } = await runWorkflow(plan, agent);
+      const adv = calls.find((c) => c.label === "adversary:level-1");
+      expect(adv.prompt, `base1=${String(base1)}`).toContain("--base 'doug/int' --head 'doug/int'");
+      expect(logs.some((l) => /level adversary falls back to doug\/int because the integrator reported no base commit/.test(l)), `log for base1=${String(base1)}`).toBe(true);
+    }
+  });
+
+  it("T3b: a valid baseCommit logs no fallback line (card level-adversary-empty-diff)", async () => {
+    const { plan, agent } = twoLevelRun({ level: ["pass"] });
+    const { logs } = await runWorkflow(plan, agent);
+    expect(logs.some((l) => /because the integrator reported no base commit/.test(l))).toBe(false);
+  });
+
+  it("T4: the integrate prompt asks for baseCommit (git rev-parse HEAD in the worktree) before the merges, and the schema allows it (card level-adversary-empty-diff)", async () => {
+    const { plan, agent, calls } = twoLevelRun({ level: ["pass"] });
+    await runWorkflow(plan, agent);
+    const p = calls.find((c) => c.label === "integrate:level-1").prompt;
+    const ask = p.indexOf("git rev-parse HEAD");
+    expect(ask, "asks for the sha").toBeGreaterThan(-1);
+    expect(p).toContain("baseCommit");
+    expect(ask).toBeLessThan(p.indexOf("git merge --no-ff"));
+    expect(ask).toBeGreaterThan(p.indexOf("Do every following git and verify command inside that worktree"));
+    const schema = source.slice(source.indexOf("const INTEGRATE_SCHEMA"), source.indexOf("\n}\n", source.indexOf("const INTEGRATE_SCHEMA")));
+    expect(schema).toMatch(/baseCommit:\s*\{\s*type:\s*'string'\s*\}/);
+  });
+
+  it("T5: the fallback level adversary's diff line uses the captured sha (card level-adversary-empty-diff)", async () => {
+    const { plan, agent, calls } = twoLevelRun({ level: ["down"], fallback: { model: "opus" } });
+    await runWorkflow(plan, agent);
+    const fb = calls.find((c) => /fallback/.test(c.label) && /level-1/.test(c.label));
+    expect(fb, "the level fallback adversary ran").toBeTruthy();
+    expect(fb.prompt).toContain(`the diff is ${SHA1}...doug/int`);
+  });
+
   it("C1: the level report's integration.acceptance is the re-integration's, not the first integration's (card integration-acceptance-recorded, behaviour 4)", async () => {
     const { plan, agent } = shapedRun(["fail", "pass"]);
     plan.acceptance = [{ text: "a works", command: "cmd-a" }];
@@ -5491,6 +5754,20 @@ describe("plugin layout", () => {
     expect(manifest.agents.map((a) => a.split("/").pop()).sort()).toEqual(readdirSync(join(root, "agents")).sort());
     expect(manifest.name).toBe("doug-flow");
   });
+  it("(card memory-every-session) registers the SessionStart recall hook: manifest hooks file exists, matcher startup|clear, command runs scripts/session-recall.mjs", () => {
+    expect(typeof manifest.hooks).toBe("string");
+    const hooksFile = join(root, manifest.hooks);
+    expect(existsSync(hooksFile), manifest.hooks).toBe(true);
+    const hooks = JSON.parse(readFileSync(hooksFile, "utf8"));
+    const entries = hooks.hooks.SessionStart;
+    expect(Array.isArray(entries)).toBe(true);
+    expect(entries).toHaveLength(1);
+    expect(entries[0].matcher).toBe("startup|clear");
+    const commands = entries[0].hooks.map((h) => h.command);
+    expect(commands).toHaveLength(1);
+    expect(commands[0]).toContain("${CLAUDE_PLUGIN_ROOT}/scripts/session-recall.mjs");
+    expect(existsSync(join(root, "scripts/session-recall.mjs"))).toBe(true);
+  });
   it("ships the eight agents with valid frontmatter and read-only verifier, reviewer, researcher and both adversaries", () => {
     const names = readdirSync(join(root, "agents")).sort();
     expect(names).toEqual(["adversary-claude.md", "adversary.md", "implementer.md", "lead.md", "planner.md", "researcher.md", "reviewer.md", "verifier.md"]);
@@ -5544,6 +5821,9 @@ describe("plugin layout", () => {
       const fm = parseFrontmatter(readFileSync(join(root, "agents", f), "utf8"));
       expect(fm.disallowedTools, f).toContain("Agent");
     }
+  });
+  it("tells the planner an acceptance command never repeats a verify command (card flow-suite-dedupe)", () => {
+    expect(readFileSync(join(root, "agents/planner.md"), "utf8")).toContain("never repeats a verify command");
   });
   it("tells the planner that a consumer task depends on its producer, so it lands in a later level (card planner-producer-level)", () => {
     // 2026-09-07, board-reorder (4 runs): a page task that PUTs to a route another task adds, in the same level,
@@ -5991,7 +6271,7 @@ describe("plugin layout", () => {
 
     // The explicit ordering sentence itself (M11: deleting it entirely must fail).
     const orderSentence =
-      "The order is: research (when called for), the test file and the project's procedure, the brief, the tester, the coder, the reviewer";
+      "The order is: research (when called for), the test file and the project's procedure, the brief, the tester, the coder, the reviewer, then the lead's own gate and commit; a lean-lane card has no tester.";
     expect(core, orderSentence).toContain(orderSentence);
 
     // The mutation-list-rule-7 clause in the brief instructions (M13: deleting it must fail).
@@ -6045,18 +6325,22 @@ describe("plugin layout", () => {
       "The claim may sit in the tester's final plain-text message or in its hand-back call; the gate reads the plain text first, then the last hand-back."
     );
   });
-  // 2026-09-14 (card landing-suggests-follow-ups): after proposal-ledger-forgeable landed on 2026-09-12, the
-  // user had to ask "do we need a follow up card?" before the two follow-up cards it produced were added by
-  // hand — /core-next step 4 recorded the landing and step 5 asked only "take the next card?", so whether a
-  // follow-up card got written depended on the user asking. This test pins the new step both skills gain
-  // between recording the landing and the continue gate: it gathers the run's own follow-up candidates and
-  // offers them with AskUserQuestion before the continue gate, adding accepted ones with `doug board add`.
-  it("K doug-hand and doug-next gather follow-up candidates and offer them with AskUserQuestion before the continue gate (card landing-suggests-follow-ups)", () => {
+  // 2026-10-03 directive (card follow-ups-backlog-ranked): follow-up cards stop going to Ready and stop asking at
+  // landing. The follow-up step files each realistic candidate straight to Backlog with `doug board add`, places
+  // it by priority with `doug board reorder`, and says in the chat what it filed. Only the user promotes a card to
+  // Ready. P2 and P3 below are the contract the three skills' Follow-up cards sections carry, verbatim.
+  const P2 =
+    "Follow-ups are filed without a question. A landing with no candidates files nothing. Each realistic candidate goes straight to Backlog with `doug board add` (never a script that edits the record): `doug board add <id> --title \"<title>\" --goal \"<goal>\" --component <c> --size <S|M|L> --class <tests-only|prose|gate-script|code|docs|eval|decision> --track <hand|flow> --deps <landed-id> --column backlog`. Then the lead places it in Backlog by priority with `doug board reorder`: `--top` for a defect that blocks a commit, a gate, or a user; `--after <id>` of the last such card for drift a user would hit; `--bottom` otherwise. Only the user promotes a card to Ready; the lead never files a follow-up to Ready or Decide.";
+  const P3 =
+    "The lead says in the chat what it filed and where: each new card's id, title, and its Backlog position with the reason. Then one commit `\"Board: <id> follow-ups added: <new-id>, <new-id>\"`, whatever the count; the served page (`doug board serve`) shows the new cards without a republish. Batch: each card's deps name the card of the batch it came from; still one commit for the whole batch.";
+  const followUpThreshold =
+    "A reviewer's out-of-scope finding is filed only when it is realistic drift (a form a model or a person would plausibly write) or when one card would close the whole class; otherwise it goes in the landing note and is not filed.";
+  const followUpCardGoal = "The card's goal text carries both";
+  it("K doug-hand and doug-next file follow-up candidates to Backlog without a question, before the continue gate (card follow-ups-backlog-ranked)", () => {
     const core = readFileSync(join(root, "skills/doug-hand/SKILL.md"), "utf8");
     const dougNext = readFileSync(join(root, "skills/doug-next/SKILL.md"), "utf8");
 
-    // K1 position: the new section sits after the landing step and before the (renumbered) continue gate, in
-    // both skills.
+    // K1 position: the section sits after the landing step and before the continue gate, in both skills.
     const coreRecordIdx = core.indexOf("## 4. Record and land");
     const coreFollowUpIdx = core.indexOf("## 5. Follow-up cards");
     const coreGateIdx = core.indexOf("## 6. Human gate: continue");
@@ -6075,28 +6359,21 @@ describe("plugin layout", () => {
     expect(dougFollowUpIdx).toBeGreaterThan(dougLandIdx);
     expect(dougFollowUpIdx).toBeLessThan(dougGateIdx);
 
-    // K2 multiSelect form: the exact AskUserQuestion sentence, verbatim, in both skills.
-    // 2026-09-19 (card core-next-condition-open): the follow-up option's fields gain class alongside size, so
-    // a `doug board add` follow-up carries a class from the start; core-next and doug-next stay identical.
-    const multiSelectSentence =
-      'Otherwise ask once with `AskUserQuestion`, `multiSelect: true`, one option per suggestion with a proposed id, title, column, size, class, track, and deps on the landed card, plus a "none" option.';
-    expect(core, multiSelectSentence).toContain(multiSelectSentence);
-    expect(dougNext, multiSelectSentence).toContain(multiSelectSentence);
+    // The section ends at the next "## " heading after its own (a later section may legitimately ask a question).
+    const sectionEnd = (text, from) => {
+      const next = text.indexOf("\n## ", from + 1);
+      return next === -1 ? text.length : next;
+    };
+    const coreSection = core.slice(coreFollowUpIdx, sectionEnd(core, coreFollowUpIdx));
+    const dougSection = dougNext.slice(dougFollowUpIdx, sectionEnd(dougNext, dougFollowUpIdx));
 
-    // K3 the add rule: `doug board add` (never a script), `doug board reorder <id> --top`, and Decide when a
-    // decision is needed, in both skills.
-    const addRuleSentence = "Each accepted suggestion is added with `doug board add` (never a script that edits the record)";
-    expect(core, addRuleSentence).toContain(addRuleSentence);
-    expect(dougNext, addRuleSentence).toContain(addRuleSentence);
-    expect(core, "`doug board reorder <id> --top`").toContain("`doug board reorder <id> --top`");
-    expect(dougNext, "`doug board reorder <id> --top`").toContain("`doug board reorder <id> --top`");
-    expect(core, "to Decide when it needs a decision").toContain("to Decide when it needs a decision");
-    expect(dougNext, "to Decide when it needs a decision").toContain("to Decide when it needs a decision");
+    // K2 P2 verbatim inside the section, in both skills.
+    expect(coreSection, "doug-hand follow-up section: P2").toContain(P2);
+    expect(dougSection, "doug-next follow-up section: P2").toContain(P2);
 
-    // K4 no candidates, no question: the exact sentence, in both skills.
-    const noCandidatesSentence = "A landing with no candidates skips the question.";
-    expect(core, noCandidatesSentence).toContain(noCandidatesSentence);
-    expect(dougNext, noCandidatesSentence).toContain(noCandidatesSentence);
+    // K3 P3 verbatim inside the section, in both skills (the one-commit sentence and the batch sentence).
+    expect(coreSection, "doug-hand follow-up section: P3").toContain(P3);
+    expect(dougSection, "doug-next follow-up section: P3").toContain(P3);
 
     // K5 never invented: the exact sentence, in both skills.
     const neverInventedSentence =
@@ -6104,35 +6381,19 @@ describe("plugin layout", () => {
     expect(core, neverInventedSentence).toContain(neverInventedSentence);
     expect(dougNext, neverInventedSentence).toContain(neverInventedSentence);
 
-    // 2026-09-15 (card follow-up-step-threshold): the K12 batch chain ran eight S cards because the follow-up
-    // step had no threshold on out-of-scope findings. Pin the threshold sentence in both skills' follow-up
-    // sections.
-    const thresholdSentence =
-      "A reviewer's out-of-scope finding is offered only when it is realistic drift (a form a model or a person would plausibly write) or when one card would close the whole class; otherwise it goes in the landing note and is not offered.";
-    const coreFollowUpSection = core.slice(coreFollowUpIdx, coreGateIdx);
-    const dougFollowUpSection = dougNext.slice(dougFollowUpIdx, dougGateIdx);
-    expect(coreFollowUpSection, "doug-hand follow-up step: threshold sentence must be present").toContain(
-      thresholdSentence
-    );
-    expect(dougFollowUpSection, "doug-next follow-up step: threshold sentence must be present").toContain(
-      thresholdSentence
-    );
-
-    // K6 one commit, no republish: the served page shows the new cards live, in both skills.
-    expect(core, "doug-hand should contain 'follow-ups added:'").toContain("follow-ups added:");
-    expect(core, "doug-hand should contain the served-page sentence").toContain("shows the new cards without a republish");
-    expect(dougNext, "doug-next should contain 'follow-ups added:'").toContain("follow-ups added:");
-    expect(dougNext, "doug-next should contain the served-page sentence").toContain("shows the new cards without a republish");
+    // K5b the threshold sentence ("filed", not "offered"), and the goal text sentence, in both sections.
+    expect(coreSection, "doug-hand follow-up step: threshold sentence").toContain(followUpThreshold);
+    expect(dougSection, "doug-next follow-up step: threshold sentence").toContain(followUpThreshold);
+    expect(coreSection, "doug-hand follow-up step: goal text sentence").toContain(followUpCardGoal);
+    expect(dougSection, "doug-next follow-up step: goal text sentence").toContain(followUpCardGoal);
+    expect(coreSection, "doug-hand: 'The suggestion's goal text carries both' must be gone").not.toContain("The suggestion's goal text carries both");
+    expect(dougSection, "doug-next: 'The suggestion's goal text carries both' must be gone").not.toContain("The suggestion's goal text carries both");
 
     // K7 doug-next only: the frontmatter allowed-tools list is widened for `doug board add`.
     const dougFm = parseFrontmatter(dougNext);
     expect(dougFm["allowed-tools"], "doug-next frontmatter allowed-tools").toContain("Bash(doug board *)");
 
-    // K8 (review follow-up): the add command carries deps on the landed card, in both skills.
-    expect(core, "--deps <landed-id> --column <ready|decide>").toContain("--deps <landed-id> --column <ready|decide>");
-    expect(dougNext, "--deps <landed-id> --column <ready|decide>").toContain("--deps <landed-id> --column <ready|decide>");
-
-    // K9 (review follow-up): track-specific candidate sources, exact sentence per skill.
+    // K9 track-specific candidate sources, exact sentence per skill.
     const coreCandidatesSentence =
       'Before the continue gate, gather the follow-up candidates this landing produced: the coder\'s and reviewer\'s "left out", "not closed", and "found on the way" items, the landing note, and any defect the reviewer marked out of scope.';
     expect(core, coreCandidatesSentence).toContain(coreCandidatesSentence);
@@ -6140,24 +6401,22 @@ describe("plugin layout", () => {
       "Before the continue gate, gather the follow-up candidates this landing produced: the report's review issues, the adversary blocks classified marginal or false whose reason names a hole, the integrate stage's conflicts and failed verify tails, and the landing summary.";
     expect(dougNext, dougCandidatesSentence).toContain(dougCandidatesSentence);
 
-    // K10 (review follow-up): the one-commit sentence, exact, in both skills.
-    const oneCommitSentence =
-      'Then one commit `"Board: <id> follow-ups added: <new-id>, <new-id>"`, whatever the count; the served page (`doug board serve`) shows the new cards without a republish.';
-    expect(core, oneCommitSentence).toContain(oneCommitSentence);
-    expect(dougNext, oneCommitSentence).toContain(oneCommitSentence);
-
-    // K11 (review follow-up): the batch sentence, exact, in both skills.
-    const batchSentence =
-      "Batch: each suggestion's deps name the card of the batch it came from; still one question and one commit for the whole batch.";
-    expect(core, batchSentence).toContain(batchSentence);
-    expect(dougNext, batchSentence).toContain(batchSentence);
+    // Negative pins: no question machinery inside the section, no Ready/Decide column choice anywhere.
+    for (const [name, section] of [["doug-hand", coreSection], ["doug-next", dougSection]]) {
+      expect(section, name + " follow-up section: no AskUserQuestion").not.toContain("AskUserQuestion");
+      expect(section, name + " follow-up section: no multiSelect").not.toContain("multiSelect");
+      expect(section, name + " follow-up section: no (Recommended)").not.toContain("(Recommended)");
+    }
+    for (const [name, text] of [["doug-hand", core], ["doug-next", dougNext]]) {
+      expect(text, name + ": no '--column <ready|decide>'").not.toContain("--column <ready|decide>");
+    }
   });
-  // 2026-09-15: the reviewer of card landing-suggests-follow-ups (d598739) found doug-swarm is a third landing
-  // loop with a continue gate and no follow-up cards step. Card doug-swarm-follow-up-step gives it the same step.
-  it("K12 doug-swarm gathers follow-up candidates and offers them with AskUserQuestion before its continue gate (card doug-swarm-follow-up-step)", () => {
+  // 2026-09-15: doug-swarm is a third landing loop with a continue gate. Card doug-swarm-follow-up-step gave it the
+  // same step; card follow-ups-backlog-ranked (2026-10-03 directive) turns it into the file-to-Backlog step.
+  it("K12 doug-swarm files follow-up candidates to Backlog without a question, before its continue gate (card follow-ups-backlog-ranked)", () => {
     const swarm = readFileSync(join(root, "skills/doug-swarm/SKILL.md"), "utf8");
 
-    // position: the new section sits after the landing step and before the (renumbered) continue gate; the old
+    // position: the section sits after the landing step and before the continue gate; the old
     // "## 6. Human gate: continue" header must be gone (a stale second step 6 must fail).
     const landIdx = swarm.indexOf("## 5. Land and record");
     const followUpIdx = swarm.indexOf("## 6. Follow-up cards");
@@ -6169,6 +6428,8 @@ describe("plugin layout", () => {
     expect(gateIdx, "doug-swarm: continue gate must come after the follow-up section").toBeGreaterThan(followUpIdx);
     expect(swarm, "doug-swarm: stale '## 6. Human gate: continue' header must be gone").not.toContain("## 6. Human gate: continue");
 
+    const section6 = swarm.slice(followUpIdx, gateIdx);
+
     // the candidates sentence, verbatim.
     const candidatesSentence =
       "Before the continue gate, gather the follow-up candidates this landing produced: the report's review issues, the adversary blocks classified marginal or false whose reason names a hole, the integrate stage's conflicts and failed verify tails, and the landing summary.";
@@ -6179,104 +6440,60 @@ describe("plugin layout", () => {
       "Suggestions come only from what the run actually reported, never invented; each carries the one-line reason and cites the pass that found it.";
     expect(swarm, neverInventedSentence).toContain(neverInventedSentence);
 
-    // the no-candidates sentence, verbatim.
-    const noCandidatesSentence = "A landing with no candidates skips the question.";
-    expect(swarm, noCandidatesSentence).toContain(noCandidatesSentence);
+    // P2 and P3 verbatim inside section 6.
+    expect(section6, "doug-swarm section 6: P2").toContain(P2);
+    expect(section6, "doug-swarm section 6: P3").toContain(P3);
 
-    // the multiSelect sentence, verbatim.
-    // 2026-09-19 (card core-next-condition-open): the follow-up option's fields gain class alongside size,
-    // matching core-next and doug-next.
-    const multiSelectSentence =
-      'Otherwise ask once with `AskUserQuestion`, `multiSelect: true`, one option per suggestion with a proposed id, title, column, size, class, track, and deps on the landed card, plus a "none" option.';
-    expect(swarm, multiSelectSentence).toContain(multiSelectSentence);
+    // the threshold sentence ("filed") and the goal text sentence.
+    expect(section6, "doug-swarm follow-up step: threshold sentence must be present").toContain(followUpThreshold);
+    expect(section6, "doug-swarm follow-up step: goal text sentence").toContain(followUpCardGoal);
+    expect(section6, "doug-swarm: 'The suggestion's goal text carries both' must be gone").not.toContain("The suggestion's goal text carries both");
 
-    // the add rule: the add sentence, the reorder fragment, the Decide fragment, and the deps/column fragment.
-    const addRuleSentence = "Each accepted suggestion is added with `doug board add` (never a script that edits the record)";
-    expect(swarm, addRuleSentence).toContain(addRuleSentence);
-    expect(swarm, "`doug board reorder <id> --top`").toContain("`doug board reorder <id> --top`");
-    expect(swarm, "to Decide when it needs a decision").toContain("to Decide when it needs a decision");
-    expect(swarm, "--deps <landed-id> --column <ready|decide>").toContain("--deps <landed-id> --column <ready|decide>");
-
-    // the one-commit sentence, verbatim, and the served-page phrase.
-    const oneCommitSentence =
-      'Then one commit `"Board: <id> follow-ups added: <new-id>, <new-id>"`, whatever the count; the served page (`doug board serve`) shows the new cards without a republish.';
-    expect(swarm, oneCommitSentence).toContain(oneCommitSentence);
-    expect(swarm, "doug-swarm should contain the served-page sentence").toContain("shows the new cards without a republish");
-
-    // frontmatter: allowed-tools widened for `doug board add`, AskUserQuestion still present, model invocation still disabled.
+    // frontmatter: allowed-tools widened for `doug board add`, model invocation still disabled.
     const swarmFm = parseFrontmatter(swarm);
     expect(swarmFm["allowed-tools"], "doug-swarm frontmatter allowed-tools").toContain("Bash(doug board *)");
     expect(swarmFm["allowed-tools"], "doug-swarm frontmatter allowed-tools").toContain("Bash(node *bin.js board *)");
-    expect(swarmFm["allowed-tools"], "doug-swarm frontmatter allowed-tools").toContain("AskUserQuestion");
     expect(swarmFm["disable-model-invocation"], "doug-swarm frontmatter disable-model-invocation").toBe("true");
 
-    // 2026-09-15 (card doug-swarm-k12-unpinned-cases): the reviewer of card doug-swarm-follow-up-step (239918c)
-    // found mutation R2 that K12 passed silently. Pin the goal-without-a-card sentence (R2).
-
-    // assertion 9 (R2): the goal-without-a-card sentence, verbatim, in section 6.
-    const section6 = swarm.slice(followUpIdx, gateIdx);
+    // 2026-09-15 (card doug-swarm-k12-unpinned-cases): the goal-without-a-card sentence, verbatim, in section 6.
     const goalWithoutCardSentence =
       "A goal without a card (section 1's second bullet) skips this step, the way section 5 says such a run skips the board steps.";
     expect(section6, "doug-swarm section 6: goal-without-a-card sentence must be present").toContain(goalWithoutCardSentence);
 
-    // 2026-09-15 (card follow-up-step-threshold): the K12 batch chain ran eight S cards because the follow-up
-    // step had no threshold on out-of-scope findings. Pin the threshold sentence in doug-swarm's section 6.
-    const thresholdSentence =
-      "A reviewer's out-of-scope finding is offered only when it is realistic drift (a form a model or a person would plausibly write) or when one card would close the whole class; otherwise it goes in the landing note and is not offered.";
-    expect(section6, "doug-swarm follow-up step: threshold sentence must be present").toContain(thresholdSentence);
+    // negative pins: no question machinery in the section, no Ready/Decide column choice anywhere in the skill.
+    expect(section6, "doug-swarm section 6: no AskUserQuestion").not.toContain("AskUserQuestion");
+    expect(section6, "doug-swarm section 6: no multiSelect").not.toContain("multiSelect");
+    expect(section6, "doug-swarm section 6: no (Recommended)").not.toContain("(Recommended)");
+    expect(swarm, "doug-swarm: no '--column <ready|decide>'").not.toContain("--column <ready|decide>");
 
+    // Batch chain (cards doug-swarm-k12-*): doug-next's batch sentence, and any line starting "Batch:" behind any
+    // non-letter prefix, must not appear in doug-swarm. The prefix-agnostic regex closes the class (a line is
+    // rejected when its first letters, after any run of non-letter characters, spell "batch" and a colon).
+    // P3 is checked inside section 6 only; the regex is applied outside it.
     const dougNextBatchSentence =
       "Batch: each suggestion's deps name the card of the batch it came from; still one question, one commit, and one republish for the whole batch.";
     expect(swarm, "doug-swarm: doug-next's batch sentence must not appear").not.toContain(dougNextBatchSentence);
     const body = swarm.replace(/^---\n[\s\S]*?\n---/, "");
-    // assertion 10 (R3, card doug-swarm-k12-batch-any-prefix): closes the K12 batch-paragraph chain begun by
-    // doug-swarm-follow-up-step. Each later card in the chain — doug-swarm-k12-unpinned-cases (any batch
-    // paragraph, not just doug-next's exact sentence), doug-swarm-k12-batch-any-section (not scoped to section
-    // 6), doug-swarm-k12-batch-forms (indentation, markdown emphasis, and case), doug-swarm-k12-batch-list-item
-    // (list and heading markers), doug-swarm-k12-batch-delimiters (paren-numbered lists and space-less
-    // headings), doug-swarm-k12-batch-seven-hash (seven-or-more-hash headings), and
-    // doug-swarm-k12-batch-escaped-hash (a backslash-escaped hash run) — widened the regex by one Markdown
-    // prefix form, and each review found the next form the regex still missed. This card closes the class by
-    // design with a prefix-agnostic regex: a line is rejected when the first letters on it, after any run of
-    // non-letter characters (whitespace, list markers, hashes, backslashes, blockquote and emphasis markers,
-    // backticks, digits), spell "batch" followed by optional whitespace and a colon. Chosen `[^a-z]*` (not the
-    // line-local `[^a-z\n]*` alternative) — the class excludes letters case-insensitively either way, and
-    // letting the non-letter run span a blank line still only matches when some line's first letters spell
-    // "batch:" (tester's brief, fact F5). The only lines this cannot catch start with a letter, which is the
-    // control class by definition, so no further prefix card follows this one. The chain's history stays in
-    // git and docs/live-runs.md.
+    const bodyOutsideP3 = body.replace(P3, "");
     expect(
-      body,
-      "doug-swarm: no line whose first letters spell batch followed by a colon, behind any non-letter prefix (whitespace, list marker, hashes, backslashes, blockquote, emphasis, backtick, digits), after the frontmatter",
+      bodyOutsideP3,
+      "doug-swarm: no line whose first letters spell batch followed by a colon, outside the pinned P3 paragraph",
     ).not.toMatch(/^[^a-z]*batch\s*:/im);
   });
-  // 2026-09-30 (card follow-ups-carry-recommendation): the follow-up question listed two candidates with no
-  // recommendation, so the user had to ask "What do you suggest?". Pin the recommendation sentence in all three
-  // landing loops, appended to the question paragraph.
-  it("follow-up step: the lead recommends add or skip per candidate, in doug-hand, doug-next, and doug-swarm (card follow-ups-carry-recommendation)", () => {
-    const recommendSentence =
-      'The lead recommends: before or in the question, each suggestion says add or skip with a one-line reason drawn from what the run reported; each recommended option\'s label ends with "(Recommended)" and recommended options come first, and when the lead recommends none, the "none" option carries "(Recommended)" and comes first.';
-    const questionSentence =
-      'A landing with no candidates skips the question. Otherwise ask once with `AskUserQuestion`, `multiSelect: true`, one option per suggestion with a proposed id, title, column, size, class, track, and deps on the landed card, plus a "none" option.';
+  // 2026-09-30 (card follow-ups-carry-recommendation) pinned a recommendation sentence on the follow-up question.
+  // 2026-10-03 (card follow-ups-backlog-ranked): there is no question any more, so the sentence and the
+  // "(Recommended)" labels are gone from all three landing loops; the priority placement replaces them.
+  it("follow-up step: no question and no recommendation sentence in doug-hand, doug-next, and doug-swarm (card follow-ups-backlog-ranked)", () => {
+    const recommendSentence = "The lead recommends: before or in the question";
     for (const skill of ["doug-hand", "doug-next", "doug-swarm"]) {
       const text = readFileSync(join(root, "skills", skill, "SKILL.md"), "utf8");
-      // T1: the new sentence, verbatim.
-      expect(text, `${skill} T1 recommendation sentence`).toContain(recommendSentence);
-      // T2: the existing question sentence is unchanged.
-      expect(text, `${skill} T2 question sentence`).toContain(questionSentence);
-      // T3: same line, after T2's text, inside the Follow-up cards section.
+      expect(text, skill + " no recommendation sentence").not.toContain(recommendSentence);
+      expect(text, skill + " no 'skips the question'").not.toContain("skips the question");
       const start = text.indexOf("Follow-up cards");
-      expect(start, `${skill} Follow-up cards heading`).toBeGreaterThan(-1);
+      expect(start, skill + " Follow-up cards heading").toBeGreaterThan(-1);
       const next = text.indexOf("\n## ", start + 1);
       const section = text.slice(start, next === -1 ? undefined : next);
-      const line = section.split("\n").find((l) => l.includes(questionSentence));
-      expect(line, `${skill} T3 question paragraph inside Follow-up cards`).toBeDefined();
-      expect(line.indexOf(recommendSentence), `${skill} T3 recommendation on the question's line`).toBeGreaterThan(-1);
-      expect(line.indexOf(recommendSentence), `${skill} T3 recommendation after the question sentence`).toBeGreaterThan(
-        line.indexOf(questionSentence),
-      );
-      // T4 (card follow-ups-carry-recommendation): "recommends none" now names the question's "none (Recommended)" option, so the threshold sentence's old clause must be gone.
-      expect(text, `${skill} T4 old threshold clause removed`).not.toContain("landing note and the lead recommends none");
+      expect(section, skill + " section has the P2 priority placement").toContain("`--top` for a defect that blocks a commit, a gate, or a user");
     }
   });
   it("research skill: a design-critical fact is verified only by a verbatim, line-numbered quote from the raw source (card research-verbatim-check)", () => {
@@ -6467,8 +6684,10 @@ describe("plugin layout", () => {
     const addLineIdx = core.indexOf(classTag, followUpHeadingIdx);
     expect(addLineIdx, "the follow-up `doug board add` line must also carry --class").toBeGreaterThan(followUpHeadingIdx);
     expect(addLineIdx, "the Start bullet's --class and the follow-up add line's --class must be two distinct occurrences").not.toBe(startIdx);
-    expect(core, "the follow-up question's option text must list class alongside size").toContain(
-      "one option per suggestion with a proposed id, title, column, size, class, track, and deps"
+    // 2026-10-03 (card follow-ups-backlog-ranked): the question is gone; the filed card carries class instead.
+    const coreAddLine = core.slice(addLineIdx).split("\n")[0];
+    expect(coreAddLine, "doug-hand's follow-up `doug board add` line must carry --class and --column backlog").toContain(
+      classTag + " --track <hand|flow> --deps <landed-id> --column backlog"
     );
 
     // Reviewer finding: the same --class-after-the-follow-up-heading position, pinned against doug-next and
@@ -6969,6 +7188,15 @@ describe("card op-core-next-general: doug-hand, /doug-next routing, and the voca
     expect(core).not.toContain("packages/doug-cli");
   });
 
+  it("(d2) doug-hand names the verify script as the way to run the gate, beside the pinned stopGate.commands phrase (card verified-tree-record)", () => {
+    const core = read("skills/doug-hand/SKILL.md");
+    expect(core).toContain(".doug/hooks/scripts/verify.mjs");
+    expect(core).toContain("the commands in `.doug/config.json` `stopGate.commands`");
+    expect(core).not.toContain("pnpm test:unit");
+    expect(core).not.toContain("pnpm typecheck");
+    expect(core).not.toContain("harness-fix");
+  });
+
   it("(e) doug-hand step 3 has the coder write the failing test first when the project has no tester agent, outside the tester paragraph", () => {
     const core = read("skills/doug-hand/SKILL.md");
     const SENTENCE =
@@ -7178,5 +7406,389 @@ describe("role agents' preloaded skills (card role-skills-preload)", () => {
     expect(problems.filter((p) => p.startsWith("crlf.md: ghost"))).toHaveLength(1);
     expect(problems.filter((p) => p.startsWith("crlfok.md"))).toHaveLength(0);
     expect(problems).toHaveLength(5);
+  });
+});
+
+// Card autopilot part C: `/doug-next --auto [n]` runs the queue on one approval. The sentences below are pinned
+// verbatim in the skill text; one assertion per sentence so a failure names the sentence that went missing.
+describe("card autopilot: doug-next and doug-hand skill text", () => {
+  const nextText = () => readFileSync(join(root, "skills/doug-next/SKILL.md"), "utf8");
+  const handText = () => readFileSync(join(root, "skills/doug-hand/SKILL.md"), "utf8");
+  const autoSection = (text) => {
+    const i = text.indexOf("## Autopilot (--auto)");
+    if (i < 0) return "";
+    const rest = text.slice(i + 5);
+    const j = rest.search(/\n## /);
+    return j < 0 ? text.slice(i) : text.slice(i, i + 5 + j);
+  };
+
+  it("doug-next's plain routing takes the next card of either track through board.mjs next --track any", () => {
+    const next = nextText();
+    expect(next).toContain('Without: `node "${CLAUDE_PLUGIN_ROOT}/scripts/board.mjs" next --track any`.');
+    expect(next).toContain("A plain /doug-next takes the next runnable Ready card of either track; a hand-track card goes to the doug-hand skill.");
+  });
+  it("doug-next's frontmatter description mentions --auto", () => {
+    expect(parseFrontmatter(nextText()).description).toContain("--auto");
+  });
+  it("doug-next has an '## Autopilot (--auto)' section", () => {
+    expect(nextText()).toContain("\n## Autopilot (--auto)\n");
+  });
+
+  it("doug-next no longer defaults the wall cap to a fixed 4 hours (card autopilot-wall-cap-by-size)", () => {
+    expect(nextText()).not.toContain("4 hours of wall clock");
+  });
+
+  it("doug-next no longer names the flat per-size wall budget (card wall-budget-size-class)", () => {
+    expect(nextText()).not.toContain("S 45, M 90, L 180");
+  });
+
+  const pinned = {
+    "the queue sentence": "`/doug-next --auto [n]` takes the first n runnable Ready cards of either track in board order (`board.mjs next --batch <n> --track any`).",
+    "the swarm branch": "A hand card whose goal asks for a swarm follows doug-hand's 2b swarm branch, with the queue approval standing for its plan approval.",
+    "unlimited: the fixed queue with n, the Ready re-read without it (S1)": "With n, the queue is fixed at the approval. Without n, autopilot is unlimited: before each card it re-reads Ready with `board.mjs next --track any` and takes the next runnable Ready card in board order.",
+    "unlimited: Ready only, promoted cards picked up (S2)": "It never takes a Backlog card: follow-ups still go to Backlog, and a card the user promotes to Ready during the run is picked up.",
+    "unlimited: the approval shows the runnable Ready cards (S3)": "Unlimited autopilot shows the runnable Ready cards at the approval, and the approval covers every card it later takes from Ready.",
+    "unlimited: no card cap, USD $40, wall cap grows by size (S4)": "Unlimited autopilot has no card cap: its USD cap defaults to $40, and its wall cap grows as each card is taken, by that card's budget from the same size x class table (`board.mjs budgets` prints it); only the totals are checked between cards.",
+    "unlimited: the budget refresh sentence": "When the measured walls drift, the lead reruns `board.mjs budgets --from docs/live-runs.md`, which recomputes the table and prints each cell's n, and replaces the table in the `board.mjs` source with the printed one.",
+    "the ending-conditions intro": "It ends with the summary below, one condition per line:",
+    "ends: Ready has no runnable card": "It ends when Ready has no runnable card, under unlimited autopilot.",
+    "ends: the user says stop": "It ends when the user says stop: the current card is finished or left In flow.",
+    "ends: context at the threshold": 'It ends when the lead\'s context is at or above autopilot.contextThreshold in .doug/config.json (default 60): between cards the lead runs `node "${CLAUDE_PLUGIN_ROOT}/scripts/context.mjs"`, which prints the context percentage of the lead\'s own session transcript, and treats a run that prints no reading as at the threshold.',
+    "ends: the anchor handoff": "Before that summary it refreshes the anchor handoff: a `## Autopilot handoff` section in .doug/anchor.md naming the landed cards, any card left In flow, and that a new session resumes with /doug-next --auto.",
+    "the default caps": "The caps default to the queue's length in cards, the wall cap that board.mjs next --batch prints (the sum of each card's budget from the size x class wall budget table in board.mjs, at the p80 of measured landings: a size/class cell with fewer than 5 landings falls back to its size's all-class figure, a card with no class uses its size's all-class figure, and a card with no size counts as M), and $40, and the user may change them at the approval.",
+    "the skipped gates' actions still happen": "Under autopilot a card still gets everything the skipped gates' Start or Approve branches do: a hand card gets doug-hand step 2's class, move to flow, and condition open, and the wall clock is noted when the card starts; a flow card gets section 1's move and section 3's Approve steps.",
+    "the queue is shown once with caps": "It shows the queue once, each card's id, size, track, and class, with the caps: cards, wall clock, and USD.",
+    "the single approval": "Autopilot asks one approval, for the whole queue, and no other gate: no start gate, no shape question, and no continue gate.",
+    "the queue approval stands for plan approval": "The queue approval stands for each flow-track card's plan approval: the lead puts plan.mjs show in the chat and runs plan.mjs approve itself.",
+    "by hand unless swarm": "A card runs by hand unless its goal asks for a swarm.",
+    "follow-ups filed without a question": "Follow-ups are filed to Backlog as section 6 says, without a question.",
+    "cost measured between cards": "Between cards the lead measures the session's cost with cost.mjs --session latest and checks every cap.",
+    "stop: design decision": "It stops and asks when a card needs a design decision its goal does not answer.",
+    "stop: gate red twice": "It stops and asks when the gate is red twice on one card.",
+    "stop: hook blocks": "It stops and asks when a hook blocks a step.",
+    "stop: reviewer blocker": "It stops and asks when a reviewer blocker stays open after one fix pass.",
+    "stop: cap reached": "It stops and asks when a cap is reached.",
+    "stop: workflow run pauses at a human gate, on either track": "It stops and asks when a workflow run pauses at a human gate, on either track.",
+    "stop: unpriced transcript": "It stops and asks when cost.mjs reports an unpriced transcript, because the USD cap cannot be checked.",
+    "stop: workflow run report not ok, on either track": "It stops and asks when a workflow run's report is not ok, on either track.",
+    "resume after the answer": "It waits for the answer, then resumes the queue at the card it stopped on.",
+    "the single closing summary": "It ends with one summary: each landed card's commit, wall clock, and gate line; each stopped card and why; each edge case taken conservatively; and the follow-ups filed.",
+  };
+  for (const [name, sentence] of Object.entries(pinned)) {
+    it(`doug-next's Autopilot section pins ${name}`, () => {
+      expect(autoSection(nextText()), `missing from the Autopilot section: ${sentence}`).toContain(sentence);
+    });
+  }
+  it("the old fixed default of 7 cards is gone (card autopilot-unlimited)", () => {
+    expect(autoSection(nextText())).not.toContain("Without n, n is 7, the Ready cap.");
+  });
+  it("each ending condition sits on its own line, in order, after the stop list and before the edge-case paragraph", () => {
+    const auto = autoSection(nextText());
+    const lines = auto.split("\n").map((l) => l.replace(/^\s*(?:[-*]\s+)?/, ""));
+    const keys = Object.keys(pinned).filter((k) => k.startsWith("ends:"));
+    expect(keys).toHaveLength(4);
+    let prev = auto.indexOf(pinned["the ending-conditions intro"]);
+    expect(prev, "ending-conditions intro missing").toBeGreaterThanOrEqual(0);
+    expect(prev).toBeGreaterThan(auto.indexOf(pinned["stop: cap reached"]));
+    for (const k of keys) {
+      expect(lines.some((l) => l.startsWith(pinned[k])), k).toBe(true);
+      const at = auto.indexOf(pinned[k]);
+      expect(at, k).toBeGreaterThan(prev);
+      prev = at;
+    }
+    const edge = auto.indexOf("An edge case or input the goal does not name");
+    expect(edge).toBeGreaterThan(prev);
+  });
+  it("the workflow-run stop lines no longer carry the flow-track wording", () => {
+    const auto = autoSection(nextText());
+    expect(auto).not.toContain("It stops and asks when a flow-track run pauses at a human gate.");
+    expect(auto).not.toContain("It stops and asks when a flow-track run's report is not ok.");
+    expect(auto).not.toMatch(/stops and asks when a flow-track run/);
+  });
+  it("each stop condition sits on its own line", () => {
+    const lines = autoSection(nextText()).split("\n").map((l) => l.replace(/^\s*(?:[-*]\s+)?/, ""));
+    for (const [name, sentence] of Object.entries(pinned)) {
+      if (!name.startsWith("stop:")) continue;
+      expect(lines.some((l) => l.startsWith(sentence)), name).toBe(true);
+    }
+  });
+  it("doug-next's Autopilot section says each card still runs its track unchanged and how each track's steps are skipped", () => {
+    const auto = autoSection(nextText());
+    expect(auto).toContain("research when needed, tester, coder, reviewer, mutations, gate, commit, record, Done; a lean-lane card has no tester and no mutation list)");
+    expect(auto).toContain("doug-hand from step 3");
+    expect(auto).toMatch(/steps? 2/);
+    expect(auto).toContain("2b");
+    expect(auto).toMatch(/section 3/);
+    expect(auto).toMatch(/section 7/);
+  });
+  it("doug-hand says the start gate, the shape question, and the continue gate are not asked under autopilot", () => {
+    expect(handText()).toContain("Under autopilot (/doug-next --auto) the start gate, the shape question, and the continue gate are not asked; the queue approval stands for them, and the autopilot's stop conditions apply.");
+  });
+  it("doug-next no longer says the swarm tag", () => {
+    expect(autoSection(nextText())).not.toContain("carries the swarm tag");
+  });
+  it("doug-next's top paragraph says the loop never continues without being asked, except under autopilot", () => {
+    expect(nextText()).toContain("the loop never continues to another card without being asked (except under autopilot, below)");
+  });
+  it("doug-next's section 3 says approval is never automatic, except that under autopilot the queue approval stands for it", () => {
+    expect(nextText()).toContain("Approval is never automatic and never inferred, except that under autopilot the queue approval stands for it.");
+  });
+  it("doug-hand's never-continues sentence carries the autopilot exception", () => {
+    expect(handText()).toContain("never continues to another card without being asked (except under autopilot, /doug-next --auto)");
+  });
+  it("docs/rehearsals.md counts four scenarios, not three", () => {
+    const p = join(root, "..", "..", "docs/rehearsals.md");
+    if (!existsSync(p)) return; // absent from the public snapshot
+    const text = readFileSync(p, "utf8");
+    expect(text).not.toContain("all three scenarios");
+    expect(text).toContain("all four scenarios");
+  });
+});
+
+// Card autopilot-edge-case-not-decision: an edge case the goal does not name is not a design decision.
+describe("card autopilot-edge-case-not-decision: doug-next Autopilot section", () => {
+  const nextText = () => readFileSync(join(root, "skills/doug-next/SKILL.md"), "utf8");
+  const autoSection = (text) => {
+    const i = text.indexOf("\n## Autopilot (--auto)\n");
+    if (i < 0) return "";
+    const rest = text.slice(i + 5);
+    const j = rest.search(/\n## /);
+    return j < 0 ? text.slice(i) : text.slice(i, i + 5 + j);
+  };
+  const edge = "An edge case or input the goal does not name is not a design decision: the lead takes the conservative behaviour, rejecting the input or, where rejecting is not possible, preserving it, never guessing, has whoever writes the test pin it, and names it in the card's landing note and the closing summary.";
+  const decision = "A design decision is a choice, for inputs the goal names, between behaviours the goal's acceptance would both satisfy and a user would notice, or one that changes another card's or module's contract.";
+  const stopLine = "It stops and asks when a card needs a design decision its goal does not answer.";
+
+  it("pins the edge-case sentence in the Autopilot section", () => {
+    expect(autoSection(nextText()), `missing from the Autopilot section: ${edge}`).toContain(edge);
+  });
+  it("pins the design-decision definition in the Autopilot section", () => {
+    expect(autoSection(nextText()), `missing from the Autopilot section: ${decision}`).toContain(decision);
+  });
+  it("places the edge-case sentence after the design-decision stop line and before the resume sentence", () => {
+    const auto = autoSection(nextText());
+    const stop = auto.indexOf(stopLine);
+    const at = auto.indexOf(edge);
+    const resume = auto.indexOf("It waits for the answer, then resumes the queue at the card it stopped on.");
+    expect(stop, "stop line missing").toBeGreaterThanOrEqual(0);
+    expect(at, "edge-case sentence missing from the Autopilot section").toBeGreaterThanOrEqual(0);
+    expect(resume, "resume sentence missing").toBeGreaterThanOrEqual(0);
+    expect(at).toBeGreaterThan(stop);
+    expect(at).toBeLessThan(resume);
+  });
+  it("no longer carries the old wording of either sentence", () => {
+    const auto = autoSection(nextText());
+    expect(auto).not.toContain("the choice that rejects or preserves rather than guesses, has the tester pin it");
+    expect(auto).not.toContain("A design decision is a choice between behaviours");
+  });
+});
+
+describe("card user-card-mini-adr", () => {
+  const body = (n) =>
+    "A card the user asks for is a mini ADR, not a one-line goal. Before filing it, the lead asks the scoping questions in one `AskUserQuestion` of up to 4 questions, each with a Recommended option, and writes the answers into the goal. The goal carries the fixed headings Context / Decision / Options / Questions; `docs/decisions` stays for real ADRs. Only a user-requested card takes this form: a follow-up the lead files keeps " +
+    n +
+    "'s lighter form, so autopilot follow-ups stay question-free.";
+  const cases = [
+    { skill: "doug-next", follow: "## 6. Follow-up cards", gate: "## 7. Human gate: continue", ref: "section 6" },
+    { skill: "doug-hand", follow: "## 5. Follow-up cards", gate: "## 6. Human gate: continue", ref: "step 5" },
+  ];
+  for (const c of cases) {
+    const text = () => readFileSync(join(root, "skills", c.skill, "SKILL.md"), "utf8");
+    const heading = "## Cards the user asks for";
+    const section = () => {
+      const t = text();
+      const i = t.indexOf(heading);
+      if (i < 0) return "";
+      const j = t.indexOf("\n## ", i + heading.length);
+      return j < 0 ? t.slice(i) : t.slice(i, j);
+    };
+    it(`${c.skill}: has the heading, after the follow-up section and before the continue gate`, () => {
+      const t = text();
+      const at = t.indexOf(heading);
+      expect(at, `missing heading: ${heading}`).toBeGreaterThanOrEqual(0);
+      expect(at).toBeGreaterThan(t.indexOf(c.follow));
+      expect(t.indexOf(c.follow)).toBeGreaterThanOrEqual(0);
+      expect(at).toBeLessThan(t.indexOf(c.gate));
+      expect(t.indexOf(c.gate)).toBeGreaterThanOrEqual(0);
+    });
+    it(`${c.skill}: the section body pins the mini-ADR text verbatim`, () => {
+      const s = section();
+      expect(s, "section missing").not.toBe("");
+      expect(s).toContain(body(c.ref));
+      for (const p of [
+        "Context / Decision / Options / Questions",
+        "one `AskUserQuestion` of up to 4 questions",
+        "each with a Recommended option",
+      ]) expect(s, `missing: ${p}`).toContain(p);
+    });
+    it(`${c.skill}: the follow-up lighter form is unchanged`, () => {
+      expect(text()).toContain("Follow-ups are filed without a question.");
+    });
+  }
+  it("CLAUDE.md carries the sentence and stays within 60 lines", () => {
+    const md = readFileSync(join(root, "..", "..", "CLAUDE.md"), "utf8");
+    expect(md).toContain('A card the user asks for is filed as a mini ADR (doug-next and doug-hand, "Cards the user asks for").');
+    expect(md.replace(/\n$/, "").split("\n").length).toBeLessThanOrEqual(60);
+  });
+});
+
+// card hand-lean-lane: a size S card whose class is prose or docs runs as coder then reviewer (no tester seat,
+// no mutation list). Sentences pinned verbatim, each appearing exactly once in its file.
+describe("card hand-lean-lane: the lean lane in doug-hand, docs/board.md, and harness-fix", () => {
+  const repo = join(root, "..", "..");
+  const count = (text, needle) => text.split(needle).length - 1;
+  const LEAN =
+    "The lean lane: a size S card whose class is `prose` or `docs` runs as coder then reviewer, with no tester seat and no mutation list. One coder on the `implement` row writes the test and the change together, from the goal, and the reviewer reviews it as usual. The session model still never implements or reviews.";
+  const F2 =
+    " On the lean lane the coder, not a tester, writes or extends the test file. The reviewer has no list to rerun, so it adds its own mutations only where the change turns out to be a mechanism.";
+  const F2_FIRST = "On the lean lane the coder, not a tester, writes or extends the test file.";
+  const F3 = "On the lean lane (doug-hand step 3) the coder writes it instead.";
+  const LEAN_FIRST_TWO =
+    "The lean lane: a size S card whose class is `prose` or `docs` runs as coder then reviewer, with no tester seat and no mutation list. One coder on the `implement` row writes the test and the change together, from the goal, and the reviewer reviews it as usual.";
+
+  it("S1: doug-hand step 3 carries the lean-lane sentence once, as its own paragraph after the tests-only paragraph", () => {
+    const core = readFileSync(join(root, "skills/doug-hand/SKILL.md"), "utf8");
+    expect(count(core, LEAN), "S1 must appear exactly once").toBe(1);
+    const h3 = core.indexOf("## 3. Build it by hand");
+    const h4 = core.indexOf("## 4. Record and land");
+    expect(core.indexOf(LEAN), "S1 must sit inside step 3").toBeGreaterThan(h3);
+    expect(core.indexOf(LEAN)).toBeLessThan(h4);
+    const paras = core.split("\n\n").map((p) => p.trim());
+    expect(count(core, LEAN + F2), "F2 must follow S1 in the same paragraph, once").toBe(1);
+    expect(count(core, F2_FIRST), "F2's first sentence must appear once").toBe(1);
+    const leanIdx = paras.indexOf(LEAN + F2);
+    expect(leanIdx, "S1 must be a paragraph of its own").toBeGreaterThan(-1);
+    expect(paras[leanIdx - 1], "S1 follows the tests-only paragraph").toMatch(/^A tests-only card /);
+    const testerPara = paras.find((p) => p.startsWith("Next: before the coder, spawn the project's `tester` agent"));
+    expect(testerPara).toBeDefined();
+    expect(testerPara, "S1 must not sit in the tester paragraph").not.toContain("The lean lane");
+  });
+
+  it("S2: the order sentence ends with the lean-lane clause, once", () => {
+    const core = readFileSync(join(root, "skills/doug-hand/SKILL.md"), "utf8");
+    const ORDER =
+      "The order is: research (when called for), the test file and the project's procedure, the brief, the tester, the coder, the reviewer, then the lead's own gate and commit; a lean-lane card has no tester.";
+    expect(count(core, ORDER)).toBe(1);
+  });
+
+  it("S3: the tester paragraph says the tester is spawned in the foreground, never in the background", () => {
+    const core = readFileSync(join(root, "skills/doug-hand/SKILL.md"), "utf8");
+    const S3 = "The tester is spawned in the foreground, never in the background: the coder starts from its red tests.";
+    expect(count(core, S3), "S3 must appear exactly once").toBe(1);
+    const testerIdx = core.indexOf("Next: before the coder, spawn the project's `tester` agent");
+    expect(testerIdx).toBeGreaterThan(-1);
+    const start = testerIdx;
+    let end = core.indexOf("\n\n", start);
+    if (end === -1) end = core.length;
+    expect(core.slice(start, end), "S3 must sit in the tester paragraph").toContain(S3);
+  });
+
+  it("S5: docs/board.md's track row carries the lean-lane sentence after 'Decision 0005.', once", () => {
+    const board = readFileSync(join(repo, "docs/board.md"), "utf8");
+    const S5 =
+      "A size S hand card whose class is `prose` or `docs` takes the lean lane: one coder writes the test and the change, with no tester seat and no mutation list (doug-hand step 3).";
+    expect(count(board, S5), "S5 must appear exactly once").toBe(1);
+    expect(board).toContain("Decision 0005. " + S5);
+    const line = board.split("\n").find((l) => l.includes(S5));
+    expect(line, "S5 must sit in the track row").toMatch(/^\|\s*`?track/);
+  });
+
+  it("F3: harness-fix section 1 says the coder writes the test on the lean lane, once, right after the tester sentence", () => {
+    const hf = readFileSync(join(repo, ".claude/skills/harness-fix/SKILL.md"), "utf8");
+    expect(count(hf, F3), "F3 must appear exactly once").toBe(1);
+    const h1 = hf.indexOf("## 1.");
+    const h2 = hf.indexOf("## 2.");
+    expect(hf.slice(h1, h2), "F3 must sit in section 1").toContain(F3);
+    expect(hf).toContain("Under a card, the tester writes or extends the test before the change, in the file that already covers the module, and the coder runs only that file while iterating: `pnpm exec vitest run <path/to/file.test>`. " + F3);
+  });
+
+  it("S6: harness-fix section 0 carries the lean-lane sentences once, immediately before the tests-only sentence", () => {
+    const hf = readFileSync(join(repo, ".claude/skills/harness-fix/SKILL.md"), "utf8");
+    expect(count(hf, LEAN_FIRST_TWO), "S6 must appear exactly once").toBe(1);
+    const h0 = hf.indexOf("## 0.");
+    const h1 = hf.indexOf("## 1.");
+    expect(h0).toBeGreaterThan(-1);
+    expect(h1).toBeGreaterThan(h0);
+    const sec = hf.slice(h0, h1).trimEnd();
+    const TESTS_ONLY = "On a tests-only card (the goal says";
+    expect(sec.includes(LEAN_FIRST_TWO + " " + TESTS_ONLY), "S6 must sit immediately before the tests-only sentence in section 0").toBe(true);
+  });
+});
+
+describe("card memory-every-session: doug-hand recalls into every brief", () => {
+  const count = (text, needle) => text.split(needle).length - 1;
+  const S1 =
+    'Then recall memory for the card: `node "${CLAUDE_PLUGIN_ROOT}/scripts/memory.mjs" brief-lessons <id>`, and paste its output verbatim, header, lesson lines with their ids, and `memoryUsed` line, into every tester, coder, and reviewer brief.';
+  const S2 = "When it prints no lessons, or exits nonzero, say so in the chat and go on: recall never blocks a card.";
+  const S3 =
+    "Save each brief to `.doug/.state/reports/<id>/briefs/<n>-<seat>.md` before spawning its agent, and each reviewer report to `.doug/.state/reports/<id>/reviews/<n>.md` when it returns.";
+  const NEXT = "Next: before the coder, spawn the project's `tester`";
+  const hand = () => readFileSync(join(root, "skills/doug-hand/SKILL.md"), "utf8");
+  const paragraphOf = (text, startsWith) => text.split("\n\n").map((p) => p.trim()).find((p) => p.startsWith(startsWith));
+
+  it("S1: the brief-lessons recall sentence appears once, verbatim", () => {
+    expect(count(hand(), S1)).toBe(1);
+  });
+
+  it("S2: the recall-never-blocks sentence appears once, verbatim", () => {
+    expect(count(hand(), S2)).toBe(1);
+  });
+
+  it("S3: the save-briefs-and-reviews sentence appears once, verbatim", () => {
+    expect(count(hand(), S3)).toBe(1);
+  });
+
+  it("the recall sentence sits inside step 3, after the research paragraph and before the tester paragraph", () => {
+    const text = hand();
+    const h3 = text.indexOf("## 3. Build it by hand");
+    const h4 = text.indexOf("## 4. Record and land");
+    const research = text.indexOf("First the research step when step 1 called for one");
+    const s1 = text.indexOf(S1);
+    expect(s1, "S1 missing").toBeGreaterThan(-1);
+    expect(research).toBeGreaterThan(h3);
+    expect(s1).toBeGreaterThan(research);
+    expect(s1).toBeLessThan(text.indexOf(NEXT));
+    expect(s1).toBeLessThan(h4);
+  });
+
+  it("step 3 carries one separate sentence saying the lean lane and a tests-only card get the same brief-lessons block", () => {
+    const text = hand();
+    const SENT = "On the lean lane and on a tests-only card, every brief carries the same `brief-lessons` block.";
+    expect(count(text, SENT), "sentence must appear once").toBe(1);
+    const at = text.indexOf(SENT);
+    expect(at).toBeGreaterThan(text.indexOf(S1));
+    expect(at).toBeLessThan(text.indexOf("## 4. Record and land"));
+  });
+});
+
+describe("card memory-every-session: hand landing reflects", () => {
+  const report = () => readFileSync(join(root, "skills/run-report/SKILL.md"), "utf8");
+  const handSection = () => {
+    const r = report();
+    return r.slice(r.indexOf("## A hand-track landing"), r.indexOf("## Then"));
+  };
+
+  it("run-report's hand section runs reflect --hand after record --hand and keeps the fail-open sentence", () => {
+    const h = handSection();
+    const rec = h.indexOf('memory.mjs" record <id> --hand');
+    const refl = h.indexOf('memory.mjs" reflect --hand <id>');
+    expect(rec, "record --hand step present").toBeGreaterThanOrEqual(0);
+    expect(refl, "reflect --hand step present").toBeGreaterThan(rec);
+    for (const flag of ["--commit <sha>", "--rounds <n>", "--review"]) expect(h.slice(refl)).toContain(flag);
+    expect(h).toContain(
+      "Its one-line summary (with the measured cost) goes in the chat. An exit 1 naming the LLM pass is said in the chat and the landing goes on regardless — reflect is a log, not a gate, the same as record."
+    );
+  });
+
+  it("run-report no longer says reflect does not run on a hand-track landing", () => {
+    expect(report()).not.toContain("does not run on a hand-track landing");
+  });
+
+  it("doug-hand step 4.1 names --rounds and --review", () => {
+    const text = readFileSync(join(root, "skills/doug-hand/SKILL.md"), "utf8");
+    const step4 = text.slice(text.indexOf("## 4. Record and land"), text.indexOf("## 5. Follow-up cards"));
+    const first = step4.slice(step4.indexOf("1. Invoke the `run-report` skill"), step4.indexOf("\n2. "));
+    expect(first).toContain("--rounds");
+    expect(first).toContain("--review");
   });
 });

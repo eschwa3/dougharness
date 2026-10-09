@@ -559,6 +559,15 @@ export function planWarnings(plan) {
   else if (n > FEATURE_TASKS) out.push(`${n} tasks: a feature is three to five; merge tasks that share a file group or split the plan`);
   const files = new Set(plan.tasks.flatMap((t) => (Array.isArray(t.files) ? t.files : [])));
   if (n > 1 && files.size === 1) out.push(`${n} tasks own the same single file (${[...files][0]}): single-file work is one task`);
+  const verifyOwners = [];
+  for (const v of Array.isArray(plan.verify) ? plan.verify : []) if (typeof v === "string" && v.trim()) verifyOwners.push([v.trim(), "plan.verify"]);
+  for (const t of plan.tasks) if (t && typeof t.verify === "string" && t.verify.trim()) verifyOwners.push([t.verify.trim(), `task ${t.id} verify`]);
+  for (const a of Array.isArray(plan.acceptance) ? plan.acceptance : []) {
+    if (!a || typeof a !== "object" || typeof a.command !== "string" || !a.command.trim()) continue;
+    const cmd = a.command.trim();
+    const hit = verifyOwners.find(([c]) => c === cmd);
+    if (hit) out.push(`acceptance "${a.text}" command \`${cmd}\` repeats a verify command (${hit[1]}): every verifier, integrate, and land already run it; name a narrower check or make it prose`);
+  }
   return out;
 }
 

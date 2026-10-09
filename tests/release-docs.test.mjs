@@ -80,6 +80,18 @@ describe("release docs", () => {
     }
   });
 
+  it("docs/getting-started.md has a 'Starting from an empty repository' section with the walking-skeleton recipe (card init-greenfield)", () => {
+    const lines = gettingStarted.split("\n");
+    const start = lines.findIndex((l) => l === "## Starting from an empty repository");
+    expect(start, "docs/getting-started.md has no '## Starting from an empty repository' line").toBeGreaterThanOrEqual(0);
+    let end = lines.findIndex((l, i) => i > start && l.startsWith("## "));
+    if (end < 0) end = lines.length;
+    const section = lines.slice(start, end).join("\n");
+    expect(section).toContain("walking skeleton");
+    expect(section).toContain("doug init");
+    expect(section).toContain("stopGate.commands");
+  });
+
   it("docs/getting-started.md drops the pre-release caveat but keeps the contributor pointer", () => {
     expect(gettingStarted.toLowerCase()).not.toContain("first release");
     expect(gettingStarted).not.toContain("do not work yet");
@@ -92,6 +104,10 @@ describe("release docs", () => {
     expect(releasing).toContain("pnpm release:stage");
     expect(releasing).toContain("claude plugin validate");
     expect(releasing).toContain("pnpm publish -r");
+  });
+
+  it.skipIf(IS_SNAPSHOT)("docs/releasing.md preflight step names the ignored board file", () => {
+    expect(releasing).toContain("`.doug/board.json`");
   });
 
   it.skipIf(IS_SNAPSHOT)("docs/releasing.md has a Dev setup section naming the local-plugin steps", () => {

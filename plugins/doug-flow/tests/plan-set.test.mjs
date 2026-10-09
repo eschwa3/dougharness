@@ -1,9 +1,10 @@
 // plan.mjs set, and the install default from .doug/config.json: the plan file is what the workflow and
 // land read, so these fields must live there rather than in launch arguments.
 import { describe, it, expect } from "vitest";
-import { execFileSync, spawnSync } from "node:child_process";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
+import { createServer as createHttpServer } from "node:http";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -629,7 +630,8 @@ describe("plan.mjs json memory recall", () => {
     }
     const stderrLines = out.stderr.split("\n").filter(Boolean);
     expect(stderrLines).toHaveLength(1);
-    expect(stderrLines[0]).toMatch(/^\[doug\] memory recall: embeddings provider unavailable \(.+\); keyword-only$/);
+    expect(stderrLines[0]).toMatch(/^WARNING: memory recall degraded to keyword-only: .+; run memory\.mjs doctor/);
+    expect(out.stderr).not.toContain("[doug] memory recall: embeddings provider unavailable");
   });
 
   // The closed-port test above proves the single-stderr-line half of the fix, but a closed port refuses the
@@ -701,7 +703,8 @@ describe("plan.mjs json memory recall", () => {
         }
         const stderrLines = out.stderr.split("\n").filter(Boolean);
         expect(stderrLines).toHaveLength(1);
-        expect(stderrLines[0]).toMatch(/^\[doug\] memory recall: embeddings provider unavailable \(.+\); keyword-only$/);
+        expect(stderrLines[0]).toMatch(/^WARNING: memory recall degraded to keyword-only: .+; run memory\.mjs doctor/);
+        expect(out.stderr).not.toContain("[doug] memory recall: embeddings provider unavailable");
       } finally {
         srv.close();
       }
@@ -738,6 +741,225 @@ describe("plan.mjs json memory recall", () => {
     const planWithKey = JSON.parse(withKey.stdout);
     const tWithKey = planWithKey.tasks.find((x) => x.id === "a");
     expect(tWithKey.lessonIds || []).toContain(oldLesson.id);
+  });
+});
+
+// card recall-fallback-warning (D2-D4): a degraded recall is said once per run on stderr, and in each task's
+// lessons block, so the run report shows it. The local-Ollama probe is pointed at a server the test owns with
+// DOUG_OLLAMA_BASE_URL; a test never reaches a real localhost Ollama.
+describe("plan.mjs json degraded recall (card recall-fallback-warning)", () => {
+  function runAsync(args, dir, extraEnv = {}) {
+    return new Promise((resolve) => {
+      const child = spawn(process.execPath, [cli, ...args, dir], { env: { ...process.env, CLAUDE_PROJECT_DIR: "", ...extraEnv } });
+      let stdout = "";
+      let stderr = "";
+      child.stdout.on("data", (d) => (stdout += d));
+      child.stderr.on("data", (d) => (stderr += d));
+      child.on("close", (status) => resolve({ status, stdout, stderr }));
+    });
+  }
+  function probeServer(handler) {
+    return new Promise((resolve) => {
+      const srv = createHttpServer(handler);
+      srv.listen(0, "127.0.0.1", () => resolve(srv));
+    });
+  }
+  const probeEnv = (srv) => ({ DOUG_OLLAMA_BASE_URL: `http://127.0.0.1:${srv.address().port}` });
+  const nothingThere = (req, res) => {
+    res.writeHead(404, { "content-type": "application/json" });
+    res.end("{}");
+  };
+  function ollamaThere(req, res) {
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(req.url === "/api/version" ? JSON.stringify({ version: "0.30.10" }) : JSON.stringify({ models: [{ name: "embeddinggemma:latest", model: "embeddinggemma:latest" }] }));
+  }
+
+  function projectOf(tasks, config) {
+    const dir = mkdtempSync(join(tmpdir(), "doug-planset-degraded-"));
+    mkdirSync(join(dir, ".doug"), { recursive: true });
+    if (config) writeFileSync(join(dir, ".doug/config.json"), JSON.stringify(config));
+    savePlan(dir, { version: 1, title: "T", goal: "A goal that explains the change.", status: "draft", acceptance: ["ok"], verify: ["true"], tasks });
+    return dir;
+  }
+  const threeTasks = () => [0, 1, 2].map((i) => ({ id: `t${i}`, title: `zzzdegrade task ${i}`, spec: "zzzdegrade provider test.", files: [`src/t${i}.ts`] }));
+
+  it("a provider that cannot embed: every task's lessons start with '(recall was keyword-only: <reason>)', ONE WARNING line for three tasks, no old line", async () => {
+    const dir = projectOf(threeTasks(), {
+      memory: { embeddings: { provider: "openai-compatible", baseUrl: "http://127.0.0.1:1", model: "zzzdegrade-model", dims: 3 } },
+    });
+    const m = openMemory(dir);
+    const lesson = addLesson(m, { text: "zzzdegrade provider lesson", kind: "pattern", source: { agent: "worker" } });
+    setLessonEmbedding(m, lesson.id, { model: "zzzdegrade-model", dims: 3, vector: Float32Array.from([1, 0, 0]) });
+    m.close();
+
+    const out = await runAsync(["json"], dir);
+    expect(out.status, out.stderr).toBe(0);
+    const plan = JSON.parse(out.stdout);
+    expect(plan.tasks).toHaveLength(3);
+    for (const t of plan.tasks) {
+      const first = t.lessons.split("\n")[0];
+      expect(first, t.id).toMatch(/^\(recall was keyword-only: request failed: .+\)$/);
+      expect(t.lessons, t.id).toContain(`[${lesson.id}]`);
+      expect(t.lessonIds).toEqual([lesson.id]);
+    }
+    const lines = out.stderr.split("\n").filter(Boolean);
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toMatch(/^WARNING: memory recall degraded to keyword-only: request failed: .+; run memory\.mjs doctor$/);
+    expect(out.stderr).not.toContain("[doug] memory recall: embeddings provider unavailable");
+  });
+
+  it("a configured provider with no vectors for its model: the block says why, and the warning says to run memory.mjs reembed", async () => {
+    const dir = projectOf(threeTasks().slice(0, 1), {
+      memory: { embeddings: { provider: "openai-compatible", baseUrl: "http://127.0.0.1:1", model: "zzzdegrade-model", dims: 3 } },
+    });
+    const m = openMemory(dir);
+    addLesson(m, { text: "zzzdegrade provider lesson", kind: "pattern", source: { agent: "worker" } });
+    m.close();
+    const out = await runAsync(["json"], dir);
+    expect(out.status, out.stderr).toBe(0);
+    const t = JSON.parse(out.stdout).tasks[0];
+    expect(t.lessons.split("\n")[0]).toBe("(recall was keyword-only: no vectors stored for zzzdegrade-model/3)");
+    expect(out.stderr.split("\n").filter(Boolean)).toEqual([
+      "WARNING: memory recall degraded to keyword-only: no vectors stored for zzzdegrade-model/3; run memory.mjs reembed",
+    ]);
+  });
+
+  it("no provider configured but a local Ollama is detected: the block and one WARNING say so", async () => {
+    const probe = await probeServer(ollamaThere);
+    try {
+      const dir = projectOf(threeTasks());
+      const m = openMemory(dir);
+      addLesson(m, { text: "zzzdegrade detected lesson", kind: "pattern", source: { agent: "worker" } });
+      m.close();
+      const out = await runAsync(["json"], dir, probeEnv(probe));
+      expect(out.status, out.stderr).toBe(0);
+      const plan = JSON.parse(out.stdout);
+      for (const t of plan.tasks) expect(t.lessons.split("\n")[0], t.id).toMatch(/^\(recall was keyword-only: no provider configured, but .*embeddinggemma.* is available\)$/);
+      const lines = out.stderr.split("\n").filter(Boolean);
+      expect(lines).toHaveLength(1);
+      expect(lines[0]).toMatch(/^WARNING: memory recall degraded to keyword-only: no provider configured, but .*embeddinggemma.* is available; run memory\.mjs doctor to enable it$/);
+    } finally {
+      probe.close();
+    }
+  });
+
+  it("no provider configured, none detected, no vectors stored: no keyword-only line in the block and nothing on stderr", async () => {
+    const probe = await probeServer(nothingThere);
+    try {
+      const dir = projectOf(threeTasks());
+      const m = openMemory(dir);
+      addLesson(m, { text: "zzzdegrade plain lesson", kind: "pattern", source: { agent: "worker" } });
+      m.close();
+      const out = await runAsync(["json"], dir, probeEnv(probe));
+      expect(out.status, out.stderr).toBe(0);
+      const plan = JSON.parse(out.stdout);
+      for (const t of plan.tasks) {
+        expect(t.lessons, t.id).toContain("zzzdegrade plain lesson");
+        expect(t.lessons).not.toContain("recall was keyword-only");
+      }
+      expect(out.stderr).toBe("");
+    } finally {
+      probe.close();
+    }
+  });
+
+  function recordingProbe(handler) {
+    const seen = [];
+    return new Promise((resolve) => {
+      const srv = createHttpServer((req, res) => {
+        seen.push(`${req.method} ${req.url}`);
+        handler(req, res);
+      });
+      srv.listen(0, "127.0.0.1", () => resolve({ srv, seen }));
+    });
+  }
+  const seedLesson = (dir) => {
+    const m = openMemory(dir);
+    addLesson(m, { text: "zzzdegrade probe lesson", kind: "pattern", source: { agent: "worker" } });
+    m.close();
+  };
+
+  it("a probe server that accepts and never answers: json exits 0 in under 3000 ms with no WARNING", async () => {
+    const { srv, seen } = await recordingProbe(() => {});
+    try {
+      const dir = projectOf(threeTasks().slice(0, 1));
+      seedLesson(dir);
+      const started = Date.now();
+      const out = await runAsync(["json"], dir, probeEnv(srv));
+      const elapsed = Date.now() - started;
+      expect(out.status, out.stderr).toBe(0);
+      expect(elapsed).toBeLessThan(3000);
+      expect(out.stderr).not.toContain("WARNING");
+      expect(seen.length).toBeGreaterThan(0);
+    } finally {
+      srv.closeAllConnections();
+      srv.close();
+    }
+  });
+
+  it("with a provider configured, json makes no request to the probe server", async () => {
+    const { srv, seen } = await recordingProbe(nothingThere);
+    try {
+      const dir = projectOf(threeTasks(), {
+        memory: { embeddings: { provider: "openai-compatible", baseUrl: "http://127.0.0.1:1", model: "zzzdegrade-model", dims: 3 } },
+      });
+      seedLesson(dir);
+      const out = await runAsync(["json"], dir, probeEnv(srv));
+      expect(out.status, out.stderr).toBe(0);
+      expect(seen).toEqual([]);
+    } finally {
+      srv.close();
+    }
+  });
+
+  it("a 3-task plan with no provider probes once: /api/version is requested at most once, and only GETs are sent", async () => {
+    const { srv, seen } = await recordingProbe(nothingThere);
+    try {
+      const dir = projectOf(threeTasks());
+      seedLesson(dir);
+      const out = await runAsync(["json"], dir, probeEnv(srv));
+      expect(out.status, out.stderr).toBe(0);
+      expect(seen.length).toBeGreaterThan(0);
+      expect(seen.filter((r) => r === "GET /api/version").length).toBeLessThanOrEqual(1);
+      for (const r of seen) expect(r.startsWith("GET "), r).toBe(true);
+    } finally {
+      srv.close();
+    }
+  });
+
+  it("code context: a degraded search starts task.codeContext with '(code search was keyword-only: <reason>)', warning once", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "doug-planset-degraded-code-"));
+    const g = (...a) => execFileSync("git", a, { cwd: dir, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+    g("init", "-q", "-b", "main");
+    g("config", "user.email", "t@example.com");
+    g("config", "user.name", "t");
+    mkdirSync(join(dir, "src"), { recursive: true });
+    writeFileSync(join(dir, "src/zzzdegrade.ts"), "export function zzzdegrade() {\n  return 1;\n}\n");
+    g("add", "-A");
+    g("commit", "-q", "-m", "base");
+    mkdirSync(join(dir, ".doug"), { recursive: true });
+    writeFileSync(
+      join(dir, ".doug/config.json"),
+      JSON.stringify({ memory: { embeddings: { provider: "openai-compatible", baseUrl: "http://127.0.0.1:1", model: "zzzdegrade-model", dims: 3 }, index: { enabled: true } } })
+    );
+    savePlan(dir, {
+      version: 1, title: "T", goal: "A goal that explains the change.", status: "draft", acceptance: ["ok"], verify: ["true"],
+      tasks: threeTasks().slice(0, 2).map((t) => ({ ...t, files: ["src/zzzdegrade.ts"] })),
+    });
+    const m = openMemory(dir);
+    await buildIndex(m, dir, { cfg: {} });
+    m.close();
+
+    const out = await runAsync(["json"], dir);
+    expect(out.status, out.stderr).toBe(0);
+    for (const t of JSON.parse(out.stdout).tasks) {
+      expect(t.codeContext.split("\n")[0], t.id).toBe("(code search was keyword-only: no vectors stored for zzzdegrade-model/3)");
+      expect(t.codeContext).toContain("src/zzzdegrade.ts:");
+    }
+    const lines = out.stderr.split("\n").filter(Boolean);
+    expect(lines).toEqual([
+      "WARNING: code index search degraded to keyword-only: no vectors stored for zzzdegrade-model/3; run memory.mjs index build",
+    ]);
   });
 });
 
@@ -895,8 +1117,14 @@ describe("plan.mjs json code context", () => {
 
     const out = run(["json"], dir);
     expect(out.status, out.stderr).toBe(0);
+    // One distinct warning per surface, each once: lessons and code search share one cached failure, so the
+    // reason is the same in both; the old `[doug] memory recall: embeddings provider unavailable` line is gone.
     const stderrLines = out.stderr.split("\n").filter(Boolean);
-    expect(stderrLines).toHaveLength(1);
-    expect(stderrLines[0]).toMatch(/^\[doug\] memory recall: embeddings provider unavailable \(.+\); keyword-only$/);
+    expect(stderrLines).toHaveLength(2);
+    const lessonsWarning = stderrLines.find((l) => l.startsWith("WARNING: memory recall degraded to keyword-only: "));
+    const codeWarning = stderrLines.find((l) => l.startsWith("WARNING: code index search degraded to keyword-only: "));
+    expect(lessonsWarning).toMatch(/^WARNING: memory recall degraded to keyword-only: .+; run memory\.mjs doctor/);
+    expect(codeWarning).toMatch(/^WARNING: code index search degraded to keyword-only: .+; run memory\.mjs doctor/);
+    expect(out.stderr).not.toContain("[doug] memory recall: embeddings provider unavailable");
   });
 });

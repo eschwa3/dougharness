@@ -110,6 +110,17 @@
         ]
       }
     ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"$CLAUDE_PROJECT_DIR/.doug/hooks/scripts/turn-start.mjs\"",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
     "SessionStart": [
       {
         "matcher": "compact|resume",
@@ -188,7 +199,7 @@
   "subagentPromptCacheTtl": "1h",
   "env": {
     "CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH": "1",
-    "CLAUDE_CODE_WORKFLOW_MAX_CONCURRENT_AGENTS": "4"
+    "CLAUDE_CODE_WORKFLOW_MAX_CONCURRENT_AGENTS": "16"
   },
   "permissions": {
     "allow": [

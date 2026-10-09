@@ -4,9 +4,9 @@ import { createServer } from "node:http";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, chmodSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { projectSlug } from "../lib/cost.mjs";
-import { openMemory, addLesson, conditionConfigHash, recordOutcomes, handOutcomeRow } from "../lib/memory.mjs";
+import { openMemory, addLesson, setLessonEmbedding, conditionConfigHash, recordOutcomes, handOutcomeRow } from "../lib/memory.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const script = join(here, "..", "scripts", "memory.mjs");
@@ -19,9 +19,9 @@ const run = (args, cwd) => spawnSync(process.execPath, [script, ...args], { cwd,
 // test process can never answer a request from that child (it would deadlock waiting on itself). The provider
 // tests below host a fake server here and need the CLI child to reach it, so they use this async variant
 // instead, which does not block the event loop.
-function runAsync(args, cwd) {
+function runAsync(args, cwd, extraEnv = {}) {
   return new Promise((resolvePromise) => {
-    const child = spawn(process.execPath, [script, ...args], { cwd, env: { ...process.env, CLAUDE_PROJECT_DIR: "" } });
+    const child = spawn(process.execPath, [script, ...args], { cwd, env: { ...process.env, CLAUDE_PROJECT_DIR: "", ...extraEnv } });
     let stdout = "";
     let stderr = "";
     child.stdout.on("data", (d) => (stdout += d));
@@ -44,7 +44,7 @@ function writeMemoryConfig(dir, embeddings) {
 // (dims taken from the request, [1, 0, 0, ...]) — so every existing caller that never registers a vector keeps
 // getting the same fixed vector for everything, and a card memory-measure test can register real per-text
 // vectors for a cosine sanity check to score.
-function startFakeOllama(vectorsByText = {}) {
+function startFakeOllama(vectorsByText = {}, { port = 0, failOn = null } = {}) {
   const server = createServer((req, res) => {
     if (req.url === "/api/version") {
       res.writeHead(200, { "content-type": "application/json" });
@@ -61,6 +61,11 @@ function startFakeOllama(vectorsByText = {}) {
       req.on("data", (c) => chunks.push(c));
       req.on("end", () => {
         const body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+        if (failOn && body.input.some((t) => t.includes(failOn))) {
+          res.writeHead(500, { "content-type": "application/json" });
+          res.end("{}");
+          return;
+        }
         const dims = body.dimensions || 4;
         const fixed = Array.from({ length: dims }, (_, j) => (j === 0 ? 1 : 0));
         const data = body.input.map((text, i) => ({ index: i, embedding: vectorsByText[text] || fixed }));
@@ -72,8 +77,36 @@ function startFakeOllama(vectorsByText = {}) {
     res.writeHead(404, { "content-type": "application/json" });
     res.end("{}");
   });
-  return new Promise((resolveReady) => server.listen(0, "127.0.0.1", () => resolveReady(server)));
+  return new Promise((resolveReady) => server.listen(port, "127.0.0.1", () => resolveReady(server)));
 }
+
+// Card recall-fallback-warning (D2): with no provider configured, the CLI probes for a local Ollama (default
+// http://localhost:11434). A test never reaches a real Ollama: the probe's base URL is overridden with
+// DOUG_OLLAMA_BASE_URL (the one new interface these tests pin) and pointed at a server the test owns.
+function listenForProbe(handler) {
+  return new Promise((resolveReady) => {
+    const server = createServer(handler);
+    server.listen(0, "127.0.0.1", () => resolveReady(server));
+  });
+}
+const probeEnv = (server) => ({ DOUG_OLLAMA_BASE_URL: `http://127.0.0.1:${server.address().port}` });
+const nothingThereHandler = (req, res) => {
+  res.writeHead(404, { "content-type": "application/json" });
+  res.end("{}");
+};
+function fakeOllamaHandler(req, res) {
+  if (req.url === "/api/version") {
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify({ version: "0.30.10" }));
+  } else if (req.url === "/api/tags") {
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify({ models: [{ name: "embeddinggemma:latest", model: "embeddinggemma:latest" }] }));
+  } else {
+    res.writeHead(404);
+    res.end("{}");
+  }
+}
+const stderrLines = (res) => res.stderr.split("\n");
 
 // A valid 12+12 sanity pairs file for `embed-check`/`reembed --pairs`. Sentence text doubles as the fake
 // server's lookup key: each pair's cosine is controlled directly via `vectorsByText`, so tests never depend on
@@ -330,12 +363,14 @@ describe("memory.mjs reflect", () => {
     rmSync(dir, { recursive: true, force: true });
   });
 
-  it("refuses --hand with usage, exit 2: a hand landing has no report", () => {
+  it("reflect --hand without a card id exits 2 with the hand usage, no longer refusing --hand outright (card memory-every-session)", () => {
     const dir = tempDir();
-    const res = run(["reflect", fixtureReport, dir, "--hand"], dir);
+    const res = run(["reflect", "--hand"], dir);
     expect(res.status).toBe(2);
     expect(res.stderr).toContain("usage");
-    expect(res.stderr).toContain("--hand is not accepted");
+    expect(res.stderr).toContain("--hand");
+    expect(res.stderr).toContain("--commit");
+    expect(res.stderr).not.toContain("--hand is not accepted");
     rmSync(dir, { recursive: true, force: true });
   });
 
@@ -346,6 +381,193 @@ describe("memory.mjs reflect", () => {
     expect(res.status).toBe(1);
     expect(res.stderr).toContain("F1");
     rmSync(dir, { recursive: true, force: true });
+  });
+});
+
+describe("memory.mjs reflect --hand", () => {
+  const reportsDir = (dir, id = "c1") => join(dir, ".doug", ".state", "reports", id);
+  const claudeOk = (dir, lessons, promptFile) => {
+    const env = { structured_output: { lessons }, session_id: "sess-hand", total_cost_usd: 0.01, is_error: false };
+    return promptFile ? writeFakeClaudeCapturingPrompt(dir, env, promptFile) : writeFakeClaudeSuccess(dir, env);
+  };
+  const proposal = (over = {}) => ({
+    kind: "pattern",
+    text: "uploads retry with jittered backoff",
+    citation: "report:c1",
+    task: "c1",
+    notDerivableBecause: "learned only from this landing",
+    ...over,
+  });
+  const helpfulOf = (dir, id) => {
+    const m = openMemory(dir);
+    try {
+      const row = m.prepare("SELECT helpful FROM lessons WHERE id = ?").get(id);
+      return row ? row.helpful : null;
+    } finally {
+      m.close();
+    }
+  };
+  // Seeds one real lesson (L1), the saved hand inputs naming [L1, "lxunknown"], one brief, one review.
+  function setup(dir, { brief = "BRIEF-BODY-MARKER the coder brief", review = "REVIEW-BODY-MARKER reviewer found nothing" } = {}) {
+    const m = openMemory(dir);
+    const L1 = addLesson(m, { kind: "pattern", source: { agent: "worker" }, text: "the first seeded lesson about uploads" }).id;
+    m.close();
+    const base = reportsDir(dir);
+    mkdirSync(join(base, "briefs"), { recursive: true });
+    mkdirSync(join(base, "reviews"), { recursive: true });
+    writeFileSync(
+      join(base, "lessons.json"),
+      JSON.stringify({ card: "c1", query: "q", mode: "keyword", reason: null, ids: [L1, "lxunknown"], text: "x", recalledAt: "2026-10-07T00:00:00.000Z" }),
+      "utf8"
+    );
+    writeFileSync(join(base, "briefs", "1-coder.md"), brief, "utf8");
+    writeFileSync(join(base, "reviews", "1.md"), review, "utf8");
+    return L1;
+  }
+  const reflect = (dir, claudeBin, extra = []) => run(["reflect", "--hand", "c1", dir, "--commit", "abc1234", "--claude-bin", claudeBin, ...extra], dir);
+
+  it("c1: bumps helpful on the lessons.json ids that exist, ignores unknown ones, appends the proposal, writes the reflections row and hand-report.json", () => {
+    const dir = tempDir();
+    try {
+      const L1 = setup(dir);
+      const res = reflect(dir, claudeOk(dir, [proposal()]), ["--rounds", "1", "--note", "landed clean"]);
+      expect(res.status, res.stderr).toBe(0);
+      expect(helpfulOf(dir, L1)).toBe(1);
+      expect(helpfulOf(dir, "lxunknown")).toBeNull();
+      const lessons = JSON.parse(run(["lessons", dir, "--json"], dir).stdout);
+      expect(lessons.filter((l) => l.source_agent === "reflect")).toHaveLength(1);
+      const m = openMemory(dir);
+      let rows;
+      try {
+        rows = m.prepare("SELECT * FROM reflections").all();
+      } finally {
+        m.close();
+      }
+      expect(rows).toHaveLength(1);
+      expect(rows[0].card).toBe("c1");
+      expect(rows[0].commit_sha).toBe("abc1234");
+      const hr = JSON.parse(readFileSync(join(reportsDir(dir), "hand-report.json"), "utf8"));
+      expect(hr.track).toBe("hand");
+      expect(hr.commit).toBe("abc1234");
+      expect(hr.levels[0].tasks[0].memoryUsed).toEqual([L1, "lxunknown"]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("c2: the prompt carries the brief, the reviewer report, the note, and memoryUsed; a 6000-char brief is cut at 4000 with the truncation marker", () => {
+    const dir = tempDir();
+    try {
+      const L1 = setup(dir, { brief: "§".repeat(6000) });
+      const promptFile = join(dir, "prompt.txt");
+      const res = reflect(dir, claudeOk(dir, [], promptFile), ["--note", "NOTE-MARKER-xyz"]);
+      expect(res.status, res.stderr).toBe(0);
+      const prompt = readFileSync(promptFile, "utf8");
+      expect(prompt).toContain("REVIEW-BODY-MARKER");
+      expect(prompt).toContain("NOTE-MARKER-xyz");
+      expect(prompt).toContain(`memoryUsed: ${L1}`);
+      expect(prompt).toContain("§".repeat(4000) + "…[truncated]");
+      expect(prompt).not.toContain("§".repeat(4001));
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("c3: five valid proposals append three and reject the rest with the cap reason", () => {
+    const dir = tempDir();
+    try {
+      setup(dir);
+      const texts = [
+        "alpha uploads retry jittered backoff",
+        "beta schema migrations need explicit rollback tests",
+        "gamma fixtures isolate clock dependent assertions",
+        "delta hooks must fail open on malformed stdin",
+        "epsilon board edits never go through scripts",
+      ];
+      const res = reflect(dir, claudeOk(dir, texts.map((text) => proposal({ text }))), ["--json"]);
+      expect(res.status, res.stderr).toBe(0);
+      const out = JSON.parse(res.stdout);
+      expect(out.appended).toHaveLength(3);
+      expect(out.rejected).toHaveLength(2);
+      for (const r of out.rejected) expect(r.reason).toBe("at most 3 lessons appended per reflection");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("c4: a pitfall needs a --review classed real; a pattern needs --rounds 1", () => {
+    const pit = proposal({ kind: "pitfall", text: "pitfall about unbounded retry loops", citation: "report:c1/R1" });
+    const cases = [
+      { name: "pitfall without --review", props: [pit], extra: [], rejected: "has no block classed real" },
+      { name: "pitfall with R1=false", props: [pit], extra: ["--rounds", "2", "--review", "R1=false: not a defect"], rejected: "has no block classed real" },
+      { name: "pitfall with R1=real", props: [pit], extra: ["--rounds", "2", "--review", "R1=real: x"], rejected: null },
+      { name: "pattern after 2 rounds", props: [proposal()], extra: ["--rounds", "2"], rejected: "did not verify on its first pass" },
+    ];
+    for (const c of cases) {
+      const dir = tempDir();
+      try {
+        setup(dir);
+        const res = reflect(dir, claudeOk(dir, c.props), ["--json", ...c.extra]);
+        expect(res.status, `${c.name}: ${res.stderr}`).toBe(0);
+        const out = JSON.parse(res.stdout);
+        if (c.rejected) {
+          expect(out.appended, c.name).toHaveLength(0);
+          expect(out.rejected[0].reason, c.name).toContain(c.rejected);
+        } else {
+          expect(out.appended, c.name).toHaveLength(1);
+          expect(out.rejected, c.name).toHaveLength(0);
+        }
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    }
+  });
+
+  it("c5: a second identical run says Already reflected, exits 0, and bumps nothing again", () => {
+    const dir = tempDir();
+    try {
+      const L1 = setup(dir);
+      const bin = claudeOk(dir, [proposal()]);
+      const first = reflect(dir, bin);
+      expect(first.status, first.stderr).toBe(0);
+      expect(helpfulOf(dir, L1)).toBe(1);
+      const second = reflect(dir, bin);
+      expect(second.status, second.stderr).toBe(0);
+      expect(second.stdout).toContain("Already reflected");
+      expect(helpfulOf(dir, L1)).toBe(1);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("c6: when the model pass fails the run exits 1 but the counters stand", () => {
+    const dir = tempDir();
+    try {
+      const L1 = setup(dir);
+      const bad = join(dir, "fail-claude.mjs");
+      writeFileSync(bad, "#!/usr/bin/env node\nprocess.stderr.write('boom');\nprocess.exit(1);\n", "utf8");
+      chmodSync(bad, 0o755);
+      const res = reflect(dir, bad);
+      expect(res.status).toBe(1);
+      expect(helpfulOf(dir, L1)).toBe(1);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("c7: no --commit exits 2 with usage", () => {
+    const dir = tempDir();
+    try {
+      setup(dir);
+      const res = run(["reflect", "--hand", "c1", dir, "--claude-bin", claudeOk(dir, [])], dir);
+      expect(res.status).toBe(2);
+      expect(res.stderr).toContain("usage");
+      expect(res.stderr).toContain("reflect --hand");
+      expect(res.stderr).toContain("--commit");
+      expect(existsSync(join(reportsDir(dir), "hand-report.json"))).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 
@@ -1383,14 +1605,320 @@ describe("memory.mjs recall", () => {
   });
 });
 
-describe("memory.mjs doctor", () => {
-  it("says keyword-only and gives the enable snippet with no provider configured", () => {
+// card recall-fallback-warning (D3/D5/D6): a degraded recall says so on stderr; stdout headers stay as they are.
+describe("memory.mjs recall: degraded warning (card recall-fallback-warning)", () => {
+  const EMBED_CFG = (baseUrl) => ({ provider: "openai-compatible", baseUrl, model: "embeddinggemma", dims: 4 });
+  const seedLessons = (dir, texts, { vectored = texts.length, model = "embeddinggemma", dims = 4 } = {}) => {
+    const m = openMemory(dir);
+    texts.forEach((text, i) => {
+      const row = addLesson(m, { text, kind: "pattern", source: { agent: "worker" } });
+      if (i < vectored) setLessonEmbedding(m, row.id, { model, dims, vector: Float32Array.from(Array.from({ length: dims }, (_, j) => (j === 0 ? 1 : 0))) });
+    });
+    m.close();
+  };
+
+  it("(a) a query-time embed timeout warns with the cold-model hint; exit 0, header unchanged, lesson still returned", async () => {
     const dir = tempDir();
-    const res = run(["doctor", dir], dir);
+    // Accepts the connection and never answers: the provider's own 2s timeout is the failure.
+    const hanging = createServer(() => {});
+    await new Promise((r) => hanging.listen(0, "127.0.0.1", r));
+    try {
+      seedLessons(dir, ["flaky tests need a retry policy"]);
+      writeMemoryConfig(dir, EMBED_CFG(serverBaseUrl(hanging)));
+      const res = await runAsync(["recall", "flaky tests", dir], dir);
+      expect(res.status, res.stderr).toBe(0);
+      expect(stderrLines(res)).toContain(
+        "WARNING: memory recall degraded to keyword-only: timeout; run memory.mjs doctor (a cold model can time out on first use; retry)"
+      );
+      expect(res.stdout.split("\n")[0]).toBe("recall: keyword-only (timeout)");
+      expect(res.stdout).toContain("flaky tests need a retry policy");
+    } finally {
+      hanging.closeAllConnections();
+      hanging.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("an unreachable provider warns with `run memory.mjs doctor` and no cold-model hint", async () => {
+    const dir = tempDir();
+    seedLessons(dir, ["flaky tests need a retry policy"]);
+    writeMemoryConfig(dir, EMBED_CFG("http://127.0.0.1:1"));
+    const res = await runAsync(["recall", "flaky tests", dir], dir);
     expect(res.status, res.stderr).toBe(0);
-    expect(res.stdout).toMatch(/keyword-only/);
-    expect(res.stdout).toMatch(/"provider": "openai-compatible"/);
+    const warning = stderrLines(res).find((l) => l.startsWith("WARNING: memory recall degraded to keyword-only: "));
+    expect(warning).toMatch(/^WARNING: memory recall degraded to keyword-only: request failed: .+; run memory\.mjs doctor$/);
+    expect(res.stderr).not.toContain("cold model");
     rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("(c) vectors stored for another model: warns 'no vectors stored for <model>/<dims>; run memory.mjs reembed'", async () => {
+    const dir = tempDir();
+    seedLessons(dir, ["flaky tests need a retry policy"], { model: "other-model", dims: 8 });
+    writeMemoryConfig(dir, EMBED_CFG("http://127.0.0.1:1"));
+    const res = await runAsync(["recall", "flaky tests", dir], dir);
+    expect(res.status, res.stderr).toBe(0);
+    expect(stderrLines(res)).toContain("WARNING: memory recall degraded to keyword-only: no vectors stored for embeddinggemma/4; run memory.mjs reembed");
+    expect(res.stdout.split("\n")[0]).toBe("recall: keyword-only (no vectors stored for embeddinggemma/4)");
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("(f) no provider configured but a local Ollama with the model is detected: warns to run doctor to enable it", async () => {
+    const probe = await listenForProbe(fakeOllamaHandler);
+    const dir = tempDir();
+    try {
+      seedLessons(dir, ["flaky tests need a retry policy"], { vectored: 0 });
+      const res = await runAsync(["recall", "flaky tests", dir], dir, probeEnv(probe));
+      expect(res.status, res.stderr).toBe(0);
+      const warning = stderrLines(res).find((l) => l.startsWith("WARNING: memory recall degraded to keyword-only: "));
+      expect(warning).toMatch(
+        /^WARNING: memory recall degraded to keyword-only: no provider configured, but .*embeddinggemma.* is available; run memory\.mjs doctor to enable it$/
+      );
+      expect(res.stdout.split("\n")[0]).toBe("recall: keyword-only (no provider configured)");
+    } finally {
+      probe.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("(e) no provider configured, vectors stored for some model: warns 'configure memory.embeddings (memory.mjs doctor)'", async () => {
+    const probe = await listenForProbe(nothingThereHandler);
+    const dir = tempDir();
+    try {
+      seedLessons(dir, ["flaky tests need a retry policy"], { model: "other-model", dims: 8 });
+      const res = await runAsync(["recall", "flaky tests", dir], dir, probeEnv(probe));
+      expect(res.status, res.stderr).toBe(0);
+      expect(stderrLines(res)).toContain(
+        "WARNING: memory recall degraded to keyword-only: no provider configured; configure memory.embeddings (memory.mjs doctor)"
+      );
+    } finally {
+      probe.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("(g) no provider configured, none detected, no vectors stored: no WARNING at all, header unchanged", async () => {
+    const probe = await listenForProbe(nothingThereHandler);
+    const dir = tempDir();
+    try {
+      seedLessons(dir, ["flaky tests need a retry policy"], { vectored: 0 });
+      const res = await runAsync(["recall", "flaky tests", dir], dir, probeEnv(probe));
+      expect(res.status, res.stderr).toBe(0);
+      expect(res.stderr).not.toContain("WARNING");
+      expect(res.stdout.split("\n")[0]).toBe("recall: keyword-only (no provider configured)");
+    } finally {
+      probe.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("partial coverage in hybrid mode: warns 'N of M lessons have no vector; run memory.mjs reembed' and stays hybrid", async () => {
+    const dir = tempDir();
+    const server = await startFakeOllama();
+    try {
+      seedLessons(dir, ["flaky retry one", "flaky retry two", "flaky retry three"], { vectored: 1 });
+      writeMemoryConfig(dir, EMBED_CFG(serverBaseUrl(server)));
+      const res = await runAsync(["recall", "flaky retry", dir], dir);
+      expect(res.status, res.stderr).toBe(0);
+      expect(stderrLines(res)).toContain("WARNING: 2 of 3 lessons have no vector; run memory.mjs reembed");
+      expect(res.stderr).not.toContain("degraded to keyword-only");
+      expect(res.stdout.split("\n")[0]).toMatch(/^recall: hybrid/);
+    } finally {
+      server.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("a fully vectored hybrid recall prints no WARNING", async () => {
+    const dir = tempDir();
+    const server = await startFakeOllama();
+    try {
+      seedLessons(dir, ["flaky retry one", "flaky retry two"]);
+      writeMemoryConfig(dir, EMBED_CFG(serverBaseUrl(server)));
+      const res = await runAsync(["recall", "flaky retry", dir], dir);
+      expect(res.status, res.stderr).toBe(0);
+      expect(res.stderr).not.toContain("WARNING");
+    } finally {
+      server.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("(D5) reembed with one failing batch ends with the still-unvectored warning on stderr, exit status unchanged (0)", async () => {
+    const dir = tempDir();
+    const server = await startFakeOllama({}, { failOn: "poison" });
+    try {
+      seedLessons(dir, ["lesson one", "lesson two", "lesson poison"], { vectored: 0 });
+      writeMemoryConfig(dir, EMBED_CFG(serverBaseUrl(server)));
+      const res = await runAsync(["reembed", dir, "--batch", "1", "--no-check"], dir);
+      expect(res.status, res.stderr).toBe(0);
+      expect(res.stdout).toMatch(/Embedded 2\/3 lesson\(s\)/);
+      const lines = stderrLines(res).filter(Boolean);
+      expect(lines[lines.length - 1]).toBe("WARNING: 1 of 3 lessons still have no vector for embeddinggemma/4; retry with memory.mjs reembed --batch 4");
+    } finally {
+      server.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("(D5) a reembed that vectors every lesson prints no WARNING", async () => {
+    const dir = tempDir();
+    const server = await startFakeOllama();
+    try {
+      seedLessons(dir, ["lesson one", "lesson two"], { vectored: 0 });
+      writeMemoryConfig(dir, EMBED_CFG(serverBaseUrl(server)));
+      const res = await runAsync(["reembed", dir, "--no-check"], dir);
+      expect(res.status, res.stderr).toBe(0);
+      expect(res.stderr).not.toContain("WARNING");
+    } finally {
+      server.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("index search prints the code-index warning (with `memory.mjs index build`) when a configured provider has no vectors", async () => {
+    const dir = gitRepoDir({ "src/upload.mjs": "// retry flaky uploads here\nexport const x = 1;\n" });
+    const build = run(["index", "build", dir], dir);
+    expect(build.status, build.stderr).toBe(0);
+    writeMemoryConfig(dir, EMBED_CFG("http://127.0.0.1:1"));
+    const res = await runAsync(["index", "search", "retry flaky uploads", dir], dir);
+    expect(res.status, res.stderr).toBe(0);
+    expect(stderrLines(res)).toContain("WARNING: code index search degraded to keyword-only: no vectors stored for embeddinggemma/4; run memory.mjs index build");
+    expect(res.stdout.split("\n")[0]).toMatch(/^index: keyword-only \(no vectors stored for embeddinggemma\/4\)/);
+    rmSync(dir, { recursive: true, force: true });
+  });
+});
+
+// card recall-fallback-warning review findings: the probe is bounded, runs only when no provider is configured,
+// and never POSTs an embed.
+describe("memory.mjs recall: Ollama probe discipline (card recall-fallback-warning)", () => {
+  function recordingServer(handler) {
+    const seen = [];
+    const server = createServer((req, res) => {
+      seen.push(`${req.method} ${req.url}`);
+      handler(req, res);
+    });
+    return new Promise((r) => server.listen(0, "127.0.0.1", () => r({ server, seen })));
+  }
+  const seedOne = (dir) => {
+    const m = openMemory(dir);
+    addLesson(m, { text: "flaky tests need a retry policy", kind: "pattern", source: { agent: "worker" } });
+    m.close();
+  };
+
+  it("a probe server that accepts and never answers: recall exits 0 in under 3000 ms with no WARNING", async () => {
+    const { server, seen } = await recordingServer(() => {});
+    const dir = tempDir();
+    try {
+      seedOne(dir);
+      const started = Date.now();
+      const res = await runAsync(["recall", "flaky tests", dir], dir, probeEnv(server));
+      const elapsed = Date.now() - started;
+      expect(res.status, res.stderr).toBe(0);
+      expect(elapsed).toBeLessThan(3000);
+      expect(res.stderr).not.toContain("WARNING");
+      expect(seen.length).toBeGreaterThan(0); // the probe really ran against this server
+    } finally {
+      server.closeAllConnections();
+      server.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("the probe shares ONE 1500 ms deadline: version and tags each answering after ~1000 ms means no detection, exit 0 in under 2000 ms", async () => {
+    const { server } = await recordingServer((req, res) => {
+      setTimeout(() => {
+        if (res.destroyed || res.writableEnded) return;
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(
+          req.url === "/api/version"
+            ? JSON.stringify({ version: "0.30.10" })
+            : JSON.stringify({ models: [{ name: "embeddinggemma:latest", model: "embeddinggemma:latest" }] })
+        );
+      }, 1000);
+    });
+    const dir = tempDir();
+    try {
+      seedOne(dir);
+      const started = Date.now();
+      const res = await runAsync(["recall", "flaky tests", dir], dir, probeEnv(server));
+      const elapsed = Date.now() - started;
+      expect(res.status, res.stderr).toBe(0);
+      expect(elapsed).toBeLessThan(2000);
+      expect(res.stderr).not.toContain("WARNING");
+      expect(res.stderr).not.toContain("is available");
+    } finally {
+      server.closeAllConnections();
+      server.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("with a provider configured, recall makes no request to the probe server", async () => {
+    const { server, seen } = await recordingServer(nothingThereHandler);
+    const dir = tempDir();
+    try {
+      seedOne(dir);
+      writeMemoryConfig(dir, { provider: "openai-compatible", baseUrl: "http://127.0.0.1:1", model: "embeddinggemma", dims: 4 });
+      const res = await runAsync(["recall", "flaky tests", dir], dir, probeEnv(server));
+      expect(res.status, res.stderr).toBe(0);
+      expect(seen).toEqual([]);
+    } finally {
+      server.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("the probe sends only GET requests, never POST /v1/embeddings", async () => {
+    const { server, seen } = await recordingServer(nothingThereHandler);
+    const dir = tempDir();
+    try {
+      seedOne(dir);
+      const res = await runAsync(["recall", "flaky tests", dir], dir, probeEnv(server));
+      expect(res.status, res.stderr).toBe(0);
+      expect(seen.length).toBeGreaterThan(0);
+      for (const r of seen) expect(r.startsWith("GET "), r).toBe(true);
+    } finally {
+      server.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("memory.mjs doctor", () => {
+  it("says keyword-only and gives the enable snippet with no provider configured", async () => {
+    const dir = tempDir();
+    const hits = [];
+    const server = await listenForProbe((req, res) => { hits.push(req.url); nothingThereHandler(req, res); });
+    try {
+      const res = await runAsync(["doctor", dir], dir, probeEnv(server));
+      expect(res.status, res.stderr).toBe(0);
+      expect(res.stdout).toMatch(/keyword-only/);
+      expect(res.stdout).toMatch(/"provider": "openai-compatible"/);
+      expect(hits.length, "the unconfigured probe must go to DOUG_OLLAMA_BASE_URL").toBeGreaterThanOrEqual(1);
+      expect(hits).toContain("/api/version");
+    } finally {
+      server.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("a configured memory.embeddings.baseUrl wins over DOUG_OLLAMA_BASE_URL", async () => {
+    const dir = tempDir();
+    const hitsA = [];
+    const hitsB = [];
+    const serverA = await listenForProbe((req, res) => { hitsA.push(req.url); fakeOllamaHandler(req, res); });
+    const serverB = await listenForProbe((req, res) => { hitsB.push(req.url); fakeOllamaHandler(req, res); });
+    try {
+      writeMemoryConfig(dir, { provider: "openai-compatible", baseUrl: serverBaseUrl(serverA), model: "embeddinggemma", dims: 4 });
+      const res = await runAsync(["doctor", dir], dir, probeEnv(serverB));
+      expect(res.status, res.stderr).toBe(0);
+      expect(hitsA.length).toBeGreaterThanOrEqual(1);
+      expect(hitsB).toHaveLength(0);
+    } finally {
+      serverA.close();
+      serverB.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it("reports what it found against a fake Ollama", async () => {
@@ -1413,15 +1941,155 @@ describe("memory.mjs doctor", () => {
     }
   });
 
-  it("(MINOR 8) prints the invalid-config warning exactly once, not once per internal read", () => {
+  it("(MINOR 8) prints the invalid-config warning exactly once, not once per internal read", async () => {
     const dir = tempDir();
-    mkdirSync(join(dir, ".doug"), { recursive: true });
-    writeFileSync(join(dir, ".doug", "config.json"), JSON.stringify({ memory: { embeddings: { provider: "bogus" } } }), "utf8");
-    const res = run(["doctor", dir], dir);
-    expect(res.status, res.stderr).toBe(0);
-    const warnings = res.stderr.split("\n").filter((l) => l.includes("memory.embeddings is not a valid shape"));
-    expect(warnings).toHaveLength(1);
-    rmSync(dir, { recursive: true, force: true });
+    const hits = [];
+    const server = await listenForProbe((req, res) => { hits.push(req.url); nothingThereHandler(req, res); });
+    try {
+      mkdirSync(join(dir, ".doug"), { recursive: true });
+      writeFileSync(join(dir, ".doug", "config.json"), JSON.stringify({ memory: { embeddings: { provider: "bogus" } } }), "utf8");
+      const res = await runAsync(["doctor", dir], dir, probeEnv(server));
+      expect(res.status, res.stderr).toBe(0);
+      const warnings = res.stderr.split("\n").filter((l) => l.includes("memory.embeddings is not a valid shape"));
+      expect(warnings).toHaveLength(1);
+      expect(hits.length, "an invalid config probes the override URL, not localhost:11434").toBeGreaterThanOrEqual(1);
+    } finally {
+      server.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("memory.mjs doctor: unsloth preset (card embedding-providers-unsloth)", () => {
+  // Fake keys are built at runtime: no credential-looking literal in this file.
+  const goodToken = ["unsloth", "test", "token", String(process.pid)].join("-");
+  const testToken = ["unsloth", "wrong", "token", String(process.pid)].join("-");
+
+  function startModelsServer(accept, models) {
+    return new Promise((resolvePromise) => {
+      const server = createServer((req, res) => {
+        res.setHeader("content-type", "application/json");
+        if (req.url === "/v1/models") {
+          if (req.headers.authorization !== `Bearer ${accept}`) {
+            res.writeHead(401);
+            res.end(JSON.stringify({ detail: "Not authenticated" }));
+            return;
+          }
+          res.writeHead(200);
+          res.end(JSON.stringify({ object: "list", data: models }));
+          return;
+        }
+        res.writeHead(404);
+        res.end("{}");
+      });
+      server.listen(0, "127.0.0.1", () => resolvePromise(server));
+    });
+  }
+
+  it("a missing key names UNSLOTH_API_KEY, and a wrong key's value never appears in stdout or stderr", async () => {
+    const dir = tempDir();
+    const server = await startModelsServer(goodToken, [{ id: "ggml-org/embeddinggemma-300M-GGUF", loaded: true }]);
+    try {
+      writeMemoryConfig(dir, { preset: "unsloth", baseUrl: serverBaseUrl(server), model: "embeddinggemma", dims: 512 });
+      const noKey = await runAsync(["doctor", dir], dir, { UNSLOTH_API_KEY: "" });
+      expect(noKey.status, noKey.stderr).toBe(0);
+      expect(noKey.stdout).toMatch(/server requires a key: set UNSLOTH_API_KEY/);
+
+      const wrong = await runAsync(["doctor", dir], dir, { UNSLOTH_API_KEY: testToken });
+      expect(wrong.status, wrong.stderr).toBe(0);
+      expect(wrong.stdout).toMatch(/server rejected the key in UNSLOTH_API_KEY/);
+      expect(wrong.stdout + wrong.stderr).not.toContain(testToken);
+      const json = await runAsync(["doctor", dir, "--json"], dir, { UNSLOTH_API_KEY: testToken });
+      expect(json.stdout + json.stderr).not.toContain(testToken);
+    } finally {
+      server.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("with the right key it reports the model listed and loaded, without printing the key", async () => {
+    const dir = tempDir();
+    const server = await startModelsServer(goodToken, [{ id: "ggml-org/embeddinggemma-300M-GGUF", loaded: true }]);
+    try {
+      writeMemoryConfig(dir, { preset: "unsloth", baseUrl: serverBaseUrl(server), model: "embeddinggemma", dims: 512 });
+      const json = await runAsync(["doctor", dir, "--json"], dir, { UNSLOTH_API_KEY: goodToken });
+      expect(json.status, json.stderr).toBe(0);
+      const parsed = JSON.parse(json.stdout);
+      expect(parsed.probe.reachable).toBe(true);
+      expect(parsed.probe.modelPresent).toBe(true);
+      expect(parsed.probe.modelLoaded).toBe(true);
+      expect(json.stdout + json.stderr).not.toContain(goodToken);
+    } finally {
+      server.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("doctor --json and text never contain the key when the server echoes it in a 500 body", async () => {
+    const dir = tempDir();
+    const server = await new Promise((resolvePromise) => {
+      const s = createServer((req, res) => {
+        res.writeHead(500, { "content-type": "application/json" });
+        res.end(JSON.stringify({ detail: `rejected ${String(req.headers.authorization)} as ${String(req.headers.authorization).replace("Bearer ", "")}` }));
+      });
+      s.listen(0, "127.0.0.1", () => resolvePromise(s));
+    });
+    try {
+      writeMemoryConfig(dir, { preset: "unsloth", baseUrl: serverBaseUrl(server), model: "embeddinggemma", dims: 512 });
+      const json = await runAsync(["doctor", dir, "--json"], dir, { UNSLOTH_API_KEY: testToken });
+      expect(json.status, json.stderr).toBe(0);
+      expect(json.stdout + json.stderr).not.toContain(testToken);
+      const text = await runAsync(["doctor", dir], dir, { UNSLOTH_API_KEY: testToken });
+      expect(text.stdout + text.stderr).not.toContain(testToken);
+      expect(JSON.parse(json.stdout).probe.reachable).toBe(false);
+    } finally {
+      server.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("doctor never prints the key when a voyage-preset or no-preset embed probe gets an echoing 400", async () => {
+    const dir = tempDir();
+    const server = await new Promise((resolvePromise) => {
+      const s = createServer((req, res) => {
+        res.writeHead(400, { "content-type": "application/json" });
+        res.end(JSON.stringify({ detail: `rejected ${String(req.headers.authorization)}` }));
+      });
+      s.listen(0, "127.0.0.1", () => resolvePromise(s));
+    });
+    try {
+      const cases = [
+        [{ preset: "voyage", baseUrl: serverBaseUrl(server), model: "voyage-4", dims: 4 }, { VOYAGE_API_KEY: testToken }],
+        [{ provider: "openai-compatible", baseUrl: serverBaseUrl(server), model: "m", dims: 4, apiKeyEnv: "MY_EMBED_ENV" }, { MY_EMBED_ENV: testToken }],
+      ];
+      for (const [conf, env] of cases) {
+        writeMemoryConfig(dir, conf);
+        const json = await runAsync(["doctor", dir, "--json"], dir, env);
+        expect(json.status, json.stderr).toBe(0);
+        expect(JSON.parse(json.stdout).probe.reason).toMatch(/HTTP 400/);
+        expect(json.stdout + json.stderr).not.toContain(testToken);
+        const text = await runAsync(["doctor", dir], dir, env);
+        expect(text.stdout + text.stderr).not.toContain(testToken);
+      }
+    } finally {
+      server.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("with nothing configured it prints one snippet per preset", async () => {
+    const dir = tempDir();
+    const hits = [];
+    const server = await listenForProbe((req, res) => { hits.push(req.url); nothingThereHandler(req, res); });
+    try {
+      const res = await runAsync(["doctor", dir], dir, probeEnv(server));
+      expect(res.status, res.stderr).toBe(0);
+      for (const p of ["ollama", "unsloth", "openai", "voyage"]) expect(res.stdout, p).toMatch(new RegExp(`"preset": "${p}"`));
+      expect(hits.length, "the unconfigured probe must go to DOUG_OLLAMA_BASE_URL").toBeGreaterThanOrEqual(1);
+    } finally {
+      server.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 
@@ -2018,5 +2686,423 @@ describe("memory.mjs usage", () => {
     expect(unknown.status).toBe(2);
     expect(unknown.stderr).toContain("usage");
     rmSync(dir, { recursive: true, force: true });
+  });
+});
+
+// Card memory-every-session, brief A: the SessionStart recall hook (plugins/doug-flow/scripts/session-recall.mjs).
+describe("session-recall.mjs (SessionStart)", () => {
+  const hookScript = join(here, "..", "scripts", "session-recall.mjs");
+  const EMBED_CFG = (baseUrl) => ({ provider: "openai-compatible", baseUrl, model: "embeddinggemma", dims: 4 });
+  const dbFile = (dir) => join(dir, ".doug", ".state", "memory", "memory.db");
+
+  // Spawns the hook like Claude Code does: JSON payload on stdin, the project dir in CLAUDE_PROJECT_DIR.
+  function hook(dir, input, extraEnv = {}) {
+    return new Promise((resolvePromise) => {
+      const started = Date.now();
+      const child = spawn(process.execPath, [hookScript], { cwd: dir, env: { ...process.env, CLAUDE_PROJECT_DIR: dir, DOUG_SESSION_RECALL: "", ...extraEnv } });
+      let stdout = "";
+      let stderr = "";
+      child.stdout.on("data", (d) => (stdout += d));
+      child.stderr.on("data", (d) => (stderr += d));
+      child.on("close", (status) => resolvePromise({ status, stdout, stderr, elapsed: Date.now() - started }));
+      child.stdin.on("error", () => {});
+      child.stdin.end(typeof input === "string" ? input : JSON.stringify({ hook_event_name: "SessionStart", source: "startup", cwd: dir, ...input }));
+    });
+  }
+
+  function writeFlowBoard(dir, cards) {
+    mkdirSync(join(dir, ".doug"), { recursive: true });
+    const board = {
+      version: 1,
+      updated: "2026-10-07",
+      columns: [
+        { id: "ready", title: "Ready" },
+        { id: "flow", title: "In flow" },
+      ],
+      components: [],
+      tags: [],
+      cards,
+    };
+    writeFileSync(join(dir, ".doug", "board.json"), JSON.stringify(board, null, 2), "utf8");
+  }
+  const flowCard = { id: "c1", title: "Retry flaky uploads", goal: "make upload retries robust against flaky networks", column: "flow" };
+
+  function seed(dir, lessons) {
+    const m = openMemory(dir);
+    const rows = lessons.map((l) => {
+      const row = addLesson(m, { kind: "pattern", source: { agent: "worker" }, ...l });
+      if (l.helpful) m.prepare("UPDATE lessons SET helpful = ? WHERE id = ?").run(l.helpful, row.id);
+      if (l.vector) setLessonEmbedding(m, row.id, { model: "embeddinggemma", dims: 4, vector: Float32Array.from(l.vector) });
+      return row;
+    });
+    m.close();
+    return rows;
+  }
+  const context = (res) => {
+    const out = JSON.parse(res.stdout);
+    expect(out.hookSpecificOutput.hookEventName).toBe("SessionStart");
+    return out.hookSpecificOutput.additionalContext;
+  };
+  const lessonLines = (text) => text.split("\n").filter((l) => l.startsWith("- ["));
+
+  it("a1: a card in the flow column with matching lessons -> additionalContext carries both ids, `for c1`, and starts `[doug] Lessons`", async () => {
+    const dir = tempDir();
+    try {
+      writeFlowBoard(dir, [flowCard]);
+      const [l1, l2] = seed(dir, [
+        { text: "upload retries need exponential backoff on flaky networks" },
+        { text: "cap upload retries so flaky networks cannot loop forever" },
+      ]);
+      for (const source of ["startup", "clear"]) {
+        const res = await hook(dir, { source });
+        expect(res.status, res.stderr).toBe(0);
+        const ctx = context(res);
+        expect(ctx.startsWith("[doug] Lessons")).toBe(true);
+        expect(ctx).toContain(`[${l1.id}]`);
+        expect(ctx).toContain(`[${l2.id}]`);
+        expect(ctx).toContain("for c1");
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("a2: no memory.db -> exit 0, empty stdout, and .doug/.state/memory is not created", async () => {
+    const dir = tempDir();
+    try {
+      writeFlowBoard(dir, [flowCard]);
+      const res = await hook(dir, {});
+      expect(res.status, res.stderr).toBe(0);
+      expect(res.stdout).toBe("");
+      expect(existsSync(join(dir, ".doug", ".state", "memory"))).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("a3: a corrupt memory.db -> exit 0, stdout is exactly one systemMessage naming session-recall, no hookSpecificOutput", async () => {
+    const dir = tempDir();
+    try {
+      writeFlowBoard(dir, [flowCard]);
+      mkdirSync(join(dir, ".doug", ".state", "memory"), { recursive: true });
+      writeFileSync(dbFile(dir), "this is not a sqlite database ".repeat(200), "utf8");
+      const res = await hook(dir, {});
+      expect(res.status, res.stderr).toBe(0);
+      const lines = res.stdout.split("\n").filter((l) => l.trim());
+      expect(lines).toHaveLength(1);
+      const out = JSON.parse(lines[0]);
+      expect(out.systemMessage).toContain("session-recall");
+      expect(out.hookSpecificOutput).toBeUndefined();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("a4: source compact (and resume) -> exit 0 with empty stdout even with matching lessons", async () => {
+    const dir = tempDir();
+    try {
+      writeFlowBoard(dir, [flowCard]);
+      seed(dir, [{ text: "upload retries need exponential backoff on flaky networks" }]);
+      for (const source of ["compact", "resume"]) {
+        const res = await hook(dir, { source });
+        expect(res.status, res.stderr).toBe(0);
+        expect(res.stdout, source).toBe("");
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("a5: twelve 1000-char lessons -> the lesson block stays within 2000 chars and holds at least one line", async () => {
+    const dir = tempDir();
+    try {
+      writeFlowBoard(dir, [flowCard]);
+      seed(dir, Array.from({ length: 12 }, (_, i) => ({ text: `upload retries flaky note${i} ` + `word${i} `.repeat(150) })));
+      const res = await hook(dir, {});
+      expect(res.status, res.stderr).toBe(0);
+      const lines = lessonLines(context(res));
+      expect(lines.length).toBeGreaterThanOrEqual(1);
+      expect(lines.join("\n").length).toBeLessThanOrEqual(2000);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("a6: embeddings against a fake Ollama with vectors -> header names `hybrid via`; a closed port -> `keyword-only (` and the lessons still appear", async () => {
+    const dir = tempDir();
+    const server = await startFakeOllama();
+    try {
+      writeFlowBoard(dir, [flowCard]);
+      const [l1] = seed(dir, [{ text: "upload retries need exponential backoff on flaky networks", vector: [1, 0, 0, 0] }]);
+      writeMemoryConfig(dir, EMBED_CFG(serverBaseUrl(server)));
+      const hybrid = await hook(dir, {});
+      expect(hybrid.status, hybrid.stderr).toBe(0);
+      const hybridCtx = context(hybrid);
+      expect(hybridCtx).toContain("hybrid via");
+      expect(hybridCtx).toContain(`[${l1.id}]`);
+
+      writeMemoryConfig(dir, EMBED_CFG("http://127.0.0.1:1"));
+      const down = await hook(dir, {});
+      expect(down.status, down.stderr).toBe(0);
+      const downCtx = context(down);
+      expect(downCtx).toContain("keyword-only (");
+      expect(downCtx).toContain(`[${l1.id}]`);
+    } finally {
+      server.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("a7: an embed that ignores timeoutMs (fetch preloaded to stall 8 s) -> the 3000 ms deadline race returns keyword output, `embeddings timed out`, within 4500 ms", async () => {
+    // createProvider reads globalThis.fetch when the hook builds the provider, so a --import preload that
+    // swaps fetch for one that ignores its AbortSignal stands in for a provider the 1500 ms timeout cannot bound.
+    const dir = tempDir();
+    try {
+      writeFlowBoard(dir, [flowCard]);
+      const [l1] = seed(dir, [{ text: "upload retries need exponential backoff on flaky networks", vector: [1, 0, 0, 0] }]);
+      writeMemoryConfig(dir, EMBED_CFG("http://127.0.0.1:1"));
+      const preload = join(dir, "stall-fetch.mjs");
+      writeFileSync(preload, 'globalThis.fetch = () => new Promise((_, reject) => setTimeout(() => reject(new Error("stalled")), 8000));\n', "utf8");
+      const res = await hook(dir, {}, { NODE_OPTIONS: `--import ${pathToFileURL(preload).href}` });
+      expect(res.status, res.stderr).toBe(0);
+      const ctx = context(res);
+      expect(ctx).toContain("keyword-only (embeddings timed out)");
+      expect(ctx).toContain(`[${l1.id}]`);
+      expect(res.elapsed).toBeLessThan(4500);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 20000);
+
+  it("a8: no card in the flow column -> query-free top lessons, helpful 3 listed before helpful 0 (even when the helpful-0 one is newer)", async () => {
+    const dir = tempDir();
+    try {
+      writeFlowBoard(dir, [{ id: "r1", title: "A ready card", goal: "not started", column: "ready" }]);
+      const now = Date.now();
+      const [good, fresh] = seed(dir, [
+        { text: "the lesson that proved helpful three times", helpful: 3, created: new Date(now - 5 * 86400000).toISOString() },
+        { text: "a newer lesson nobody has used yet", helpful: 0, created: new Date(now - 1 * 86400000).toISOString() },
+      ]);
+      const res = await hook(dir, {});
+      expect(res.status, res.stderr).toBe(0);
+      const ctx = context(res);
+      expect(ctx).toContain("top by helpful-harmful");
+      expect(ctx.indexOf(`[${good.id}]`)).toBeGreaterThan(-1);
+      expect(ctx.indexOf(`[${fresh.id}]`)).toBeGreaterThan(-1);
+      expect(ctx.indexOf(`[${good.id}]`)).toBeLessThan(ctx.indexOf(`[${fresh.id}]`));
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  // Added by the reviewer finding on card memory-every-session: the try/catch around loadBoard had no test.
+  it("a8b: a DB plus an invalid board file -> the top-lessons context, not a systemMessage", async () => {
+    const dir = tempDir();
+    try {
+      const [l1] = seed(dir, [{ text: "a lesson that survives a broken board file", helpful: 2 }]);
+      writeFileSync(join(dir, ".doug", "board.json"), "{ this is not json", "utf8");
+      const res = await hook(dir, {});
+      expect(res.status, res.stderr).toBe(0);
+      expect(res.stdout).not.toContain("systemMessage");
+      const ctx = context(res);
+      expect(ctx).toContain("top by helpful-harmful");
+      expect(ctx).toContain(`[${l1.id}]`);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("a9: DOUG_SESSION_RECALL=0 -> empty stdout; so does memory.sessionRecall false in .doug/config.json", async () => {
+    const dir = tempDir();
+    try {
+      writeFlowBoard(dir, [flowCard]);
+      seed(dir, [{ text: "upload retries need exponential backoff on flaky networks" }]);
+      const control = await hook(dir, {});
+      expect(control.stdout).not.toBe("");
+      const env = await hook(dir, {}, { DOUG_SESSION_RECALL: "0" });
+      expect(env.status, env.stderr).toBe(0);
+      expect(env.stdout).toBe("");
+      writeFileSync(join(dir, ".doug", "config.json"), JSON.stringify({ memory: { sessionRecall: false } }), "utf8");
+      const cfg = await hook(dir, {});
+      expect(cfg.status, cfg.stderr).toBe(0);
+      expect(cfg.stdout).toBe("");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("a10: garbage stdin -> exit 0 and nothing thrown", async () => {
+    const dir = tempDir();
+    try {
+      writeFlowBoard(dir, [flowCard]);
+      seed(dir, [{ text: "upload retries need exponential backoff on flaky networks" }]);
+      for (const junk of ["", "not json {{{", "[1,2", "null"]) {
+        const res = await hook(dir, junk);
+        expect(res.status, `${JSON.stringify(junk)}: ${res.stderr}`).toBe(0);
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("memory.mjs brief-lessons", () => {
+  const EMBED_CFG = (baseUrl) => ({ provider: "openai-compatible", baseUrl, model: "embeddinggemma", dims: 4 });
+  const dbFile = (dir) => join(dir, ".doug", ".state", "memory", "memory.db");
+  const lessonsFile = (dir, id = "c1") => join(dir, ".doug", ".state", "reports", id, "lessons.json");
+  // No configured provider means the CLI probes a local Ollama; point the probe at a dead port.
+  const NO_OLLAMA = { DOUG_OLLAMA_BASE_URL: "http://127.0.0.1:1" };
+  const card = { id: "c1", title: "Retry flaky uploads", goal: "make upload retries robust against flaky networks", column: "ready" };
+
+  // The header string the workflow puts above a task's lessons, read out of the workflow source.
+  function workflowHeader() {
+    const src = readFileSync(join(here, "..", "workflows", "doug-implement.js"), "utf8");
+    const m = /`(Lessons from earlier runs on this repository \(memory; each cites where it was learned\):)`/.exec(src);
+    if (!m) throw new Error("lessons header not found in doug-implement.js");
+    return m[1];
+  }
+
+  function writeBoard(dir, cards = [card]) {
+    mkdirSync(join(dir, ".doug"), { recursive: true });
+    const board = {
+      version: 1,
+      updated: "2026-10-07",
+      columns: [
+        { id: "ready", title: "Ready" },
+        { id: "flow", title: "In flow" },
+      ],
+      components: [],
+      tags: [],
+      cards,
+    };
+    writeFileSync(join(dir, ".doug", "board.json"), JSON.stringify(board, null, 2), "utf8");
+  }
+
+  function seed(dir, lessons) {
+    const m = openMemory(dir);
+    const rows = lessons.map((l) => {
+      const row = addLesson(m, { kind: "pattern", source: { agent: "worker" }, ...l });
+      if (l.vector) setLessonEmbedding(m, row.id, { model: "embeddinggemma", dims: 4, vector: Float32Array.from(l.vector) });
+      return row;
+    });
+    m.close();
+    return rows;
+  }
+
+  const lessonLines = (stdout) => stdout.split("\n").filter((l) => l.startsWith("- ["));
+  const idOf = (line) => /^- \[([^\]]+)\]/.exec(line)[1];
+  const memoryUsedIds = (stdout) => {
+    const line = stdout.split("\n").find((l) => l.startsWith("memoryUsed: "));
+    return line ? line.slice("memoryUsed: ".length).split(",").map((s) => s.trim()).filter(Boolean) : null;
+  };
+
+  it("b1: a seeded card and matching lessons -> first line is the workflow's header, `- [id]` lines, and lessons.json ids == stdout ids == the memoryUsed line", async () => {
+    const dir = tempDir();
+    try {
+      writeBoard(dir);
+      const [l1, l2] = seed(dir, [
+        { text: "upload retries need exponential backoff on flaky networks" },
+        { text: "cap upload retries so flaky networks cannot loop forever" },
+      ]);
+      const res = await runAsync(["brief-lessons", "c1", dir], dir, NO_OLLAMA);
+      expect(res.status, res.stderr).toBe(0);
+      expect(res.stdout.split("\n")[0]).toBe(workflowHeader());
+      const lines = lessonLines(res.stdout);
+      const ids = lines.map(idOf);
+      expect(ids.sort()).toEqual([l1.id, l2.id].sort());
+      expect(memoryUsedIds(res.stdout)).toEqual(lines.map(idOf));
+      const saved = JSON.parse(readFileSync(lessonsFile(dir), "utf8"));
+      expect(saved.card).toBe("c1");
+      expect(saved.ids).toEqual(lines.map(idOf));
+      expect(saved.mode).toBe("keyword-only");
+      expect(typeof saved.query).toBe("string");
+      expect(saved.query).toContain("Retry flaky uploads");
+      expect(typeof saved.text).toBe("string");
+      expect(typeof saved.recalledAt).toBe("string");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("b2: a configured fake Ollama with vectors -> lessons.json mode is hybrid", async () => {
+    const dir = tempDir();
+    const server = await startFakeOllama();
+    try {
+      writeBoard(dir);
+      writeMemoryConfig(dir, EMBED_CFG(serverBaseUrl(server)));
+      const [l1] = seed(dir, [{ text: "upload retries need exponential backoff on flaky networks", vector: [1, 0, 0, 0] }]);
+      const res = await runAsync(["brief-lessons", "c1", dir], dir);
+      expect(res.status, res.stderr).toBe(0);
+      expect(res.stdout.split("\n")[0]).toBe(workflowHeader());
+      expect(lessonLines(res.stdout).map(idOf)).toContain(l1.id);
+      const saved = JSON.parse(readFileSync(lessonsFile(dir), "utf8"));
+      expect(saved.mode).toBe("hybrid");
+      expect(saved.ids).toContain(l1.id);
+    } finally {
+      server.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("b3: no memory database -> exit 0, `No lessons recalled for c1.`, lessons.json ids [], and the database is not created", async () => {
+    const dir = tempDir();
+    try {
+      writeBoard(dir);
+      const res = await runAsync(["brief-lessons", "c1", dir], dir, NO_OLLAMA);
+      expect(res.status, res.stderr).toBe(0);
+      expect(res.stdout).toContain("No lessons recalled for c1.");
+      expect(JSON.parse(readFileSync(lessonsFile(dir), "utf8")).ids).toEqual([]);
+      expect(existsSync(dbFile(dir))).toBe(false);
+      expect(existsSync(join(dir, ".doug", ".state", "memory"))).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("b4: a corrupt memory.db -> exit 0, stderr `memory recall skipped`, lessons.json ids []", async () => {
+    const dir = tempDir();
+    try {
+      writeBoard(dir);
+      mkdirSync(join(dir, ".doug", ".state", "memory"), { recursive: true });
+      writeFileSync(dbFile(dir), "this is not a sqlite database ".repeat(200), "utf8");
+      const res = await runAsync(["brief-lessons", "c1", dir], dir, NO_OLLAMA);
+      expect(res.status, res.stderr).toBe(0);
+      expect(res.stderr).toContain("memory recall skipped");
+      expect(JSON.parse(readFileSync(lessonsFile(dir), "utf8")).ids).toEqual([]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("b5: an unknown card -> exit 1 and `no card nope`", async () => {
+    const dir = tempDir();
+    try {
+      writeBoard(dir);
+      const res = await runAsync(["brief-lessons", "nope", dir], dir, NO_OLLAMA);
+      expect(res.status).toBe(1);
+      expect(res.stderr + res.stdout).toContain("no card nope");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("b6: ten 1000-char lessons -> the lesson block is at most 2000 chars and lessons.json ids are exactly the rendered lines", async () => {
+    const dir = tempDir();
+    try {
+      writeBoard(dir);
+      const filler = "upload retries flaky networks backoff ".repeat(40).slice(0, 1000);
+      const all = seed(dir, Array.from({ length: 10 }, (_, i) => ({ text: `lesson ${i} ${filler}` })));
+      const res = await runAsync(["brief-lessons", "c1", dir], dir, NO_OLLAMA);
+      expect(res.status, res.stderr).toBe(0);
+      const lines = lessonLines(res.stdout);
+      expect(lines.length).toBeGreaterThanOrEqual(1);
+      expect(lines.length).toBeLessThan(all.length);
+      expect(lines.join("\n").length).toBeLessThanOrEqual(2000);
+      const ids = lines.map(idOf);
+      expect(JSON.parse(readFileSync(lessonsFile(dir), "utf8")).ids).toEqual(ids);
+      expect(memoryUsedIds(res.stdout)).toEqual(ids);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

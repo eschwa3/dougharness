@@ -76,6 +76,58 @@ describe("loadConfig", () => {
   });
 });
 
+// Card autopilot-unlimited: autopilot.contextThreshold is a percentage in 1..100 (default 60), read by doug-flow's
+// scripts/context.mjs. A value that is not a finite number in that range folds back to 60 with one stderr warning
+// naming the key; null falls back silently.
+describe("loadConfig autopilot.contextThreshold (card autopilot-unlimited)", () => {
+  function writeCfg(obj) {
+    mkdirSync(join(dir, ".doug"), { recursive: true });
+    writeFileSync(join(dir, ".doug/config.json"), JSON.stringify(obj));
+  }
+  function spy(fn) {
+    const lines = [];
+    const orig = process.stderr.write;
+    process.stderr.write = (s) => {
+      lines.push(String(s));
+      return true;
+    };
+    try {
+      return { result: fn(), lines };
+    } finally {
+      process.stderr.write = orig;
+    }
+  }
+  it("defaults to 60, absent or not", () => {
+    expect(DEFAULTS.autopilot).toEqual({ contextThreshold: 60 });
+    expect(loadConfig(dir).autopilot.contextThreshold).toBe(60);
+    writeCfg({ autopilot: {} });
+    const { result: cfg, lines } = spy(() => loadConfig(dir));
+    expect(cfg.autopilot.contextThreshold).toBe(60);
+    expect(lines.join("")).not.toContain("autopilot.contextThreshold");
+  });
+  it("accepts 45 with no warning", () => {
+    writeCfg({ autopilot: { contextThreshold: 45 } });
+    const { result: cfg, lines } = spy(() => loadConfig(dir));
+    expect(cfg.autopilot.contextThreshold).toBe(45);
+    expect(lines.join("")).not.toContain("autopilot.contextThreshold");
+  });
+  for (const [label, bad] of [["the string \"70\"", "70"], ["0", 0], ["150", 150], ["an object", { a: 1 }], ["true", true]]) {
+    it(`folds ${label} back to 60 with one warning naming autopilot.contextThreshold`, () => {
+      writeCfg({ autopilot: { contextThreshold: bad } });
+      const { result: cfg, lines } = spy(() => loadConfig(dir));
+      expect(cfg.autopilot.contextThreshold).toBe(60);
+      const hits = lines.filter((l) => l.includes("autopilot.contextThreshold"));
+      expect(hits, JSON.stringify(lines)).toHaveLength(1);
+    });
+  }
+  it("falls back to 60 silently for an explicit null", () => {
+    writeCfg({ autopilot: { contextThreshold: null } });
+    const { result: cfg, lines } = spy(() => loadConfig(dir));
+    expect(cfg.autopilot.contextThreshold).toBe(60);
+    expect(lines.join("")).not.toContain("autopilot.contextThreshold");
+  });
+});
+
 // Card gates-config-shape-check (decision, option a): for each of the four keys the gates iterate with a bare
 // `for (const raw of patterns)` (matchAny, lib/glob.mjs) or an unguarded `for (const entry of ...)`
 // (resolveCommands), a wrong-shape value (not an array) must fall back to that key's default and warn once on

@@ -20,6 +20,8 @@ export const RUNNER_PATTERNS = [
   /\bgradle\w*\b.*\btest\b/,
   /\bdotnet\s+test\b/,
   /\bmake\s+(test|check)\b/,
+  // card verified-tree-record: the vendored or plugin verify.mjs only; a project's own verify.mjs must not count.
+  /(\.doug\/hooks|doug-gates)\/scripts\/verify\.mjs\b/,
 ];
 
 // The commands the stop gate runs, by name, plus every other configured project command except install.

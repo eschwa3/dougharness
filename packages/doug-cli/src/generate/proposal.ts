@@ -41,11 +41,18 @@ export function buildProposal(d: Detection): Proposal {
   const changes: FileChange[] = [];
 
   // 1. .doug/config.json
+  const existingConfig = readIfExists(join(dir, ".doug/config.json"));
+  // `memory` is the user's (embeddings, index), not detected: carry it over so a re-init does not drop it.
+  let carried: Record<string, unknown> = {};
+  try {
+    const prev = existingConfig === null ? null : (JSON.parse(existingConfig) as { memory?: unknown });
+    if (prev && typeof prev === "object" && prev.memory !== undefined) carried = { memory: prev.memory };
+  } catch {}
   changes.push({
     path: ".doug/config.json",
-    before: readIfExists(join(dir, ".doug/config.json")),
-    after: JSON.stringify(config, null, 2) + "\n",
-    reason: "Gate configuration read by the hooks. Everything in it was detected, not guessed.",
+    before: existingConfig,
+    after: JSON.stringify({ ...config, ...carried }, null, 2) + "\n",
+    reason: "Gate configuration read by the hooks. Everything in it was detected, not guessed; memory settings already in the file are kept.",
   });
 
   // 1b. .doug/board.json: only when no board exists yet at either record path.

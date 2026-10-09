@@ -91,6 +91,7 @@ fi
 # --- 6. next steps -------------------------------------------------------------
 echo "setup: next steps:"
 echo "setup:   doug init <repo>"
+echo "setup:   doug doctor <repo>   (re-check the install any time)"
 echo "setup:   doug board init   (or: doug board add)"
 echo "setup:   start Claude Code with --plugin-dir plugins/doug-gates --plugin-dir plugins/doug-flow"
 echo "setup:   then run /doug-next"

@@ -92,10 +92,14 @@ one before the brief).` `--json` carries `"stamped": true|false` on the result o
 memory.mjs recall <query> [dir] [--files <glob,glob>] [--k <n>] [--json]
 ```
 
-Fuses BM25 over FTS5 with cosine similarity over stored vectors by reciprocal rank fusion (`1/(60+rank)` per
-side) when an embedding provider is configured and vectors exist for it, recency-weights the result (age
-measured from `confirmed` or `created`), and boosts a lesson whose `scope` matches `--files` (a comma-separated
-list of globs; `**`, `*`, `?` supported, `**/` also matching zero directories). Text output starts with one
+With an embedding provider configured and vectors stored for its model and dims, every live lesson in the
+staleness window that has a stored vector is ranked by cosine similarity x recency weight (age measured from
+`confirmed` or `created`) x scope boost: a lesson whose `scope` matches `--files` (a comma-separated list of
+globs; `**`, `*`, `?` supported, `**/` also matching zero directories), or whose `scope` is empty, is
+multiplied by 1.5 whenever `--files` is given. Ties break by lesson id ascending. BM25 hits over FTS5 that have
+no such vector (unembedded lessons) are appended after all vectored lessons, in BM25 order. The BM25 fallback:
+without a provider, without vectors for it, or when embedding the query fails, the ranking is BM25 x recency x
+scope (keyword-only). Text output starts with one
 header line — `recall: hybrid via <provider> <model>/<dims>` or `recall: keyword-only (<reason>)` — followed by
 one line per lesson (`id  score  kind  text`); `--json` returns the full `{ mode, reason, provider, checked,
 lessons }` shape. Returned lessons never carry the embedding blob or its model/dims columns (multi-KB per
@@ -127,8 +131,17 @@ memory.mjs reflect <report.json> [dir] [--run <wf-id>] [--card <id>] [--commit <
 ```
 
 Runs after `record` in `run-report` (card `memory-reflect`): report/dir/adversary parsing is the same as
-`record`'s, and an `--adversary` id the report doesn't have fails the same way. `--hand` is refused — a hand
-landing has no report to reflect on.
+`record`'s, and an `--adversary` id the report doesn't have fails the same way.
+
+**`reflect --hand <card-id> [dir] --commit <sha> [--rounds <n>] [--review "R1=<class>[: <reason>]"]... [--note <text>]`**
+(card `memory-every-session`) reflects on a hand landing, which has no workflow report. It assembles one at
+`.doug/.state/reports/<card-id>/hand-report.json` (canonical, no timestamp, so a second run hashes the same and
+is a no-op) from the briefs and reviewer reports `doug-hand` saved there and `lessons.json`: one task with
+`memoryUsed` = the lessons.json ids, `verified: true` (a green gate), `passes` = `--rounds` (default 1), and one
+fixed blocker ledger entry per `--review` id, so a pitfall needs a `--review` classed `real` and a pattern needs
+one round. The prompt gains a hand section: each file cut at 4000 chars (`…[truncated]`), 16000 in total, the
+note last. Everything else is the flow pass; `--commit` is required (exit 2); there is no schema change and
+nothing is stored on the outcome row.
 
 **Counters (deterministic, no LLM, always runs first).** For each task in the report with a non-empty
 `memoryUsed`: a block classed `real` on that task bumps `harmful + 1` on every used lesson that exists (real wins
@@ -208,6 +221,29 @@ last balanced top-level `{...}` object on stdout, not the whole buffer with a si
 **`--dry-run`** applies nothing at all — no counters, no `reflections` row, no lessons appended — but still runs
 the LLM pass and prints what would happen, cost included.
 
+## Session recall
+
+A doug-flow plugin hook (`plugins/doug-flow/hooks/hooks.json`, `scripts/session-recall.mjs`) puts the repository's lessons into a fresh session's context. It runs on SessionStart with source `startup` or `clear` only (matcher `startup|clear`); `resume` and `compact` get nothing.
+
+- Query: the title and goal of the card(s) in the board's `flow` column, recalled keyword-only first. With no card in flow it lists the top lessons by helpful minus harmful (then newest confirmed or created), with no query and no provider.
+- With an embeddings provider configured, a hybrid recall (provider timeout 1500 ms) races an overall 3000 ms deadline and replaces the keyword result if it lands; otherwise the header says `keyword-only (<reason>)`.
+- k = 5; the rendered lesson lines are capped at 2000 characters, the same renderer plan.mjs uses (`renderLessons` in `lib/memory.mjs`).
+- Output: `additionalContext` starting `[doug] Lessons from this repository's memory (...)`, each line `[lesson id] text (citation)`, with the instruction to paste applicable lessons into agent briefs and list their ids as `memoryUsed`. Nothing is printed when no lesson qualifies.
+- It never creates `.doug/.state/memory/memory.db` and never exits non-zero: an exception becomes one stderr line and a `systemMessage`.
+- Opt out with `DOUG_SESSION_RECALL=0` or `"memory": { "sessionRecall": false }` in `.doug/config.json`.
+
+## `memory.mjs brief-lessons`
+
+```
+memory.mjs brief-lessons <card-id> [dir] [--k <n>] [--json]
+```
+
+Recall for a hand-track card's briefs (card memory-every-session; doug-hand step 3 pastes its output into every tester, coder, and reviewer brief). The query is the card's title and goal, `k` is 8 unless `--k` says otherwise, and the recall is the one `plan.mjs json` runs per task. Stdout is the workflow's lessons header verbatim, an optional `(recall was keyword-only: <reason>)` note when the recall degraded, the `- [<id>] ...` lines (capped at 2000 characters by the same `renderLessons`), then `memoryUsed: <id>, <id>`. `.doug/.state/reports/<card-id>/lessons.json` records `{ card, query, mode, reason, ids, text, recalledAt }`, with `ids` exactly the rendered lines' ids.
+
+- No memory database: `No lessons recalled for <id>.`, `ids: []`, exit 0, and the database is not created.
+- A database or provider error: one stderr line `[doug] memory recall skipped: <message>`, `ids: []` plus an `error` field, exit 0.
+- An unknown card exits 1 with `no card <id>`.
+
 ## `memory.mjs doctor`
 
 ```
@@ -225,6 +261,13 @@ key never serves it — the probe falls back to one embed call and reports reach
 instructions are printed for that case only when the configured `baseUrl` is itself the Ollama preset host:port
 (`localhost`/`127.0.0.1:11434`) — a down local Ollama, the one case `doctor` exists to catch — never for a real,
 reachable non-Ollama provider that simply lacks that one endpoint.
+
+For the `unsloth` and `openai` presets the probe is `GET <baseUrl>/v1/models` with the key as a Bearer token: an
+unset key env var is reported without any request (`missing API key: set UNSLOTH_API_KEY`), a 401 names the env
+var (`HTTP 401: key rejected or missing; set UNSLOTH_API_KEY`), and a 200 reports whether the configured model is
+listed (the id equals it, or the id's last `/` segment equals or starts with it, case-insensitive; no `:tag` cut)
+and whether the server says it is `loaded` (`modelLoaded` is `null` when the server has no such field, as OpenAI's
+does not). The `voyage` preset makes no `/api/version` request: it reports kind `voyage` from one embed probe (or `missing API key: set VOYAGE_API_KEY` with no request). With nothing configured, `doctor` prints today's lines, then one config snippet per preset. It never prints a key's value: any occurrence of the key in a server's error body is replaced with `[redacted]` in every reason, the doctor text and `--json`.
 
 ## `memory.mjs reembed`
 
@@ -456,9 +499,40 @@ URL uses the same adapter. Install it with `brew install ollama` (macOS), `curl 
 https://ollama.com/install.sh | sh` (Linux), or `winget install Ollama.Ollama` (Windows); then `ollama pull
 embeddinggemma`.
 
-**Task prefixes.** Two model families need a prefix the provider layer adds automatically (the server never adds
+**Presets.** `memory.embeddings.preset` is one of `ollama`, `unsloth`, `openai`, `voyage`, `custom`. A preset fills
+only the fields the config leaves unset (`provider`, `baseUrl`, `apiKeyEnv`); explicit fields win. `model` and `dims`
+stay required, an unknown preset is an invalid shape (keyword-only), and a config with no `preset` key behaves as
+before. A preset that requires a key (`unsloth`, `openai`, `voyage`) refuses with `missing API key: set <ENV>`
+without calling the server when the env var is unset. Keys live only in the environment, never in the config.
+
+```json
+"memory": { "embeddings": { "preset": "ollama", "model": "embeddinggemma", "dims": 512 } }
+"memory": { "embeddings": { "preset": "unsloth", "model": "embeddinggemma", "dims": 512 } }
+"memory": { "embeddings": { "preset": "openai", "model": "text-embedding-3-small", "dims": 512 } }
+"memory": { "embeddings": { "preset": "voyage", "model": "voyage-4", "dims": 512 } }
+"memory": { "embeddings": { "preset": "custom", "provider": "openai-compatible", "baseUrl": "http://localhost:8080", "model": "m", "dims": 512 } }
+```
+
+- `ollama`: `http://localhost:11434`, no key.
+- `unsloth` (Unsloth Studio): `http://127.0.0.1:8888`, key from `UNSLOTH_API_KEY` (the server answers 401 "Not
+  authenticated" without one). It rejects `dimensions` (400 "'dimensions' is not supported by ..."), so the preset
+  omits it and truncates the native 768-wide vector to `dims` client-side, then re-normalizes; per the card's live
+  check, embeddinggemma truncated to 512 matches Ollama's at cosine 0.9999.
+- `openai`: `https://api.openai.com`, key from `OPENAI_API_KEY`.
+- `voyage`: `https://api.voyageai.com`, key from `VOYAGE_API_KEY`.
+- `custom`: no defaults; `provider` and `baseUrl` must be given.
+
+**Dimensions rejected.** For an openai-compatible server that is sent `dimensions`: a 400 whose body
+mentions `dimensions` is retried once without it, the vector is truncated and re-normalized to `dims`, and the
+provider remembers it for later batches. Any other 400 is not retried. Voyage's `output_dimension` is unchanged.
+
+**Task prefixes.** Four model families need a prefix the provider layer adds automatically (the server never adds
 it): `embeddinggemma` gets `task: search result | query: ` for a query and `title: none | text: ` for a
-document; `nomic-embed-text` gets `search_query: ` / `search_document: `. Every other model gets none.
+document; `nomic-embed-text` gets `search_query: ` / `search_document: `; `mxbai-embed-large` gets
+`Represent this sentence for searching relevant passages: ` on a query and nothing on a document;
+`qwen3-embedding` gets `Instruct: Given a web search query, retrieve relevant passages that answer the query`
+then a newline and `Query:` (no space after the colon) on a query and nothing on a document. Every other model
+gets none.
 
 **Measured speeds** (Apple silicon laptop, 2026-09-07): Ollama 0.30.10 ~91ms per single query; llama-server on the same GGUF
 ~9ms per single query — both fast enough that recall never needs to be skipped for latency; quoted here so a

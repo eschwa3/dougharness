@@ -2,7 +2,7 @@ import type { Detection } from "../detect/types.js";
 import type { DougConfig } from "./config.js";
 
 // Generates standard project subagents under .claude/agents/: coder, architect, reviewer, researcher, and
-// (when a test framework is detected) tester. Pure function of its arguments: no filesystem,
+// tester (always). Pure function of its arguments: no filesystem,
 // no clock, no randomness, so the same inputs give byte-identical output.
 
 export const AGENT_MARK = "doug: generated";
@@ -150,8 +150,16 @@ function renderAgent(spec: AgentSpec): string {
   return lines.join("\n") + "\n";
 }
 
+function timeoutRuleFor(cfg: DougConfig): string {
+  const last = cfg.stopGate.commands[cfg.stopGate.commands.length - 1];
+  const cmd = last ? cfg.commands[last] : undefined;
+  const example = cmd ? `, such as ${cmd},` : "";
+  return `Run any command that can take over 120 s${example} with the Bash timeout set to 600000, and hand back only after it exits.`;
+}
+
 export function generateAgents(d: Detection, cfg: DougConfig): AgentFile[] {
   const n = d.node;
+  const timeoutRule = timeoutRuleFor(cfg);
 
   const coder: AgentSpec = {
     name: "coder",
@@ -162,13 +170,13 @@ export function generateAgents(d: Detection, cfg: DougConfig): AgentFile[] {
       "Do only what was asked, no refactors or renames beyond it.",
       "Add or update the test with the change.",
       "Never bypass hooks with --no-verify.",
-      "Do not claim done until the gate passed in this session.",
+      "Run the gate with `node .doug/hooks/scripts/verify.mjs`, not the raw commands; do not claim done until it passed in this session.",
       "Report every command run with its exit status.",
       "Return partial=true only after a hook tells you `[doug] Worker context at <pct>% of <window> tokens`: stop at a boundary (finish the file you are on and its named test, then commit), and say what's done, what's left, what to do next, and how to verify it. Never claim partial to dodge a hard task.",
       "When a test contradicts the brief or the card's goal, do not change production code to fit the test; stop and report the conflict, quoting both, so the lead can send it back to the tester.",
       "Apply each mutation in a scratch copy or git worktree under `.doug/.state`, run the one test file there, and remove the copy.",
       "Scratch files go under `.doug/.state/scratch`; protect-paths keeps refusing the Claude Code session scratchpad, which is outside the project.",
-      "Run any command that can take over 120 s, such as pnpm test:unit, with the Bash timeout set to 600000, and hand back only after it exits.",
+      timeoutRule,
     ],
   };
 
@@ -192,12 +200,12 @@ export function generateAgents(d: Detection, cfg: DougConfig): AgentFile[] {
     facts: buildFacts(d, cfg, { gate: true, singleTest: true, ci: true }),
     rules: [
       "Review `git diff` (or `git diff <base>...HEAD` when a base is named).",
-      "Run the gate commands and report real exit codes.",
+      "Run the brief's test files and mutations and the gate's non-test commands, never the full test suite directly; for the full gate run `node .doug/hooks/scripts/verify.mjs` without `--no-credit`, which credits a green verified-tree record of the same tree, and report its gate line and real exit codes.",
       "When the change's point is that a mechanism exists, mutate or remove it, rerun the test, and confirm it fails before reverting.",
       "Severity blocker/major/minor with blocker meaning the change must not merge.",
       "Do not ask for work beyond the request.",
       "Apply each mutation in a scratch copy or git worktree under `.doug/.state`, run the one test file there, and remove the copy.",
-      "Run any command that can take over 120 s, such as pnpm test:unit, with the Bash timeout set to 600000, and hand back only after it exits.",
+      timeoutRule,
     ],
   };
 
@@ -224,21 +232,23 @@ export function generateAgents(d: Detection, cfg: DougConfig): AgentFile[] {
     { path: ".claude/agents/researcher.md", content: renderAgent(researcher) },
   ];
 
-  if (n.testFramework || d.python.testFramework) {
-    const frameworkName = n.testFramework ?? "pytest";
+  {
+    const frameworkName = n.testFramework ?? (d.python.testFramework ? "pytest" : null);
     const tester: AgentSpec = {
       name: "tester",
-      description: `Writes and runs tests with ${frameworkName} for a named behavior; edits test files only`,
+      description: frameworkName
+        ? `Writes and runs tests with ${frameworkName} for a named behavior; edits test files only`
+        : "Writes and runs tests for a named behavior; edits test files only",
       readOnly: false,
       facts: buildFacts(d, cfg, { pm: true, singleTest: true }),
       rules: [
         "A new test must fail without the behavior and pass with it.",
         "Edit only test files.",
-        "Run each test file you touch with the single-test command.",
+        "Run each test file you touch with the single-test command in Facts; when Facts lists none, report the exact command you ran.",
         "Report what ran.",
         'When your new tests are meant to stay red until the coder\'s change, end your final message with a JSON object {"tests_red_by_design": ["<test file>", ...]} naming every test file you left failing by its repository-relative path, report the red once, and do not rerun the suite to make a gate pass. Put that JSON line either as the last line of your final plain-text message or inside your hand-back message: the SubagentStop gate reads your last plain-text message first and, when that holds no claim, your last hand-back call.',
         "Scratch files go under `.doug/.state/scratch`; protect-paths keeps refusing the Claude Code session scratchpad, which is outside the project.",
-        "Run any command that can take over 120 s, such as pnpm test:unit, with the Bash timeout set to 600000, and hand back only after it exits.",
+        timeoutRule,
         "On a tests-only card, run the brief's mutation list yourself in a scratch copy or git worktree under `.doug/.state`, run the one test file there, report each result, and remove the copy; never edit a production file in the live checkout.",
       ],
     };

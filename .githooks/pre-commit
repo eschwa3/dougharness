@@ -103,6 +103,25 @@ process.exit(staged.every(hit) ? 0 : 1);
   exit 0
 fi
 
+# card gate-docs-skip-unless-named: a staged docs/**/*.md file does not by itself run the suite. When every staged
+# path is on preCommit.noTestPaths or is a docs .md, plugins/doug-gates/lib/docs-gate.mjs (the same rule the Stop
+# gate uses) looks for tracked test files naming each doc: none -> skip like the block above; some -> run only
+# `pnpm test:unit <those files>`, never credited as a full run. Same fail-closed conditions as above, and a dirty
+# working tree (working_tree_dirty) runs the full gate: the test tree it reads is the working tree. The lib is
+# imported relative to the hook, like verified-tree.mjs below. Any node failure prints nothing: the full gate.
+docs_decision=""
+if [ "$staged_status" -eq 0 ] && [ "$no_test_config_status" -eq 0 ] && [ -n "$staged_paths" ] && [ "$working_tree_dirty" -eq 0 ]; then
+  docs_lib="$(cd "$(dirname "$0")/.." 2>/dev/null && pwd)/plugins/doug-gates/lib/docs-gate.mjs"
+  docs_decision=$(printf '%s\n' "$staged_paths" | DOUG_NO_TEST_CONFIG="$no_test_config" node "$docs_lib" 2>/dev/null) || docs_decision=""
+fi
+docs_mode=${docs_decision%%
+*}
+if [ "$docs_mode" = "skip" ]; then
+  rm -f .doug/.state/pre-commit/last-run.json
+  echo "pre-commit: gate skipped; only no-test paths (preCommit.noTestPaths) and docs no test names are staged" >&2
+  exit 0
+fi
+
 # card gate-output-names-failures: a discarded terminal (like the record
 # commits for 98fd1bb and 2f03658) left nothing to say which test failed.
 # Each step's output is teed into a log under .doug/.state/pre-commit (already
@@ -205,6 +224,7 @@ process.stdout.write(JSON.stringify(parseTotals(readFileSync(process.argv[1], "u
   record_command "$step_name" "$command_str" "$step_status" "$duration_ms" "$step_totals"
   if [ "$step_status" -ne 0 ]; then
     write_record false
+    rm -f .doug/.state/verified-tree.json
     if [ "$status_readable" -eq 0 ]; then
       echo "pre-commit: could not read the exit status of pnpm ${step_name} (${log}.status missing or unreadable); commit refused" >&2
     elif [ -f "$log" ]; then
@@ -219,8 +239,35 @@ process.stdout.write(JSON.stringify(parseTotals(readFileSync(process.argv[1], "u
   rm -f "$log"
 }
 
+# card verified-tree-record: ALWAYS runs both steps (the hook never reads the verified-tree record). The tree
+# of the WORKING tree is computed before the first command and again after the last; the record is written
+# only when they are equal. The lib is imported relative to the HOOK, not cwd (fixtures point core.hooksPath
+# at this directory). Any node failure leaves vt_before empty: no record, hook exit unchanged.
+vt_lib="$(cd "$(dirname "$0")/.." 2>/dev/null && pwd)/plugins/doug-gates/lib/verified-tree.mjs"
+vt_before=$(node "$vt_lib" tree "$PWD" 2>/dev/null) || vt_before=""
+
+if [ "$docs_mode" = "targeted" ]; then
+  # card gate-docs-skip-unless-named: only the test files that name the staged docs; no typecheck. Never credited
+  # as a full run: no passing last-run.json (removed), no verified-tree record (a red run_step removes it).
+  rm -f .doug/.state/pre-commit/last-run.json
+  docs_files=${docs_decision#*
+}
+  old_ifs="$IFS"
+  IFS='
+'
+  set -f
+  set -- $docs_files
+  set +f
+  IFS="$old_ifs"
+  run_step test:unit pnpm test:unit "$@"
+  exit 0
+fi
+
 run_step typecheck pnpm typecheck
 run_step test:unit pnpm test:unit
 
 write_record true
+if [ -n "$vt_before" ]; then
+  node "$vt_lib" record "$vt_before" "[$pre_commit_commands_json]" "$PWD" >/dev/null 2>&1 || true
+fi
 exit 0

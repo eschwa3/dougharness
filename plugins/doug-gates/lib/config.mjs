@@ -83,6 +83,9 @@ export const DEFAULTS = Object.freeze({
   // Per-subagent cap on WebSearch plus WebFetch calls (scripts/research-cap.mjs, card research-fetch-cap): null
   // or 0 turns it off. The main session is never capped.
   research: { maxFetches: 6 },
+  // Card autopilot-unlimited: the context percentage (1..100) at which `/doug-next --auto` ends and hands off; read by
+  // doug-flow's scripts/context.mjs. A value that is not a finite number in that range folds back to 60 (loadConfig).
+  autopilot: { contextThreshold: 60 },
 });
 
 export function projectDir(input) {
@@ -152,6 +155,22 @@ function normaliseArrayShapes(cfg) {
   }
 }
 
+function normaliseAutopilot(cfg) {
+  const a = cfg.autopilot;
+  if (a === null || typeof a !== "object" || Array.isArray(a)) {
+    cfg.autopilot = { ...DEFAULTS.autopilot };
+    return;
+  }
+  const v = a.contextThreshold;
+  if (v === undefined || v === null) {
+    cfg.autopilot = { ...a, contextThreshold: DEFAULTS.autopilot.contextThreshold };
+    return;
+  }
+  if (typeof v === "number" && Number.isFinite(v) && v >= 1 && v <= 100) return;
+  process.stderr.write(`[doug] ${CONFIG_RELPATH} autopilot.contextThreshold must be a number from 1 to 100; using the default\n`);
+  cfg.autopilot = { ...a, contextThreshold: DEFAULTS.autopilot.contextThreshold };
+}
+
 export function loadConfig(dir) {
   const file = join(dir, CONFIG_RELPATH);
   if (!existsSync(file)) return { ...DEFAULTS, _present: false };
@@ -159,6 +178,7 @@ export function loadConfig(dir) {
     const raw = JSON.parse(readFileSync(file, "utf8"));
     const merged = { ...deepMerge(DEFAULTS, raw), _present: true };
     normaliseArrayShapes(merged);
+    normaliseAutopilot(merged);
     return merged;
   } catch (err) {
     // A broken config must never silently disable gates. Fall back to defaults and say so.

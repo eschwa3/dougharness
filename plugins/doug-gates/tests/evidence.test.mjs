@@ -28,4 +28,18 @@ describe("verification evidence", () => {
     expect(red).toContain("never ran a test or verify command itself");
     expect(red).not.toContain("they pass");
   });
+  // card verified-tree-record: running the gate through verify.mjs is verification evidence, but only the
+  // vendored or plugin copy; any other project's own verify.mjs must not count.
+  it("counts `node .doug/hooks/scripts/verify.mjs` as verification evidence", () => {
+    expect(verificationEvidence(["node .doug/hooks/scripts/verify.mjs"], cfg).ran).toEqual(["node .doug/hooks/scripts/verify.mjs"]);
+    expect(RUNNER_PATTERNS.some((r) => r.test("node .doug/hooks/scripts/verify.mjs"))).toBe(true);
+  });
+  it("counts `node plugins/doug-gates/scripts/verify.mjs --no-credit` as verification evidence", () => {
+    expect(verificationEvidence(["node plugins/doug-gates/scripts/verify.mjs --no-credit"], cfg).ran).toEqual(["node plugins/doug-gates/scripts/verify.mjs --no-credit"]);
+    expect(RUNNER_PATTERNS.some((r) => r.test("node plugins/doug-gates/scripts/verify.mjs --no-credit"))).toBe(true);
+  });
+  it("does not count a project's own `node scripts/verify.mjs`", () => {
+    expect(verificationEvidence(["node scripts/verify.mjs"], cfg).ran).toEqual([]);
+    expect(RUNNER_PATTERNS.some((r) => r.test("node scripts/verify.mjs"))).toBe(false);
+  });
 });

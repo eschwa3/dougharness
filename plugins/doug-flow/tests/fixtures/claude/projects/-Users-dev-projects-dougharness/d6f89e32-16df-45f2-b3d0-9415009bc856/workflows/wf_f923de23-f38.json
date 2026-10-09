@@ -1,0 +1,108 @@
+{
+ "runId": "wf_f923de23-f38",
+ "durationMs": 4783342,
+ "workflowProgress": [
+  {
+   "type": "workflow_agent",
+   "label": "implement:doctor-feature-checks",
+   "startedAt": 1791376331468,
+   "durationMs": 606640
+  },
+  {
+   "type": "workflow_agent",
+   "label": "verify:doctor-feature-checks",
+   "startedAt": 1791376938251,
+   "durationMs": 347459
+  },
+  {
+   "type": "workflow_agent",
+   "label": "review:doctor-feature-checks",
+   "startedAt": 1791376938252,
+   "durationMs": 38837
+  },
+  {
+   "type": "workflow_agent",
+   "label": "adversary:doctor-feature-checks",
+   "startedAt": 1791377285728,
+   "durationMs": 326046
+  },
+  {
+   "type": "workflow_agent",
+   "label": "fix:doctor-feature-checks:2",
+   "startedAt": 1791377611780,
+   "durationMs": 270021
+  },
+  {
+   "type": "workflow_agent",
+   "label": "adversary:doctor-feature-checks:2",
+   "startedAt": 1791377881807,
+   "durationMs": 318836
+  },
+  {
+   "type": "workflow_agent",
+   "label": "check:doctor-feature-checks:2",
+   "startedAt": 1791378200657,
+   "durationMs": 304523
+  },
+  {
+   "type": "workflow_agent",
+   "label": "integrate:level-0",
+   "startedAt": 1791378505191,
+   "durationMs": 259000
+  },
+  {
+   "type": "workflow_agent",
+   "label": "implement:init-guided-flow",
+   "startedAt": 1791378764463,
+   "durationMs": 255429
+  },
+  {
+   "type": "workflow_agent",
+   "label": "verify:init-guided-flow",
+   "startedAt": 1791379020002,
+   "durationMs": 340779
+  },
+  {
+   "type": "workflow_agent",
+   "label": "review:init-guided-flow",
+   "startedAt": 1791379020002,
+   "durationMs": 330037
+  },
+  {
+   "type": "workflow_agent",
+   "label": "adversary:init-guided-flow",
+   "startedAt": 1791379360785,
+   "durationMs": 324111
+  },
+  {
+   "type": "workflow_agent",
+   "label": "integrate:level-1",
+   "startedAt": 1791379684907,
+   "durationMs": 254356
+  },
+  {
+   "type": "workflow_agent",
+   "label": "implement:getting-started-matches-flow",
+   "startedAt": 1791379939501,
+   "durationMs": 263255
+  },
+  {
+   "type": "workflow_agent",
+   "label": "check:getting-started-matches-flow",
+   "startedAt": 1791380202898,
+   "durationMs": 305961
+  },
+  {
+   "type": "workflow_agent",
+   "label": "integrate:level-2",
+   "startedAt": 1791380508864,
+   "durationMs": 283392
+  },
+  {
+   "type": "workflow_agent",
+   "label": "adversary:level-2",
+   "startedAt": 1791380792262,
+   "durationMs": 322192
+  }
+ ]
+}

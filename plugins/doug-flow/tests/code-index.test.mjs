@@ -674,4 +674,83 @@ describe("searchIndex", () => {
     const result = await searchIndex(m, "!!! ??? ...", {});
     expect(result.chunks).toEqual([]);
   });
+
+  // card recall-fallback-warning (D1): searchIndex returns degraded, and in hybrid mode unvectored/total chunk
+  // counts over the whole index.
+  describe("degraded (card recall-fallback-warning)", () => {
+    it("(a) a provider whose query embed times out: degraded true, reason 'timeout'", async () => {
+      const good = fakeProvider();
+      await buildIndex(m, dir, { cfg: {}, provider: good, check: false });
+      const slow = { name: "fake", model: good.model, dims: good.dims, embed: async () => ({ ok: false, reason: "timeout" }) };
+      const result = await searchIndex(m, "retry flaky uploads", { provider: slow });
+      expect(result.mode).toBe("keyword-only");
+      expect(result.reason).toBe("timeout");
+      expect(result.degraded).toBe(true);
+    });
+
+    it("(c) provider given, vectors only under another model/dims: degraded true, reason names the configured pair", async () => {
+      const other = fakeProvider({ model: "other-model", dims: 8, vectorFor: () => [1, 0, 0, 0, 0, 0, 0, 0] });
+      await buildIndex(m, dir, { cfg: {}, provider: other, check: false });
+      const result = await searchIndex(m, "retry flaky uploads", { provider: fakeProvider({ model: "fake-model", dims: 3 }) });
+      expect(result.mode).toBe("keyword-only");
+      expect(result.reason).toBe("no vectors stored for fake-model/3");
+      expect(result.degraded).toBe(true);
+    });
+
+    it("(d) provider given, no vectors at all: degraded true", async () => {
+      await buildIndex(m, dir, { cfg: {} });
+      const result = await searchIndex(m, "retry flaky uploads", { provider: fakeProvider() });
+      expect(result.mode).toBe("keyword-only");
+      expect(result.degraded).toBe(true);
+    });
+
+    it("(e) no provider but vectors stored for some model: degraded true", async () => {
+      await buildIndex(m, dir, { cfg: {}, provider: fakeProvider(), check: false });
+      const result = await searchIndex(m, "retry flaky uploads", {});
+      expect(result.reason).toBe("no provider configured");
+      expect(result.degraded).toBe(true);
+    });
+
+    it("(f) no provider, opts.detectedProvider given: degraded true", async () => {
+      await buildIndex(m, dir, { cfg: {} });
+      const result = await searchIndex(m, "retry flaky uploads", { detectedProvider: "ollama embeddinggemma at http://localhost:11434" });
+      expect(result.mode).toBe("keyword-only");
+      expect(result.degraded).toBe(true);
+    });
+
+    it("(g) no provider, nothing detected, no vectors stored: degraded false", async () => {
+      await buildIndex(m, dir, { cfg: {} });
+      const result = await searchIndex(m, "retry flaky uploads", {});
+      expect(result.mode).toBe("keyword-only");
+      expect(result.reason).toBe("no provider configured");
+      expect(result.degraded).toBe(false);
+    });
+
+    it("a --files filter that excludes every vector while vectors exist for the provider is NOT degraded", async () => {
+      const provider = fakeProvider();
+      await buildIndex(m, dir, { cfg: {}, provider, check: false });
+      // Only src/upload.mjs holds a vector; src/other.mjs is stripped, so a filter on it leaves no vectors.
+      m.prepare("UPDATE code_chunks SET embedding = NULL, embedding_model = NULL, embedding_dims = NULL WHERE path = 'src/other.mjs'").run();
+      const result = await searchIndex(m, "function", { provider, files: ["src/other.mjs"] });
+      expect(result.mode).toBe("keyword-only");
+      expect(result.reason).toBe("no vectors in the filtered paths");
+      expect(result.degraded).toBe(false);
+    });
+
+    it("hybrid with some chunks unvectored: degraded false, unvectored and total count the whole index", async () => {
+      const provider = fakeProvider();
+      await buildIndex(m, dir, { cfg: {}, provider, check: false });
+      const total = m.prepare("SELECT COUNT(*) AS n FROM code_chunks").get().n;
+      m.prepare("UPDATE code_chunks SET embedding = NULL, embedding_model = NULL, embedding_dims = NULL WHERE path = 'src/other.mjs'").run();
+      const unvectored = m.prepare("SELECT COUNT(*) AS n FROM code_chunks WHERE embedding IS NULL").get().n;
+      expect(unvectored).toBeGreaterThan(0);
+      expect(unvectored).toBeLessThan(total);
+      // A --files subset must not change the counts: they cover the whole index.
+      const result = await searchIndex(m, "function", { provider, files: ["src/upload.mjs"] });
+      expect(result.mode).toBe("hybrid");
+      expect(result.degraded).toBe(false);
+      expect(result.total).toBe(total);
+      expect(result.unvectored).toBe(unvectored);
+    });
+  });
 });

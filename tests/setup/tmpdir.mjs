@@ -53,3 +53,6 @@ for (const sig of ["SIGTERM", "SIGINT"]) {
     process.kill(process.pid, sig);
   });
 }
+
+// card recall-fallback-warning: no test reaches a real local Ollama; the probe default is a closed port unless a test passes its own in the child env.
+process.env.DOUG_OLLAMA_BASE_URL = "http://127.0.0.1:9";

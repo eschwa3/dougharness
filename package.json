@@ -1,7 +1,7 @@
 {
   "name": "dougharness",
   "private": true,
-  "version": "1.0.3",
+  "version": "1.1.0",
   "description": "Doug: a native-first harness for Claude Code. Deterministic gates, tailored install, honest memory.",
   "license": "MIT",
   "packageManager": "pnpm@9.15.4",

@@ -3,12 +3,16 @@ import { accessSync, constants, existsSync, readdirSync, readFileSync, statSync 
 import { createRequire } from "node:module";
 import { homedir } from "node:os";
 import { delimiter, join, relative, resolve } from "node:path";
-import { gatesSourceDir } from "./generate/settings.js";
+import { PROMPT_CACHE_TTL_KEY, SUBAGENT_DEPTH_ENV, WORKFLOW_CONCURRENCY_ENV, gatesSourceDir } from "./generate/settings.js";
+import { BOARD_RELPATH, FALLBACK_RELPATH } from "@dougharness/flow/lib/board.mjs";
+import { readMemoryConfig } from "@dougharness/flow/lib/embeddings.mjs";
 
 export const DOCTOR_USAGE = `doug doctor [dir] [--json]
 
 Read-only install health check: Node and SQLite FTS5, .doug/config.json, the vendored hooks, the hooks
-registered in .claude/settings*.json, codex on PATH, the memory store, and the installed plugin versions.
+registered in .claude/settings*.json, the status line, the subagent cache/concurrency/depth settings, the board,
+codex and codex-review on PATH, the memory store, semantic memory (embeddings), whether the plugins are installed,
+and the installed plugin versions.
 Each check prints ok, warn, fail, or skip and, when warn or fail, one fix: command.
 Exit 1 when any check fails, 0 otherwise, 2 on bad arguments. Never writes.
 `;
@@ -57,6 +61,9 @@ const INSTALL_CLI_FIX = "npm install -g @dougharness/cli";
 const FLOW_KEY = "doug-flow@dougharness";
 const GATES_KEY = "doug-gates@dougharness";
 const HOOKS_MARK = ".doug/hooks/scripts/";
+const STATUSLINE_MARK = ".doug/hooks/scripts/statusline.mjs";
+const PLUGINS_FIX =
+  "claude plugin marketplace add eschwa3/dougharness && claude plugin install doug-gates@dougharness && claude plugin install doug-flow@dougharness";
 
 function errMsg(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
@@ -136,10 +143,68 @@ function hookCommands(settings: unknown): string[] {
   return out;
 }
 
+// The first executable `name` on env.PATH, or null.
+function onPath(name: string, env: Record<string, string | undefined>): string | null {
+  for (const entry of (env.PATH ?? "").split(delimiter)) {
+    if (!entry) continue;
+    const p = join(entry, name);
+    try {
+      if (!statSync(p).isFile()) continue;
+      accessSync(p, constants.X_OK);
+      return p;
+    } catch {
+      // keep looking
+    }
+  }
+  return null;
+}
+
+// .claude/settings.json then .claude/settings.local.json (local overrides). null when settings.json is missing or
+// unparsable; an unparsable local file is ignored.
+function readSettingsPair(dir: string): { main: Record<string, unknown>; local: Record<string, unknown> | null } | null {
+  const main = join(dir, ".claude", "settings.json");
+  if (!existsSync(main)) return null;
+  const m = readJson(main);
+  if (!m.ok || !isObject(m.value)) return null;
+  const lp = join(dir, ".claude", "settings.local.json");
+  const l = existsSync(lp) ? readJson(lp) : null;
+  return { main: m.value, local: l && l.ok && isObject(l.value) ? l.value : null };
+}
+
+function settingsEnvValue(pair: { main: Record<string, unknown>; local: Record<string, unknown> | null }, key: string): unknown {
+  for (const s of [pair.local, pair.main]) {
+    if (s && isObject(s.env) && s.env[key] !== undefined) return s.env[key];
+  }
+  return undefined;
+}
+
+function readConfigObject(dir: string): Record<string, unknown> | null {
+  const f = join(dir, ".doug", "config.json");
+  if (!existsSync(f)) return null;
+  const p = readJson(f);
+  return p.ok && isObject(p.value) ? p.value : null;
+}
+
 export async function collectChecks(dir: string, deps: DoctorDeps = {}, initFix = "doug init"): Promise<CheckResult[]> {
   const env = deps.env ?? process.env;
   const nodeVersion = deps.nodeVersion ?? process.versions.node;
   const checks: CheckResult[] = [];
+
+  const readInstalledPlugins = (): Record<string, unknown> | null => {
+    const cfgDir = deps.claudeConfigDir ?? env.CLAUDE_CONFIG_DIR ?? join(homedir(), ".claude");
+    const file = join(cfgDir, "plugins", "installed_plugins.json");
+    if (!existsSync(file)) return null;
+    const parsed = readJson(file);
+    if (!parsed.ok || !isObject(parsed.value)) return null;
+    if (parsed.value.version !== 2 || !isObject(parsed.value.plugins)) return null;
+    return parsed.value.plugins;
+  };
+  const pickRecord = (plugins: Record<string, unknown>, key: string): Record<string, unknown> | null => {
+    const records = plugins[key];
+    if (!Array.isArray(records)) return null;
+    const usable = records.filter((r): r is Record<string, unknown> => isObject(r) && typeof r.version === "string");
+    return usable.find((r) => typeof r.projectPath === "string" && resolve(r.projectPath) === dir) ?? usable.find((r) => r.scope === "user") ?? null;
+  };
 
   // 1. node
   let lib: MemoryLib | null = null;
@@ -162,15 +227,14 @@ export async function collectChecks(dir: string, deps: DoctorDeps = {}, initFix 
 
   // 2. config
   const configFile = join(dir, ".doug", "config.json");
-  checks.push(
-    guard("config", () => {
+  const configCheck = guard("config", () => {
       if (!existsSync(configFile)) return result("config", "fail", ".doug/config.json is missing", initFix);
       const parsed = readJson(configFile);
       if (!parsed.ok) return result("config", "fail", `.doug/config.json is not valid JSON (${parsed.error})`, initFix);
       if (!isObject(parsed.value)) return result("config", "fail", ".doug/config.json is not a JSON object", initFix);
       return result("config", "ok", ".doug/config.json parses");
-    }),
-  );
+    });
+  checks.push(configCheck);
 
   // 3. hooks-vendored
   checks.push(
@@ -238,21 +302,77 @@ export async function collectChecks(dir: string, deps: DoctorDeps = {}, initFix 
     }),
   );
 
+  // statusline
+  checks.push(
+    guard("statusline", () => {
+      const pair = readSettingsPair(dir);
+      if (!pair) return result("statusline", "skip", "skipped: .claude/settings.json is missing or not valid JSON");
+      const sl = pair.local && pair.local.statusLine !== undefined ? pair.local.statusLine : pair.main.statusLine;
+      if (sl === undefined || sl === null) return result("statusline", "warn", "no status line in .claude/settings.json", initFix);
+      const command = isObject(sl) && typeof sl.command === "string" ? sl.command : "";
+      if (!command.includes(STATUSLINE_MARK)) return result("statusline", "skip", "a custom status line is set; Doug's is not used");
+      if (!existsSync(join(dir, STATUSLINE_MARK))) return result("statusline", "warn", `the status line runs ${STATUSLINE_MARK}, which does not exist`, initFix);
+      return result("statusline", "ok", `status line runs ${STATUSLINE_MARK}`);
+    }),
+  );
+
+  // subagent-settings
+  checks.push(
+    guard("subagent-settings", () => {
+      const pair = readSettingsPair(dir);
+      if (!pair) return result("subagent-settings", "skip", "skipped: .claude/settings.json is missing or not valid JSON");
+      const cfg = readConfigObject(dir);
+      const sub = cfg && isObject(cfg.subagents) ? cfg.subagents : {};
+      const expected = (k: string) => sub[k] !== null;
+      const ttl = pair.local && pair.local[PROMPT_CACHE_TTL_KEY] !== undefined ? pair.local[PROMPT_CACHE_TTL_KEY] : pair.main[PROMPT_CACHE_TTL_KEY];
+      const conc = settingsEnvValue(pair, WORKFLOW_CONCURRENCY_ENV);
+      const depth = settingsEnvValue(pair, SUBAGENT_DEPTH_ENV);
+      const rows: { want: boolean; label: string; value: unknown; text: string }[] = [
+        { want: expected("promptCacheTtl"), label: PROMPT_CACHE_TTL_KEY, value: ttl, text: `subagent prompt cache ${String(ttl)}` },
+        { want: expected("maxConcurrentWorkflowAgents"), label: WORKFLOW_CONCURRENCY_ENV, value: conc, text: `${String(conc)} concurrent workflow agents` },
+        { want: expected("maxSpawnDepth"), label: SUBAGENT_DEPTH_ENV, value: depth, text: `spawn depth ${String(depth)}` },
+      ];
+      const wanted = rows.filter((r) => r.want);
+      if (wanted.length === 0) return result("subagent-settings", "skip", "no subagent settings are expected (all null in .doug/config.json)");
+      const missing = wanted.filter((r) => r.value === undefined);
+      if (missing.length > 0) return result("subagent-settings", "warn", `missing in .claude/settings.json: ${missing.map((r) => r.label).join(", ")}`, initFix);
+      return result("subagent-settings", "ok", wanted.map((r) => r.text).join(", "));
+    }),
+  );
+
+  // board
+  checks.push(
+    guard("board", () => {
+      const rel = existsSync(join(dir, BOARD_RELPATH)) ? BOARD_RELPATH : existsSync(join(dir, FALLBACK_RELPATH)) ? FALLBACK_RELPATH : null;
+      if (rel === null) return result("board", "warn", "no board", `doug board init${initFix.slice("doug init".length)}`);
+      const parsed = readJson(join(dir, rel));
+      if (!parsed.ok || !isObject(parsed.value) || !Array.isArray(parsed.value.cards)) {
+        return result("board", "warn", `${rel} is not a board (unparsable or no cards array)`, `repair the JSON in ${rel}`);
+      }
+      return result("board", "ok", `${rel}: ${parsed.value.cards.length} cards; view it with doug board serve --open`);
+    }),
+  );
+
   // 5. codex
   checks.push(
     guard("codex", () => {
-      for (const entry of (env.PATH ?? "").split(delimiter)) {
-        if (!entry) continue;
-        const p = join(entry, "codex");
-        try {
-          if (!statSync(p).isFile()) continue;
-          accessSync(p, constants.X_OK);
-          return result("codex", "ok", `codex found at ${p}`);
-        } catch {
-          // keep looking
-        }
-      }
+      const found = onPath("codex", env);
+      if (found) return result("codex", "ok", `codex found at ${found}`);
       return result("codex", "warn", "codex is not on PATH; the adversary falls back to Claude", "install the Codex CLI (docs/getting-started.md)");
+    }),
+  );
+
+  // adversary
+  checks.push(
+    guard("adversary", () => {
+      const cfg = readConfigObject(dir);
+      const cmds = cfg && isObject(cfg.commands) ? cfg.commands : null;
+      if (cmds && typeof cmds.adversary === "string" && cmds.adversary.length > 0) {
+        return result("adversary", "ok", `adversary command is ${cmds.adversary}`);
+      }
+      const found = onPath("codex-review", env);
+      if (found) return result("adversary", "ok", `codex-review found at ${found}`);
+      return result("adversary", "warn", "codex-review is not on PATH; the adversary falls back to the Claude adversary", "npm install -g @dougharness/codex");
     }),
   );
 
@@ -270,6 +390,28 @@ export async function collectChecks(dir: string, deps: DoctorDeps = {}, initFix 
       if (info.quickCheck !== "ok") return result("memory", "fail", `memory store quick_check: ${info.quickCheck}`, mv);
       if (info.userVersion === null || info.userVersion < 1) return result("memory", "fail", `memory store has user_version ${info.userVersion}`, mv);
       return result("memory", "ok", `memory store opens (user_version ${info.userVersion})`);
+    }),
+  );
+
+  // embeddings
+  checks.push(
+    guard("embeddings", () => {
+      if (configCheck.status !== "ok") return result("embeddings", "skip", "skipped: the config check is not ok");
+      const e = readMemoryConfig(dir).embeddings;
+      if (e) return result("embeddings", "ok", `semantic memory: ${e.provider} ${e.model}/${e.dims} at ${String(e.baseUrl)}`);
+      return result("embeddings", "warn", "semantic memory is off; recall is keyword-only", `doug memory setup${initFix.slice("doug init".length)}`);
+    }),
+  );
+
+  // plugins
+  checks.push(
+    guard("plugins", () => {
+      const missing: string[] = [];
+      const plugins = readInstalledPlugins();
+      for (const key of [FLOW_KEY, GATES_KEY]) if (!plugins || pickRecord(plugins, key) === null) missing.push(key);
+      if (missing.length === 0) return result("plugins", "ok", "doug-flow and doug-gates are installed");
+      const why = plugins ? `not installed: ${missing.join(", ")}` : `no readable installed_plugins.json; not installed: ${missing.join(", ")}`;
+      return result("plugins", "warn", `${why}; a session started with claude --plugin-dir loads them without an install`, PLUGINS_FIX);
     }),
   );
 

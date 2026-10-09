@@ -23,6 +23,7 @@ import {
   loadBoard,
   moveCard,
   reorderCard,
+  readyCapWarning,
   newBoard,
   nextReadyCard,
   nextReadyCards,
@@ -225,6 +226,10 @@ export async function runBoard(argv: string[], io?: BoardIo): Promise<number> {
           column: stringOpt(opts, "column"),
         });
         saveBoard(dir, board);
+        if (findCard(board, id).column === "ready") {
+          const capLine = readyCapWarning(board);
+          if (capLine) out.stderr(capLine);
+        }
         out.stdout(`Added ${id} to ${findCard(board, id).column} in ${relpathOf(dir, boardPath(dir))}.\n`);
         return 0;
       }
@@ -286,6 +291,8 @@ export async function runBoard(argv: string[], io?: BoardIo): Promise<number> {
                 : `skipping ${s.id}: waiting on ${s.waitingOn.join(", ")}\n`,
           );
         }
+        const capLine = readyCapWarning(board);
+        if (capLine) out.stderr(capLine);
         if (!card) {
           out.stderr(track === "hand" ? "No Ready hand-track card whose dependencies are Done.\n" : "No Ready card whose dependencies are Done.\n");
           return 1;

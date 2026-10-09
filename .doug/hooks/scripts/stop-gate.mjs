@@ -8,6 +8,12 @@
 // checkpoint commit or tag (lib/checkpoint.mjs). Honors stop_hook_active and a per-session block
 // cap so it can never loop forever.
 //
+// card stop-gate-runs-only-on-code-turns: a main Stop verifies only when the finishing turn changed code: it skips when
+// the tree still equals the UserPromptSubmit turn-start fingerprint (scripts/turn-start.mjs) and no main-agent Edit was
+// traced since, noting unverified changes left by other agents; a missing record verifies as today. When only
+// preCommit.noTestPaths paths moved, the protected-path, proposal-path and plan-scope scans still run and only the
+// verification commands are skipped.
+//
 // card stop-gate-read-only-subagent-skip: a SubagentStop whose own agent made no change skips the
 // verification commands (step 3) and the evidence check (step 3b) entirely, and never takes or waits for
 // gate.lock — the protected-path, proposal-path, and scope scans still run. The run trace, when it can vouch
@@ -21,7 +27,8 @@
 // session in flight defers instead of verifying: it still runs the cheap tree-state scans (protected paths,
 // proposal paths, plan scope — steps 1, 1b, 2) and blocks on a real hit exactly as before, but skips the
 // verification commands, the evidence check, gate.lock, state.verified, and the blocks.jsonl ledger, and
-// returns one systemMessage naming the agents still running. "In flight" (subagentsInFlight below) is read off
+// returns one systemMessage naming the agents still running (card stop-gate-defer-read-only-quiet: only agents that can change the tree count, and a repeat deferral is silent; the full verification then follows at the first
+// Stop after they stop, except that a read-only lead turn skips it: card stop-gate-runs-only-on-code-turns). "In flight" (subagentsInFlight below) is read off
 // this session's run trace: an agent has stopped when some SubagentStop line for it after its last
 // SubagentStart carries `decision: "allow"` (rule A), or when more of those lines carry no `decision` field at
 // all than carry `decision: "block"` (rule B) — a decision-less line is the trace hook's own SubagentStop line
@@ -66,9 +73,10 @@
 // Fails closed exactly like subagentsInFlight: with trace.enabled false, or the trace file missing or
 // unreadable, there is no evidence either way, so the gate runs as today.
 
-import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync, unlinkSync, openSync, closeSync, readSync } from "node:fs";
-import { execFileSync } from "node:child_process";
-import { join } from "node:path";
+import { existsSync, mkdirSync, readFileSync, realpathSync, statSync, writeFileSync, unlinkSync, openSync, closeSync, readSync } from "node:fs";
+import { execFileSync, spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
+import { join, dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import { runHook, allow, blockStop, systemMessage } from "../lib/io.mjs";
 import { loadConfig, projectDir } from "../lib/config.mjs";
 import { loadState, saveState } from "../lib/state.mjs";
@@ -77,13 +85,15 @@ import { runCommand, failureSummary } from "../lib/run.mjs";
 import { loadScopePlan, scopeViolations, describeViolations, PLAN_RELPATH } from "../lib/scope.mjs";
 import { checkpoint, describeCheckpoint } from "../lib/checkpoint.mjs";
 import { verificationEvidence, describeMissingEvidence } from "../lib/evidence.mjs";
-import { changedFiles, captureBaseline, sinceBaseline, headAt, committedSince, walkProposalPathFiles, fileIdentity } from "../lib/baseline.mjs";
+import { changedFiles, captureBaseline, sinceBaseline, headAt, committedSince, walkProposalPathFiles, fileIdentity, treeFingerprint, sameTree, readAgentStart, readTurnStart, turnTreeStatus, onlyNoTestPathsChanged, movedSinceVerified } from "../lib/baseline.mjs";
 import { tracePath, readTrace, traceLine, appendTrace, agentLabel } from "../lib/trace.mjs";
 import { isAppliedContent } from "../lib/proposals.mjs";
 import { gitHead, mergeSnapshot, readDecisions, readPlanSummary, snapshotSection } from "../lib/anchor.mjs";
 import { contextReading, recordAgentContext } from "../lib/agent-context.mjs";
-import { parseTotals, validTotals, compareTotals, deltaTotals, waiverCovers } from "../lib/test-totals.mjs";
-import { failingTestFilesFrom, classifyFinalBlock, appendBlockLine } from "../lib/block-ledger.mjs";
+import { parseTotals, readSummaries, sumTotals, compareTotals, deltaTotals, waiverCovers } from "../lib/test-totals.mjs";
+import { failingTestFilesFrom, nonTestTscPathsFrom, classifyFinalBlock, appendBlockLine } from "../lib/block-ledger.mjs";
+import { docsGateDecision } from "../lib/docs-gate.mjs";
+import { resolveCommands, computeTree, readRecord, writeRecord as writeTreeRecord, removeRecord as removeTreeRecord, creditable } from "../lib/verified-tree.mjs";
 
 // Only the last this many characters of last_assistant_message are ever scanned for a partial claim
 // (review, scan cost): a structured result lives at the end of a worker's message, and the balanced-span
@@ -91,6 +101,11 @@ import { failingTestFilesFrom, classifyFinalBlock, appendBlockLine } from "../li
 // measured 1.6s at 130KB and 6.6s at 260KB of brace-heavy prose — real, if a worker's message ever grows
 // that large. Bounding the input bounds the cost regardless of how long the message is.
 const PARTIAL_SCAN_TAIL_CHARS = 32 * 1024;
+
+// Card ci-n4b-signal-rerun: a shell that forks reports a child's death by signal as exit 128 + signal number
+// (POSIX shell convention, signals 1..64), so a status in this range is load-suspect like a signal kill.
+const SIGNAL_EXIT_MIN = 129;
+const SIGNAL_EXIT_MAX = 192;
 
 // Every balanced {...} span that starts at some "{" in `text`, matched independently from that position
 // (review MAJOR 1): a stray unmatched "{" earlier in the prose, or an odd number of quote characters
@@ -297,6 +312,15 @@ function stripLeadingDotSlash(f) {
 // otherwise `{ covered: false, reasonLine }` — one line, no newline, saying why.
 function redByDesignCoverage(claimFiles, commandFailures, changed, dir) {
   const changedSet = new Set(Array.isArray(changed) ? changed : []);
+  for (const cf of commandFailures) {
+    const bad = nonTestTscPathsFrom(cf.output, dir);
+    if (bad.length > 0) {
+      return {
+        covered: false,
+        reasonLine: `The tests_red_by_design claim does not cover this: \`${cf.command}\` reported a type error in ${bad.join(", ")}, which is not a test file.`,
+      };
+    }
+  }
   const namedByCommand = commandFailures.map((cf) => ({ command: cf.command, files: failingTestFilesFrom(cf.output, dir) }));
   const noFile = namedByCommand.filter((c) => c.files.length === 0);
   if (noFile.length > 0) {
@@ -387,6 +411,50 @@ const CHANGE_TOOLS = new Set(["Edit", "Write", "MultiEdit", "NotebookEdit"]);
 // succeeded, so any Pre or PostToolUse line naming one counts as a change whatever its ok.
 const SHELL_TOOLS = new Set(["Bash", "Monitor"]);
 
+// The change rule shared by agentMadeNoChanges (at an agent's stop) and the in-flight filter (card
+// stop-gate-defer-read-only-quiet, `countingInFlight` below): true when any line of agent `id` is a Pre or
+// PostToolUse line whose tool is in SHELL_TOOLS (whatever ok), or a PostToolUse line whose tool is in
+// CHANGE_TOOLS and whose ok is not exactly false.
+function traceShowsChange(lines, id) {
+  return lines
+    .filter((l) => l.agent === id)
+    .some((l) => {
+      if (SHELL_TOOLS.has(l.tool)) return true;
+      return l.event === "PostToolUse" && CHANGE_TOOLS.has(l.tool) && l.ok !== false;
+    });
+}
+
+// Agent types that write by design (card stop-gate-defer-read-only-quiet): one of these in flight defers the
+// main Stop even when its trace so far shows no change (a coder that has only read so far still has a
+// tester's red tests on disk). Exact, case-sensitive match.
+const WRITING_AGENT_TYPES = new Set(["tester", "coder", "implementer", "general-purpose", "doug-flow:implementer", "doug-flow:lead", "claude"]);
+
+// The in-flight agents that count toward the deferral (card stop-gate-defer-read-only-quiet): a type in
+// READ_ONLY_AGENT_TYPES never counts; a type in WRITING_AGENT_TYPES always counts; any other type counts only
+// when its trace so far shows a change (traceShowsChange). Never throws: any failure keeps the agent (the
+// conservative answer, as today's deferral).
+function countingInFlight(dir, cfg, sessionId, inFlight) {
+  try {
+    let lines = null;
+    try {
+      lines = cfg.trace && cfg.trace.enabled !== false ? readTrace(tracePath(dir, sessionId)) : null;
+    } catch {
+      lines = null;
+    }
+    return inFlight.filter((a) => {
+      try {
+        if (READ_ONLY_AGENT_TYPES.has(a.type)) return false;
+        if (WRITING_AGENT_TYPES.has(a.type)) return true;
+        return !lines || traceShowsChange(lines, a.id);
+      } catch {
+        return true;
+      }
+    });
+  } catch {
+    return inFlight;
+  }
+}
+
 // True when this SubagentStop's own agent made no change during its life (card
 // stop-gate-read-only-subagent-skip), so the caller can skip the verification commands and evidence check for
 // it. Never throws (a hook reader must never throw): any failure here reads as false, the conservative answer
@@ -408,12 +476,7 @@ function agentMadeNoChanges(dir, cfg, sessionId, subagent) {
         const lines = readTrace(file);
         const started = lines.some((l) => l.event === "SubagentStart" && l.agent === subagent.id);
         if (started) {
-          const mine = lines.filter((l) => l.agent === subagent.id);
-          const changed = mine.some((l) => {
-            if (SHELL_TOOLS.has(l.tool)) return true;
-            return l.event === "PostToolUse" && CHANGE_TOOLS.has(l.tool) && l.ok !== false;
-          });
-          return !changed;
+          return !traceShowsChange(lines, subagent.id);
         }
       }
     }
@@ -421,6 +484,161 @@ function agentMadeNoChanges(dir, cfg, sessionId, subagent) {
   } catch {
     return false;
   }
+}
+
+// card gate-skip-readonly-researchers: true when this SubagentStop's agent changed nothing in the working tree
+// since it started: the trace hook recorded a start fingerprint on SubagentStart (lib/baseline.mjs
+// readAgentStart) and it equals the current one (same HEAD, same dirty set, same identities), and the agent's
+// final message carries no tests_red_by_design claim, and its trace shows no successful Edit-type call. Catches read-only agents that run Bash, which
+// agentMadeNoChanges counts as a change. No record, no git, any failure -> false (run the gate).
+function treeUnchangedSinceStart(dir, cfg, sessionId, subagent, input, currentFingerprint) {
+  try {
+    if (!subagent || !currentFingerprint) return false;
+    if (redByDesignClaim(input.last_assistant_message) ?? redByDesignClaim(lastHandbackMessage(input.agent_transcript_path))) return false;
+    // An agent whose own trace shows a successful Edit/Write-type call did change something (an edit that was
+    // reverted, or a no-op, leaves the tree equal): never skip it on the fingerprint alone.
+    if (cfg.trace && cfg.trace.enabled !== false) {
+      const file = tracePath(dir, sessionId);
+      if (existsSync(file) && readTrace(file).some((l) => l.agent === subagent.id && l.event === "PostToolUse" && CHANGE_TOOLS.has(l.tool) && l.ok !== false)) return false;
+    }
+    const start = readAgentStart(dir, sessionId, subagent.id);
+    return sameTree(start, currentFingerprint);
+  } catch {
+    return false;
+  }
+}
+
+// card worktree-agent-gate, card worktree-gate-mixed-tree-agent: the trees a SubagentStop verifies, in
+// first-touched order. A worktree-isolated subagent edits under <dir>/.claude/worktrees/<wt>/ (input.cwd inside
+// it, or its own successful Edit-type trace lines carry absolute paths there); a path inside <dir> but outside
+// .claude/worktrees names the main checkout; any other path names nothing. The set is the cwd's worktree plus
+// every tree its trace paths name (a worktree that no longer exists as a directory is skipped). Empty, a main
+// Stop, or any failure resolves to [dir]. Only the verification target varies per tree: state, trace,
+// gate.lock, the ledger, and evidence stay under `dir`. Never throws.
+function verifyDirs(dir, cfg, sessionId, input, subagent) {
+  try {
+    if (!subagent) return [dir];
+    const base = join(dir, ".claude/worktrees");
+    const wtName = (p) => {
+      if (typeof p !== "string" || !isAbsolute(p)) return null;
+      const rel = relative(base, resolve(p));
+      if (!rel || rel.startsWith("..") || isAbsolute(rel)) return null;
+      return rel.split(sep)[0] || null;
+    };
+    const inMain = (p) => {
+      if (typeof p !== "string" || !isAbsolute(p)) return false;
+      const rel = relative(dir, resolve(p));
+      return !!rel && !rel.startsWith("..") && !isAbsolute(rel);
+    };
+    const trees = [];
+    const add = (t) => {
+      if (!trees.includes(t)) trees.push(t);
+    };
+    const addWt = (name) => {
+      const wt = join(base, name);
+      try {
+        if (statSync(wt).isDirectory()) add(wt);
+      } catch {
+        // a worktree that is gone adds nothing
+      }
+    };
+    const cwdName = wtName(input && input.cwd);
+    if (cwdName) addWt(cwdName);
+    if (cfg.trace && cfg.trace.enabled !== false) {
+      const file = tracePath(dir, sessionId);
+      if (existsSync(file)) {
+        for (const l of readTrace(file)) {
+          if (l.agent !== subagent.id || l.event !== "PostToolUse" || !CHANGE_TOOLS.has(l.tool) || l.ok === false) continue;
+          const name = wtName(l.detail);
+          if (name) addWt(name);
+          else if (inMain(l.detail)) add(dir);
+        }
+      }
+    }
+    return trees.length ? trees : [dir];
+  } catch {
+    return [dir];
+  }
+}
+
+// card worktree-gate-mixed-tree-agent: the single verification target, for a gate process that was handed one
+// (DOUG_STOP_GATE_TREE, set by runPerTree below). Honoured only for a SubagentStop and only when it is `dir`
+// itself or an existing directory directly under <dir>/.claude/worktrees (realpaths compared, so a symlink
+// cannot escape); anything else is ignored as if unset. Never throws.
+function forcedTree(dir, subagent) {
+  try {
+    const t = process.env.DOUG_STOP_GATE_TREE;
+    if (!subagent || !t || !statSync(t).isDirectory()) return null;
+    const real = realpathSync(t);
+    if (real === realpathSync(dir)) return t;
+    return dirname(real) === realpathSync(join(dir, ".claude/worktrees")) ? t : null;
+  } catch {
+    return null;
+  }
+}
+
+// A child gate process (handed a valid tree and the child flag) leaves SubagentStop decision lines to its parent.
+function isTreeChild(dir, subagent) {
+  return !!forcedTree(dir, subagent) && process.env.DOUG_STOP_GATE_CHILD === "1";
+}
+
+// card worktree-gate-mixed-tree-agent: a SubagentStop whose agent touched several trees. Every exit of the gate
+// is process.exit, so each tree's verification runs as this same script in a child process (DOUG_STOP_GATE_TREE,
+// the parent's deadline in DOUG_STOP_GATE_DEADLINE, DOUG_STOP_GATE_CHILD so the child writes no decision line).
+// The first child that blocks decides (its reason prefixed with the failing tree). A child that gives no verdict
+// (killed, timed out, non-zero exit, unparseable output) is a block naming the tree, never an allow; its process
+// group is killed. `record` writes the one combined decision line.
+function runPerTree(input, trees, dir, deadline, record) {
+  const labelOf = (tree) => {
+    const rel = relative(dir, tree) || ".";
+    return rel === "." ? "the main checkout" : rel;
+  };
+  const fail = (tree, why) => {
+    record("block");
+    return blockStop(`[doug] Verification failed in ${labelOf(tree)} (${tree}):\n${why}`);
+  };
+  let last = "";
+  for (const tree of trees) {
+    let r = null;
+    try {
+      r = spawnSync(process.execPath, [fileURLToPath(import.meta.url)], {
+        input: JSON.stringify(input),
+        env: { ...process.env, DOUG_STOP_GATE_TREE: tree, DOUG_STOP_GATE_DEADLINE: String(deadline), DOUG_STOP_GATE_CHILD: "1" },
+        encoding: "utf8",
+        stdio: ["pipe", "pipe", "inherit"],
+        detached: true,
+        timeout: Math.max(1000, deadline - Date.now()) + 2000,
+        maxBuffer: 16 * 1024 * 1024,
+      });
+    } catch (e) {
+      return fail(tree, `the verification process could not start (${e && e.message ? e.message : e}).`);
+    }
+    if (r.error || r.signal || r.status !== 0) {
+      if (r.pid) {
+        try {
+          process.kill(-r.pid, "SIGKILL");
+        } catch {
+          // the group is already gone
+        }
+      }
+      const why = r.error ? String(r.error.code || r.error.message) : r.signal ? `killed by ${r.signal}` : `exit status ${r.status}`;
+      return fail(tree, `the verification process gave no verdict (${why}).`);
+    }
+    const out = typeof r.stdout === "string" ? r.stdout.trim() : "";
+    let parsed = null;
+    if (out) {
+      try {
+        parsed = JSON.parse(out);
+      } catch {
+        return fail(tree, "the verification process gave no verdict (unparseable output).");
+      }
+    }
+    if (parsed && parsed.decision === "block") return fail(tree, parsed.reason);
+    if (out) last = out;
+  }
+  record("allow");
+  if (last) process.stdout.write(last + "\n");
+  return allow();
 }
 
 // card stop-gate-skips-orphan-subagent-stops: true when a SubagentStop's own event carries none of the three
@@ -544,7 +762,7 @@ function waiverSources(dir, baselineHead) {
 }
 
 // The count check for the commands that ran green by exit code. Returns { problems, parsed }: `problems` are
-// block reasons, `parsed` the per-command totals of every run with a clean single summary (for the last-green
+// block reasons, `parsed` the per-command summary lists of every run that was counted (for the last-green
 // record). A missing or unparseable summary, or no baseline, is a trace line and no check.
 function countCheck(dir, cfg, state, input, ran) {
   const problems = [];
@@ -565,24 +783,28 @@ function countCheck(dir, cfg, state, input, ran) {
   for (const { command, stdout, result } of ran) {
     try {
       const p = result !== undefined ? result : parseTotals(stdout);
-      if (p.status === "conflict") {
-        problems.push(`\`${command}\` printed conflicting test summaries (${p.summaries.map((x) => `${x.total} total, ${x.skipped} skipped, ${x.todo} todo`).join(" vs ")}); the test count cannot be trusted. A waiver does not cover this.`);
-        continue;
-      }
-      if (p.status !== "ok") {
+      const summaries = p.status === "ok" ? readSummaries(p) : null;
+      if (!summaries) {
         note(`count check did not run for \`${command}\`: no test summary in its output`);
         continue;
       }
-      parsed[command] = p.totals;
       const all = state.testTotals && typeof state.testTotals === "object" ? state.testTotals : null;
-      const base = all ? validTotals(all[command]) : null;
-      if (!base) {
-        note(`count check did not run for \`${command}\`: no baseline totals for it`);
+      const baseList = all ? readSummaries(all[command]) : null;
+      if (!baseList) {
+        parsed[command] = summaries;
+        note(`count check did not run for \`${command}\`: no baseline totals for it (${summaries.length} test summar${summaries.length === 1 ? "y" : "ies"} printed: ${summaries.map((s) => `total ${s.total}, skipped ${s.skipped}, todo ${s.todo}`).join("; ")})`);
         continue;
       }
-      const found = compareTotals(base, p.totals);
+      if (baseList.length !== summaries.length) {
+        problems.push(`\`${command}\` printed ${summaries.length} test summar${summaries.length === 1 ? "y" : "ies"}; the baseline has ${baseList.length}. The test count cannot be trusted. A waiver does not cover this; take a new baseline if a package was added or removed.`);
+        continue;
+      }
+      parsed[command] = summaries;
+      const base = sumTotals(baseList);
+      const now = sumTotals(summaries);
+      const found = compareTotals(base, now);
       if (found.length === 0) continue;
-      const delta = deltaTotals(base, p.totals);
+      const delta = deltaTotals(base, now);
       if (waiverCovers(waiverSources(dir, state.baselineHead), delta)) continue;
       const lines = found.map((f) => `${f.kind} ${f.kind === "total" ? "dropped" : "rose"} from ${f.baseline} (baseline) to ${f.now} (now)`);
       problems.push(
@@ -613,16 +835,6 @@ function writeLastGreen(dir, parsed) {
   }
 }
 
-function resolveCommands(cfg) {
-  const out = [];
-  for (const entry of cfg.stopGate.commands || []) {
-    if (typeof entry !== "string") continue;
-    const named = cfg.commands && cfg.commands[entry];
-    out.push({ name: entry, command: typeof named === "string" ? named : entry });
-  }
-  return out;
-}
-
 // card stop-gate-credits-pre-commit: `git rev-parse HEAD^{tree}`, the tree sha of the current commit — what
 // the pre-commit hook's own record (.doug/.state/pre-commit/last-run.json) compares its `tree` field against.
 // Null on any failure (no git, no HEAD yet, ...): a reader must never throw.
@@ -639,17 +851,36 @@ function headTreeSha(dir) {
 // card ratchet-pre-commit-credit: a recorded parseTotals result, normalised, or null when it is not readable.
 function readableRecordedTotals(t) {
   try {
-    if (!t || typeof t !== "object") return null;
-    if (t.status === "ok") {
-      const totals = validTotals(t.totals);
-      return totals ? { status: "ok", totals } : null;
+    if (t && typeof t === "object" && t.status === "none") return { status: "none" };
+    const summaries = readSummaries(t);
+    return summaries ? { status: "ok", summaries, totals: sumTotals(summaries) } : null;
+  } catch {
+    return null;
+  }
+}
+
+// card verified-tree-record: a verified-tree record (lib/verified-tree.mjs) of `tree` (the working tree now), same
+// Node and command set, credits the commands instead of re-running them. Same return shape as preCommitCredit:
+// one `{ name, command, ok: true, credited: "verified-tree", recorded? }` per resolveCommands entry in config
+// order. A command with a baseline in state.testTotals and no readable recorded totals returns null (the commands
+// run), the same rule as preCommitCredit. Never throws: any failure is null, and null runs the commands.
+function treeCredit(dir, cfg, state, tree) {
+  try {
+    if (!tree) return null;
+    const record = readRecord(dir);
+    if (!record) return null;
+    const configured = resolveCommands(cfg);
+    if (configured.length === 0) return null;
+    if (!creditable(dir, cfg, record, tree, configured.map((c) => c.command)).ok) return null;
+    const all = state && state.testTotals && typeof state.testTotals === "object" ? state.testTotals : null;
+    const out = [];
+    for (const { name, command } of configured) {
+      const recorded = readableRecordedTotals(record.totals[command]);
+      const hasBaseline = all ? readSummaries(all[command]) !== null : false;
+      if (hasBaseline && (!recorded || recorded.status === "none")) return null;
+      out.push({ name, command, ok: true, credited: "verified-tree", ...(recorded ? { recorded } : {}) });
     }
-    if (t.status === "conflict") {
-      if (!Array.isArray(t.summaries) || t.summaries.length === 0) return null;
-      const summaries = t.summaries.map(validTotals);
-      return summaries.every((x) => x) ? { status: "conflict", summaries } : null;
-    }
-    return t.status === "none" ? { status: "none" } : null;
+    return out;
   } catch {
     return null;
   }
@@ -657,7 +888,7 @@ function readableRecordedTotals(t) {
 
 // card stop-gate-credits-pre-commit: the pre-commit hook (.githooks/pre-commit) writes a machine-readable
 // record of its own run to .doug/.state/pre-commit/last-run.json (version, tree, ok, at, commands: [{ name,
-// command, exit, durationMs, totals? }], totals being the hook's parseTotals result for that command; a command with a baseline in state.testTotals is credited only if its totals are readable ok or conflict, else the commands run). When the working tree has no changes beyond HEAD (nothing left in `changed`
+// command, exit, durationMs, totals? }], totals being the hook's parseTotals result for that command; a command with a baseline in state.testTotals is credited only if its totals are readable (a list of summaries, or an old ok or conflict shape), else the commands run). When the working tree has no changes beyond HEAD (nothing left in `changed`
 // once stopGate.ignoreChangedPaths paths are removed) and that record is a passing run, against HEAD's own
 // tree, of exactly today's configured commands in order, the Stop gate credits it instead of re-running the
 // same commands a second time — returning `{ name, command, ok: true, credited: "pre-commit" }` per command,
@@ -689,53 +920,20 @@ function preCommitCredit(dir, cfg, changed, state) {
       if (!record.commands[i] || record.commands[i].command !== configured[i].command) return null;
     }
     // card ratchet-pre-commit-credit: a command with a baseline in state.testTotals is credited only when the
-    // record carries readable totals for it (ok with valid counts, or a conflict with valid summaries);
+    // record carries readable totals for it (a list of valid summaries, or an old ok or conflict shape);
     // otherwise null and the commands really run. `recorded` is the parseTotals-shaped result for the count check.
     const all = state && state.testTotals && typeof state.testTotals === "object" ? state.testTotals : null;
     const out = [];
     for (let i = 0; i < configured.length; i++) {
       const { name, command } = configured[i];
       const recorded = readableRecordedTotals(record.commands[i].totals);
-      const hasBaseline = all ? validTotals(all[command]) !== null : false;
+      const hasBaseline = all ? readSummaries(all[command]) !== null : false;
       if (hasBaseline && (!recorded || recorded.status === "none")) return null;
       out.push({ name, command, ok: true, credited: "pre-commit", ...(recorded ? { recorded } : {}) });
     }
     return out;
   } catch {
     return null;
-  }
-}
-
-// The verified-tree fingerprint (card stop-gate-process-storm, goal 2): the HEAD sha plus the content
-// identity of every dirty path and every proposal-path file on disk, at the moment it is computed. Null
-// when `changed` is not the array shape changedFiles returns (no git, or git unavailable) — there is
-// nothing to fingerprint reliably, so the tree can never be judged "unchanged" on this path.
-function treeFingerprint(dir, cfg, changed) {
-  if (!Array.isArray(changed)) return null;
-  const walked = walkProposalPathFiles(dir, cfg.proposalPaths);
-  const paths = [...new Set([...changed, ...walked])];
-  // `at` (state.mjs's comment for state.verified) is when this fingerprint was taken; sameTree below never
-  // reads it, so recomputing it on the after-wait path (a fresh Date.now()) never affects equality.
-  return { head: headAt(dir), tree: captureBaseline(dir, paths), at: Date.now() };
-}
-
-// Whether two treeFingerprint results describe the same tree: both present, the same HEAD, the same set of
-// paths, and an identical identity for each. Never throws (a hook reader must never throw): a malformed
-// fingerprint — e.g. a hand-edited state.verified — just compares unequal rather than blocking the gate.
-function sameTree(a, b) {
-  try {
-    if (!a || !b || typeof a !== "object" || typeof b !== "object") return false;
-    if (a.head !== b.head) return false;
-    const at = a.tree && typeof a.tree === "object" ? a.tree : null;
-    const bt = b.tree && typeof b.tree === "object" ? b.tree : null;
-    if (!at || !bt) return false;
-    const ak = Object.keys(at).sort();
-    const bk = Object.keys(bt).sort();
-    if (ak.length !== bk.length) return false;
-    for (let i = 0; i < ak.length; i++) if (ak[i] !== bk[i]) return false;
-    return ak.every((k) => at[k] === bt[k]);
-  } catch {
-    return false;
   }
 }
 
@@ -754,7 +952,7 @@ function verifiedUnchangedAllow(dir, cfg, state, input, subagent, capNote) {
   // exits (F4); the `decision` a SubagentStop's own line now always carries folds in here, alongside its
   // `reason`, rather than a second line being written for the same event. Only for a SubagentStop (subagent
   // set) — a main Stop's own trace line here is not an agent-stop decision.
-  if (cfg.trace && cfg.trace.enabled !== false) {
+  if (cfg.trace && cfg.trace.enabled !== false && !isTreeChild(dir, subagent)) {
     appendTrace(dir, { ...traceLine(input, { now: new Date() }), event: input.hook_event_name, reason: "verified-unchanged", ...(subagent ? { decision: "allow" } : {}) });
   }
   if (subagent) {
@@ -838,14 +1036,17 @@ function resolveHookTimeoutSec(cfg) {
 // discarded), less a margin so the gate's own block reaches Claude Code before that happens. gateStart
 // is this process's own start time, not the moment this function runs, so the budget covers everything
 // this invocation has done so far (config/state loads, earlier checks), not just what follows.
-function gateBudget(cfg) {
+function gateBudget(cfg, inherited) {
   const hookTimeoutSec = resolveHookTimeoutSec(cfg);
   const hookTimeoutMs = hookTimeoutSec * 1000;
   const marginMs = Math.min(30000, hookTimeoutMs / 10);
   // process.uptime() is fractional seconds; runCommand's timeoutMs must be an unsigned integer (Node's
   // spawnSync throws otherwise), so every value derived from this deadline is rounded down.
   const gateStart = Date.now() - Math.floor(process.uptime() * 1000);
-  return { hookTimeoutSec, hookTimeoutMs, deadline: Math.floor(gateStart + hookTimeoutMs - marginMs) };
+  const own = Math.floor(gateStart + hookTimeoutMs - marginMs);
+  // card worktree-gate-mixed-tree-agent: a per-tree child never outlives its parent's deadline.
+  const deadline = typeof inherited === "number" && Number.isFinite(inherited) && inherited <= own ? inherited : own;
+  return { hookTimeoutSec, hookTimeoutMs, deadline };
 }
 
 // A lock whose numeric `at` is older than the hook-timeout budget is stale regardless of a live pid: no
@@ -884,6 +1085,8 @@ function normalizedDeferrals(state) {
   return typeof d === "number" && Number.isFinite(d) && d >= 0 ? Math.floor(d) : 0;
 }
 
+const READ_ONLY_LINE = "[doug] Read-only turn: verification skipped; the working tree holds unverified changes from other agents.";
+
 runHook("stop-gate", async (input) => {
   if (input.stop_hook_active) return allow();
   const dir = projectDir(input);
@@ -894,11 +1097,30 @@ runHook("stop-gate", async (input) => {
   // main Stops the counter (R1) is tracking — reset right here, after loadState, so every SubagentStop exit
   // below that saves state (including the one that reloads state again mid-lock-wait, R6 note there) persists
   // the reset.
-  if (subagent) state.deferrals = 0;
+  if (subagent) {
+    state.deferrals = 0;
+    delete state.lastDeferral;
+  }
   if (!subagent) state.turns += 1;
   const maxBlocks = cfg.stopGate.maxBlocks ?? 3;
   const blocksSoFar = subagent ? (state.agentBlocks && state.agentBlocks[subagent.id]) || 0 : state.stopBlocks;
   const who = subagent ? `Subagent ${subagent.type} (${subagent.id})` : null;
+  // card worktree-gate-mixed-tree-agent: an agent that touched several trees is verified in each, one gate process per tree.
+  const forced = forcedTree(dir, subagent);
+  const treeChild = isTreeChild(dir, subagent);
+  if (subagent && !forced) {
+    const trees = verifyDirs(dir, cfg, input.session_id, input, subagent);
+    if (trees.length > 1) {
+      const record = (decision) => {
+        try {
+          if (cfg.trace && cfg.trace.enabled !== false) appendTrace(dir, { ...traceLine(input, { now: new Date() }), event: "SubagentStop", decision, reason: null });
+        } catch {
+          // never block the real exit on a trace failure
+        }
+      };
+      return runPerTree(input, trees, dir, gateBudget(cfg).deadline, record);
+    }
+  }
   // D1 (card stop-gate-defers-while-subagent-in-flight): one choke point for the `decision` every SubagentStop
   // exit's own trace line now carries, so no exit (present or future) can miss it — except the
   // `stop_hook_active` early return above, which runs before `subagent` exists and so writes no decision line
@@ -913,7 +1135,7 @@ runHook("stop-gate", async (input) => {
   // tests_red_by_design, its `detail`) into this same line instead of a second one being written. Wrapped so a
   // trace failure never blocks the real exit (a hook reader must never throw).
   function traceSubagentDecision(decision, traceReason, extra) {
-    if (!subagent) return;
+    if (!subagent || treeChild) return;
     try {
       if (!cfg.trace || cfg.trace.enabled === false) return;
       appendTrace(dir, { ...traceLine(input, { now: new Date() }), event: "SubagentStop", decision, reason: traceReason ?? null, ...(extra || {}) });
@@ -956,7 +1178,7 @@ runHook("stop-gate", async (input) => {
   };
   // Card stop-gate-budget-under-hook-timeout: the whole gate (wait plus commands) must fit under the
   // platform's own hook timeout. Computed once so the wait loop and the command loop share one clock.
-  const { hookTimeoutSec, hookTimeoutMs, deadline: budgetDeadline } = gateBudget(cfg);
+  const { hookTimeoutSec, hookTimeoutMs, deadline: budgetDeadline } = gateBudget(cfg, forced ? Number(process.env.DOUG_STOP_GATE_DEADLINE) : NaN);
 
   // card stop-gate-skips-orphan-subagent-stops: checked before the partial-claim block, the tree scans, the
   // deferral logic, gate.lock, skipVerification, and runVerification — an orphan SubagentStop is not a real
@@ -1042,6 +1264,9 @@ runHook("stop-gate", async (input) => {
 
   const edited = state.editedFiles.length > 0;
   const changed = changedFiles(dir);
+  // card worktree-agent-gate: the verification target (the agent's worktree, else `dir`) and its changed paths.
+  const vdir = forced || verifyDirs(dir, cfg, input.session_id, input, subagent)[0];
+  const vchanged = vdir === dir ? changed : changedFiles(vdir);
   // Snapshot whatever was already dirty so it is never mistaken for this session's own work (card
   // stop-gate-waiting-on-subagents). Ideally this happens on SessionStart (scripts/session-start-baseline.mjs),
   // before the session can have dirtied anything itself; this is the fallback for a session where that
@@ -1119,6 +1344,58 @@ runHook("stop-gate", async (input) => {
     (state.baselineSource === "session-start" ? sessionMadeChanges : edited || (Array.isArray(changed) && changed.length > 0)) ||
     (Array.isArray(committed) && committed.length > 0) ||
     walkedProposalHits.length > 0;
+  // card stop-gate-runs-only-on-code-turns: a main Stop whose turn changed no code skips verification. The turn-start
+  // record (scripts/turn-start.mjs, UserPromptSubmit) must equal the current tree once preCommit.noTestPaths paths are
+  // dropped from both (same HEAD, same code paths, same identities), and the trace must show no successful main-agent
+  // Edit-type call since the record (an edit reverted by content leaves the tree equal). Placed here, at the
+  // onlyIfEdited skip and ahead of it, because the protected-path, proposal-path and plan-scope scans below are about
+  // files a turn changed and a read-only turn changed none; a missing, malformed or stale record, no git, or any throw
+  // reads as "cannot tell" and falls through to today's path. Never for a SubagentStop.
+  let readOnlyTurn = null;
+  if (!subagent) {
+    let readOnly = null;
+    try {
+      const start = readTurnStart(dir, input.session_id);
+      const status = turnTreeStatus(cfg, start, treeFingerprint(dir, cfg, changed));
+      if (status && status.same) {
+        let editedThisTurn = false;
+        if (cfg.trace && cfg.trace.enabled !== false) {
+          const file = tracePath(dir, input.session_id);
+          if (existsSync(file)) {
+            const since = typeof start.at === "number" ? start.at : 0;
+            editedThisTurn = readTrace(file).some((l) => !l.agent && l.event === "PostToolUse" && CHANGE_TOOLS.has(l.tool) && l.ok !== false && !(Date.parse(l.t) < since));
+          }
+        }
+        if (!editedThisTurn) readOnly = status;
+      }
+    } catch {
+      readOnly = null;
+    }
+    // Only an UNFILTERED match (nothing at all changed) exits here. When only noTestPaths paths moved (a Bash write
+    // to a board or docs file), the scans below still run, so such a file cannot escape the plan-scope and
+    // proposal-path checks; only the verification commands are skipped (skipReason "read-only-turn").
+    if (readOnly && !readOnly.exact) {
+      readOnlyTurn = readOnly;
+    } else if (readOnly) {
+      // The tree-problem scans (protected, proposal, plan scope) still run on the exact path: a file already
+      // dirty before the record is not this turn's, but it must not be hidden from them. Any problem, or a throw,
+      // falls through to the normal path, which finds and blocks on it.
+      let treeClean = false;
+      try {
+        treeClean = scanTreeProblems().problems.length === 0;
+      } catch {
+        treeClean = false;
+      }
+      if (!treeClean) readOnly = null;
+    }
+    if (readOnly && readOnly.exact) {
+      const notice = contextNotice(dir, cfg, state, input.session_id, "skip");
+      saveState(dir, input.session_id, state);
+      const line = readOnly.dirty ? READ_ONLY_LINE : null;
+      const msg = [line, notice].filter(Boolean).join("\n\n");
+      return msg ? systemMessage(msg) : allowDecided();
+    }
+  }
   if (cfg.stopGate.onlyIfEdited && !anyChange) {
     const notice = subagent ? null : contextNotice(dir, cfg, state, input.session_id, "skip");
     saveState(dir, input.session_id, state);
@@ -1128,7 +1405,7 @@ runHook("stop-gate", async (input) => {
   // card stop-gate-process-storm, case 2: a tree already verified by an earlier green gate this session
   // needs no recheck at all — placed ahead of maxBlocks and every problems check below, since a red gate
   // never records `verified` and there is nothing left here to recheck when nothing has changed since.
-  const currentFingerprint = treeFingerprint(dir, cfg, changed);
+  const currentFingerprint = treeFingerprint(vdir, cfg, vchanged);
   if (sameTree(state.verified, currentFingerprint)) {
     return verifiedUnchangedAllow(dir, cfg, state, input, subagent);
   }
@@ -1213,7 +1490,8 @@ runHook("stop-gate", async (input) => {
   // (that block is real and counts as today); only with no such problem does this Stop defer, skipping
   // gate.lock, the verification commands, the evidence check, state.verified, and the blocks.jsonl ledger
   // entirely, and touching neither state.stopBlocks nor state.agentBlocks. The next Stop after the last
-  // SubagentStop (subagentsInFlight then returns `[]`) runs the full gate as today. state.lastGate is left
+  // SubagentStop (subagentsInFlight then returns `[]`) runs the full gate as today, unless that lead turn is read-only
+  // (card stop-gate-runs-only-on-code-turns), which skips verification. state.lastGate is left
   // untouched — this Stop verified nothing, so there is nothing honest to record there.
   // R1/R3 (card stop-gate-deferral-cap): state.deferrals counts consecutive deferred main Stops; unbounded,
   // a dead or forged subagent (the module header's "Known limit") would defer forever. deferralCapNote is
@@ -1222,7 +1500,13 @@ runHook("stop-gate", async (input) => {
   // falls through to ends up returning. The cap only ever widens when the full verification runs (R7): it
   // never lets a Stop skip verification that would otherwise have run.
   let deferralCapNote = null;
-  const inFlight = subagent ? [] : subagentsInFlight(dir, cfg, input.session_id);
+  // Card stop-gate-defer-read-only-quiet: only agents that can change the tree count (countingInFlight: not a
+  // read-only type, and a non-writing type only once its trace shows a change). With none left this Stop runs
+  // the ordinary path exactly as with no agent in flight. A repeat deferral (same counting set and same tree
+  // fingerprint as the last one, state.lastDeferral) is silent: no systemMessage, but it still counts toward
+  // stopGate.maxDeferrals. state.lastDeferral is cleared wherever state.deferrals resets to 0, so the first
+  // deferral of a streak always speaks.
+  const inFlight = subagent ? [] : countingInFlight(dir, cfg, input.session_id, subagentsInFlight(dir, cfg, input.session_id));
   if (inFlight.length > 0) {
     const { problems: deferProblems } = scanTreeProblems();
     if (deferProblems.length === 0) {
@@ -1230,10 +1514,21 @@ runHook("stop-gate", async (input) => {
       const n = normalizedDeferrals(state) + 1;
       const names = inFlight.map((a) => agentLabel({ agent: a.id, agentType: a.type })).join(", ");
       if (n < maxDeferrals) {
+        const ids = inFlight.map((a) => a.id).sort();
+        const prev = state.lastDeferral;
+        const repeat =
+          !!prev &&
+          typeof prev === "object" &&
+          Array.isArray(prev.ids) &&
+          prev.ids.length === ids.length &&
+          prev.ids.every((id, i) => id === ids[i]) &&
+          sameTree(prev.fingerprint, currentFingerprint);
         state.deferrals = n;
+        state.lastDeferral = { ids, fingerprint: currentFingerprint };
         saveState(dir, input.session_id, state);
+        if (repeat) return allow();
         return systemMessage(
-          `[doug] Verification deferred: ${inFlight.length} subagent(s) of this session still in flight (${names}). The stop gate runs the full verification at the first Stop after they stop. Do not treat this work as done.`,
+          `[doug] Verification deferred: waits for ${names} to stop; the full gate runs at the first Stop after they stop.`,
         );
       }
       // R3: the cap is hit on this Stop — do not defer again. Reset the counter (R5) and fall through to
@@ -1243,22 +1538,54 @@ runHook("stop-gate", async (input) => {
       // value itself (stopGate.maxDeferrals) is named alongside it so the message stays informative once the
       // deferred count is no longer always the cap.
       state.deferrals = 0;
+      delete state.lastDeferral;
       deferralCapNote = `[doug] Deferral cap reached: ${n - 1} consecutive Stops deferred (stopGate.maxDeferrals ${maxDeferrals}) while subagents of this session were still in flight (${names}); running the full verification anyway.`;
     } else {
       state.deferrals = 0; // R5: a real tree problem — this Stop does not defer
+      delete state.lastDeferral;
     }
     // A real problem, or the cap was just hit: fall through to the ordinary path below, which finds the
     // same problem again inside runVerification and blocks on it exactly as today (deferral only ever
     // widens "nothing to check yet", never what counts as a real problem).
   } else if (!subagent) {
     state.deferrals = 0; // R5: no agent in flight — this Stop runs the gate
+    delete state.lastDeferral;
   }
 
   // card stop-gate-read-only-subagent-skip: computed once, ahead of the gate.lock acquire just below, so a
   // SubagentStop whose own agent made no change never takes or waits for the lock at all — waiting up to
-  // timeoutMs on a suite it will never even need is the other half of the 2026-09-16 process storm. Only ever
-  // true for a SubagentStop; the main Stop always runs the full gate.
-  const skipVerification = subagent ? agentMadeNoChanges(dir, cfg, input.session_id, subagent) : false;
+  // timeoutMs on a suite it will never even need is the other half of the 2026-09-16 process storm. The two
+  // agent reasons are only ever true for a SubagentStop; the main Stop skips only for no-test-paths (below).
+  // card gate-skip-readonly-researchers: a second skip reason, "tree-unchanged", for an agent whose tree
+  // fingerprint equals its SubagentStart one even though its trace shows shell calls.
+  // card stop-gate-no-test-paths: a third reason, for both stops: every path changed since the last green
+  // verification is on preCommit.noTestPaths (onlyNoTestPathsChanged fails closed on anything doubtful).
+  // card gate-docs-skip-unless-named: a fourth reason, "no-test-paths-docs", when every changed path is on the
+  // list or a docs .md that no tracked test names; when some tests name it, `targetedFiles` makes the
+  // verification below run only `test:unit <those files>`. Fail closed to the full gate (docs-gate.mjs).
+  let docsDecision = null;
+  const docsRule = () => {
+    try {
+      if (!resolveCommands(cfg).some((c) => c.name === "test:unit")) return null;
+      const moved = movedSinceVerified(vdir, state.verified, vchanged);
+      return moved && moved.size > 0 ? docsGateDecision(vdir, cfg, moved) : null;
+    } catch {
+      return null;
+    }
+  };
+  const skipReason = subagent && agentMadeNoChanges(dir, cfg, input.session_id, subagent)
+    ? "no-agent-changes"
+    : subagent && treeUnchangedSinceStart(dir, cfg, input.session_id, subagent, input, currentFingerprint)
+      ? "tree-unchanged"
+      : readOnlyTurn
+        ? "read-only-turn"
+        : onlyNoTestPathsChanged(vdir, cfg, state.verified, vchanged)
+          ? "no-test-paths"
+          : (docsDecision = docsRule()) && docsDecision.kind === "skip"
+            ? "no-test-paths-docs"
+            : null;
+  const skipVerification = skipReason !== null;
+  const targetedFiles = !skipVerification && docsDecision && docsDecision.kind === "targeted" ? docsDecision.files : null;
 
   // card stop-gate-no-change-restop: a stop in the same scope on a tree unchanged since a red block whose
   // commands all really ran (state.lastRed, recorded at the final block below) repeats that block without
@@ -1268,6 +1595,7 @@ runHook("stop-gate", async (input) => {
   // unreadable, different, or not plainly a command-failure red degrades to running (fail closed to running).
   if (!skipVerification) {
     let lastRed = null;
+    let redViaNoTestPaths = false; // card stop-gate-board-edit-reuses-red: reused although the tree moved, only on noTestPaths
     try {
       const rec = state.lastRed;
       const scopeNow = subagent ? subagent.id : "main";
@@ -1280,21 +1608,26 @@ runHook("stop-gate", async (input) => {
         typeof rec.summary === "string" &&
         Array.isArray(rec.commands) &&
         rec.commands.every((c) => typeof c === "string") &&
-        rec.scope === scopeNow &&
+        // card stop-gate-lead-reuses-subagent-red: a main Stop also takes a subagent's record, but only on the exact
+        // same tree (never via the board-only path below); a SubagentStop still takes only its own scope's.
+        (rec.scope === scopeNow || !subagent) &&
         rec.commands.length === commandsNow.length &&
         rec.commands.every((c, i) => c === commandsNow[i]) &&
         rec.fingerprint &&
         typeof rec.fingerprint === "object" &&
         currentFingerprint &&
-        sameTree(rec.fingerprint, currentFingerprint) &&
+        (sameTree(rec.fingerprint, currentFingerprint) || (rec.scope === scopeNow && (redViaNoTestPaths = onlyNoTestPathsChanged(vdir, cfg, rec.fingerprint, vchanged)))) &&
         !(subagent && (redByDesignClaim(input.last_assistant_message) ?? redByDesignClaim(lastHandbackMessage(input.agent_transcript_path)))) &&
-        !preCommitCredit(dir, cfg, changed, state)
+        !preCommitCredit(vdir, cfg, vchanged, state) &&
+        !treeCredit(vdir, cfg, state, computeTree(vdir))
       ) {
         lastRed = rec;
       }
     } catch {
       lastRed = null;
     }
+    if (!lastRed) redViaNoTestPaths = false;
+    const crossWho = lastRed && lastRed.scope !== (subagent ? subagent.id : "main") ? (typeof lastRed.who === "string" && lastRed.who ? lastRed.who : `Subagent ${lastRed.scope}`) : null;
     if (lastRed) {
       if (blocksSoFar >= maxBlocks) {
         const alreadyStoodDown = markStoodDown("block-cap");
@@ -1309,12 +1642,19 @@ runHook("stop-gate", async (input) => {
       const blocks = blocksSoFar + 1;
       if (subagent) state.agentBlocks = { ...(state.agentBlocks || {}), [subagent.id]: blocks };
       else state.stopBlocks = blocks;
-      state.lastRed = null; // one reuse per record: the next stop on this tree really runs
+      // one reuse per record on the exact same tree; a board-only reuse keeps the record (user decision
+      // 2026-10-05), so consecutive board-only turns keep reusing the red, bounded by maxBlocks.
+      if (!redViaNoTestPaths) state.lastRed = null;
       saveState(dir, input.session_id, state);
       const reason =
         (who ? `[doug] ${who} cannot report done: verification failed (${blocks}/${maxBlocks}). Fix the following before finishing the task. ` : `[doug] Verification failed (${blocks}/${maxBlocks}). Fix the following before finishing. `) +
         `Do not claim the task is done while this fails.\n\n` +
-        `Nothing changed since the last block, so the commands were not re-run. The last run's failure:\n\n` +
+        (crossWho
+          ? `Nothing changed since ${crossWho}'s block, so the commands were not re-run. ${crossWho}'s run failed:`
+          : redViaNoTestPaths
+          ? `Only paths on preCommit.noTestPaths changed since the last block, so the commands were not re-run.`
+          : `Nothing changed since the last block, so the commands were not re-run.`) +
+        (crossWho ? `\n\n` : ` The last run's failure:\n\n`) +
         [...treeProblems, lastRed.summary].join("\n\n");
       const reuseClass = typeof lastRed.class === "string" ? lastRed.class : "real";
       const capped = deferralCapNote && !subagent ? `${deferralCapNote}\n\n${reason}` : reason;
@@ -1418,7 +1758,8 @@ runHook("stop-gate", async (input) => {
           // to even get here, so it already passed that check point and always intends 0). Unconditional:
           // every path that reaches here, subagent or not, means 0.
           state.deferrals = 0;
-          verifiedCandidate = treeFingerprint(dir, cfg, changed);
+          delete state.lastDeferral;
+          verifiedCandidate = treeFingerprint(vdir, cfg, vchanged);
           if (sameTree(state.verified, verifiedCandidate)) {
             // Review round 1 minor 5: this exit returns straight from verifiedUnchangedAllow, bypassing the
             // *Releasing wrappers (R4) below — release the lock here (a no-op when this gate never took it)
@@ -1504,14 +1845,21 @@ runHook("stop-gate", async (input) => {
   // card stop-gate-credits-pre-commit: a passing pre-commit record for this exact tree and command set
   // stands in for actually running them — see preCommitCredit above. Every other check below (evidence,
   // red-by-design, state.verified, the block ledger) runs exactly as it would after a real run.
-  const credited = skipVerification ? null : preCommitCredit(dir, cfg, changed, state);
+  // card verified-tree-record: treeBefore is the working tree immediately before the first command; a record of
+  // it (any writer: Stop, verify.mjs, land, pre-commit) is tried before preCommitCredit's last-run.json.
+  const treeBefore = skipVerification ? null : computeTree(vdir);
+  const credited = skipVerification ? null : (treeCredit(vdir, cfg, state, treeBefore) ?? preCommitCredit(vdir, cfg, vchanged, state));
+  // card gate-docs-skip-unless-named: a targeted run is never a full run (no record, no ratchet, no state.verified).
+  const targeted = !credited && targetedFiles ? targetedFiles : null;
   if (!skipVerification && credited) {
     for (const { recorded, ...r } of credited) {
       results.push(r);
       if (recorded) ranGreen.push({ command: r.command, result: recorded });
     }
   } else if (!skipVerification) {
-    for (const { name, command } of resolveCommands(cfg)) {
+    for (const { name, command: fullCommand } of resolveCommands(cfg)) {
+      if (targeted && name !== "test:unit") continue; // a targeted run is test:unit alone, no typecheck
+      const command = targeted ? `${fullCommand} ${targeted.join(" ")}` : fullCommand;
       // Card stop-gate-budget-under-hook-timeout: a command that cannot even start before the platform
       // would kill this hook's own process is dropped rather than let the platform cut it off mid-run,
       // silently, with its block message discarded (F1). One still runs with what budget is left, clamped
@@ -1530,9 +1878,9 @@ runHook("stop-gate", async (input) => {
       // never bypass the budget: normalizedTimeoutMs floors and clamps up to at least 1ms; unset uses the
       // remaining budget outright. The timed-out message below reports this same value.
       const commandTimeoutMs = Math.min(normalizedTimeoutMs(cfg) ?? remaining, remaining);
-      const r = runCommand(command, { cwd: dir, timeoutMs: commandTimeoutMs });
-      results.push({ name, command, ok: r.ok, durationMs: r.durationMs, timedOut: r.timedOut, status: r.status });
-      if (r.ok) ranGreen.push({ command, stdout: r.stdout });
+      const r = runCommand(command, { cwd: vdir, timeoutMs: commandTimeoutMs });
+      results.push({ name, command, ok: r.ok, durationMs: r.durationMs, timedOut: r.timedOut, status: r.status, ...(targeted ? { targeted: targeted.length } : {}) });
+      if (r.ok && !targeted) ranGreen.push({ command, stdout: r.stdout });
       if (!r.ok) {
         const why = r.timedOut ? `timed out after ${commandTimeoutMs} ms` : `exit ${r.status}`;
         const output = r.stderr + "\n" + r.stdout;
@@ -1541,6 +1889,38 @@ runHook("stop-gate", async (input) => {
         problems.push(`\`${command}\` failed (${why}):\n${failureSummary(output, 40)}`);
         commandFailures.push({ command, output });
       }
+    }
+  }
+  // card verified-tree-record: record "these commands exited 0 on this tree" after a real all-green run on a tree
+  // unchanged across it; remove the record on any command failure (fail closed). A credited run never writes.
+  if (!skipVerification && !credited && !targeted) {
+    try {
+      const configured = resolveCommands(cfg);
+      if (configured.length === 0) {
+        // nothing ran, nothing to record
+      } else if (results.length === configured.length && results.every((r) => r.ok)) {
+        const treeAfter = treeBefore ? computeTree(vdir) : null;
+        if (treeBefore && treeAfter === treeBefore) {
+          const totals = {};
+          for (const g of ranGreen) {
+            const parsed = parseTotals(g.stdout);
+            if (parsed.status === "ok") totals[g.command] = parsed;
+          }
+          writeTreeRecord(vdir, {
+            version: 1,
+            tree: treeAfter,
+            node: process.version,
+            at: new Date().toISOString(),
+            by: subagent ? "subagent-stop" : "stop",
+            commands: results.map((r) => ({ name: r.name, command: r.command, exit: 0, durationMs: typeof r.durationMs === "number" ? r.durationMs : 0 })),
+            totals,
+          });
+        }
+      } else {
+        removeTreeRecord(vdir);
+      }
+    } catch {
+      // never throw from the writer
     }
   }
   const postCommandProblems = problems.length;
@@ -1564,13 +1944,23 @@ runHook("stop-gate", async (input) => {
   problems.push(...counted.problems);
   const countProblemAdded = counted.problems.length > 0;
 
-  state.lastGate = { ok: problems.length === 0, at: Date.now(), results, scope, evidence, ...(subagent ? { subagent } : {}), ...(skipVerification ? { skipped: "no-agent-changes" } : {}) };
+  // A main Stop's skip has no decision-tagged exit line like a SubagentStop's (allowReleasing folds the reason
+  // into that); record the reason here so the trace carries it (card stop-gate-no-test-paths).
+  if (skipVerification && !subagent && cfg.trace && cfg.trace.enabled !== false) {
+    try {
+      appendTrace(dir, { ...traceLine(input, { now: new Date() }), event: input.hook_event_name, reason: skipReason });
+    } catch {
+      // never block the real exit on a trace failure
+    }
+  }
+  state.lastGate = { ok: problems.length === 0, at: Date.now(), results, scope, evidence, ...(subagent ? { subagent } : {}), ...(skipVerification ? { skipped: skipReason } : {}) };
   // card stop-gate-process-storm, case 2: a green gate records the tree it just verified, so a later
   // Stop/SubagentStop whose tree still matches can skip re-running these commands (the sameTree check
   // above). A red gate never reaches here, so it records nothing (goal 2). Never on a no-agent-changes skip
   // (card stop-gate-read-only-subagent-skip): nothing was actually verified.
-  state.lastRed = null; // card stop-gate-no-change-restop: re-set at the final block below when it qualifies
-  if (problems.length === 0 && !skipVerification) state.verified = verifiedCandidate;
+  // A read-only-turn skip verified nothing: it leaves lastRed (and stopBlocks, below) as they were.
+  if (skipReason !== "read-only-turn") state.lastRed = null; // card stop-gate-no-change-restop: re-set at the final block below when it qualifies
+  if (problems.length === 0 && !skipVerification && !targeted) state.verified = verifiedCandidate;
   if (problems.length === 0 && !skipVerification) writeLastGreen(dir, counted.parsed); // empty when nothing really ran
   if (problems.length === 0 && subagent) {
     // A subagent's green gate: its counter resets; the checkpoint, if any, belongs to the session's own Stop.
@@ -1578,17 +1968,23 @@ runHook("stop-gate", async (input) => {
     saveState(dir, input.session_id, state);
     // card stop-gate-read-only-subagent-skip: the "no-agent-changes" reason folds into this exit's own
     // decision-tagged trace line (D1) rather than a second one being written.
-    return allowReleasing(skipVerification ? "no-agent-changes" : null);
+    return allowReleasing(skipReason);
   }
   if (problems.length === 0) {
-    state.stopBlocks = 0;
+    // A read-only-turn skip changed nothing this turn: no stopBlocks reset and no checkpoint commit.
+    if (skipReason !== "read-only-turn") state.stopBlocks = 0;
     // 4. Checkpoint on green (off unless checkpoint.enabled): record the working tree now that the
     // gate passed with changes present, so a later regression can be undone with git.
-    const ck = checkpoint({ dir, cfg, changed, gateResults: results });
+    const ck = skipReason === "read-only-turn" ? { skipped: "disabled" } : checkpoint({ dir, cfg, changed, gateResults: results });
     const silent = ck.skipped === "disabled" || ck.skipped === "no changes";
     if (!silent) state.lastCheckpoint = { ...ck, at: Date.now() };
     const notice = contextNotice(dir, cfg, state, input.session_id, "verification");
     saveState(dir, input.session_id, state);
+    if (skipReason === "read-only-turn") {
+      const line = readOnlyTurn && readOnlyTurn.dirty ? READ_ONLY_LINE : null;
+      const msg = [line, silent ? null : describeCheckpoint(ck), notice].filter(Boolean).join("\n\n");
+      return msg ? systemMessageReleasing(msg) : allowReleasing();
+    }
     if (notice) return systemMessageReleasing(silent ? notice : `${describeCheckpoint(ck)}\n\n${notice}`);
     return silent ? allowReleasing() : systemMessageReleasing(describeCheckpoint(ck));
   }
@@ -1630,6 +2026,46 @@ runHook("stop-gate", async (input) => {
             // Card stop-gate-block-ledger: the standing claim, distinct from state.lastGate above (which a
             // later gate run replaces wholesale, line ~942) — this is what a later block's classifier reads.
             state.redByDesignClaim = { files: coverage.files, at: new Date().toISOString(), agent: subagent.id };
+            // card stop-gate-lead-reuses-subagent-red: the tester just ran every command on this tree; record the
+            // red so the lead's Stop on the same tree reuses it (same conditions as the final-block recorder).
+            try {
+              const configured = resolveCommands(cfg);
+              if (
+                !skipVerification &&
+                !credited &&
+                !targeted &&
+                results.length === configured.length &&
+                results.every((r) => !r.timedOut && !r.skipped && (r.ok || (typeof r.status === "number" && r.status !== 0 && !(r.status >= SIGNAL_EXIT_MIN && r.status <= SIGNAL_EXIT_MAX)))) &&
+                verifiedCandidate
+              ) {
+                let redClass = "real";
+                try {
+                  redClass = classifyFinalBlock({
+                    preVerificationProblems,
+                    evidenceProblemAdded,
+                    commandFailures,
+                    postCommandProblems,
+                    results,
+                    redByDesignClaimFiles: coverage.files,
+                    changedAtStart: changed,
+                    dir,
+                    budgetDeadline,
+                  });
+                } catch {
+                  redClass = "real";
+                }
+                state.lastRed = {
+                  fingerprint: verifiedCandidate,
+                  scope: subagent.id,
+                  commands: configured.map((c) => c.command),
+                  summary: problems.slice(preVerificationProblems, postCommandProblems).join("\n\n"),
+                  class: redClass,
+                  who,
+                };
+              }
+            } catch {
+              state.lastRed = null;
+            }
             saveState(dir, input.session_id, state);
             // Card stop-gate-defers-while-subagent-in-flight: the "tests_red_by_design" reason (and its
             // covered-files detail) folds into this exit's own decision-tagged trace line (D1) rather than a
@@ -1678,16 +2114,17 @@ runHook("stop-gate", async (input) => {
     }
     // card stop-gate-no-change-restop: record this red for reuse only when every configured command really
     // ran (not credited, none dropped for budget or timed out) and at least one failed, every failure by a
-    // numeric non-zero exit (a signal kill has status null and is load-suspect). Stored with the block's ledger
+    // numeric non-zero exit outside 129..192 (a signal kill has status null, a shell-reported one 128+signal; both load-suspect). Stored with the block's ledger
     // class so a reuse logs the same class. state.lastRed was cleared above, so every other path leaves none.
     try {
       const configured = resolveCommands(cfg);
       if (
         !skipVerification &&
         !credited &&
+        !targeted &&
         commandFailures.length > 0 &&
         results.length === configured.length &&
-        results.every((r) => !r.timedOut && !r.skipped && (r.ok || (typeof r.status === "number" && r.status !== 0))) &&
+        results.every((r) => !r.timedOut && !r.skipped && (r.ok || (typeof r.status === "number" && r.status !== 0 && !(r.status >= SIGNAL_EXIT_MIN && r.status <= SIGNAL_EXIT_MAX)))) &&
         postCommandProblems - preVerificationProblems === commandFailures.length &&
         verifiedCandidate
       ) {
@@ -1697,6 +2134,7 @@ runHook("stop-gate", async (input) => {
           commands: configured.map((c) => c.command),
           summary: problems.slice(preVerificationProblems, postCommandProblems).join("\n\n"),
           class: finalClass,
+          who,
         };
         saveState(dir, input.session_id, state);
       }

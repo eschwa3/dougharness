@@ -51,11 +51,19 @@ describe("the local harness-fix skill (.claude/skills/harness-fix)", () => {
     for (const f of files) expect(existsSync(join(repo, f)), f).toBe(true);
   });
 
+  it("section 0 says every tester, coder, and reviewer brief carries the `memory.mjs brief-lessons <id>` block (card memory-every-session)", () => {
+    const fix = readFileSync(FIX_PATH, "utf8");
+    const h = fix.indexOf("## 0. Who does the work");
+    const next = fix.indexOf("\n## ", h + 1);
+    expect(h, "no '## 0. Who does the work' heading").toBeGreaterThanOrEqual(0);
+    expect(fix.slice(h, next === -1 ? undefined : next)).toContain("`memory.mjs brief-lessons <id>`");
+  });
+
   it("names a test file for every module, the rules it lists, and every test file it names exists", () => {
     const fix = readFileSync(FIX_PATH, "utf8");
     // harness-fix is the procedure itself: the model may invoke it, and it names a test file for every module.
     expect(parseFrontmatter(fix)["disable-model-invocation"]).toBeUndefined();
-    for (const t of ["template.test.mjs", "board.test.mjs", "plan.test.mjs", "replan.test.mjs", "land.test.mjs", "hooks.test.mjs", "proposal.test.ts", "contract.test.ts"]) expect(fix).toContain(t);
+    for (const t of ["template.test.mjs", "board.test.mjs", "plan.test.mjs", "replan.test.mjs", "land.test.mjs", "hooks-pretool.test.mjs", "hooks-stop-gate.test.mjs", "hooks-stop-gate-runner.test.mjs", "hooks-stop-gate-subagents.test.mjs", "hooks-session.test.mjs", "hooks-stop-gate-records.test.mjs", "proposal.test.ts", "contract.test.ts"]) expect(fix).toContain(t);
     for (const rule of [".doug/hooks/scripts", "scriptPath", "pnpm test:unit", "Never `pnpm test`", "flow-board.d.ts", "trailers"]) expect(fix).toContain(rule);
     // Every test file the skill names exists.
     for (const m of fix.matchAll(/`((?:plugins|packages|tests)\/[^`]+\.test\.(?:mjs|ts))`/g)) expect(existsSync(join(repo, m[1])), m[1]).toBe(true);
@@ -138,6 +146,11 @@ describe("the local harness-fix skill (.claude/skills/harness-fix)", () => {
   it("harness-fix names the implement and review rows, the lead, and both tracks (card core-next-swarm-opt-in)", () => {
     const fix = readFileSync(FIX_PATH, "utf8");
     for (const s of ["`implement` row", "`review` row", "lead", "Agent tool", "both tracks"]) expect(fix, s).toContain(s);
+  });
+  it("harness-fix names verify.mjs as the gate runner and verified-tree.test.mjs in its module table (card verified-tree-record)", () => {
+    const fix = readFileSync(FIX_PATH, "utf8");
+    expect(fix).toContain(".doug/hooks/scripts/verify.mjs");
+    expect(fix).toContain("verified-tree.test.mjs");
   });
   it("harness-fix rule 7 lists one mutation per case (card hand-track-tester-and-mutations)", () => {
     const harnessFix = readFileSync(FIX_PATH, "utf8");

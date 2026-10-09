@@ -31,7 +31,7 @@ All commands run from the repo root. Iterate on a single test file. The gate is 
 - If a hook blocks an action, do not work around it. Report it. Scratch files go under `.doug/.state/scratch`; protect-paths keeps refusing the Claude Code session scratchpad, which is outside the project.
 - While `.doug/plan.json` is approved, change only files its tasks own. The stop gate blocks anything else; widen the plan and have it re-approved instead.
 - Do not add `Co-Authored-By` or `Claude-Session` trailers to commit messages.
-- Two tracks: a card's track is picked by size and risk (docs/board.md `track`); `/doug-next <id>` routes a hand card to doug-hand. In this repo a hand card follows `.claude/skills/harness-fix/SKILL.md`.
+- Two tracks: a card's track is picked by size and risk (docs/board.md `track`); `/doug-next <id>` routes a hand card to doug-hand. In this repo a hand card follows `.claude/skills/harness-fix/SKILL.md`. A card the user asks for is filed as a mini ADR (doug-next and doug-hand, "Cards the user asks for").
 - Be terse: use the fewest words and tokens that carry the point. No preamble, no recap, no restating the question.
 
 ## Gotchas
