@@ -57,7 +57,13 @@
   },
   "preCommit": {
     "noTestPaths": [
-      ".doug/board.json"
+      ".doug/board.json",
+      "docs/live-runs.md",
+      ".doug/plan.json",
+      ".doug/anchor.md"
+    ],
+    "docsTests": [
+      "tests/export-public.test.mjs"
     ]
   },
   "checkpoint": {
@@ -75,9 +81,9 @@
   "memory": {
     "embeddings": {
       "provider": "openai-compatible",
-      "baseUrl": "http://localhost:11434",
-      "model": "embeddinggemma",
-      "dims": 512
+      "baseUrl": "http://127.0.0.1:11434",
+      "model": "embeddinggemma:latest",
+      "dims": 768
     }
   }
 }

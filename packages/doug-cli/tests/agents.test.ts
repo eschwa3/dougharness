@@ -21,6 +21,15 @@ function byPath(files: { path: string; content: string }[]) {
   return Object.fromEntries(files.map((f) => [f.path, f.content]));
 }
 
+function frontmatterLines(content: string): string[] {
+  const lines = content.split("\n");
+  const end = lines.indexOf("---", 1);
+  return lines.slice(0, end + 1);
+}
+
+const REVIEWER_GATE_RULE =
+  "Run the brief's test files and mutations and the gate's non-test commands, never the full test suite directly; for the full gate run `node .doug/hooks/scripts/verify.mjs` without `--no-credit`, which credits a green verified-tree record of the same tree, and report its gate line and real exit codes.";
+
 describe("generateAgents", () => {
   it("proposes coder, architect, reviewer, researcher, tester in order for ts-pnpm (has a test framework)", () => {
     const d = detect(tsPnpm);
@@ -35,7 +44,7 @@ describe("generateAgents", () => {
     ]);
   });
 
-  it("omits tester when no test framework is detected", () => {
+  it("writes tester even when no test framework is detected, with the generic description and single-test rule (card init-greenfield)", () => {
     const dir = noTestFrameworkDir();
     const d = detect(dir);
     const cfg = generateConfig(d);
@@ -45,7 +54,23 @@ describe("generateAgents", () => {
       ".claude/agents/architect.md",
       ".claude/agents/reviewer.md",
       ".claude/agents/researcher.md",
+      ".claude/agents/tester.md",
     ]);
+    const tester = byPath(files)[".claude/agents/tester.md"];
+    expect(frontmatterLines(tester)).toContain(
+      `description: ${JSON.stringify("Writes and runs tests for a named behavior; edits test files only")}`
+    );
+    expect(tester).toContain(
+      "Run each test file you touch with the single-test command in Facts; when Facts lists none, report the exact command you ran."
+    );
+  });
+
+  it("writes tester.md for every stack fixture (card init-greenfield)", () => {
+    for (const name of ["ts-pnpm", "npm-bare", "py-uv", "ci-order"]) {
+      const d = detect(join(here, "fixtures", name));
+      const paths = generateAgents(d, generateConfig(d)).map((f) => f.path);
+      expect(paths, name).toContain(".claude/agents/tester.md");
+    }
   });
 
   it("proposes coder, architect, reviewer, researcher, tester in order for npm-bare (has a test framework)", () => {
@@ -61,12 +86,6 @@ describe("generateAgents", () => {
       ".claude/agents/tester.md",
     ]);
   });
-
-  function frontmatterLines(content: string): string[] {
-    const lines = content.split("\n");
-    const end = lines.indexOf("---", 1);
-    return lines.slice(0, end + 1);
-  }
 
   it("sets complete, exact frontmatter per role, with tools/disallowedTools only for read-only roles", () => {
     const d = detect(tsPnpm);
@@ -220,6 +239,24 @@ describe("generateAgents", () => {
     const cfg = generateConfig(d);
     const reviewer = byPath(generateAgents(d, cfg))[".claude/agents/reviewer.md"];
     expect(reviewer).toContain("mutate or remove it, rerun the test, and confirm it fails before reverting");
+  });
+
+  it("tells the coder and the reviewer to run the gate with verify.mjs (card verified-tree-record)", () => {
+    const d = detect(tsPnpm);
+    const cfg = generateConfig(d);
+    const files = byPath(generateAgents(d, cfg));
+    const coder = files[".claude/agents/coder.md"];
+    const reviewer = files[".claude/agents/reviewer.md"];
+    expect(coder).toContain("verify.mjs");
+    expect(coder).toContain("Run the gate with `node .doug/hooks/scripts/verify.mjs`");
+    expect(reviewer).toContain("verify.mjs");
+    expect(reviewer).toContain(REVIEWER_GATE_RULE);
+    expect(reviewer).not.toContain("Run the gate with `node .doug/hooks/scripts/verify.mjs`");
+    expect(reviewer).not.toMatch(/(?<!without )`--no-credit`/);
+    const rules = reviewer.slice(reviewer.indexOf("## Rules"), reviewer.includes("## Project notes") ? reviewer.indexOf("## Project notes") : undefined);
+    const gateRule = rules.split("\n").find((l) => l.includes("verify.mjs")) ?? "";
+    expect(gateRule, "F1: the reviewer's gate rule sits in the Rules section").toContain(REVIEWER_GATE_RULE);
+    expect(gateRule, "F1: the reviewer's gate rule names no package manager command").not.toMatch(/pnpm/);
   });
 
   it("T9 tells the tester to end a red-by-design report with the tests_red_by_design claim (card subagent-stop-gate-tester-red)", () => {
@@ -499,6 +536,68 @@ describe("spliceSkills", () => {
       const lines = f.content.split("\n");
       const fm = lines.slice(1, lines.indexOf("---", 1));
       expect(fm.some((l) => /^skills:/.test(l)), f.path).toBe(false);
+    }
+  });
+});
+
+// Card agent-rules-no-pm: the 120 s timeout rule's example comes from the config's last stop-gate command
+// (the slowest step), never a hardcoded pnpm; with no gate command the "such as" clause is dropped.
+describe("generateAgents timeout rule (card agent-rules-no-pm)", () => {
+  const timeoutRule = (content: string) => rulesOf(content).filter((l) => l.includes("can take over 120 s"));
+  function rulesOf(content: string): string[] {
+    const start = content.indexOf("## Rules");
+    const end = content.includes("## Project notes") ? content.indexOf("## Project notes") : undefined;
+    return content.slice(start, end).split("\n").filter((l) => l.startsWith("- "));
+  }
+  const lastGate = (cfg: ReturnType<typeof generateConfig>) =>
+    cfg.commands[cfg.stopGate.commands[cfg.stopGate.commands.length - 1]];
+
+  it("N1: no Rules line of any generated agent names pnpm for the py-uv and npm-bare fixtures", () => {
+    for (const name of ["py-uv", "npm-bare"]) {
+      const d = detect(join(here, "fixtures", name));
+      const files = generateAgents(d, generateConfig(d));
+      expect(files.length, name).toBeGreaterThan(0);
+      for (const f of files) {
+        for (const line of rulesOf(f.content)) expect(line, `${name} ${f.path}`).not.toMatch(/pnpm/);
+      }
+    }
+  });
+
+  it("N2: py-uv's timeout rule names that project's own last gate command", () => {
+    const d = detect(join(here, "fixtures", "py-uv"));
+    const cfg = generateConfig(d);
+    const cmd = lastGate(cfg);
+    expect(cmd).toBeTruthy();
+    const files = generateAgents(d, cfg).filter((f) => rulesOf(f.content).some((l) => l.includes("can take over 120 s")));
+    expect(files.map((f) => f.path).sort()).toEqual([".claude/agents/coder.md", ".claude/agents/reviewer.md", ".claude/agents/tester.md"]);
+    for (const f of files) {
+      expect(timeoutRule(f.content), f.path).toEqual([
+        `- Run any command that can take over 120 s, such as ${cmd}, with the Bash timeout set to 600000, and hand back only after it exits.`,
+      ]);
+    }
+  });
+
+  it("N3: ts-pnpm's timeout rule names its last gate command, a pnpm one, in every agent that has the rule", () => {
+    const d = detect(tsPnpm);
+    const cfg = generateConfig(d);
+    expect(lastGate(cfg)).toBe("pnpm test");
+    for (const f of generateAgents(d, cfg).filter((f) => f.content.includes("can take over 120 s"))) {
+      expect(timeoutRule(f.content), f.path).toEqual([
+        "- Run any command that can take over 120 s, such as pnpm test, with the Bash timeout set to 600000, and hand back only after it exits.",
+      ]);
+    }
+  });
+
+  it("N4: a config with no stop-gate commands drops the such-as clause", () => {
+    const d = detect(tsPnpm);
+    const cfg = generateConfig(d);
+    cfg.stopGate.commands = [];
+    const files = generateAgents(d, cfg).filter((f) => f.content.includes("can take over 120 s"));
+    expect(files.length).toBeGreaterThan(0);
+    for (const f of files) {
+      expect(timeoutRule(f.content), f.path).toEqual([
+        "- Run any command that can take over 120 s with the Bash timeout set to 600000, and hand back only after it exits.",
+      ]);
     }
   });
 });

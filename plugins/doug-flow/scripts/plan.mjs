@@ -95,53 +95,6 @@ function withDefaults(p, d) {
   if (out.adversary !== false && !hasCommand && configAdversary(d)) out = { ...out, adversary: { ...(out.adversary && typeof out.adversary === "object" ? out.adversary : {}), command: configAdversary(d) } };
   return out;
 }
-// Renders recalled lessons as one line per lesson, in rank order. Each lesson's own text gets a fixed budget
-// (LESSON_CHAR_BUDGET): text over budget is cut at the last sentence boundary (". ", "! ", "? ", or a newline)
-// within it, falling back to the last word boundary, then a hard cut, with an ellipsis ("…") appended; the
-// citation (or kind, when there is none) stays on the line either way. A sentence/newline boundary this close
-// to the start (MIN_CUT_KEPT) keeps too little to be worth it — a lesson opening with a heading-then-newline,
-// or a stray early period, would otherwise collapse to almost nothing — so that case falls through to the word
-// boundary (then the hard cut) instead, same as when no such boundary exists at all. That keeps any one lesson
-// — the memory store holds whole files up to ~12k characters, not just short summaries — from ever crowding
-// out the rest: the running total is kept under LESSONS_CHAR_CAP by skipping (not stopping at) a line that
-// would overflow it, so a later, shorter lesson still renders even after an earlier one didn't fit. lessonIds
-// carries exactly the ids of the lines rendered. { text: null, ids: [] } when nothing rendered, the caller's
-// cue to omit the fields entirely.
-const LESSONS_CHAR_CAP = 2000;
-const LESSON_CHAR_BUDGET = 400;
-const MIN_CUT_KEPT = 40;
-function cutLessonText(text, budget) {
-  if (text.length <= budget) return text;
-  const slice = text.slice(0, budget);
-  let cut = -1;
-  for (const sep of [". ", "! ", "? "]) {
-    const idx = slice.lastIndexOf(sep);
-    if (idx !== -1) cut = Math.max(cut, idx + sep.length - 1);
-  }
-  const nl = slice.lastIndexOf("\n");
-  if (nl !== -1) cut = Math.max(cut, nl);
-  if (cut < MIN_CUT_KEPT) cut = -1;
-  if (cut === -1) {
-    const sp = slice.lastIndexOf(" ");
-    cut = sp !== -1 ? sp : budget;
-  }
-  return text.slice(0, cut).trimEnd() + "…";
-}
-function renderLessons(lessons) {
-  const text = [];
-  const ids = [];
-  let length = 0;
-  for (const lesson of Array.isArray(lessons) ? lessons : []) {
-    const line = `- [${lesson.id}] ${cutLessonText(lesson.text, LESSON_CHAR_BUDGET)} (${lesson.citation || lesson.kind})`;
-    const nextLength = length + (text.length ? 1 : 0) + line.length;
-    if (nextLength > LESSONS_CHAR_CAP) continue;
-    text.push(line);
-    ids.push(lesson.id);
-    length = nextLength;
-  }
-  return text.length ? { text: text.join("\n"), ids } : { text: null, ids: [] };
-}
-
 // Mirrors lib/memory.mjs's exported MEMORY_DB_RELPATH by value, not by import: importing that module loads
 // node:sqlite at its top level (review MAJOR/MINOR 4), so the mere existence check below must not pull it in
 // on a Node that lacks node:sqlite, or every plan.mjs json without a database would eat that module's load
@@ -149,14 +102,27 @@ function renderLessons(lessons) {
 const MEMORY_DB_RELPATH = ".doug/.state/memory/memory.db";
 
 // Wraps a provider so a down or slow embeddings endpoint is ever hit once per `plan.mjs json` run: the first
-// embed() failure is cached and handed to every later caller with no further request, and the run prints
-// exactly one stderr line about it. Without this, a plan with many tasks rediscovers the same dead endpoint
+// embed() failure is cached and handed to every later caller with no further request (the degraded-recall
+// WARNING for it comes from warnOnce below, once per distinct line). Without this, a plan with many tasks rediscovers the same dead endpoint
 // once per task, each paying its own request or timeout (review MAJOR: measured 26.8s for 8 tasks against a
 // black-holed baseUrl). null in, null out: recallLessons already treats a null provider as keyword-only.
+// card recall-fallback-warning: each distinct degraded-recall warning is printed once per run, not once per task;
+// and the local-provider probe (only when no provider is configured) runs once per run too.
+const warnedLines = new Set();
+function warnOnce(line) {
+  if (!line || warnedLines.has(line)) return;
+  warnedLines.add(line);
+  process.stderr.write(line + "\n");
+}
+let detectedOnce = null;
+function detectOnce(provider) {
+  if (provider) return Promise.resolve(null);
+  if (!detectedOnce) detectedOnce = import("../lib/memory.mjs").then((mod) => mod.detectLocalProvider());
+  return detectedOnce;
+}
 function cachingProvider(provider) {
   if (!provider) return null;
   let failure = null;
-  let warned = false;
   return {
     name: provider.name,
     model: provider.model,
@@ -164,13 +130,7 @@ function cachingProvider(provider) {
     async embed(texts, opts) {
       if (failure) return failure;
       const result = await provider.embed(texts, opts);
-      if (!result.ok) {
-        failure = result;
-        if (!warned) {
-          warned = true;
-          process.stderr.write(`[doug] memory recall: embeddings provider unavailable (${result.reason}); keyword-only\n`);
-        }
-      }
+      if (!result.ok) failure = result;
       return result;
     },
   };
@@ -187,15 +147,20 @@ function cachingProvider(provider) {
 async function attachLessons(plan, dir, provider) {
   if (!existsSync(join(dir, MEMORY_DB_RELPATH))) return plan;
   try {
-    const { openMemory, recallLessons } = await import("../lib/memory.mjs");
+    const { openMemory, recallLessons, degradedWarning, degradedReason, renderLessons } = await import("../lib/memory.mjs");
     const staleDays = readMemoryStaleDays(dir);
     const m = openMemory(dir);
     try {
+      const detectedProvider = await detectOnce(provider);
+      // An empty lesson store has nothing to degrade (a code-index-only database, say): no warning for it.
+      const hasLessons = m.prepare("SELECT 1 FROM lessons WHERE superseded_by IS NULL AND stale IS NULL LIMIT 1").get() !== undefined;
       const tasks = [];
       for (const task of plan.tasks) {
-        const taskRecall = await recallLessons(m, `${task.title}\n${task.spec}`, { files: task.files, k: 8, checkoutDir: dir, provider, staleDays });
+        const taskRecall = await recallLessons(m, `${task.title}\n${task.spec}`, { files: task.files, k: 8, checkoutDir: dir, provider, staleDays, detectedProvider });
+        if (hasLessons) warnOnce(degradedWarning(taskRecall, { what: "memory recall", detectedProvider }));
         const taskLessons = renderLessons(taskRecall.lessons);
-        tasks.push(taskLessons.text === null ? task : { ...task, lessons: taskLessons.text, lessonIds: taskLessons.ids });
+        const lessonsText = taskLessons.text !== null && taskRecall.degraded ? `(recall was keyword-only: ${degradedReason(taskRecall, detectedProvider)})\n${taskLessons.text}` : taskLessons.text;
+        tasks.push(taskLessons.text === null ? task : { ...task, lessons: lessonsText, lessonIds: taskLessons.ids });
       }
       return { ...plan, tasks };
     } finally {
@@ -207,7 +172,7 @@ async function attachLessons(plan, dir, provider) {
   }
 }
 
-// Renders code chunks the same skip-not-stop way renderLessons renders lessons, one line per chunk:
+// Renders code chunks the same skip-not-stop way renderLessons (lib/memory.mjs) renders lessons, one line per chunk:
 // "- <path>:<start>-<end>  <first non-blank line of the chunk, trimmed to 120 chars>". codeContextIds carries
 // exactly the ids of the lines kept, in rank order. { text: null, ids: [] } when nothing rendered, the caller's
 // cue to omit the fields entirely.
@@ -243,17 +208,20 @@ async function attachCodeContext(plan, dir, provider) {
   if (!readIndexConfig(dir).enabled) return plan;
   if (!existsSync(join(dir, MEMORY_DB_RELPATH))) return plan;
   try {
-    const { openMemory } = await import("../lib/memory.mjs");
+    const { openMemory, degradedWarning, degradedReason } = await import("../lib/memory.mjs");
     const { searchIndex } = await import("../lib/code-index.mjs");
     const m = openMemory(dir);
     try {
       const chunkCount = m.prepare("SELECT COUNT(*) AS n FROM code_chunks").get().n;
       if (chunkCount === 0) return plan;
+      const detectedProvider = await detectOnce(provider);
       const tasks = [];
       for (const task of plan.tasks) {
-        const result = await searchIndex(m, `${task.title}\n${task.spec}`, { k: 6, provider });
+        const result = await searchIndex(m, `${task.title}\n${task.spec}`, { k: 6, provider, detectedProvider });
+        warnOnce(degradedWarning(result, { what: "code index search", code: true, detectedProvider }));
         const rendered = renderCodeContext(result.chunks);
-        tasks.push(rendered.text === null ? task : { ...task, codeContext: rendered.text, codeContextIds: rendered.ids });
+        const codeText = rendered.text !== null && result.degraded ? `(code search was keyword-only: ${degradedReason(result, detectedProvider)})\n${rendered.text}` : rendered.text;
+        tasks.push(rendered.text === null ? task : { ...task, codeContext: codeText, codeContextIds: rendered.ids });
       }
       return { ...plan, tasks };
     } finally {

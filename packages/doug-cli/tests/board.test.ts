@@ -908,3 +908,57 @@ describe("errors", () => {
     expect(help.stdout).toContain("doug board serve [dir]");
   });
 });
+
+// 2026-10-03 (card follow-ups-backlog-ranked): Ready is capped at 7; only the user promotes cards to Ready.
+// `doug board add` into ready and `doug board next` warn above the cap on stderr; stdout and exit status are unchanged.
+describe("doug board Ready cap (card follow-ups-backlog-ranked)", () => {
+  const warning = (n: number) => `warning: Ready holds ${n} cards, above the cap of 7; only the user promotes cards to Ready\n`;
+  const readyCards = (n: number) =>
+    Array.from({ length: n }, (_, i) => ({ id: `r${i + 1}`, column: "ready", title: `R${i + 1}`, deps: [], goal: "g" }));
+
+  it("add --column ready making 8 warns on stderr, still adds, exits 0, and leaves stdout alone", async () => {
+    const dir = fresh();
+    writeBoard(dir, readyCards(7));
+    const r = await run(["add", "x", "--title", "X", "--goal", "g", "--column", "ready", dir]);
+    expect(r.code).toBe(0);
+    expect(r.stderr).toContain(warning(8));
+    expect(r.stdout).toBe("Added x to ready in .doug/board.json.\n");
+    expect(readBoard(dir).cards.map((c: { id: string }) => c.id)).toContain("x");
+  });
+  it("add --column ready making 7 does not warn", async () => {
+    const dir = fresh();
+    writeBoard(dir, readyCards(6));
+    const r = await run(["add", "x", "--title", "X", "--goal", "g", "--column", "ready", dir]);
+    expect(r.code).toBe(0);
+    expect(r.stderr).not.toContain("above the cap");
+  });
+  it("add --column backlog with 9 cards in Ready does not warn", async () => {
+    const dir = fresh();
+    writeBoard(dir, readyCards(9));
+    const r = await run(["add", "x", "--title", "X", "--goal", "g", "--column", "backlog", dir]);
+    expect(r.code).toBe(0);
+    expect(r.stderr).not.toContain("above the cap");
+  });
+  it("add with no --column (backlog) with 9 cards in Ready does not warn", async () => {
+    const dir = fresh();
+    writeBoard(dir, readyCards(9));
+    const r = await run(["add", "x", "--title", "X", "--goal", "g", dir]);
+    expect(r.code).toBe(0);
+    expect(r.stderr).not.toContain("above the cap");
+  });
+  it("next with 8 Ready cards warns on stderr and prints the card on stdout, exit 0", async () => {
+    const dir = fresh();
+    writeBoard(dir, readyCards(8));
+    const r = await run(["next", dir]);
+    expect(r.code).toBe(0);
+    expect(r.stderr).toContain(warning(8));
+    expect(JSON.parse(r.stdout).id).toBe("r1");
+  });
+  it("next with 7 Ready cards does not warn", async () => {
+    const dir = fresh();
+    writeBoard(dir, readyCards(7));
+    const r = await run(["next", dir]);
+    expect(r.code).toBe(0);
+    expect(r.stderr).not.toContain("above the cap");
+  });
+});

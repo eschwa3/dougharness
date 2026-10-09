@@ -5,7 +5,7 @@
 // SessionStart script (its earlier capture, when the platform fires it).
 
 import { execFileSync } from "node:child_process";
-import { readFileSync, readdirSync } from "node:fs";
+import { readFileSync, readdirSync, mkdirSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { join, resolve, sep } from "node:path";
 import { matchAny } from "./glob.mjs";
@@ -157,4 +157,169 @@ export function captureBaseline(dir, paths) {
 // or present but whose content identity has moved since the baseline was captured.
 export function sinceBaseline(dir, paths, baseline) {
   return paths.filter((p) => !(p in baseline) || fileIdentity(join(dir, p)) !== baseline[p]);
+}
+
+// The verified-tree fingerprint (card stop-gate-process-storm, goal 2): the HEAD sha plus the content
+// identity of every dirty path and every proposal-path file on disk, at the moment it is computed. Null
+// when `changed` is not the array shape changedFiles returns (no git, or git unavailable) — there is
+// nothing to fingerprint reliably, so the tree can never be judged "unchanged" on this path.
+export function treeFingerprint(dir, cfg, changed) {
+  if (!Array.isArray(changed)) return null;
+  const walked = walkProposalPathFiles(dir, cfg.proposalPaths);
+  const paths = [...new Set([...changed, ...walked])];
+  // `at` (state.mjs's comment for state.verified) is when this fingerprint was taken; sameTree below never
+  // reads it, so recomputing it on the after-wait path (a fresh Date.now()) never affects equality.
+  return { head: headAt(dir), tree: captureBaseline(dir, paths), at: Date.now() };
+}
+
+// Whether two treeFingerprint results describe the same tree: both present, the same HEAD, the same set of
+// paths, and an identical identity for each. Never throws (a hook reader must never throw): a malformed
+// fingerprint — e.g. a hand-edited state.verified — just compares unequal rather than blocking the gate.
+export function sameTree(a, b) {
+  try {
+    if (!a || !b || typeof a !== "object" || typeof b !== "object") return false;
+    if (a.head !== b.head) return false;
+    const at = a.tree && typeof a.tree === "object" ? a.tree : null;
+    const bt = b.tree && typeof b.tree === "object" ? b.tree : null;
+    if (!at || !bt) return false;
+    const ak = Object.keys(at).sort();
+    const bk = Object.keys(bt).sort();
+    if (ak.length !== bk.length) return false;
+    for (let i = 0; i < ak.length; i++) if (ak[i] !== bk[i]) return false;
+    return ak.every((k) => at[k] === bt[k]);
+  } catch {
+    return false;
+  }
+}
+
+// card stop-gate-no-test-paths: whether every path changed since the last green verification (`verified`, a
+// treeFingerprint recorded in state.verified) is on preCommit.noTestPaths, read with the pre-commit hook's
+// exact rule (.githooks/pre-commit): an entry matches a path when equal, or, ending in "/", when the path
+// starts with it. Not a glob. "Changed since" is the union of the paths committed since verified.head that are
+// absent from verified.tree or whose current identity differs from the recorded one (a path committed with the
+// verified content is not a change), every path dirty now (read with --no-renames, both sides of a rename) that is absent from verified.tree or whose identity moved, and every verified.tree path
+// whose identity moved (reverted or committed with other content). Fails closed: false when there is no
+// verified fingerprint, its head is unknown to git, git is unavailable, the union is empty, the list is
+// missing, empty, or holds a non-string or empty entry, or any path is off the list. Never throws.
+export function onlyNoTestPathsChanged(dir, cfg, verified, changed) {
+  try {
+    const list = cfg && cfg.preCommit && cfg.preCommit.noTestPaths;
+    if (!Array.isArray(list) || list.length === 0 || !list.every((e) => typeof e === "string" && e !== "")) return false;
+    const moved = movedSinceVerified(dir, verified, changed);
+    if (!moved || moved.size === 0) return false;
+    const hit = (p) => list.some((e) => (e.endsWith("/") ? p.startsWith(e) : p === e));
+    return [...moved].every(hit);
+  } catch {
+    return false;
+  }
+}
+
+// The "changed since the last green" set onlyNoTestPathsChanged judges (card gate-docs-skip-unless-named factors
+// it out so the docs rule reads the same set): a Set of paths, or null when there is no usable verified
+// fingerprint, `changed` is not an array, its head is unknown to git, or anything throws. Never throws.
+export function movedSinceVerified(dir, verified, changed) {
+  try {
+    if (!verified || typeof verified !== "object" || !verified.tree || typeof verified.tree !== "object" || Array.isArray(verified.tree)) return null;
+    if (!Array.isArray(changed)) return null;
+    const committed = committedSince(dir, verified.head);
+    if (!Array.isArray(committed)) return null;
+    const moved = new Set();
+    for (const p of committed) {
+      if (!(p in verified.tree) || fileIdentity(join(dir, p)) !== verified.tree[p]) moved.add(p);
+    }
+    // changedFiles collapses a rename `old -> new` to `new`, hiding a path moved out of a source location, so
+    // the dirty set is collected here with --no-renames (both sides), exactly as pre-commit does.
+    const git = (args) =>
+      execFileSync("git", args, { cwd: dir, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], timeout: 5000 })
+        .split("\n")
+        .map((l) => l.trim())
+        .filter(Boolean)
+        .filter((p) => !p.startsWith(".claude/worktrees/") && !p.startsWith(".doug/.state/") && p !== ".doug/anchor.md");
+    const dirty = [...git(["diff", "--name-only", "--no-renames", "HEAD", "--"]), ...git(["ls-files", "--others", "--exclude-standard"])];
+    for (const p of new Set([...dirty, ...Object.keys(verified.tree)])) {
+      if (!(p in verified.tree) || fileIdentity(join(dir, p)) !== verified.tree[p]) moved.add(p);
+    }
+    return moved;
+  } catch {
+    return null;
+  }
+}
+
+// card gate-skip-readonly-researchers: the start fingerprint of a subagent, written by the trace hook on
+// SubagentStart and read by the stop gate. One small JSON file per agent under .doug/.state/agent-start/<session>/.
+// Ids are reduced to [A-Za-z0-9_-] so one can never escape the directory. Both functions never throw: a failed
+// write means no record, an unreadable record reads as null (the gate then runs as before).
+function agentStartFile(dir, sessionId, agentId) {
+  const clean = (v) => String(v ?? "").replace(/[^A-Za-z0-9_-]/g, "_") || "_";
+  return join(dir, ".doug/.state/agent-start", clean(sessionId), `${clean(agentId)}.json`);
+}
+
+export function writeAgentStart(dir, cfg, sessionId, agentId) {
+  try {
+    const fp = treeFingerprint(dir, cfg, changedFiles(dir));
+    if (!fp) return;
+    const file = agentStartFile(dir, sessionId, agentId);
+    mkdirSync(join(file, ".."), { recursive: true });
+    writeFileSync(file, JSON.stringify(fp));
+  } catch {
+    // no record
+  }
+}
+
+export function readAgentStart(dir, sessionId, agentId) {
+  try {
+    return JSON.parse(readFileSync(agentStartFile(dir, sessionId, agentId), "utf8"));
+  } catch {
+    return null;
+  }
+}
+
+// card stop-gate-runs-only-on-code-turns: the turn-start fingerprint, written by scripts/turn-start.mjs on
+// UserPromptSubmit and read by the main Stop gate. One small JSON file per session under
+// .doug/.state/turn-start/<session>.json, same id sanitising as agentStartFile. Both functions never throw: a
+// failed write means no record, an unreadable record reads as null (the gate then verifies as before).
+function turnStartFile(dir, sessionId) {
+  const clean = String(sessionId ?? "").replace(/[^A-Za-z0-9_-]/g, "_") || "_";
+  return join(dir, ".doug/.state/turn-start", `${clean}.json`);
+}
+
+export function writeTurnStart(dir, cfg, sessionId) {
+  try {
+    const fp = treeFingerprint(dir, cfg, changedFiles(dir));
+    if (!fp) return;
+    const file = turnStartFile(dir, sessionId);
+    mkdirSync(join(file, ".."), { recursive: true });
+    writeFileSync(file, JSON.stringify(fp));
+  } catch {
+    // no record
+  }
+}
+
+export function readTurnStart(dir, sessionId) {
+  try {
+    return JSON.parse(readFileSync(turnStartFile(dir, sessionId), "utf8"));
+  } catch {
+    return null;
+  }
+}
+
+// Whether the tree still matches a turn-start record once every path on preCommit.noTestPaths is dropped from
+// both (the pre-commit hook's rule: equal, or a prefix when the entry ends in "/"). Returns null when it cannot
+// tell (no or malformed record, no current fingerprint, any throw) so the caller verifies; otherwise
+// { same, exact, dirty }: `exact` = equal with nothing dropped; `same` = same HEAD, same code paths, same identities; `dirty` = the current tree still holds
+// code paths. Never throws.
+export function turnTreeStatus(cfg, start, current) {
+  try {
+    if (!start || !current || typeof start !== "object" || typeof current !== "object") return null;
+    if (!start.tree || typeof start.tree !== "object" || Array.isArray(start.tree)) return null;
+    if (!current.tree || typeof current.tree !== "object" || Array.isArray(current.tree)) return null;
+    const list = cfg && cfg.preCommit && Array.isArray(cfg.preCommit.noTestPaths) ? cfg.preCommit.noTestPaths.filter((e) => typeof e === "string" && e !== "") : [];
+    const skip = (p) => list.some((e) => (e.endsWith("/") ? p.startsWith(e) : p === e));
+    const strip = (fp) => ({ head: fp.head, tree: Object.fromEntries(Object.entries(fp.tree).filter(([p]) => !skip(p))) });
+    const a = strip(start);
+    const b = strip(current);
+    return { same: sameTree(a, b), exact: sameTree(start, current), dirty: Object.keys(b.tree).length > 0 };
+  } catch {
+    return null;
+  }
 }

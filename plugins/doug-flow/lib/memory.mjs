@@ -15,6 +15,8 @@ import { mkdirSync, existsSync, readFileSync, statSync } from "node:fs";
 import { dirname, resolve, join } from "node:path";
 import { createHash } from "node:crypto";
 import { homedir } from "node:os";
+import { request as httpRequest } from "node:http";
+import { request as httpsRequest } from "node:https";
 import { classifyBlocks, adversaryBlocks } from "./board.mjs";
 import { transcriptUsage, priceUsage, projectSlug, CODEX_PRICES, CODEX_DEFAULT_MODEL } from "./cost.mjs";
 import { MODELS_HEADING } from "./models.mjs";
@@ -836,14 +838,21 @@ function toRecallLesson(lesson, extra) {
 // marking every row stale forever (a wrong one given). Never throws for a provider or checkout problem (a
 // database problem may still throw, same as every other export here). See design #2 in the memory-recall card.
 export async function recallLessons(m, query, opts = {}) {
-  const { files = [], k = 8, now = new Date(), provider = null, checkoutDir = null, staleDays = 30 } = opts;
+  const { files = [], k = 8, now = new Date(), provider = null, checkoutDir = null, staleDays = 30, detectedProvider = null } = opts;
   const nowDate = now instanceof Date ? now : new Date(now);
   const nowIsoStr = nowDate.toISOString();
   const nowMs = nowDate.getTime();
   const checked = isProjectRoot(checkoutDir);
 
   // (a) candidates: not superseded, not stale, and confirmed-or-created within staleDays.
-  const allRows = m.prepare("SELECT * FROM lessons WHERE superseded_by IS NULL AND stale IS NULL").all().map(lessonRowToObject);
+  // Light columns only: the embedding blob is never loaded here (card recall-scale-row-load).
+  const allRows = m
+    .prepare(
+      "SELECT id, created, confirmed, scope, embedding_model, embedding_dims, embedding IS NOT NULL AS has_vec FROM lessons WHERE superseded_by IS NULL AND stale IS NULL"
+    )
+    .all()
+    .map(lessonRowToObject);
+  const hasVec = (l) => !!l.has_vec;
   const freshRows = allRows.filter((l) => ageDaysOf(l.confirmed || l.created, nowMs) <= staleDays);
   const byId = new Map(freshRows.map((l) => [l.id, l]));
 
@@ -869,9 +878,16 @@ export async function recallLessons(m, query, opts = {}) {
   const cosine = new Map();
   if (provider) {
     providerName = provider.name;
-    const vectorRows = freshRows.filter(
-      (l) => l.embedding && l.embedding_model === provider.model && l.embedding_dims === provider.dims
-    );
+    // Blobs are read only when the light columns say a fresh row holds one under this model/dims.
+    const anyMatching = freshRows.some((l) => hasVec(l) && l.embedding_model === provider.model && l.embedding_dims === provider.dims);
+    const vectorRows = !anyMatching
+      ? []
+      : m
+      .prepare(
+        "SELECT id, embedding FROM lessons WHERE superseded_by IS NULL AND stale IS NULL AND embedding IS NOT NULL AND embedding_model = ? AND embedding_dims = ?"
+      )
+      .all(provider.model, provider.dims)
+      .filter((l) => byId.has(l.id));
     if (!vectorRows.length) {
       reason = `no vectors stored for ${provider.model}/${provider.dims}`;
     } else {
@@ -890,6 +906,20 @@ export async function recallLessons(m, query, opts = {}) {
         reason = null;
       }
     }
+  }
+
+  // card recall-fallback-warning: keyword-only is degraded when a provider was given, vectors exist for any
+  // model, or the caller detected a usable provider; hybrid reports how many live in-window rows lack a vector.
+  // The existence check is bounded and only runs when no other term already decided it.
+  const hasAnyVector = (db) =>
+    !!db.prepare("SELECT 1 AS x FROM lessons WHERE superseded_by IS NULL AND stale IS NULL AND embedding IS NOT NULL LIMIT 1").get();
+  const degraded = mode === "keyword-only" && (!!provider || hasAnyVector(m) || !!detectedProvider);
+  const coverage = {};
+  if (mode === "hybrid") {
+    coverage.total = freshRows.length;
+    coverage.unvectored = freshRows.filter(
+      (l) => !(hasVec(l) && l.embedding_model === provider.model && l.embedding_dims === provider.dims)
+    ).length;
   }
 
   // (d) scores: recency weight, then scope boost. Dense mode scores cosine; the BM25 order scores 1/(60+rank).
@@ -932,6 +962,15 @@ export async function recallLessons(m, query, opts = {}) {
   let idx = 0;
   while (result.length < k && idx < candidates.length) {
     const cand = candidates[idx++];
+    // Every column except the blob (and the model/dims toRecallLesson strips anyway); hasVector comes from has_vec.
+    const { has_vec, ...full } = m
+      .prepare(
+        `SELECT id, text, kind, scope, citation, source_agent, source_model, task, card, commit_sha, created, confirmed,
+                helpful, harmful, superseded_by, embedding_model, embedding_dims, stale, embedding IS NOT NULL AS has_vec
+         FROM lessons WHERE id = ?`
+      )
+      .get(cand.lesson.id);
+    cand.lesson = lessonRowToObject({ ...full, embedding: has_vec ? true : null });
     if (!checked) {
       result.push(toRecallLesson(cand.lesson, { score: cand.score, sides: cand.sides }));
       continue;
@@ -945,7 +984,176 @@ export async function recallLessons(m, query, opts = {}) {
     result.push(toRecallLesson({ ...cand.lesson, confirmed: nowIsoStr }, { score: cand.score, sides: cand.sides }));
   }
 
-  return { mode, reason: mode === "hybrid" ? null : reason, provider: providerName, checked, lessons: result };
+  return { mode, reason: mode === "hybrid" ? null : reason, provider: providerName, checked, degraded, ...coverage, lessons: result };
+}
+
+// Renders recalled lessons as one line per lesson, in rank order. Each lesson's own text gets a fixed budget
+// (LESSON_CHAR_BUDGET): text over budget is cut at the last sentence boundary (". ", "! ", "? ", or a newline)
+// within it, falling back to the last word boundary, then a hard cut, with an ellipsis ("…") appended; the
+// citation (or kind, when there is none) stays on the line either way. A sentence/newline boundary this close
+// to the start (MIN_CUT_KEPT) keeps too little to be worth it — a lesson opening with a heading-then-newline,
+// or a stray early period, would otherwise collapse to almost nothing — so that case falls through to the word
+// boundary (then the hard cut) instead, same as when no such boundary exists at all. That keeps any one lesson
+// — the memory store holds whole files up to ~12k characters, not just short summaries — from ever crowding
+// out the rest: the running total is kept under LESSONS_CHAR_CAP by skipping (not stopping at) a line that
+// would overflow it, so a later, shorter lesson still renders even after an earlier one didn't fit. lessonIds
+// carries exactly the ids of the lines rendered. { text: null, ids: [] } when nothing rendered, the caller's
+// cue to omit the fields entirely.
+const LESSONS_CHAR_CAP = 2000;
+const LESSON_CHAR_BUDGET = 400;
+const MIN_CUT_KEPT = 40;
+function cutLessonText(text, budget) {
+  if (text.length <= budget) return text;
+  const slice = text.slice(0, budget);
+  let cut = -1;
+  for (const sep of [". ", "! ", "? "]) {
+    const idx = slice.lastIndexOf(sep);
+    if (idx !== -1) cut = Math.max(cut, idx + sep.length - 1);
+  }
+  const nl = slice.lastIndexOf("\n");
+  if (nl !== -1) cut = Math.max(cut, nl);
+  if (cut < MIN_CUT_KEPT) cut = -1;
+  if (cut === -1) {
+    const sp = slice.lastIndexOf(" ");
+    cut = sp !== -1 ? sp : budget;
+  }
+  return text.slice(0, cut).trimEnd() + "…";
+}
+export function renderLessons(lessons) {
+  const text = [];
+  const ids = [];
+  let length = 0;
+  for (const lesson of Array.isArray(lessons) ? lessons : []) {
+    const line = `- [${lesson.id}] ${cutLessonText(lesson.text, LESSON_CHAR_BUDGET)} (${lesson.citation || lesson.kind})`;
+    const nextLength = length + (text.length ? 1 : 0) + line.length;
+    if (nextLength > LESSONS_CHAR_CAP) continue;
+    text.push(line);
+    ids.push(lesson.id);
+    length = nextLength;
+  }
+  return text.length ? { text: text.join("\n"), ids } : { text: null, ids: [] };
+}
+
+// The lessons a session starts with when no card query exists (card memory-every-session): live, non-stale
+// lessons confirmed-or-created within staleDays, ordered by helpful minus harmful desc, then confirmed-or-created
+// desc, then id ascending. No provider, no citation re-check, nothing written.
+export function topLessons(m, { k = 5, staleDays = 30, now = new Date() } = {}) {
+  const nowMs = (now instanceof Date ? now : new Date(now)).getTime();
+  const rows = m
+    .prepare(
+      `SELECT id, text, kind, scope, citation, source_agent, source_model, task, card, commit_sha, created, confirmed,
+              helpful, harmful, superseded_by, stale
+       FROM lessons WHERE superseded_by IS NULL AND stale IS NULL`
+    )
+    .all()
+    .map(lessonRowToObject)
+    .filter((l) => ageDaysOf(l.confirmed || l.created, nowMs) <= staleDays);
+  const stamp = (l) => new Date(l.confirmed || l.created).getTime() || 0;
+  rows.sort((a, b) => b.helpful - b.harmful - (a.helpful - a.harmful) || stamp(b) - stamp(a) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+  return rows.slice(0, k);
+}
+
+// --- Degraded-recall warnings (card recall-fallback-warning) ------------------------------------------------
+// The one place that words a degraded recall, for memory.mjs recall / index search and plan.mjs json alike.
+// `result` is a recallLessons or searchIndex result; `what` is "memory recall" or "code index search"; `code`
+// picks the chunk wording and the `index build` fix. Returns the stderr line (no newline) or null.
+export function degradedWarning(result, { what = "memory recall", code = false, detectedProvider = null } = {}) {
+  const noun = code ? "chunks" : "lessons";
+  const rebuild = code ? "run memory.mjs index build" : "run memory.mjs reembed";
+  if (result.mode === "hybrid") {
+    if (result.unvectored > 0) return `WARNING: ${result.unvectored} of ${result.total} ${noun} have no vector; ${rebuild}`;
+    return null;
+  }
+  if (!result.degraded) return null;
+  const reason = result.reason;
+  let fix;
+  let shown = reason;
+  if (reason === "no provider configured") {
+    if (detectedProvider) {
+      shown = `no provider configured, but ${detectedProvider} is available`;
+      fix = "run memory.mjs doctor to enable it";
+    } else {
+      fix = "configure memory.embeddings (memory.mjs doctor)";
+    }
+  } else if (typeof reason === "string" && reason.startsWith("no vectors stored for ")) {
+    fix = rebuild;
+  } else if (reason === "timeout") {
+    fix = "run memory.mjs doctor (a cold model can time out on first use; retry)";
+  } else {
+    fix = "run memory.mjs doctor";
+  }
+  return `WARNING: ${what} degraded to keyword-only: ${shown}; ${fix}`;
+}
+
+// The reason shown in a task prompt block when a recall was degraded: the same wording as the warning's reason
+// part, including the detected-provider form.
+export function degradedReason(result, detectedProvider = null) {
+  if (result.reason === "no provider configured" && detectedProvider) return `no provider configured, but ${detectedProvider} is available`;
+  return result.reason;
+}
+
+// One probe for a usable local embedding provider, for a caller whose config has none. DOUG_OLLAMA_BASE_URL
+// overrides the default base URL (http://localhost:11434). Returns a short description ("ollama embeddinggemma
+// at <url>") or null: a failed or negative probe is "not detected", never an error. Ollama only, GET only:
+// /api/version then /api/tags under ONE shared 1500 ms deadline (never an embed call, never a POST). The model
+// name matching mirrors embeddings.mjs's modelNameMatches (exact, or the part before ":" on either side); that
+// helper is not exported and this card may not edit embeddings.mjs, so the rule is repeated here.
+export async function detectLocalProvider(opts = {}) {
+  try {
+    const baseUrl = process.env.DOUG_OLLAMA_BASE_URL || "http://localhost:11434";
+    const root = baseUrl.replace(/\/$/, "");
+    const want = "embeddinggemma";
+    const base = (n) => String(n ?? "").split(":")[0];
+    const signal = AbortSignal.timeout(opts.timeoutMs ?? 1500);
+    const get = opts.fetch ? (url) => fetchGet(opts.fetch, url, signal) : (url) => httpGet(url, signal);
+    const version = await get(`${root}/api/version`);
+    if (!version.ok) return null;
+    const tags = await get(`${root}/api/tags`);
+    if (!tags.ok) return null;
+    const json = JSON.parse(tags.body);
+    const models = Array.isArray(json && json.models) ? json.models : [];
+    const present = models.some((mo) => mo && [mo.name, mo.model].some((n) => n !== undefined && n !== null && (n === want || base(n) === want)));
+    return present ? `ollama ${want} at ${baseUrl}` : null;
+  } catch {
+    return null;
+  }
+}
+
+async function fetchGet(fetchImpl, url, signal) {
+  const res = await fetchImpl(url, { signal, headers: { Connection: "close" } });
+  if (!res.ok) {
+    await res.body?.cancel?.().catch(() => {});
+    return { ok: false, body: "" };
+  }
+  return { ok: true, body: await res.text() };
+}
+
+// node:http rather than fetch: aborting a fetch whose TCP connect is still pending leaves the connect attempt
+// (and so the process) alive for ~10 s against an unroutable host; destroying a node:http request tears the
+// socket down at once, so the CLI exits right after the deadline.
+function httpGet(url, signal) {
+  return new Promise((resolveP, rejectP) => {
+    const mod = url.startsWith("https:") ? httpsRequest : httpRequest;
+    const req = mod(url, { method: "GET", headers: { Connection: "close" } }, (res) => {
+      if (res.statusCode < 200 || res.statusCode >= 300) {
+        res.destroy();
+        resolveP({ ok: false, body: "" });
+        return;
+      }
+      const chunks = [];
+      res.on("data", (c) => chunks.push(c));
+      res.on("end", () => resolveP({ ok: true, body: Buffer.concat(chunks).toString("utf8") }));
+      res.on("error", rejectP);
+    });
+    const onAbort = () => {
+      req.destroy();
+      rejectP(new Error("timeout"));
+    };
+    if (signal.aborted) return onAbort();
+    signal.addEventListener("abort", onAbort, { once: true });
+    req.on("error", rejectP);
+    req.end();
+  });
 }
 
 function taskAdversary(task, level) {
@@ -1394,7 +1602,39 @@ export function buildReflectPrompt(report, { blocks = [], plan = null, existingL
   } else {
     lines.push("(none yet)");
   }
+  if (report.hand && typeof report.hand === "object") appendHandMaterial(lines, report.hand);
   return lines.join("\n") + "\n";
+}
+
+// A hand landing's saved material (card memory-every-session): each file capped at HAND_FILE_CHAR_CAP, all of it at
+// HAND_TOTAL_CHAR_CAP, the landing note last so a budget spent on files still leaves the note.
+const HAND_FILE_CHAR_CAP = 4000;
+const HAND_TOTAL_CHAR_CAP = 16000;
+const HAND_TRUNCATED = "\u2026[truncated]";
+
+function appendHandMaterial(lines, hand) {
+  lines.push("");
+  lines.push("Hand-track material (briefs, reviewer reports, landing note; the rules above still apply, cite report:<card> or report:<card>/R<n>):");
+  const note = typeof hand.note === "string" && hand.note.trim() ? hand.note : null;
+  const cutNote = note && note.length > HAND_FILE_CHAR_CAP ? note.slice(0, HAND_FILE_CHAR_CAP) + HAND_TRUNCATED : note;
+  let budget = HAND_TOTAL_CHAR_CAP - (cutNote ? cutNote.length : 0);
+  const add = (label, files) => {
+    for (const f of Array.isArray(files) ? files : []) {
+      if (!f || typeof f.text !== "string") continue;
+      if (budget <= 0) break;
+      let text = f.text.length > HAND_FILE_CHAR_CAP ? f.text.slice(0, HAND_FILE_CHAR_CAP) + HAND_TRUNCATED : f.text;
+      if (text.length > budget) text = text.slice(0, budget) + HAND_TRUNCATED;
+      budget -= text.length;
+      lines.push(`--- ${label} ${f.name || ""} ---`);
+      lines.push(text);
+    }
+  };
+  add("brief", hand.briefs);
+  add("reviewer report", hand.reviews);
+  if (cutNote) {
+    lines.push("--- landing note ---");
+    lines.push(cutNote);
+  }
 }
 
 // Citation filter (C.2): a "report:" citation is checked against `report` (never unchecked here, unlike

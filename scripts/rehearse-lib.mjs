@@ -25,6 +25,10 @@ export const CLI = join(ROOT, "packages/doug-cli/dist/bin.js");
 export const FIXTURE_DIR = join(ROOT, "evals/fixtures/ts-basic");
 export const TASKS_FILE = join(ROOT, "evals/tasks/ts-basic.json");
 export const HELDOUT_FILE = join(ROOT, "evals/heldout/fix-hours.test.ts");
+// The swarm scenario's own task and held-out test (card rehearsal-swarm-splittable): one size M plan task owning two
+// source files, so the shape gate lets the lead split it.
+export const SWARM_TASK_ID = "swarm-split-planned";
+export const SWARM_HELDOUT_FILE = join(ROOT, "evals/heldout/swarm-split-planned.test.ts");
 export const RESULTS_FILE = ".doug/.state/last-report.json";
 export const STREAM_DIR = ".doug/.state/rehearsal";
 export const SYNTHETIC_REPORT_RELPATH = `${STREAM_DIR}/synthetic-report.json`;
@@ -50,25 +54,29 @@ export function cleanEnv(extra = {}) {
 // stage figure, not the scenario total (item workflow-rehearsal-review #6: research gives no single number, so
 // the flow and hand totals are split across their sessions in proportion to what each is expected to do, and the
 // swarm total is all in its one implement session).
-export const SCENARIOS = ["flow", "swarm", "hand"];
+export const SCENARIOS = ["flow", "swarm", "hand", "auto"];
 export const ESTIMATES = {
   flow: {
     // /doug-next's own first step moves the card (uncommitted working state, never a "Board: <id> moved to In
     // flow" commit) and spawns the planner before its approval gate (research §1, section 1), so there is no
     // separate /doug-plan stage to estimate: the gate stage now covers what the old $0.25 gate and $0.75 plan
     // stages did together (item rehearsal-first-live-findings #1).
-    stages: { gate: 1.25, implement: 2.5 },
+    stages: { gate: 0.75, implement: 1.75 },
     source:
-      "flow rehearsals on the ts-basic fixture measured $4.15/9 min (docs/live-runs.md, 2026-09-09), $3.93/10 min (2026-09-10), and $2.13/9 min (2026-09-20); the former gate ($0.25) and plan ($0.75) estimates merge into one gate stage since /doug-next runs the planner before its own approval gate, leaving implement as before",
+      "flow rehearsals on the ts-basic fixture measured $4.15/9 min (docs/live-runs.md, 2026-09-09), $3.93/10 min (2026-09-10), $2.13/9 min (2026-09-20), and $1.97/6.9 min (gate $0.58/3.3 min, implement $1.38/3.4 min, 2026-10-09); the former gate ($0.25) and plan ($0.75) estimates merge into one gate stage since /doug-next runs the planner before its own approval gate, leaving implement as before",
   },
   swarm: {
-    stages: { implement: 4.0 },
+    stages: { implement: 3.0 },
     source:
-      "swarm rehearsal on the ts-basic fixture measured $4.32/12.7 min (docs/live-runs.md, 2026-09-10), predating the shape gate (3eb9485, 2026-09-12); the scenario fails at implement today, so this figure is not reproducible until rehearsal-swarm-splittable lands",
+      "swarm rehearsal estimate from the two pre-shape-gate split runs on the ts-basic fixture ($4.32/12.7 min 2026-09-10, $3.86/7.3 min 2026-09-09, docs/live-runs.md); the scenario now runs the two-source-file task swarm-split-planned, which the shape gate (3eb9485) lets split, and its first run measured $2.32/4.9 min (implement $2.32/4.8 min, the lead split split-helpers into 2 briefs, 2026-10-09)",
   },
   hand: {
-    stages: { gate: 0.25, build: 3.75 },
-    source: "hand rehearsal on the ts-basic fixture measured $2.16/3.8 min (docs/live-runs.md, 2026-09-09), measured before the tester seat and research step existed",
+    stages: { gate: 0.5, build: 2.0 },
+    source: "hand rehearsal on the ts-basic fixture measured $2.16/3.8 min (docs/live-runs.md, 2026-09-09), measured before the tester seat and research step existed, and $1.72/3.2 min (gate $0.32/0.3 min, build $1.39/2.9 min, the first run with the tester seat and research step, 2026-10-09)",
+  },
+  auto: {
+    stages: { gate: 0.5, build: 8.0 },
+    source: "two hand builds at the hand figure ($2.16/3.8 min each, docs/live-runs.md, 2026-09-09, rounded up with a gate that reads two cards); unmeasured, no autopilot rehearsal has run live",
   },
 };
 
@@ -93,7 +101,7 @@ export function capFor(scenario, stageName) {
 export function estimateLines(scenario = null) {
   if (!scenario) {
     const lines = SCENARIOS.map((s) => `  ${s.padEnd(6)} $${scenarioTotal(s).toFixed(2)}  (${ESTIMATES[s].source})`);
-    lines.push(`  ${"all".padEnd(6)} $${totalEstimate().toFixed(2)}  (sum of the three)`);
+    lines.push(`  ${"all".padEnd(6)} $${totalEstimate().toFixed(2)}  (sum of every scenario)`);
     return lines;
   }
   const est = ESTIMATES[scenario];
@@ -103,7 +111,7 @@ export function estimateLines(scenario = null) {
 }
 
 // ---- CLI argument parsing ------------------------------------------------------------------------------
-// `rehearse.mjs [flow|swarm|hand|all] --card <id> --spend [dir]`. Pure: does not validate the scenario name
+// `rehearse.mjs [flow|swarm|hand|auto|all] --card <id> --spend [dir]`. Pure: does not validate the scenario name
 // or check the card exists (the caller does, before anything is spawned).
 export function parseArgs(argv) {
   const positional = [];
@@ -336,12 +344,11 @@ export function assertImplemented(dir, stream, { plugins, requireWorkers = false
       // Since 3eb9485, a deterministic shape gate (plugins/doug-flow/skills/swarm-launch/SKILL.md) keeps a task
       // shaped like this fixture's (one source file plus its tests) off the lead: doug-implement.js's swarmReport()
       // records that on the task as `swarm: { applies: false, reason, ... }`. When that is why no task swarmed, say
-      // so by name instead of the old blanket message, and point at the card that would give this scenario a
-      // splittable task.
+      // so by name instead of the old blanket message.
       const gated = tasks.find((t) => t.swarm && t.swarm.applies === false);
       if (gated) {
         return fail(
-          `task ${gated.id}: no workers (${gated.swarm.reason}); the shape gate kept it off the lead, so this scenario cannot prove a split until card rehearsal-swarm-splittable lands`,
+          `task ${gated.id}: no workers (${gated.swarm.reason}); the shape gate kept it off the lead`,
         );
       }
       return fail("no task in the report carried workers: the swarm did not run");
@@ -369,26 +376,36 @@ function fixtureSuite() {
   return JSON.parse(readFileSync(TASKS_FILE, "utf8"));
 }
 
-function fixtureTask(suite) {
-  const task = suite.tasks.find((t) => t.id === "fix-hours-planned");
-  if (!task || !task.plan) throw new Error(`task "fix-hours-planned" with a plan was not found in ${TASKS_FILE}`);
+function fixtureTask(suite, id = "fix-hours-planned") {
+  const task = suite.tasks.find((t) => t.id === id);
+  if (!task || !task.plan) throw new Error(`task "${id}" with a plan was not found in ${TASKS_FILE}`);
   return task;
 }
 
 // A fresh fixture for one scenario: the suite's own setup commands (so a checkout that never ran evals still
 // gets node_modules; evals/fixtures/ts-basic/node_modules is gitignored), `doug init`, a board holding one card
 // `fix-hours` (title/goal from the fix-hours-planned task's plan), on the hand track only for the hand scenario,
-// and, for the swarm scenario, the same task's plan installed pre-approved with swarm on (the swarm opt-in and
+// and, for the swarm scenario, a card `swarm-split-planned` from that task's plan (two source files, size M, so
+// the shape gate lets it split) with the plan installed pre-approved with swarm on (the swarm opt-in and
 // the approval are the user's acts, standing in for /doug-swarm here since the swarm scenario starts at
 // implement, not at a gate). CLAUDE.md's Models table is left exactly as `doug init` generated it, worker row
 // included; the runner edits no row. Throws with a `pnpm build` message when the CLI is missing.
 // `tempPrefix` lets a caller (the test file) mark its own fixtures distinctly from a real run's, so a fixture
 // left behind by --spend on failure is recognisable as the runner's (card workflow-rehearsal-review #7).
+// The auto scenario's second card: its goal is the add-truncate task's prompt in the same suite.
+const AUTO_BACKLOG_CARD = { id: "add-capitalize", title: "Add capitalize", goal: "Add a capitalize helper to src/strings.ts that upper-cases the first letter of a string." };
+function autoSecondCard(suite) {
+  const task = suite.tasks.find((t) => t.id === "add-truncate");
+  if (!task || !task.prompt) throw new Error(`task "add-truncate" with a prompt was not found in ${TASKS_FILE}`);
+  return { id: "add-truncate", title: "Add truncate", goal: task.prompt };
+}
+
 export function prepareFixture({ scenario, dir, tempPrefix } = {}) {
   if (!SCENARIOS.includes(scenario)) throw new Error(`prepareFixture: unknown scenario "${scenario}"; scenarios are ${SCENARIOS.join(", ")}`);
   if (!existsSync(CLI)) throw new Error(`the doug CLI is not built (${relative(ROOT, CLI)} is missing); run "pnpm build" first`);
   const suite = fixtureSuite();
-  const task = fixtureTask(suite);
+  const task = fixtureTask(suite, scenario === "swarm" ? SWARM_TASK_ID : "fix-hours-planned");
+  const cardId = scenario === "swarm" ? SWARM_TASK_ID : "fix-hours";
   const target = dir || mkdtempSync(join(tmpdir(), tempPrefix || `doug-rehearse-${scenario}-`));
   cpSync(FIXTURE_DIR, target, { recursive: true });
 
@@ -411,23 +428,29 @@ export function prepareFixture({ scenario, dir, tempPrefix } = {}) {
 
   let board = { ...newBoard(), components: ["flow"] };
   board = addCard(board, {
-    id: "fix-hours",
+    id: cardId,
     title: task.plan.title,
     goal: task.plan.goal,
     component: "flow",
     size: "S",
-    track: scenario === "hand" ? "hand" : undefined,
+    track: scenario === "hand" || scenario === "auto" ? "hand" : undefined,
     column: "ready",
     // doug-hand's Start step now refuses a classless card before it stamps the landing's condition
     // (scripts/memory.mjs's "condition open"); every fixture card carries one so a rehearsal never trips that
     // refusal (plugins/doug-flow/skills/doug-hand/SKILL.md step 2).
     class: "code",
   });
+  if (scenario === "auto") {
+    const second = autoSecondCard(suite);
+    board = addCard(board, { ...second, component: "flow", size: "S", track: "hand", column: "ready", class: "code" });
+    // Card autopilot-unlimited: a bare `--auto` takes Ready cards only, so this Backlog card must come out untouched.
+    board = addCard(board, { ...AUTO_BACKLOG_CARD, component: "flow", size: "S", track: "hand", column: "backlog", class: "code" });
+  }
   mkdirSync(join(target, ".doug"), { recursive: true });
   writeFileSync(join(target, BOARD_RELPATH), JSON.stringify(board, null, 2) + "\n");
 
   if (scenario === "swarm") {
-    const plan = { ...task.plan, status: "approved", card: "fix-hours", swarm: true };
+    const plan = { ...task.plan, status: "approved", card: cardId, swarm: true };
     writeFileSync(join(target, ".doug/plan.json"), JSON.stringify(plan, null, 2) + "\n");
   }
 
@@ -437,7 +460,7 @@ export function prepareFixture({ scenario, dir, tempPrefix } = {}) {
   execFileSync("git", ["add", "-A"], { cwd: target, env: cleanEnv() });
   execFileSync("git", ["commit", "-q", "-m", "fixture"], { cwd: target, env: cleanEnv() });
   const baseline = execFileSync("git", ["rev-parse", "HEAD"], { cwd: target, encoding: "utf8", env: cleanEnv() }).trim();
-  return { dir: target, card: { id: "fix-hours", title: task.plan.title, goal: task.plan.goal }, task, baseline };
+  return { dir: target, card: { id: cardId, title: task.plan.title, goal: task.plan.goal }, task, baseline };
 }
 
 // ---- One `claude -p` session (evals/run.mjs runWorkflowSession's spawn shape exactly) --------------------------
@@ -500,11 +523,11 @@ function act(script, args, dir) {
 // #1b): checks the tree is clean BEFORE the held-out test is copied in (a dirty tree afterwards used to be
 // unwinnable, since the copy itself is what made it dirty), then always removes the held-out file again, whether
 // `pnpm test` passed or not, so the fixture is left exactly as the build/land left it.
-function runHeldOutAndClean(dir) {
+function runHeldOutAndClean(dir, { id = "fix-hours", file = HELDOUT_FILE } = {}) {
   const before = dirtyOutsideDoug(dir);
   if (before.length) return fail(`working tree is not clean before the held-out test is added: ${before.join(", ")}`);
-  const heldOutPath = join(dir, "tests/heldout-fix-hours.test.ts");
-  cpSync(HELDOUT_FILE, heldOutPath);
+  const heldOutPath = join(dir, `tests/heldout-${id}.test.ts`);
+  cpSync(file, heldOutPath);
   let test;
   try {
     test = spawnSync("pnpm", ["test"], { cwd: dir, encoding: "utf8", shell: true, env: cleanEnv() });
@@ -548,8 +571,8 @@ function runBoardCli(args) {
 export function rehearsalNote({ scenario, outcome, stages, cost = null, agentNames = null }) {
   const stageList = stages.map((s) => `${s.name} (${s.wallClock})${s.message ? ` — ${s.message}` : ""}`).join(", ");
   const base =
-    scenario === "hand"
-      ? `Rehearsal hand on the ts-basic fixture: ${outcome}; cost ${cost === null ? "not measured" : `$${Number(cost).toFixed(2)}`}; stages ${stageList}`
+    scenario === "hand" || scenario === "auto"
+      ? `Rehearsal ${scenario} on the ts-basic fixture: ${outcome}; cost ${cost === null ? "not measured" : `$${Number(cost).toFixed(2)}`}; stages ${stageList}`
       : `Rehearsal ${scenario} on the ts-basic fixture: ${outcome}; stages ${stageList}`;
   if (scenario !== "swarm") return base;
   return `${base}; plugin loading and agent-name resolution asserted in the runtime (plugins: doug-flow; agents resolved: ${(agentNames || []).join(", ") || "none"})`;
@@ -643,6 +666,26 @@ export const SCENARIO_STAGES = {
       assert: (ctx) => assertHandBuilt(ctx),
     },
   ],
+  auto: [
+    {
+      kind: "session",
+      name: "gate",
+      maxTurns: 20,
+      prompt: () => "/doug-next --auto",
+      assert: ({ dir, stream }) => assertAutoGateHeld(dir, stream),
+    },
+    {
+      kind: "session",
+      name: "build",
+      maxTurns: 140,
+      prompt: () =>
+        [
+          "/doug-next --auto",
+          "I approved the queue as shown, with the caps you proposed. Do not invoke the doug-board skill at any step: this checkout publishes nothing.",
+        ].join("\n\n"),
+      assert: (ctx) => assertAutoBuilt(ctx),
+    },
+  ],
   flow: [
     {
       kind: "session",
@@ -694,7 +737,7 @@ export const SCENARIO_STAGES = {
     {
       kind: "act",
       name: "land",
-      run: ({ dir }) => landAndVerify(dir),
+      run: ({ dir }) => landAndVerify(dir, { id: SWARM_TASK_ID, file: SWARM_HELDOUT_FILE }),
     },
   ],
 };
@@ -737,6 +780,79 @@ export function assertHandBuilt({ dir, baseline }) {
   return pass(`built as ${codeCommit}`, { commit: codeCommit });
 }
 
+// The auto scenario's two cards, in board order: what each one's build must change and which held-out test checks it.
+const AUTO_CARDS = [
+  { id: "fix-hours", files: ["src/duration.ts", "tests/duration.test.ts"], heldOut: { id: "fix-hours", file: HELDOUT_FILE } },
+  { id: "add-truncate", files: ["src/strings.ts", "tests/strings.test.ts"], heldOut: { id: "add-truncate", file: join(ROOT, "evals/heldout/add-truncate.test.ts") } },
+];
+
+// The auto scenario's gate stage: a bare `/doug-next --auto` shows the queue and asks its one approval, which is denied
+// in print mode, so both cards are still Ready, only the fixture commit exists, and no source file was touched.
+export function assertAutoGateHeld(dir, stream) {
+  for (const c of AUTO_CARDS) {
+    const held = assertGateHeld(dir, stream, { plugins: ["doug-flow"], command: "doug-flow:doug-next", cardId: c.id, unchangedFiles: AUTO_CARDS.flatMap((x) => x.files.slice(0, 1)) });
+    if (!held.ok) return held;
+  }
+  return pass("gate held: the queue approval was not given, and both cards are untouched");
+}
+
+// Tool names the stream's assistant messages called.
+function toolUseNames(stream) {
+  const names = [];
+  for (const j of jsonLines(stream)) {
+    const content = j && j.type === "assistant" && j.message && Array.isArray(j.message.content) ? j.message.content : [];
+    for (const c of content) if (c && c.type === "tool_use" && c.name) names.push(c.name);
+  }
+  return names;
+}
+
+// The auto scenario's build assertion: doug-hand's landing for EACH card (a code commit changing that card's source
+// and test files, the card Done with a `source` naming it, a hand-track entry in docs/live-runs.md, its held-out
+// test passing), and no AskUserQuestion in the stream: a gate prompt between the cards is exactly what autopilot
+// must not do. Never throws on a missing piece; every miss names the card.
+export function assertAutoBuilt({ dir, baseline, stream }) {
+  if (!baseline) return fail("no baseline commit was recorded for this fixture");
+  if (toolUseNames(stream).includes("AskUserQuestion")) return fail("the build stream carries an AskUserQuestion tool_use: autopilot asked a question between or within the cards");
+  let shas;
+  try {
+    shas = execFileSync("git", ["rev-list", `${baseline}..HEAD`], { cwd: dir, encoding: "utf8", env: cleanEnv() }).trim().split("\n").filter(Boolean);
+  } catch (err) {
+    return fail(`git rev-list failed: ${err.message}`);
+  }
+  if (!shas.length) return fail("no commits since the fixture baseline; the build never committed");
+  let board;
+  try {
+    board = JSON.parse(readFileSync(boardPath(dir), "utf8"));
+  } catch (err) {
+    return fail(`could not read the fixture board: ${err.message}`);
+  }
+  const runs = existsSync(join(dir, "docs/live-runs.md")) ? readFileSync(join(dir, "docs/live-runs.md"), "utf8") : "";
+  const backlog = (board.cards || []).find((x) => x.id === AUTO_BACKLOG_CARD.id);
+  if (!backlog || backlog.column !== "backlog" || backlog.goal !== AUTO_BACKLOG_CARD.goal) return fail(`the Backlog card ${AUTO_BACKLOG_CARD.id} was moved or changed: unlimited autopilot must take Ready cards only`);
+  const commits = [];
+  for (const c of AUTO_CARDS) {
+    let codeCommit = null;
+    for (const sha of shas) {
+      const files = execFileSync("git", ["show", "--name-only", "--pretty=format:", sha], { cwd: dir, encoding: "utf8", env: cleanEnv() }).split("\n").filter(Boolean);
+      if (c.files.every((f) => files.includes(f))) {
+        codeCommit = sha;
+        break;
+      }
+    }
+    if (!codeCommit) return fail(`no commit since the fixture baseline changes both ${c.files.join(" and ")} (card ${c.id}; commits since baseline: ${shas.join(", ")})`);
+    const card = (board.cards || []).find((x) => x.id === c.id);
+    if (!card || card.column !== "done") return fail(`the fixture board does not have ${c.id} in done`);
+    if (!card.source || !String(card.source).includes(codeCommit.slice(0, 7))) return fail(`${c.id}'s source does not name the code commit ${codeCommit} (source: ${card.source || "none"})`);
+    if (!runs.includes(`\`${c.id}\``) || !runs.includes("hand track: a gated by-hand change")) return fail(`docs/live-runs.md carries no hand-track entry for ${c.id} (board.mjs record --hand did not run)`);
+    commits.push(codeCommit);
+  }
+  for (const c of AUTO_CARDS) {
+    const held = runHeldOutAndClean(dir, c.heldOut);
+    if (!held.ok) return fail(`${c.id}: ${held.message}`);
+  }
+  return pass(`built as ${commits.join(", ")}`, { commit: commits[commits.length - 1] });
+}
+
 // HEAD is a merge commit (two parents), not a fast-forward or a no-op: `git rev-list --parents -n 1 HEAD` lists
 // the commit followed by each parent, so a plain commit has one token after it and a merge has two or more.
 export function assertTwoParents(dir) {
@@ -749,14 +865,14 @@ export function assertTwoParents(dir) {
 // The runner act shared by the flow and swarm scenarios' last stage: `plan.mjs done`, `plan.mjs land`, a check
 // that land actually produced a merge commit (two parents) rather than a fast-forward or a no-op, then the
 // held-out test on the landed fixture (as /doug-next step 5 and the eval scorer both do).
-function landAndVerify(dir) {
+function landAndVerify(dir, heldOut) {
   const done = act(PLAN_MJS, ["done"], dir);
   if (!done.ok) return fail(`plan.mjs done failed: ${done.stderr || done.stdout}`);
   const land = act(PLAN_MJS, ["land"], dir);
   if (!land.ok) return fail(`plan.mjs land failed: ${land.stderr || land.stdout}`);
   const merged = assertTwoParents(dir);
   if (!merged.ok) return merged;
-  const held = runHeldOutAndClean(dir);
+  const held = runHeldOutAndClean(dir, heldOut);
   if (!held.ok) return held;
   return pass(`landed as ${merged.commit}`, { commit: merged.commit });
 }
@@ -795,7 +911,7 @@ export function runScenario(scenario, { tempPrefix } = {}) {
   let reportFile = null;
   let reportSynthesized = false;
   let agentNames = [];
-  if (scenario !== "hand") {
+  if (scenario !== "hand" && scenario !== "auto") {
     const realReport = join(dir, RESULTS_FILE);
     if (existsSync(realReport)) {
       reportFile = realReport;

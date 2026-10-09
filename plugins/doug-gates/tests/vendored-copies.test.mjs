@@ -1,6 +1,6 @@
 // This repository runs Doug on itself: the hooks Claude Code actually fires come from `.doug/hooks/{scripts,lib}`,
 // vendored copies of `plugins/doug-gates/{scripts,lib}` (the `harness-fix` skill says to copy an edited gate
-// script across, but nothing enforced it — see card vendored-hooks-drift). `hooks.test.mjs` holds the
+// script across, but nothing enforced it — see card vendored-hooks-drift). the `hooks-*.test.mjs` files hold the
 // behavior tests that spawn the real scripts; this file asserts a repository-layout invariant instead — it
 // spawns nothing — so a drift failure reads as its own line in the run output, and the behavior suite stays
 // about behavior. It checks two things: the vendored copies are byte-identical to their plugin source (in both

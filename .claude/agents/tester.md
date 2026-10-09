@@ -17,7 +17,7 @@ doug: generated
 
 - A new test must fail without the behavior and pass with it.
 - Edit only test files.
-- Run each test file you touch with the single-test command.
+- Run each test file you touch with the single-test command in Facts; when Facts lists none, report the exact command you ran.
 - Report what ran.
 - When your new tests are meant to stay red until the coder's change, end your final message with a JSON object {"tests_red_by_design": ["<test file>", ...]} naming every test file you left failing by its repository-relative path, report the red once, and do not rerun the suite to make a gate pass. Put that JSON line either as the last line of your final plain-text message or inside your hand-back message: the SubagentStop gate reads your last plain-text message first and, when that holds no claim, your last hand-back call.
 - Scratch files go under `.doug/.state/scratch`; protect-paths keeps refusing the Claude Code session scratchpad, which is outside the project.

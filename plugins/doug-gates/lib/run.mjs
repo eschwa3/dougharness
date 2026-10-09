@@ -6,6 +6,10 @@ import { spawnSync } from "node:child_process";
 export function commandEnv(base = process.env) {
   const env = { ...base, CI: base.CI ?? "1", NO_COLOR: "1" };
   delete env.FORCE_COLOR;
+  // card worktree-gate-mixed-tree-agent: the stop gate's per-tree plumbing never reaches the commands it runs.
+  delete env.DOUG_STOP_GATE_TREE;
+  delete env.DOUG_STOP_GATE_DEADLINE;
+  delete env.DOUG_STOP_GATE_CHILD;
   return env;
 }
 

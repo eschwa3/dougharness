@@ -19,10 +19,33 @@
 //
 // Known limits (round 2, major 2 - measured, not guessed): the cap is a budget nudge for researchers, not a
 // security boundary. Not counted at all: xargs curl; a for/while loop body (do curl ...); timeout 10 curl ...;
-// and any other wrapper resolveVerb does not skip (docker run ... curl, ssh host curl); other fetchers (gh api,
-// a node -e "fetch(...)" one-liner, python, etc.). Counted although no network call happens: curl --version,
-// curl --help. A shell -c script with several curls in it (bash -c 'curl a; curl b') counts once, since
-// commandForms reads the whole -c script as one form.
+// eval curl ...; and any other wrapper resolveVerb does not skip (docker run ... curl, ssh host curl); other
+// fetchers (gh api, a node -e "fetch(...)" one-liner, python, etc.). Counted although no network call happens:
+// curl --version, curl --help. A shell -c script with several curls in it (bash -c 'curl a; curl b') counts
+// once, since commandForms reads the whole -c script as one form.
+//
+// Loopback exemption (card research-cap-localhost, whole-command grammar, fix pass 5): a local model probe is not
+// web research, so it is neither counted nor denied. The exemption applies only when the entire raw command
+// string, before any splitting, is ONE simple fetch (isLoopbackFetch):
+//   1. Trimmed, it tokenizes into words. Single quotes are literal; double quotes may not hold $, a backtick, a
+//      backslash or !; an unterminated quote is not exempt. Outside quotes only space, tab, [A-Za-z0-9._:/=@%+,-]
+//      and a redirect's > are allowed, so & | ; ( ) { } [ ] * ? ~ # $ ` \ ! < and a newline are never exempt.
+//   2. The first word is exactly curl or wget: no path, wrapper, assignment or other case.
+//   3. Every other word is an allowlisted option (value-less -s -S -f -L -i -v -g or --silent and similar,
+//      combinable in one short token; value-taking -o -H -d -X -w -m for curl, -O -T and --header for wget,
+//      whose value is any word and is never URL-checked), a redirect, or a loopback URL: host exactly localhost,
+//      127.0.0.1 or [::1] with an optional scheme and port, matched whole (localhost.evil.com, localhost@evil.com
+//      and 127.0.0.1.nip.io are remote). [::1] is a glob unquoted, so it is exempt only inside quotes. At least
+//      one loopback URL is required; there is no other positional word.
+//   4. A redirect is only >, >> or 2>, attached to or followed by one unquoted, charset-clean target that is
+//      exactly /dev/null or does not start with /dev/ (bash opens /dev/tcp and /dev/udp as sockets).
+// A command outside the grammar is not an error: it is counted by bashFetchVerbs exactly as at HEAD, one count
+// per split command whose first resolved fetch form is curl or wget. Only Bash curl/wget is affected; WebFetch
+// and WebSearch always count. Anything doubtful counts: a compound line, a pipe, a wrapper, a mixed local and
+// remote command, no URL such as curl --version, other 127.x addresses, 0.0.0.0, host.docker.internal.
+// Accepted limits of the exemption: an env proxy (https_proxy=http://evil.com in the environment, not on the
+// command) routes the request out; -L, and wget by default, follow a redirect a local server can point at a
+// remote host; a ~/.curlrc or ~/.wgetrc can add a URL or a proxy.
 //
 // Known limit: several calls issued in one message can each read the same count before any of them appends, so
 // a single burst can push an agent's count past the cap by the number of calls it issues at once.
@@ -242,11 +265,116 @@ function splitTopLevel(command) {
   return results;
 }
 
+const LOOPBACK_TOKEN = /^(?:[a-z][a-z0-9+.-]*:\/\/)?(?:localhost|127\.0\.0\.1|\[::1\])(?::\d+)?(?:[/?#].*)?$/i;
+const UNQUOTED_SAFE = /[A-Za-z0-9._:/=@%+,-]/;
+const REDIRECT = /^2?>>?(.*)$/;
+const REDIRECT_TARGET = /^[A-Za-z0-9._:/=@%+,-]+$/;
+
+// Option allowlist. A loopback fetch may carry only these options; every other option (-K/--config, -x/--proxy,
+// wget -i/--input-file, --url, --, curl -T, anything unknown) can hide a remote target or proxy. Value-less flags
+// may be combined in one short token; a value-taking letter may come last with its value attached (-qO-,
+// -sSo/tmp/x). A value is never URL-checked.
+const FETCH_OPTIONS = {
+  curl: {
+    flags: new Set("sSfLivg"),
+    longFlags: new Set(["silent", "show-error", "fail", "location", "include", "verbose", "compressed", "no-progress-meter"]),
+    valueShort: new Set("oHdXwm"),
+    valueLong: new Set(["output", "header", "data", "data-raw", "data-binary", "json", "request", "write-out", "max-time", "connect-timeout"]),
+  },
+  wget: {
+    flags: new Set("q"),
+    longFlags: new Set(["quiet"]),
+    valueShort: new Set("OT"),
+    valueLong: new Set(["output-document", "header", "post-data", "timeout"]),
+  },
+};
+
+// Words of one simple command, or null when the text leaves the grammar's character set (rule 1). Each word keeps
+// its raw source text (quotes included), its unquoted value, and whether it holds an unquoted redirect ">".
+function tokenize(text) {
+  const words = [];
+  let raw = "";
+  let val = "";
+  let gt = false;
+  let open = false;
+  let quote = "";
+  const end = () => {
+    if (open) words.push({ raw, val, gt });
+    raw = "";
+    val = "";
+    gt = false;
+    open = false;
+  };
+  for (const ch of text) {
+    if (quote) {
+      raw += ch;
+      if (ch === quote) quote = "";
+      else if (quote === '"' && "$`\\!".includes(ch)) return null;
+      else val += ch;
+    } else if (ch === " " || ch === "\t") end();
+    else {
+      open = true;
+      raw += ch;
+      if (ch === "'" || ch === '"') quote = ch;
+      else if (ch === ">") {
+        gt = true;
+        val += ch;
+      } else if (UNQUOTED_SAFE.test(ch)) val += ch;
+      else return null;
+    }
+  }
+  if (quote) return null;
+  end();
+  return words;
+}
+
+// True only when the whole raw command is one simple loopback fetch (see the header). Never throws: string tests
+// only; anything outside the grammar returns false and is counted as at HEAD.
+function isLoopbackFetch(command) {
+  const words = tokenize(String(command).trim());
+  if (!words || words.length < 2 || !Object.hasOwn(FETCH_OPTIONS, words[0].raw)) return false;
+  const opts = FETCH_OPTIONS[words[0].raw];
+  let urls = 0;
+  let wantValue = false;
+  for (let k = 1; k < words.length; k += 1) {
+    const { raw, val, gt } = words[k];
+    if (gt) {
+      const m = REDIRECT.exec(raw);
+      if (!m) return false;
+      let target = m[1];
+      if (target === "") {
+        k += 1;
+        if (k >= words.length) return false;
+        target = words[k].raw;
+      }
+      if (!REDIRECT_TARGET.test(target) || (target.startsWith("/dev/") && target !== "/dev/null")) return false;
+    } else if (wantValue) wantValue = false;
+    else if (raw.startsWith("--")) {
+      const eq = val.indexOf("=");
+      const name = val.slice(2, eq === -1 ? undefined : eq);
+      if (opts.valueLong.has(name)) wantValue = eq === -1;
+      else if (eq !== -1 || !opts.longFlags.has(name)) return false;
+    } else if (raw.startsWith("-")) {
+      if (raw.length === 1) return false;
+      for (let c = 1; c < raw.length; c += 1) {
+        if (opts.flags.has(raw[c])) continue;
+        if (!opts.valueShort.has(raw[c])) return false;
+        wantValue = c === raw.length - 1;
+        break;
+      }
+    } else if (LOOPBACK_TOKEN.test(val) && !/\s/.test(val)) urls += 1;
+    else return false;
+  }
+  return urls > 0;
+}
+
 // Returns one verb ("curl" or "wget") per split command of a Bash command line that resolves to a fetch;
 // non-fetch split commands contribute nothing. A non-string command (missing, or e.g. a number) is zero
 // fetches. commandForms runs on each split command's original text with its quotes intact (it does its own
-// quote parsing for a shell -c script), never on stripped or reconstructed text.
+// quote parsing for a shell -c script), never on stripped or reconstructed text. A command that is one simple
+// loopback fetch (isLoopbackFetch) is not a fetch to count.
 function bashFetchVerbs(command) {
+  if (isLoopbackFetch(command)) return [];
   const verbs = [];
   for (const cmd of splitTopLevel(command)) {
     for (const form of commandForms(cmd)) {

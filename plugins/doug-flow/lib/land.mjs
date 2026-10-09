@@ -85,6 +85,39 @@ function run(command, cwd, timeoutMs) {
   return { command, ok: !timedOut && r.status === 0, status: r.status, timedOut: !!timedOut, durationMs: Date.now() - started, outputTail: tail((r.stdout || "") + "\n" + (r.stderr || "")) };
 }
 
+// card verified-tree-record: run plan.verify through the project's vendored verify.mjs (--json), which computes the
+// branch worktree's tree, credits a verified-tree record of it, or runs the commands and records the result for
+// the MAIN checkout (--record-dir). Returns the entries land records under `verify` (command, ok, status, timedOut,
+// durationMs, outputTail, plus credited: "verified-tree" when credited), stopping at the first failure like
+// today's loop, or null when the output cannot be read (the caller then runs the loop unchanged).
+function verifyViaVendored(script, dir, work, commands, timeoutMs) {
+  try {
+    const args = [script, "--json", "--by", "land", "--cwd", work, "--record-dir", dir, "--timeout-ms", String(timeoutMs), ...commands.flatMap((c) => ["--command", c])];
+    const r = spawnSync(process.execPath, args, { cwd: work, encoding: "utf8", timeout: timeoutMs * commands.length + 60000, maxBuffer: 64 * 1024 * 1024, env: commandEnv() });
+    let out = null;
+    try {
+      out = JSON.parse(String(r.stdout || "").trim().split("\n").pop());
+    } catch {
+      out = null;
+    }
+    if (!out || !Array.isArray(out.results) || out.results.length === 0) {
+      const why = r.error && r.error.code === "ETIMEDOUT" ? "timed out" : "gave no readable result";
+      return { error: `the vendored verify.mjs ${why}; land does not re-run the commands` };
+    }
+    return out.results.map((x) => ({
+      command: x.command,
+      ok: x.ok === true,
+      status: x.status,
+      timedOut: !!x.timedOut,
+      durationMs: x.durationMs,
+      outputTail: x.outputTail || "",
+      ...(out.credited ? { credited: out.credited } : {}),
+    }));
+  } catch (err) {
+    return { error: `the vendored verify.mjs could not run: ${err && err.message}` };
+  }
+}
+
 // Returns { ok: true, base, branch, mergeCommit, verify } or { ok: false, reason, verify? }. Never throws on a refusal.
 export function landPlan(dir, plan, { timeoutMs = 600000, now = () => new Date(), deleteBranches = false } = {}) {
   if (!plan) return { ok: false, reason: "no plan" };
@@ -131,20 +164,46 @@ export function landPlan(dir, plan, { timeoutMs = 600000, now = () => new Date()
   const verify = [];
   const acceptance = [];
   try {
-    const commands = [...(plan.install ? [plan.install] : []), ...(plan.verify || [])];
-    for (const command of commands) {
-      const r = run(command, work, timeoutMs);
+    // card verified-tree-record: install always runs through run(). plan.verify goes through the vendored
+    // verify.mjs when the project has one (it credits a verified-tree record of the branch's tree and writes one
+    // for the main checkout after a green run); otherwise, or when it cannot be read, today's loop runs.
+    const failVerify = (r) => {
+      const why = r.timedOut ? `timed out after ${timeoutMs} ms` : `exit ${r.status}`;
+      return { ok: false, reason: `verify failed on ${branch}: \`${r.command}\` (${why})\n${r.outputTail}`, verify, acceptance: [] };
+    };
+    if (plan.install) {
+      const r = run(plan.install, work, timeoutMs);
       verify.push(r);
-      if (!r.ok) {
-        const why = r.timedOut ? `timed out after ${timeoutMs} ms` : `exit ${r.status}`;
-        return { ok: false, reason: `verify failed on ${branch}: \`${command}\` (${why})\n${r.outputTail}`, verify, acceptance: [] };
+      if (!r.ok) return failVerify(r);
+    }
+    const verifyList = plan.verify || [];
+    const vendored = join(dir, ".doug/hooks/scripts/verify.mjs");
+    let viaVerify = null;
+    if (verifyList.length && existsSync(vendored)) viaVerify = verifyViaVendored(vendored, dir, work, verifyList, timeoutMs);
+    if (viaVerify && viaVerify.error) {
+      return { ok: false, reason: `verify failed on ${branch}: ${viaVerify.error}`, verify, acceptance: [] };
+    }
+    if (viaVerify) {
+      for (const r of viaVerify) {
+        verify.push(r);
+        if (!r.ok) return failVerify(r);
+      }
+    } else {
+      for (const command of verifyList) {
+        const r = run(command, work, timeoutMs);
+        verify.push(r);
+        if (!r.ok) return failVerify(r);
       }
     }
 
     const acceptanceCommands = acceptanceEntries(plan.acceptance).filter((a) => a.command);
     for (const a of acceptanceCommands) {
-      const r = run(a.command, work, timeoutMs);
-      const entry = { text: a.text, command: a.command, ok: r.ok, status: r.status, timedOut: r.timedOut, durationMs: r.durationMs, outputTail: r.outputTail };
+      // Card flow-suite-dedupe: a command identical to a plan.verify command already ran (green, or land returned above); reuse its result.
+      const same = verify.slice(plan.install ? 1 : 0).find((v) => String(v.command).trim() === String(a.command).trim());
+      const r = same ? null : run(a.command, work, timeoutMs);
+      const entry = same
+        ? { text: a.text, command: a.command, ok: same.ok, status: same.status, timedOut: false, durationMs: 0, outputTail: "", reused: "verify" }
+        : { text: a.text, command: a.command, ok: r.ok, status: r.status, timedOut: r.timedOut, durationMs: r.durationMs, outputTail: r.outputTail };
       acceptance.push(entry);
       if (!entry.ok) {
         const why = entry.timedOut ? `timed out after ${timeoutMs} ms` : `exit ${entry.status}`;
@@ -211,8 +270,8 @@ export function landPlan(dir, plan, { timeoutMs = 600000, now = () => new Date()
     baseWas: baseTip.slice(0, 7),
     branchTip: branchTip.slice(0, 7),
     mergeCommit,
-    verify: verify.map((v) => ({ command: v.command, ok: v.ok, durationMs: v.durationMs })),
-    acceptance: acceptance.map((a) => ({ text: a.text, command: a.command, ok: a.ok, durationMs: a.durationMs })),
+    verify: verify.map((v) => ({ command: v.command, ok: v.ok, durationMs: v.durationMs, ...(v.credited ? { credited: v.credited } : {}) })),
+    acceptance: acceptance.map((a) => ({ text: a.text, command: a.command, ok: a.ok, durationMs: a.durationMs, ...(a.reused ? { reused: a.reused } : {}) })),
   };
   savePlan(dir, { ...plan, landed });
   return { ok: true, base, branch, mergeCommit, verify, acceptance, worktrees, branches: branchesResult };

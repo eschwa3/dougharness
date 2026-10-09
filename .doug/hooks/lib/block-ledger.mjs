@@ -18,6 +18,60 @@ function stripLeadingDotSlash(f) {
   return typeof f === "string" && f.startsWith("./") ? f.slice(2) : f;
 }
 
+const TEST_FILE_RE = /\.(?:test|spec)\.[A-Za-z]+$/;
+
+// Every path a tsc error line names (card stop-gate-tsc-red-claim): a path token immediately followed by
+// `(<line>,<col>): error TS<digits>` anywhere on the line, so a `pnpm -r` prefix does not hide it. Same
+// normalisation as failingTestFilesFrom (leading "./", then `dir + "/"`). Never throws: reads as none.
+export function tscErrorPaths(output, dir) {
+  try {
+    const paths = new Set();
+    const MARK = "): error TS";
+    const isDigit = (c) => c >= "0" && c <= "9";
+    const isStop = (c) => /[\s"'`()]/.test(c);
+    for (const line of String(output || "").split("\n")) {
+      // Cheap pre-filter, and no backtracking regex: every step below is a linear walk from a marker.
+      let at = line.indexOf(MARK);
+      while (at !== -1) {
+        const after = at + MARK.length;
+        let i = at - 1;
+        const colEnd = i;
+        while (i >= 0 && isDigit(line[i])) i--;
+        let ok = i < colEnd && line[i] === "," ;
+        if (ok) {
+          i--;
+          const lineEnd = i;
+          while (i >= 0 && isDigit(line[i])) i--;
+          ok = i < lineEnd && line[i] === "(";
+        }
+        if (ok && isDigit(line[after] || "")) {
+          const pathEnd = i;
+          let j = pathEnd;
+          while (j > 0 && !isStop(line[j - 1])) j--;
+          if (j < pathEnd) {
+            let f = stripLeadingDotSlash(line.slice(j, pathEnd));
+            if (typeof dir === "string" && dir && f.startsWith(dir + "/")) f = f.slice(dir.length + 1);
+            paths.add(f);
+          }
+        }
+        at = line.indexOf(MARK, at + 1);
+      }
+    }
+    return [...paths];
+  } catch {
+    return [];
+  }
+}
+
+// The tsc error paths in `output` that are not test files; one of these means the failure is not red by design.
+export function nonTestTscPathsFrom(output, dir) {
+  try {
+    return tscErrorPaths(output, dir).filter((f) => !TEST_FILE_RE.test(f));
+  } catch {
+    return [];
+  }
+}
+
 // Test files a failed verification command's output names: every path token ending in ".test.<ext>" or
 // ".spec.<ext>" (ext = letters) on a line containing "FAIL" or "failed", deduplicated, normalised to a
 // repository-relative path when absolute under `dir`. Moved here from stop-gate.mjs (card
@@ -28,6 +82,7 @@ export function failingTestFilesFrom(output, dir) {
   try {
     const files = new Set();
     const tokenRe = /[^\s"'`]+\.(?:test|spec)\.[A-Za-z]+/g;
+    for (const p of tscErrorPaths(output, dir)) if (TEST_FILE_RE.test(p)) files.add(p);
     for (const line of String(output || "").split("\n")) {
       if (!line.includes("FAIL") && !line.includes("failed")) continue;
       for (const m of line.matchAll(tokenRe)) {
@@ -72,13 +127,15 @@ export function classifyFinalBlock({ preVerificationProblems, evidenceProblemAdd
     const namedByCommand = failures.map((cf) => failingTestFilesFrom(cf.output, dir));
     const allNamed = [...new Set(namedByCommand.flat())];
 
+    const nonTestTsc = failures.some((cf) => nonTestTscPathsFrom(cf.output, dir).length > 0);
+
     const onlyFailedCommands =
       preVerificationProblems === 0 &&
       !evidenceProblemAdded &&
       failures.length > 0 &&
       postCommandProblems - preVerificationProblems === failures.length;
     const everyCommandNamedAFile = failures.length > 0 && namedByCommand.every((files) => files.length > 0);
-    if (onlyFailedCommands && everyCommandNamedAFile && Array.isArray(redByDesignClaimFiles) && redByDesignClaimFiles.length > 0) {
+    if (onlyFailedCommands && !nonTestTsc && everyCommandNamedAFile && Array.isArray(redByDesignClaimFiles) && redByDesignClaimFiles.length > 0) {
       const claimSet = new Set(redByDesignClaimFiles);
       if (allNamed.every((f) => claimSet.has(f))) return "expected-red";
     }

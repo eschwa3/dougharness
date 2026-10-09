@@ -6,7 +6,9 @@
 //     every number level and passes.
 //   - The verified-unchanged skip runs no test command, so there is no output to count there; no count check
 //     happens on it. (The pre-commit credit path is counted from the totals the hook records in last-run.json.)
-//   - A runner that prints one summary per package (`pnpm -r`) reads as conflicting summaries and blocks.
+//   - The baseline is the number of `Tests` summaries a command prints plus their sum (ADR 0013): a session
+//     that adds or removes a package changes the number of summaries and blocks with no waiver until a new
+//     baseline is taken.
 //   - Runners other than vitest print no `Tests` summary in this shape: no summary is parsed, no check runs.
 
 const ANSI_RE = /\u001b\[[0-9;]*m/g;
@@ -32,8 +34,9 @@ function parseSummaryValue(value) {
   return { total: Number(m[2]), skipped: counts.skipped, todo: counts.todo };
 }
 
-// Every `Tests` summary line is collected (never "the last one": a test can print a byte-identical line).
-// -> { status: "ok", totals } | { status: "none" } | { status: "conflict", summaries }
+// Every `Tests` summary line is kept as its own entry, in output order; a byte-identical duplicate counts
+// twice (ADR 0013: the number of summaries is part of the baseline).
+// -> { status: "ok", summaries: [{ total, skipped, todo }, ...], totals: <their sum> } | { status: "none" }
 export function parseTotals(output) {
   try {
     if (typeof output !== "string") return { status: "none" };
@@ -45,12 +48,42 @@ export function parseTotals(output) {
       if (parsed) summaries.push(parsed);
     }
     if (summaries.length === 0) return { status: "none" };
-    const first = summaries[0];
-    const same = (s) => s.total === first.total && s.skipped === first.skipped && s.todo === first.todo;
-    if (summaries.every(same)) return { status: "ok", totals: { ...first } };
-    return { status: "conflict", summaries };
+    return { status: "ok", summaries, totals: sumTotals(summaries) };
   } catch {
     return { status: "none" };
+  }
+}
+
+// Field-wise sum of a list of { total, skipped, todo }.
+export function sumTotals(summaries) {
+  const out = { total: 0, skipped: 0, todo: 0 };
+  for (const s of summaries) {
+    out.total += s.total;
+    out.skipped += s.skipped;
+    out.todo += s.todo;
+  }
+  return out;
+}
+
+// Reads a baseline entry or a recorded parseTotals result in any shape -> a list of valid summaries, or null.
+// A list; an old { total, skipped, todo } (a list of one); a recorded { status: "ok", summaries }; an old
+// recorded { status: "ok", totals } (a list of one); an old recorded { status: "conflict", summaries }.
+// Never throws.
+export function readSummaries(x) {
+  try {
+    let list;
+    if (Array.isArray(x)) list = x;
+    else if (x && typeof x === "object") {
+      if (x.status === "ok") list = Array.isArray(x.summaries) ? x.summaries : [x.totals];
+      else if (x.status === "conflict") list = x.summaries;
+      else if (x.status === undefined) list = [x];
+      else return null;
+    } else return null;
+    if (!Array.isArray(list) || list.length === 0) return null;
+    const out = list.map(validTotals);
+    return out.every((s) => s) ? out : null;
+  } catch {
+    return null;
   }
 }
 

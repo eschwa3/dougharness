@@ -245,6 +245,37 @@ describe("agent scaling warnings (proposal C)", () => {
   });
 });
 
+describe("acceptance repeats verify (card flow-suite-dedupe)", () => {
+  const withAcceptance = (command, extra = {}) => plan({
+    verify: ["pnpm typecheck", "pnpm test:unit"],
+    acceptance: [{ text: "suite green", command }],
+    ...extra,
+  });
+  const repeats = (p) => planWarnings(p).filter((w) => w.includes("repeats a verify command"));
+  it("D1a: an acceptance command equal (trimmed) to a plan.verify command warns, naming plan.verify; the plan stays valid", () => {
+    const p = withAcceptance(" pnpm test:unit ");
+    const w = planWarnings(p);
+    expect(w).toHaveLength(1);
+    expect(w[0]).toContain("suite green");
+    expect(w[0]).toContain("pnpm test:unit");
+    expect(w[0]).toContain("repeats a verify command");
+    expect(w[0]).toContain("plan.verify");
+    expect(validatePlan(p)).toEqual([]);
+  });
+  it("D1b: an acceptance command equal to a task's verify warns, naming that task", () => {
+    const p = plan({ acceptance: [{ text: "file green", command: "pnpm exec vitest run tests/strings.test.ts" }] });
+    const id = p.tasks[0].id;
+    const w = planWarnings(p);
+    expect(w).toHaveLength(1);
+    expect(w[0]).toContain("repeats a verify command");
+    expect(w[0]).toContain(`task ${id} verify`);
+    expect(validatePlan(p)).toEqual([]);
+  });
+  it("D1c: a different, narrower command does not warn", () => {
+    expect(repeats(withAcceptance("pnpm exec vitest run x.test.ts -t foo"))).toEqual([]);
+  });
+});
+
 // Several cards in one plan (card parallel-cards): per-card drafts merged into one plan whose tasks carry their card,
 // level k of the batch being the union of each card's level k; a file two cards own is sequenced by a dependency
 // edge from the later card's task to the earlier card's, never refused; only a cycle across cards is refused, by name.

@@ -84,6 +84,8 @@ export interface RepoDetection {
   hasClaudeMd: boolean;
   hasClaudeSettings: boolean;
   readmeHasSetup: boolean;
+  /** A git repo holding nothing but .git/.doug/.claude, CLAUDE.md, and top-level README*, LICENSE*, .gitignore, .gitattributes (card init-greenfield). */
+  isEmpty: boolean;
 }
 
 export interface Detection {

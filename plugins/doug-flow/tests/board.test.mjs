@@ -1,10 +1,11 @@
 // The board library and CLI behind /doug-next: card selection, moves, and run entries. No agents run.
 import { describe, it, expect } from "vitest";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync, existsSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync, existsSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import * as lib from "../lib/board.mjs";
 import { loadBoard, saveBoard, boardPath, validateBoard, newBoard, addCard, editCard, removeCard, nextReadyCard, nextReadyCards, moveCard, reorderCard, findCard, runEntry, handEntry, runSummary, appendRun, DEFAULT_COLUMNS, DEFAULT_TAGS, boardTags, adversaryBlocks, classifyBlocks, parseAdversaryClasses, promoteResearchNote, recordLanding, STOP_CLASSES } from "../lib/board.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -450,8 +451,7 @@ describe("board.mjs url removed (card artifact-path-removal)", () => {
     const url = run(["url", dir]);
     expect(unknown.status, unknown.stderr).toBeGreaterThan(0);
     expect(url.status, url.stderr).toBe(unknown.status);
-    const lib = await import("../lib/board.mjs");
-    expect(lib.setArtifactUrl).toBeUndefined();
+      expect(lib.setArtifactUrl).toBeUndefined();
   });
 });
 
@@ -1371,6 +1371,203 @@ describe("board.mjs edit --tag and next --tag", () => {
   });
 });
 
+describe("wall budget table (card wall-budget-size-class)", () => {
+  const run = (args, dir) => spawnSync(process.execPath, [cli, ...args], { cwd: dir, encoding: "utf8", env: { ...process.env, CLAUDE_PROJECT_DIR: "" } });
+  const LINE = (m) => `wall cap: ${m} min (size x class table at p80, board.mjs budgets; no size counts as M)`;
+  const FIXTURE = { S: { all: 57, "gate-script": 116, docs: 29 }, M: { all: 102, code: 112 }, L: { all: 274 } };
+  const card = (id, size, cls) => ({ id, column: "ready", component: "gates", title: id, goal: id, ...(size ? { size } : {}), ...(cls ? { class: cls } : {}) });
+
+  // The sample fixture: ids g1..g6 are S/gate-script, d1..d3 S/docs (thin), s1..s4 S with no class, m1..m5 M/code,
+  // "nosize" has no size, and "ghost" is not on the board. No L samples.
+  const samplesFixture = () => {
+    const cards = [];
+    const samples = [];
+    const add = (prefix, minutes, size, cls) => minutes.forEach((m, i) => { cards.push(card(`${prefix}${i + 1}`, size, cls)); samples.push({ id: `${prefix}${i + 1}`, minutes: m }); });
+    add("g", [10, 20, 30, 40, 50, 60], "S", "gate-script");
+    add("d", [5, 15, 25], "S", "docs");
+    add("s", [70, 80, 90, 100], "S");
+    add("m", [10, 20, 30, 40, 100], "M", "code");
+    cards.push(card("nosize", undefined, "code"));
+    samples.push({ id: "nosize", minutes: 9999 }, { id: "ghost", minutes: 9999 });
+    return { cards, samples };
+  };
+  const FALLBACK = { S: { all: 1 }, M: { all: 2 }, L: { all: 777 } };
+  const EXPECTED_TABLE = { S: { all: 80, "gate-script": 50 }, M: { all: 100, code: 100 }, L: { all: 777 } };
+
+  it("T4 the shipped table: WALL_BUDGET_MIN_N is 5, each size has a positive integer all, every value is a positive integer", () => {
+    expect(lib.WALL_BUDGET_MIN_N).toBe(5);
+    for (const size of ["S", "M", "L"]) {
+      expect(Number.isInteger(lib.WALL_BUDGET_MIN[size].all) && lib.WALL_BUDGET_MIN[size].all > 0, `${size}.all`).toBe(true);
+      for (const [k, v] of Object.entries(lib.WALL_BUDGET_MIN[size])) expect(Number.isInteger(v) && v > 0, `${size}.${k}`).toBe(true);
+    }
+  });
+
+  it("T1 cardBudgetMinutes picks the class cell, else the size's all, counting no or an unknown size as M", () => {
+    const f = (c) => lib.cardBudgetMinutes(c, FIXTURE);
+    expect(f({ size: "S", class: "gate-script" })).toBe(116);
+    expect(f({ size: "S", class: "docs" })).toBe(29);
+    expect(f({ size: "M", class: "code" })).toBe(112);
+    expect(f({ size: "S", class: "code" })).toBe(57);
+    expect(f({ size: "S" })).toBe(57);
+    expect(f({ class: "code" })).toBe(112);
+    expect(f({ size: "XL" })).toBe(102);
+    expect(f({ size: "L", class: "docs" })).toBe(274);
+  });
+
+  it("T1 cardBudgetMinutes defaults to the shipped table", () => {
+    expect(lib.cardBudgetMinutes({ size: "L" })).toBe(lib.WALL_BUDGET_MIN.L.all);
+    expect(lib.cardBudgetMinutes({ size: "S", class: "gate-script" })).toBe(lib.WALL_BUDGET_MIN.S["gate-script"] ?? lib.WALL_BUDGET_MIN.S.all);
+  });
+
+  it("T2 wallCapMinutes sums each card's budget from the table", () => {
+    const queue = [{ size: "S", class: "gate-script" }, { size: "S", class: "docs" }, { size: "M", class: "code" }];
+    expect(lib.wallCapMinutes(queue, FIXTURE)).toBe(116 + 29 + 112);
+    expect(lib.wallCapMinutes([], FIXTURE)).toBe(0);
+    expect(lib.wallCapMinutes([{ size: "XL" }, {}], FIXTURE)).toBe(204);
+  });
+
+  it("T3 next --batch 3 prints the wall cap summed per card from the size x class table, and keeps stdout the JSON array", () => {
+    const b = board();
+    b.cards = [card("c1", "S", "gate-script"), card("c2", "S", "docs"), card("c3", "M", "code")];
+    const dir = project(b);
+    const r = run(["next", dir, "--batch", "3"], dir);
+    expect(r.status, r.stderr).toBe(0);
+    expect(JSON.parse(r.stdout)).toHaveLength(3);
+    const T = lib.WALL_BUDGET_MIN;
+    const sum = (T.S["gate-script"] ?? T.S.all) + (T.S.docs ?? T.S.all) + (T.M.code ?? T.M.all);
+    expect(sum).not.toBe(180);
+    expect(lib.wallCapMinutes(b.cards)).toBe(sum);
+    expect(r.stderr).toContain(LINE(sum) + "\n");
+    expect(r.stdout).not.toContain("wall cap:");
+  });
+
+  it("T3 next --batch 1 prints the cap of just the first card, by its class", () => {
+    const b = board();
+    b.cards = [card("c1", "S", "gate-script"), card("c2", "M", "code")];
+    const dir = project(b);
+    const r = run(["next", dir, "--batch", "1"], dir);
+    expect(r.status, r.stderr).toBe(0);
+    const T = lib.WALL_BUDGET_MIN;
+    expect(r.stderr).toContain(LINE(T.S["gate-script"] ?? T.S.all) + "\n");
+  });
+
+  it("T8 plain next prints no wall cap line", () => {
+    const b = board();
+    b.cards = [card("c1", "S", "gate-script")];
+    const dir = project(b);
+    const r = run(["next", dir], dir);
+    expect(r.status, r.stderr).toBe(0);
+    expect(r.stderr).not.toContain("wall cap:");
+  });
+
+  it("T5 parseLiveRunWalls reads the Wall clock row of each landing section and skips old-table and row-less sections", () => {
+    const text = [
+      "# Live runs",
+      "",
+      "## 2026-10-09, some-id: Title one",
+      "",
+      "| Field | Value |",
+      "|---|---|",
+      "| Wall clock | 30 min |",
+      "| Wall clock | 99 min |",
+      "",
+      "## 2026-10-08, other-id: Title two",
+      "",
+      "| Cost | $1 |",
+      "| Wall clock | 12 min |",
+      "",
+      "## 2026-10-07, suffix-id: Trailing text",
+      "",
+      "| Wall clock | 27 min (two runs) |",
+      "",
+      "## 2026-10-06, decimal-id: Decimal",
+      "",
+      "| Wall clock | 10.2 min |",
+      "",
+      "## 2026-09-01, old-id: Old table",
+      "",
+      "| Attempt | Outcome | Cost | Wall clock |",
+      "|---|---|---|---|",
+      "| 1 | ok | $1 | 45 min |",
+      "",
+      "## 2026-09-02, no-wall: Nothing",
+      "",
+      "Prose only.",
+      "",
+    ].join("\n");
+    expect(lib.parseLiveRunWalls(text)).toEqual([{ id: "some-id", minutes: 30 }, { id: "other-id", minutes: 12 }, { id: "suffix-id", minutes: 27 }]);
+  });
+
+  it("T6 wallBudgetTable: p80 per size and class (sorted index min(floor(0.8n), n-1)), thin class cells fall back, an empty size keeps the fallback, unjoinable samples are skipped", () => {
+    const { cards, samples } = samplesFixture();
+    const { table, cells } = lib.wallBudgetTable(samples, { cards }, { fallback: FALLBACK });
+    expect(table).toEqual(EXPECTED_TABLE);
+    expect(table.S.docs).toBeUndefined();
+    expect(table.L.all).toBe(777);
+    expect(cells).toContainEqual({ size: "S", cls: "all", n: 13, p80: 80 });
+    expect(cells).toContainEqual({ size: "S", cls: "gate-script", n: 6, p80: 50 });
+    expect(cells).toContainEqual({ size: "S", cls: "docs", n: 3, p80: 25 });
+    expect(cells).toContainEqual({ size: "M", cls: "all", n: 5, p80: 100 });
+    expect(cells).toContainEqual({ size: "M", cls: "code", n: 5, p80: 100 });
+  });
+
+  it("T6 wallBudgetTable: minN is settable", () => {
+    const { cards, samples } = samplesFixture();
+    const { table } = lib.wallBudgetTable(samples, { cards }, { minN: 3, fallback: FALLBACK });
+    expect(table.S.docs).toBe(25);
+  });
+
+  describe("budgets CLI", () => {
+    const liveRuns = (samples) => samples.map((s) => `## 2026-10-09, ${s.id}: Title ${s.id}\n\n| Field | Value |\n|---|---|\n| Wall clock | ${s.minutes} min |\n`).join("\n");
+    const setup = () => {
+      const { cards, samples } = samplesFixture();
+      const b = board();
+      b.cards = cards;
+      const dir = project(b);
+      const from = join(dir, "live-runs.md");
+      writeFileSync(from, "# Live runs\n\n" + liveRuns(samples));
+      return { dir, from };
+    };
+    const listing = (dir) => readdirSync(dir, { recursive: true }).sort();
+
+    it("T7 budgets --from prints one line per cell and the computed table, and writes no file", () => {
+      const { dir, from } = setup();
+      const before = listing(dir);
+      const boardBefore = readFileSync(boardPath(dir), "utf8");
+      const r = run(["budgets", dir, "--from", from], dir);
+      expect(r.status, r.stderr).toBe(0);
+      const lines = r.stdout.trimEnd().split("\n");
+      const L = lib.WALL_BUDGET_MIN.L.all;
+      expect(lines.slice(0, 7)).toEqual([
+        "S/all n=13 p80 80",
+        "S/docs n=3 p80 25 (fewer than 5; falls back to S/all 80)",
+        "S/gate-script n=6 p80 50",
+        "M/all n=5 p80 100",
+        "M/code n=5 p80 100",
+        `L/all n=0 (no landings; keeps the shipped ${L})`,
+        "table: " + JSON.stringify({ S: { all: 80, "gate-script": 50 }, M: { all: 100, code: 100 }, L: { all: L } }),
+      ].slice(0, 7));
+      expect(lines).toHaveLength(7);
+      expect(listing(dir)).toEqual(before);
+      expect(readFileSync(boardPath(dir), "utf8")).toBe(boardBefore);
+    });
+
+    it("T7 budgets without --from prints the shipped table", () => {
+      const { dir } = setup();
+      const r = run(["budgets", dir], dir);
+      expect(r.status, r.stderr).toBe(0);
+      expect(r.stdout.trimEnd()).toBe("table: " + JSON.stringify(lib.WALL_BUDGET_MIN));
+    });
+
+    it("T7 budgets --from a missing file exits 2 with a message", () => {
+      const { dir } = setup();
+      const r = run(["budgets", dir, "--from", join(dir, "nope.md")], dir);
+      expect(r.status).toBe(2);
+      expect(r.stderr.length).toBeGreaterThan(0);
+    });
+  });
+});
+
 describe("runEntry model tier cell", () => {
   const rep = (models) => ({ plan: "P", integrationBranch: "doug/x", modelsSource: "CLAUDE.md", ok: true, levels: [{ index: 0, tasks: [{ id: "t", implemented: true, verified: true, reviewed: true, adversary: { ran: true, verdict: "pass" }, models }], integration: { ok: true } }] });
   const card = { id: "t", title: "T", column: "done" };
@@ -1533,7 +1730,7 @@ describe("nextReadyCards and next --batch", () => {
     const two = run(["next", dir, "--batch", "2"], dir);
     expect(two.status, two.stderr).toBe(0);
     expect(JSON.parse(two.stdout).map((c) => c.id)).toEqual(["first", "second"]);
-    expect(two.stderr).toBe("skipping blocked: waiting on later\n");
+    expect(two.stderr).toMatch(/^skipping blocked: waiting on later\nwall cap: \d+ min \(size x class table at p80, board\.mjs budgets; no size counts as M\)\n$/);
     expect(JSON.parse(run(["next", dir, "--batch", "1"], dir).stdout).map((c) => c.id)).toEqual(["first"]);
     const bad = run(["next", dir, "--batch", "x"], dir);
     expect(bad.status).toBe(2);
@@ -1867,5 +2064,204 @@ describe("card class (card board-card-class)", () => {
     const next = run(["next", dir]);
     expect(next.status, next.stderr).toBe(0);
     expect(JSON.parse(next.stdout).class).toBe("code");
+  });
+});
+
+// 2026-10-03 (card follow-ups-backlog-ranked): Ready is capped at 7; only the user promotes cards to Ready.
+// The helper and `board.mjs next` warn above the cap on stderr; stdout and exit status are unchanged.
+describe("Ready cap (card follow-ups-backlog-ranked)", () => {
+  const run = (args, dir) => spawnSync(process.execPath, [cli, ...args], { cwd: dir, encoding: "utf8", env: { ...process.env, CLAUDE_PROJECT_DIR: "" } });
+  const withReady = (n) => {
+    const b = board();
+    b.cards = [
+      { id: "base", column: "done", component: "gates", title: "Base", size: "S", goal: "done already" },
+      ...Array.from({ length: n }, (_, i) => ({ id: `r${i + 1}`, column: "ready", component: "gates", title: `R${i + 1}`, size: "S", deps: [], goal: `ready card ${i + 1}` })),
+      { id: "later", column: "backlog", component: "flow", title: "Later", size: "L", goal: "not ready" },
+    ];
+    return b;
+  };
+  const line = (n) => `warning: Ready holds ${n} cards, above the cap of 7; only the user promotes cards to Ready\n`;
+
+  it("exports READY_CAP = 7", () => {
+    expect(lib.READY_CAP).toBe(7);
+  });
+  it("readyCapWarning is null at 7 Ready cards and the exact line at 8", () => {
+    expect(lib.readyCapWarning(withReady(7))).toBeNull();
+    expect(lib.readyCapWarning(withReady(0))).toBeNull();
+    expect(lib.readyCapWarning(withReady(8))).toBe(line(8));
+    expect(lib.readyCapWarning(withReady(9))).toBe(line(9));
+  });
+  it("readyCapWarning counts only the Ready column", () => {
+    const b = withReady(7);
+    b.cards.push(...Array.from({ length: 5 }, (_, i) => ({ id: `bk${i}`, column: "backlog", component: "gates", title: "B", size: "S", goal: "b" })));
+    expect(lib.readyCapWarning(b)).toBeNull();
+  });
+  it("board.mjs next with 8 Ready cards prints the warning on stderr and leaves stdout and the exit status alone", () => {
+    const dir = project(withReady(8));
+    const r = run(["next", dir], dir);
+    expect(r.status).toBe(0);
+    expect(r.stderr).toContain(line(8));
+    expect(JSON.parse(r.stdout).id).toBe("r1");
+    expect(r.stdout).not.toContain("warning");
+  });
+  it("board.mjs next with 7 Ready cards prints no warning", () => {
+    const dir = project(withReady(7));
+    const r = run(["next", dir], dir);
+    expect(r.status).toBe(0);
+    expect(r.stderr).not.toContain("above the cap");
+    expect(JSON.parse(r.stdout).id).toBe("r1");
+  });
+});
+
+// Card autopilot part A: `--track any` takes Ready cards of either track in board order (card doug-next-route-any folded in).
+describe("next --track any (card autopilot)", () => {
+  const mixed = () => {
+    const b = board();
+    // board order: blocked(flow, waits), handa(hand), first(flow), handb(hand), second(flow)
+    b.cards.splice(2, 0, { id: "handa", column: "ready", component: "flow", title: "Hand A", size: "S", track: "hand", deps: [], goal: "harness work" });
+    b.cards.splice(4, 0, { id: "handb", column: "ready", component: "flow", title: "Hand B", size: "S", track: "hand", deps: ["base"], goal: "more harness work" });
+    return b;
+  };
+  const cliRun = (args, dir) => spawnSync(process.execPath, [cli, ...args], { cwd: dir, encoding: "utf8", env: { ...process.env, CLAUDE_PROJECT_DIR: "" } });
+
+  it("nextReadyCard with track any returns the first runnable card of either track and skips only for deps", () => {
+    const { card, skipped } = nextReadyCard(mixed(), { track: "any" });
+    expect(card.id).toBe("handa");
+    expect(skipped).toEqual([{ id: "blocked", waitingOn: ["later"] }]);
+    const b = mixed();
+    b.cards = b.cards.filter((c) => c.id !== "blocked" && c.id !== "handa");
+    expect(nextReadyCard(b, { track: "any" }).card.id).toBe("first");
+    expect(nextReadyCard(b, { track: "any" }).skipped).toEqual([]);
+  });
+  it("nextReadyCards with track any returns hand and flow cards together in board order, with no track-skip entries", () => {
+    const { cards, skipped } = nextReadyCards(mixed(), { track: "any", batch: 10 });
+    expect(cards.map((c) => c.id)).toEqual(["handa", "first", "handb", "second"]);
+    expect(skipped).toEqual([{ id: "blocked", waitingOn: ["later"] }]);
+    expect(nextReadyCards(mixed(), { track: "any", batch: 3 }).cards.map((c) => c.id)).toEqual(["handa", "first", "handb"]);
+  });
+  it("the default track stays flow and the hand track stays hand", () => {
+    expect(nextReadyCard(mixed()).card.id).toBe("first");
+    expect(nextReadyCard(mixed(), { track: "hand" }).card.id).toBe("handa");
+  });
+  it("board.mjs next --track any returns the hand card ahead of the flow cards, without track skipping lines", () => {
+    const dir = project(mixed());
+    const r = cliRun(["next", dir, "--track", "any"], dir);
+    expect(r.status, r.stderr).toBe(0);
+    expect(JSON.parse(r.stdout).id).toBe("handa");
+    expect(r.stderr).toBe("skipping blocked: waiting on later\n");
+    expect(r.stderr).not.toContain("hand track");
+    expect(r.stderr).not.toContain("flow track");
+  });
+  it("board.mjs next --batch <n> --track any prints a JSON array of both tracks in board order", () => {
+    const dir = project(mixed());
+    const r = cliRun(["next", dir, "--batch", "3", "--track", "any"], dir);
+    expect(r.status, r.stderr).toBe(0);
+    expect(JSON.parse(r.stdout).map((c) => c.id)).toEqual(["handa", "first", "handb"]);
+    expect(r.stderr).toMatch(/^skipping blocked: waiting on later\nwall cap: \d+ min \(size x class table at p80, board\.mjs budgets; no size counts as M\)\n$/);
+    const all = cliRun(["next", dir, "--batch", "9", "--track", "any"], dir);
+    expect(JSON.parse(all.stdout).map((c) => c.id)).toEqual(["handa", "first", "handb", "second"]);
+  });
+  it("an unknown track error lists flow, hand, any", () => {
+    const dir = project(mixed());
+    const r = cliRun(["next", dir, "--track", "robot"], dir);
+    expect(r.status).toBe(2);
+    expect(r.stderr).toContain("tracks are flow, hand, any");
+  });
+  it("the usage strings and header comment say flow|hand|any", () => {
+    const src = readFileSync(cli, "utf8");
+    expect(src).toContain("board.mjs next [dir] [--track flow|hand|any]");
+    expect(src).toContain("board.mjs next --batch <n> [dir] [--track flow|hand|any]");
+    expect(src).toContain("usage: board.mjs next [dir] [--track flow|hand|any] [--batch <n>] [--tag <tag>]");
+  });
+});
+
+// Card flow-wall-budget: the run file's agent times (cost.mjs runWall) reach the run entry and the summary as a
+// Stage wall row and a first-line note; detection only. lib/board.mjs does not import cost.mjs, so the wall result
+// is passed in.
+describe("stage wall in the run entry and the summary (card flow-wall-budget)", () => {
+  const MIN = 60_000;
+  const taskOf = (id, card) => ({ id, ...(card ? { card } : {}), implemented: true, verified: true, reviewed: true, adversary: null, models: { implement: "sonnet / medium" } });
+  const reportOf = (...tasks) => ({ plan: "W", integrationBranch: "doug/w", ok: true, levels: [{ index: 0, tasks, integration: { ok: true }, integrationModel: "sonnet / medium" }] });
+  const single = reportOf(taskOf("t"));
+  const over = {
+    measured: true,
+    reason: null,
+    unverified: [],
+    tasks: [{ task: "t", ms: 45 * MIN, passes: [{ pass: 1, ms: 28 * MIN }], stages: [] }],
+    flags: [{ kind: "task", label: "t", ms: 45 * MIN, limitMs: 40 * MIN }, { kind: "stage", label: "implement:t", ms: 12 * MIN, limitMs: 10 * MIN }],
+  };
+  const entry = (wall, extra = {}) => runEntry({ card: { id: "c", title: "C" }, report: single, wallClock: "50 min", wall, date: "2026-10-07", ...extra });
+
+  it("B1: flags are listed on a Stage wall row right after Wall clock", () => {
+    const md = entry(over);
+    expect(md).toContain("| Stage wall | over: task t 45 min > 40; stage implement:t 12 min > 10 |");
+    const lines = md.split("\n");
+    expect(lines.findIndex((l) => l.startsWith("| Stage wall |"))).toBe(lines.findIndex((l) => l.startsWith("| Wall clock |")) + 1);
+  });
+  it("B2: no wall result (no --run) reads not measured", () => {
+    expect(entry(null)).toContain("| Stage wall | not measured |");
+    expect(runEntry({ card: { id: "c", title: "C" }, report: single, date: "2026-10-07" })).toContain("| Stage wall | not measured |");
+  });
+  it("B3: an unmeasured run says why, and a measured run with no flag says it is within budget", () => {
+    expect(entry({ measured: false, reason: "no agent times", unverified: [], tasks: [], flags: [] })).toContain("| Stage wall | unverified: no agent times |");
+    expect(entry({ measured: true, reason: null, unverified: [], tasks: [{ task: "t", ms: 30 * MIN, passes: [], stages: [] }], flags: [] })).toMatch(/\| Stage wall \| within budget \(\d+ min a task\) \|/);
+  });
+  it("B4: the summary's first line carries the flags or the unverified note, and stays three lines", () => {
+    const s = runSummary({ report: single, wallClock: "50 min", wall: over });
+    expect(s.split("\n")[0]).toContain("(over budget: task t 45 min > 40; stage implement:t 12 min > 10)");
+    expect(s.split("\n")).toHaveLength(4); // three lines and the trailing newline
+    expect(runSummary({ report: single, wallClock: "50 min", wall: { measured: false, reason: "no agent times", unverified: [], tasks: [], flags: [] } }).split("\n")[0]).toContain("(stage times unverified)");
+    const quiet = runSummary({ report: single, wallClock: "50 min", wall: { measured: true, reason: null, unverified: [], tasks: [], flags: [] } });
+    expect(quiet).not.toContain("over budget");
+    expect(quiet).not.toContain("unverified");
+    expect(runSummary({ report: single, wallClock: "50 min" })).not.toContain("over budget");
+  });
+  it("B5: in a batch a card's entry shows only its own tasks' flags, and a level flag only under the first card", () => {
+    const batch = reportOf(taskOf("a1", "alpha"), taskOf("b1", "beta"));
+    const wall = {
+      measured: true,
+      reason: null,
+      unverified: [],
+      tasks: [],
+      flags: [
+        { kind: "task", label: "a1", ms: 45 * MIN, limitMs: 40 * MIN },
+        { kind: "task", label: "b1", ms: 50 * MIN, limitMs: 40 * MIN },
+        { kind: "stage", label: "integrate:level-0", ms: 12 * MIN, limitMs: 10 * MIN },
+      ],
+    };
+    const alpha = runEntry({ card: { id: "alpha", title: "Alpha" }, report: batch, batch: ["alpha", "beta"], wall, date: "2026-10-07" });
+    expect(alpha).toContain("task a1 45 min > 40");
+    expect(alpha).toContain("stage integrate:level-0 12 min > 10");
+    expect(alpha).not.toContain("b1 50 min");
+    const beta = runEntry({ card: { id: "beta", title: "Beta" }, report: batch, batch: ["alpha", "beta"], wall, date: "2026-10-07" });
+    expect(beta).toContain("task b1 50 min > 40");
+    expect(beta).not.toContain("a1 45 min");
+    expect(beta).not.toContain("integrate:level-0");
+  });
+  // Fix pass (reviewer findings): added tests, existing assertions untouched.
+  it("B6: a card's summary in a batch shows only its own tasks' flags, level flags (even a :retry label) only under the first card, and names the pass", () => {
+    const batch = reportOf(taskOf("a1", "alpha"), taskOf("b1", "beta"));
+    const wall = {
+      measured: true,
+      reason: null,
+      unverified: ["b1"],
+      tasks: [],
+      flags: [
+        { kind: "task", label: "a1", ms: 45 * MIN, limitMs: 40 * MIN },
+        { kind: "pass", label: "b1", pass: 2, ms: 31 * MIN, limitMs: 30 * MIN },
+        { kind: "stage", label: "adversary:level-0:retry", ms: 12 * MIN, limitMs: 10 * MIN },
+        { kind: "stage", label: "implement:a1", ms: 606640, limitMs: 10 * MIN },
+      ],
+    };
+    const first = runSummary({ report: filterReportForCard(batch, "alpha"), wall, batch: ["alpha", "beta"], card: "alpha" }).split("\n")[0];
+    expect(first).toContain("task a1 45 min > 40");
+    expect(first).toContain("adversary:level-0:retry 12 min > 10");
+    expect(first).toContain("implement:a1 10.1 min > 10");
+    expect(first).not.toContain("b1");
+    const second = runSummary({ report: filterReportForCard(batch, "beta"), wall, batch: ["alpha", "beta"], card: "beta" }).split("\n")[0];
+    expect(second).toContain("b1 pass 2 31 min > 30");
+    expect(second).not.toContain("a1");
+    expect(second).not.toContain("level-0");
+    expect(second).toContain("(stage times unverified for 1 task)");
   });
 });

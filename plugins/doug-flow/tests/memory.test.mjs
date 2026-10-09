@@ -28,6 +28,8 @@ import {
   embedLessons,
   checkCitation,
   recallLessons,
+  topLessons,
+  renderLessons,
   unstaleLesson,
   runReflect,
   buildReflectPrompt,
@@ -1666,6 +1668,105 @@ describe("recallLessons", () => {
   });
 });
 
+// card recall-fallback-warning (D1/D6): recallLessons returns degraded, plus unvectored/total in hybrid mode.
+describe("recallLessons: degraded (card recall-fallback-warning)", () => {
+  const vec = (v) => Float32Array.from(v);
+  const seed = (text, model = null, dims = 3, extra = {}) => {
+    const row = addLesson(m, { text, kind: "pattern", source: { agent: "worker" }, ...extra });
+    if (model) setLessonEmbedding(m, row.id, { model, dims, vector: vec(Array.from({ length: dims }, (_, i) => (i === 0 ? 1 : 0))) });
+    return row;
+  };
+  const failing = (reason, model = "fake-model", dims = 3) => ({ name: "fake", model, dims, embed: async () => ({ ok: false, reason }) });
+
+  beforeEach(() => {
+    m = openMemory(dir);
+  });
+
+  it("(a) a query-time embed timeout is degraded, with reason 'timeout'", async () => {
+    seed("retry flaky uploads", "fake-model");
+    const result = await recallLessons(m, "retry flaky uploads", { provider: failing("timeout"), checkoutDir: dir });
+    expect(result.mode).toBe("keyword-only");
+    expect(result.reason).toBe("timeout");
+    expect(result.degraded).toBe(true);
+  });
+
+  it("(b) an unreachable provider is degraded, naming the 'request failed' reason", async () => {
+    seed("retry flaky uploads", "fake-model");
+    const reason = "request failed: connect ECONNREFUSED 127.0.0.1:1";
+    const result = await recallLessons(m, "retry flaky uploads", { provider: failing(reason), checkoutDir: dir });
+    expect(result.reason).toBe(reason);
+    expect(result.degraded).toBe(true);
+  });
+
+  it("(c) provider given, vectors only under another model/dims: degraded, reason names the configured pair", async () => {
+    seed("retry flaky uploads", "other-model", 8);
+    const result = await recallLessons(m, "retry flaky", { provider: fakeProvider({ model: "fake-model", dims: 3 }), checkoutDir: dir });
+    expect(result.mode).toBe("keyword-only");
+    expect(result.reason).toBe("no vectors stored for fake-model/3");
+    expect(result.degraded).toBe(true);
+  });
+
+  it("(d) provider given, no vectors stored at all: degraded", async () => {
+    seed("retry flaky uploads");
+    const result = await recallLessons(m, "retry flaky", { provider: fakeProvider(), checkoutDir: dir });
+    expect(result.mode).toBe("keyword-only");
+    expect(result.reason).toBe("no vectors stored for fake-model/3");
+    expect(result.degraded).toBe(true);
+  });
+
+  it("(e) no provider, but vectors are stored for some model: degraded", async () => {
+    seed("retry flaky uploads", "other-model", 8);
+    const result = await recallLessons(m, "retry flaky", { checkoutDir: dir });
+    expect(result.reason).toBe("no provider configured");
+    expect(result.degraded).toBe(true);
+  });
+
+  it("(f) no provider, but opts.detectedProvider is given: degraded", async () => {
+    seed("retry flaky uploads");
+    const result = await recallLessons(m, "retry flaky", { checkoutDir: dir, detectedProvider: "ollama embeddinggemma at http://localhost:11434" });
+    expect(result.mode).toBe("keyword-only");
+    expect(result.reason).toBe("no provider configured");
+    expect(result.degraded).toBe(true);
+  });
+
+  it("(g) no provider, nothing detected, no vectors stored: a choice, not degraded", async () => {
+    seed("retry flaky uploads");
+    const result = await recallLessons(m, "retry flaky", { checkoutDir: dir });
+    expect(result.mode).toBe("keyword-only");
+    expect(result.reason).toBe("no provider configured");
+    expect(result.degraded).toBe(false);
+  });
+
+  it("a healthy hybrid recall with every lesson vectored is not degraded and has unvectored 0", async () => {
+    seed("retry flaky uploads", "fake-model");
+    const result = await recallLessons(m, "retry flaky", { provider: fakeProvider(), checkoutDir: dir });
+    expect(result.mode).toBe("hybrid");
+    expect(result.degraded).toBe(false);
+    expect(result.unvectored).toBe(0);
+    expect(result.total).toBe(1);
+  });
+
+  it("(h) hybrid with 2 of 5 live lessons unvectored: degraded false, unvectored 2, total 5; stale and superseded rows are not counted", async () => {
+    const now = new Date();
+    seed("alpha one", "fake-model");
+    seed("alpha two", "fake-model");
+    seed("alpha three", "fake-model");
+    seed("alpha four");
+    seed("alpha five");
+    // Outside the 30-day window and superseded: neither is a live in-window row.
+    seed("alpha ancient", null, 3, { created: new Date(now.getTime() - 90 * 86400000).toISOString() });
+    const old = seed("alpha replaced");
+    // superseded_by has a foreign key: point at an existing lesson (the first, already counted live).
+    const first = m.prepare("SELECT id FROM lessons WHERE text = 'alpha one'").get();
+    m.prepare("UPDATE lessons SET superseded_by = ? WHERE id = ?").run(first.id, old.id);
+    const result = await recallLessons(m, "alpha", { provider: fakeProvider(), checkoutDir: dir, now });
+    expect(result.mode).toBe("hybrid");
+    expect(result.degraded).toBe(false);
+    expect(result.unvectored).toBe(2);
+    expect(result.total).toBe(5);
+  });
+});
+
 describe("recallLessons: dense ranking (card recall-dense-ranking)", () => {
   const now = new Date("2026-09-30T00:00:00.000Z");
   const daysAgo = (n) => new Date(now.getTime() - n * 86400000).toISOString();
@@ -1795,6 +1896,93 @@ describe("recallLessons: dense ranking (card recall-dense-ranking)", () => {
   });
 });
 
+describe("topLessons (card memory-every-session)", () => {
+  const NOW = new Date("2026-10-07T12:00:00.000Z");
+  const daysAgo = (n) => new Date(NOW.getTime() - n * 86400000).toISOString();
+  const add = (text, extra = {}) => {
+    const { helpful = 0, harmful = 0, ...opts } = extra;
+    const row = addLesson(m, { text, kind: "pattern", source: { agent: "worker" }, created: daysAgo(2), ...opts });
+    m.prepare("UPDATE lessons SET helpful = ?, harmful = ? WHERE id = ?").run(helpful, harmful, row.id);
+    return row;
+  };
+  beforeEach(() => {
+    m = openMemory(dir);
+  });
+
+  it("orders by helpful minus harmful desc, then confirmed-or-created desc, then id", () => {
+    const low = add("low score lesson", { helpful: 1 });
+    const net = add("net two lesson", { helpful: 5, harmful: 3 });
+    const top = add("top score lesson", { helpful: 4 });
+    const older = add("tie older lesson", { created: daysAgo(10) });
+    const newer = add("tie newer lesson", { created: daysAgo(1) });
+    const confirmed = add("tie confirmed lesson", { created: daysAgo(20) });
+    m.prepare("UPDATE lessons SET confirmed = ? WHERE id = ?").run(daysAgo(0), confirmed.id);
+    const ids = topLessons(m, { k: 10, now: NOW }).map((l) => l.id);
+    expect(ids.slice(0, 3)).toEqual([top.id, net.id, low.id]);
+    expect(ids.slice(3)).toEqual([confirmed.id, newer.id, older.id]);
+  });
+
+  it("breaks a full tie by id ascending", () => {
+    const a = add("alpha tie lesson", { id: "lesson-b" });
+    const b = add("beta tie lesson", { id: "lesson-a" });
+    expect(topLessons(m, { now: NOW }).map((l) => l.id)).toEqual([b.id, a.id]);
+  });
+
+  it("honours k (default 5) and returns [] on an empty store", () => {
+    expect(topLessons(m, { now: NOW })).toEqual([]);
+    for (let i = 0; i < 8; i++) add(`lesson number ${i}`, { helpful: i });
+    expect(topLessons(m, { now: NOW })).toHaveLength(5);
+    expect(topLessons(m, { k: 2, now: NOW })).toHaveLength(2);
+  });
+
+  it("excludes stale, superseded, and out-of-window lessons", () => {
+    const keep = add("the one live lesson", { helpful: 0 });
+    const stale = add("stale lesson", { helpful: 9 });
+    m.prepare("UPDATE lessons SET stale = ? WHERE id = ?").run(daysAgo(0), stale.id);
+    const old = add("superseded lesson", { helpful: 9 });
+    const replacement = add("its replacement", { helpful: 0 });
+    supersedeLesson(m, old.id, replacement.id);
+    const outOfWindow = add("ancient lesson", { helpful: 9, created: daysAgo(90) });
+    const ids = topLessons(m, { k: 10, now: NOW }).map((l) => l.id);
+    expect(ids).toContain(keep.id);
+    expect(ids).toContain(replacement.id);
+    for (const gone of [stale.id, old.id, outOfWindow.id]) expect(ids).not.toContain(gone);
+    // a confirmed date inside the window brings an old lesson back
+    m.prepare("UPDATE lessons SET confirmed = ? WHERE id = ?").run(daysAgo(1), outOfWindow.id);
+    expect(topLessons(m, { k: 10, now: NOW }).map((l) => l.id)).toContain(outOfWindow.id);
+  });
+});
+
+describe("renderLessons (card memory-every-session: moved to lib/memory.mjs)", () => {
+  it("renders `- [id] text (citation|kind)` lines and returns the rendered ids", () => {
+    const r = renderLessons([
+      { id: "L1", text: "first lesson", citation: "path:1", kind: "pattern" },
+      { id: "L2", text: "second lesson", citation: null, kind: "pitfall" },
+    ]);
+    expect(r.text).toBe("- [L1] first lesson (path:1)\n- [L2] second lesson (pitfall)");
+    expect(r.ids).toEqual(["L1", "L2"]);
+  });
+
+  it("returns { text: null, ids: [] } for nothing and for a non-array", () => {
+    expect(renderLessons([])).toEqual({ text: null, ids: [] });
+    expect(renderLessons(undefined)).toEqual({ text: null, ids: [] });
+  });
+
+  it("cuts a long lesson near 400 chars with an ellipsis, and skips (not stops at) a line that would overflow 2000", () => {
+    const long = Array.from({ length: 200 }, (_, i) => `w${i}`).join(" ");
+    const r = renderLessons([{ id: "L1", text: long, citation: null, kind: "pattern" }]);
+    expect(r.text).toContain("…");
+    expect(r.text.length).toBeLessThan(450);
+    const many = Array.from({ length: 12 }, (_, i) => ({ id: `M${i}`, text: long, citation: null, kind: "pattern" }));
+    many.push({ id: "short", text: "tiny", citation: null, kind: "pattern" });
+    const capped = renderLessons(many);
+    expect(capped.text.length).toBeLessThanOrEqual(2000);
+    expect(capped.ids.length).toBeLessThan(12);
+    expect(capped.ids).toContain("short");
+    expect(capped.text.split("\n")).toHaveLength(capped.ids.length);
+  });
+});
+
 describe("unstaleLesson", () => {
   beforeEach(() => {
     m = openMemory(dir);
@@ -1895,6 +2083,55 @@ describe("buildReflectPrompt", () => {
     expect(prompt).toContain("partial-task: verified=false passes=1 stopReason=partial after resume: still broken partial=true");
     expect(prompt).toContain("done-task: verified=true passes=1 stopReason=null partial=false");
     expect(prompt).toContain("a task marked partial=true below ran out of context, not verification; propose no lesson that blames its code or its tests for that");
+  });
+
+  it("without report.hand the prompt is byte-identical to the pre-hand output (card memory-every-session)", () => {
+    const report = { levels: [{ index: 0, tasks: [{ id: "t1", verified: true, passes: 1, stopReason: null, reviewIssues: [], verifierFindings: [], memoryUsed: ["abc"] }] }] };
+    const prompt = buildReflectPrompt(report, { blocks: [], plan: null, existingLessons: [{ id: "abc", kind: "pattern", text: "a lesson", created: "2026-01-01T00:00:00.000Z" }] });
+    expect(prompt).toBe("You are proposing at most 3 lessons for a coding harness's memory store, from one workflow report.\nEvery rule below is enforced again in code after you answer, so follow it exactly:\n- kind \"pitfall\" is valid only for a task that has at least one block classed real below.\n- kind \"pattern\" is valid only for a task that verified true on its first pass (passes 1).\n- citation must be exactly one of: \"report:<task>/<block-id>\" naming a block below, \"report:<task>\" naming a task below, or \"path:line\" / 'path:line \"quoted text\"' naming a real line in this checkout.\n- notDerivableBecause must say why the lesson is not something a reader could already get by reading the code; never restate a fact already sitting verbatim in a file.\n- never propose a lesson whose text is already covered by one of the existing lessons listed below.\n- propose at most 3 lessons; an empty list is a perfectly good answer when nothing here is worth remembering.\n- a task marked partial=true below ran out of context, not verification; propose no lesson that blames its code or its tests for that.\n\nTasks in this report:\n- t1: verified=true passes=1 stopReason=null partial=false\n  memoryUsed: abc\n\nExisting lessons (never propose a near-duplicate of one of these):\n- abc (pattern): a lesson\n");
+    expect(prompt).not.toContain("Hand-track material");
+  });
+
+  it("with report.hand it appends the hand section: files capped at 4000 chars with a truncation marker, 16000 in total, the note last (card memory-every-session)", () => {
+    const S = "\u00a7";
+    const handReport = (hand) => ({
+      track: "hand",
+      levels: [{ index: 0, tasks: [{ id: "c1", verified: true, passes: 1, stopReason: null, reviewIssues: [], verifierFindings: [], memoryUsed: [] }] }],
+      hand,
+    });
+    const opts = { blocks: [], plan: null, existingLessons: [] };
+    const base = buildReflectPrompt({ levels: handReport({}).levels }, opts);
+
+    const small = buildReflectPrompt(handReport({ briefs: [{ name: "1-coder.md", text: "BRIEF-TEXT" }], reviews: [{ name: "1.md", text: "REVIEW-TEXT" }], note: "NOTE-TEXT" }), opts);
+    const header = "Hand-track material (briefs, reviewer reports, landing note; the rules above still apply, cite report:<card> or report:<card>/R<n>):";
+    expect(small.startsWith(base)).toBe(true);
+    expect(small).toContain(header);
+    expect(small.indexOf(header)).toBeGreaterThanOrEqual(base.length - 1);
+    expect(small).toContain("BRIEF-TEXT");
+    expect(small).toContain("REVIEW-TEXT");
+    expect(small.indexOf("NOTE-TEXT")).toBeGreaterThan(small.indexOf("REVIEW-TEXT"));
+    expect(small.indexOf("NOTE-TEXT")).toBeGreaterThan(small.indexOf("BRIEF-TEXT"));
+    expect(small).not.toContain("\u2026[truncated]");
+
+    const exactly = buildReflectPrompt(handReport({ briefs: [{ name: "b.md", text: S.repeat(4000) }] }), opts);
+    expect(exactly).toContain(S.repeat(4000));
+    expect(exactly).not.toContain("\u2026[truncated]");
+
+    const cut = buildReflectPrompt(handReport({ briefs: [{ name: "b.md", text: S.repeat(4001) }] }), opts);
+    expect(cut).toContain(S.repeat(4000) + "\u2026[truncated]");
+    expect(cut).not.toContain(S.repeat(4001));
+
+    const many = buildReflectPrompt(
+      handReport({
+        briefs: [1, 2, 3].map((n) => ({ name: `${n}-coder.md`, text: S.repeat(4000) })),
+        reviews: [1, 2, 3].map((n) => ({ name: `${n}.md`, text: S.repeat(4000) })),
+        note: "TAIL-NOTE",
+      }),
+      opts
+    );
+    expect(many.split(S).length - 1).toBeLessThanOrEqual(16000);
+    expect(many.split(S).length - 1).toBeGreaterThanOrEqual(12000);
+    expect(many.endsWith("TAIL-NOTE\n") || many.trimEnd().endsWith("TAIL-NOTE")).toBe(true);
   });
 
   it("REFLECT_SCHEMA requires lessons and REFLECT_DUPLICATE_JACCARD is 0.6", () => {
@@ -2194,5 +2431,217 @@ describe("runReflect: proposal filters (C)", () => {
     expect(row.source_model).toBe("haiku-test-model");
     expect(row.card).toBe("card-1");
     expect(row.commit_sha).toBe("c1c1c1c");
+  });
+});
+
+// card recall-scale-row-load: recallLessons must load only the rows the ranking needs, with output unchanged.
+// The golden file was generated from the pre-change code (UPDATE_RECALL_GOLDEN=1 rewrites it; never do that
+// after the change, it would bless whatever the new code returns).
+describe("recallLessons: golden equivalence and row load (card recall-scale-row-load)", () => {
+  const GOLDEN = join(dirname(new URL(import.meta.url).pathname), "fixtures", "recall-golden.json");
+  const NOW = new Date("2026-09-30T00:00:00.000Z");
+  const daysAgo = (n) => new Date(NOW.getTime() - n * 86400000).toISOString();
+  const MODEL = { model: "fake-model", dims: 3 };
+  let checkoutDir;
+  let storeDirs;
+
+  beforeEach(() => {
+    storeDirs = [];
+    checkoutDir = mkdtempSync(join(tmpdir(), "doug-recall-golden-checkout-"));
+    mkdirSync(join(checkoutDir, ".doug"), { recursive: true });
+    mkdirSync(join(checkoutDir, "src"), { recursive: true });
+    writeFileSync(join(checkoutDir, "src", "a.mjs"), "line one\nline two\nline three\n", "utf8");
+  });
+
+  afterEach(() => {
+    for (const d of storeDirs) rmSync(d, { recursive: true, force: true });
+    rmSync(checkoutDir, { recursive: true, force: true });
+  });
+
+  const openStore = (build) => {
+    const d = mkdtempSync(join(tmpdir(), "doug-recall-golden-store-"));
+    storeDirs.push(d);
+    const db = openMemory(d);
+    build(db);
+    return db;
+  };
+
+  const mk = (db, id, text, { created = daysAgo(5), scope, citation, vec, model = MODEL.model, dims = MODEL.dims } = {}) => {
+    addLesson(db, { id, text, kind: "pattern", source: { agent: "worker" }, created, scope, citation });
+    if (vec) setLessonEmbedding(db, id, { model, dims, vector: Float32Array.from(vec) });
+  };
+
+  // The main store: every shape the card's goal names.
+  const buildMain = (db) => {
+    mk(db, "r-good", "retry flaky calls good", { citation: 'src/a.mjs:2 "line two"', vec: [0.5, 0.5, 0.7] });
+    mk(db, "r-bad1", "retry flaky calls bad one", { citation: 'src/a.mjs:2 "line moved"', vec: [1, 0, 0] });
+    mk(db, "r-bad2", "retry flaky calls bad two", { citation: "src/missing.mjs:1" });
+    mk(db, "r-scoped", "retry flaky uploads scoped", { scope: ["src/**/*.mjs"], vec: [0.9, 0.1, 0] });
+    mk(db, "r-unscoped", "retry flaky uploads unscoped", { vec: [0.8, 0.2, 0.1] });
+    mk(db, "r-elsewhere", "retry flaky uploads elsewhere", { scope: ["docs/**/*.md"], vec: [0.85, 0.15, 0] });
+    mk(db, "r-novec", "retry flaky calls without vector", { created: daysAgo(12) });
+    mk(db, "r-novec2", "flaky retry novec second", { created: daysAgo(3), scope: ["src/a.mjs"] });
+    mk(db, "r-other", "retry flaky calls other model", { vec: [1, 0, 0], model: "other-model", dims: 3 });
+    mk(db, "r-otherdims", "retry flaky calls other dims", { vec: [1, 0, 0, 0], model: "fake-model", dims: 4 });
+    mk(db, "r-veconly", "unrelated zzz vector only", { vec: [0.95, 0.05, 0] });
+    mk(db, "r-veconly-old", "unrelated qqq old vector", { created: daysAgo(40), vec: [1, 0, 0] });
+    mk(db, "r-garbled", "retry flaky garbled date", { created: "not-a-date", vec: [0.6, 0.4, 0] });
+    mk(db, "r-confirmed", "retry flaky confirmed lately", { created: daysAgo(200), vec: [0.7, 0.3, 0] });
+    mk(db, "r-ancient", "retry flaky ancient", { created: daysAgo(90), vec: [1, 0, 0] });
+    mk(db, "r-stale", "retry flaky stale already", { vec: [1, 0, 0] });
+    mk(db, "r-superseded", "retry flaky superseded", { vec: [1, 0, 0] });
+    db.prepare("UPDATE lessons SET confirmed = ? WHERE id = ?").run(daysAgo(2), "r-confirmed");
+    db.prepare("UPDATE lessons SET stale = ? WHERE id = ?").run(daysAgo(1), "r-stale");
+    db.prepare("UPDATE lessons SET superseded_by = ? WHERE id = ?").run("r-good", "r-superseded");
+  };
+
+  // Degraded store: the only vector sits on an out-of-window row, so degraded rests on a row recall never ranks.
+  const buildOnlyOldVector = (db) => {
+    mk(db, "o-fresh1", "retry flaky fresh one");
+    mk(db, "o-fresh2", "retry flaky fresh two");
+    mk(db, "o-old", "retry flaky old vectored", { created: daysAgo(90), vec: [1, 0, 0] });
+  };
+
+  // Vectors only on a superseded row and a stale row: neither is live, so keyword recall is not degraded.
+  const buildDeadVectors = (db) => {
+    mk(db, "d-live1", "retry flaky live one");
+    mk(db, "d-live2", "retry flaky live two");
+    mk(db, "d-superseded", "retry flaky superseded vectored", { vec: [1, 0, 0] });
+    mk(db, "d-stale", "retry flaky stale vectored", { vec: [1, 0, 0] });
+    db.prepare("UPDATE lessons SET superseded_by = ? WHERE id = ?").run("d-live1", "d-superseded");
+    db.prepare("UPDATE lessons SET stale = ? WHERE id = ?").run(daysAgo(1), "d-stale");
+  };
+
+  // A store with no vectors anywhere.
+  const buildNoVectors = (db) => {
+    mk(db, "n-1", "retry flaky plain one");
+    mk(db, "n-2", "retry flaky plain two");
+  };
+
+  const failing = (reason) => ({ name: "fake", ...MODEL, embed: async () => ({ ok: false, reason }) });
+  const qvec = () => fakeProvider({ vectorFor: () => [1, 0, 0] });
+  const mismatched = () => fakeProvider({ model: "nomatch-model", dims: 3 });
+
+  const MATRIX = [
+    ["main", buildMain, "keyword, no checkout", () => ({ query: "retry flaky" })],
+    ["main", buildMain, "keyword, checkout", () => ({ query: "retry flaky", checkoutDir })],
+    ["main", buildMain, "keyword, checkout, files, k=3", () => ({ query: "retry flaky uploads", checkoutDir, files: ["src/a.mjs"], k: 3 })],
+    ["main", buildMain, "keyword, narrow staleDays", () => ({ query: "retry flaky", checkoutDir, staleDays: 10 })],
+    ["main", buildMain, "keyword, empty query", () => ({ query: "" })],
+    ["main", buildMain, "hybrid, no checkout", () => ({ query: "retry flaky", provider: qvec() })],
+    ["main", buildMain, "hybrid, checkout (stale drop, confirm)", () => ({ query: "retry flaky", provider: qvec(), checkoutDir })],
+    ["main", buildMain, "hybrid, checkout, k=2 (backfill)", () => ({ query: "retry flaky", provider: qvec(), checkoutDir, k: 2 })],
+    ["main", buildMain, "hybrid, checkout, k=1 (backfill past the dropped top hit)", () => ({ query: "retry flaky", provider: qvec(), checkoutDir, k: 1 })],
+    ["main", buildMain, "hybrid, files, k=20", () => ({ query: "retry flaky uploads", provider: qvec(), files: ["src/a.mjs"], k: 20 })],
+    ["main", buildMain, "hybrid, checkout, files, k=5", () => ({ query: "retry flaky uploads", provider: qvec(), checkoutDir, files: ["src/a.mjs"], k: 5 })],
+    ["main", buildMain, "hybrid, a different query vector", () => ({ query: "retry flaky", provider: fakeProvider({ vectorFor: () => [0, 1, 0] }), k: 20 })],
+    ["main", buildMain, "hybrid, narrow staleDays", () => ({ query: "retry flaky", provider: qvec(), staleDays: 10, k: 20 })],
+    ["main", buildMain, "hybrid, query matching nothing (vector-only candidates)", () => ({ query: "zzzznomatch", provider: qvec(), k: 20 })],
+    ["main", buildMain, "provider with no matching vectors", () => ({ query: "retry flaky", provider: mismatched(), checkoutDir })],
+    ["main", buildMain, "provider whose embed fails", () => ({ query: "retry flaky", provider: failing("timeout"), checkoutDir })],
+    ["main", buildMain, "detectedProvider only", () => ({ query: "retry flaky", detectedProvider: "ollama x", checkoutDir })],
+    ["only-old-vector", buildOnlyOldVector, "degraded: keyword, no provider", () => ({ query: "retry flaky", checkoutDir })],
+    ["only-old-vector", buildOnlyOldVector, "degraded: provider, no matching vectors", () => ({ query: "retry flaky", provider: qvec(), checkoutDir })],
+    ["only-old-vector", buildOnlyOldVector, "degraded: embed fails", () => ({ query: "retry flaky", provider: failing("connection refused"), checkoutDir })],
+    ["no-vectors", buildNoVectors, "no vectors: keyword, no provider (not degraded)", () => ({ query: "retry flaky", checkoutDir })],
+    ["no-vectors", buildNoVectors, "no vectors: provider", () => ({ query: "retry flaky", provider: qvec(), checkoutDir })],
+    ["dead-vectors", buildDeadVectors, "dead vectors: keyword, no provider (not degraded)", () => ({ query: "retry flaky", checkoutDir })],
+    ["dead-vectors", buildDeadVectors, "dead vectors: keyword, no checkout", () => ({ query: "retry flaky" })],
+    ["dead-vectors", buildDeadVectors, "dead vectors: provider (degraded, no live vectors)", () => ({ query: "retry flaky", provider: qvec(), checkoutDir })],
+  ];
+
+  const run = async () => {
+    const out = {};
+    for (const [store, build, label, optsFor] of MATRIX) {
+      const db = openStore(build);
+      try {
+        const { query, ...opts } = optsFor();
+        const result = await recallLessons(db, query, { now: NOW, ...opts });
+        const table = db.prepare("SELECT id, stale, confirmed FROM lessons ORDER BY id").all().map((r) => ({ ...r }));
+        out[`${store} | ${label}`] = JSON.parse(JSON.stringify({ result, table }));
+      } finally {
+        db.close();
+      }
+    }
+    return out;
+  };
+
+  it("recall output and the stale/confirmed side effects match the golden file, over the whole matrix", async () => {
+    const actual = await run();
+    if (process.env.UPDATE_RECALL_GOLDEN === "1") {
+      mkdirSync(dirname(GOLDEN), { recursive: true });
+      writeFileSync(GOLDEN, JSON.stringify(actual, null, 2) + "\n", "utf8");
+      throw new Error("golden regenerated; rerun without UPDATE_RECALL_GOLDEN");
+    }
+    const golden = JSON.parse(readFileSync(GOLDEN, "utf8"));
+    expect(Object.keys(actual)).toEqual(Object.keys(golden));
+    for (const key of Object.keys(golden)) expect(actual[key], key).toEqual(golden[key]);
+  });
+
+  it("the golden file covers the shapes the card names (a guard against a vacuous fixture)", () => {
+    const golden = JSON.parse(readFileSync(GOLDEN, "utf8"));
+    const g = (k) => golden[k];
+    expect(g("main | hybrid, checkout (stale drop, confirm)").result.mode).toBe("hybrid");
+    const hy = g("main | hybrid, checkout (stale drop, confirm)");
+    expect(hy.table.find((r) => r.id === "r-bad1").stale).not.toBeNull();
+    expect(hy.table.find((r) => r.id === "r-good").confirmed).not.toBeNull();
+    expect(g("main | hybrid, files, k=20").result.lessons.some((l) => l.id === "r-novec" && l.hasVector === false)).toBe(true);
+    expect(g("main | hybrid, checkout, k=2 (backfill)").result.lessons).toHaveLength(2);
+    expect(g("main | hybrid, no checkout").result.lessons.some((l) => l.id === "r-garbled")).toBe(true);
+    expect(g("main | provider with no matching vectors").result.degraded).toBe(true);
+    const old = g("only-old-vector | degraded: keyword, no provider").result;
+    expect(old.mode).toBe("keyword-only");
+    expect(old.degraded).toBe(true);
+    expect(g("dead-vectors | dead vectors: keyword, no provider (not degraded)").result.degraded).toBe(false);
+    expect(g("dead-vectors | dead vectors: provider (degraded, no live vectors)").result.degraded).toBe(true);
+    expect(g("no-vectors | no vectors: keyword, no provider (not degraded)").result.degraded).toBe(false);
+  });
+
+  // Statements recallLessons runs, recorded by wrapping prepare/exec on the open store.
+  const recordSql = async (build, opts, query = "retry flaky") => {
+    const db = openStore(build);
+    const seen = [];
+    const prepare = db.prepare.bind(db);
+    const exec = db.exec.bind(db);
+    db.prepare = (sql) => (seen.push(String(sql)), prepare(sql));
+    db.exec = (sql) => (seen.push(String(sql)), exec(sql));
+    try {
+      await recallLessons(db, query, { now: NOW, ...opts });
+    } finally {
+      db.prepare = prepare;
+      db.exec = exec;
+      db.close();
+    }
+    return seen.map((s) => s.replace(/\s+/g, " ").trim());
+  };
+
+  // A `*` anywhere in a select list over lessons, by-id loads included (count(*) is not a row load).
+  const selectsStar = (sql) => /\bselect\b[^;]*?\*[^;]*?\bfrom\s+lessons\b/i.test(sql.replace(/count\(\s*\*\s*\)/gi, "count(1)"));
+  const readsEmbeddingBlob = (sql) => /\bembedding\b/i.test(sql.replace(/\bembedding\s+is\s+(not\s+)?null\b/gi, ""));
+
+  it("hybrid recall never selects * from lessons, by-id loads included", async () => {
+    const sqls = await recordSql(buildMain, { provider: qvec(), checkoutDir, files: ["src/a.mjs"] });
+    expect(sqls.filter(selectsStar)).toEqual([]);
+  });
+
+  it("keyword recall never selects * from lessons, by-id loads included", async () => {
+    const sqls = await recordSql(buildMain, { checkoutDir });
+    expect(sqls.filter(selectsStar)).toEqual([]);
+  });
+
+  it("every statement that reads the embedding column filters on embedding_model and embedding_dims", async () => {
+    const sqls = await recordSql(buildMain, { provider: qvec(), checkoutDir });
+    const reads = sqls.filter(readsEmbeddingBlob);
+    expect(reads.filter((s) => !(/embedding_model\s*=/i.test(s) && /embedding_dims\s*=/i.test(s)))).toEqual([]);
+  });
+
+  it("keyword mode reads no embedding blobs", async () => {
+    const sqls = await recordSql(buildMain, { checkoutDir });
+    expect(sqls.filter(readsEmbeddingBlob)).toEqual([]);
+  });
+
+  it("a provider with no matching vectors reads no embedding blobs either", async () => {
+    const sqls = await recordSql(buildMain, { provider: mismatched(), checkoutDir });
+    expect(sqls.filter(readsEmbeddingBlob)).toEqual([]);
   });
 });

@@ -287,8 +287,11 @@ const INTEGRATE_SCHEMA = {
     branch: { type: 'string' },
     merged: { type: 'array', items: { type: 'string' } },
     conflicts: { type: 'array', items: { type: 'string' } },
-    verify: { type: 'array', items: { type: 'object', required: ['command', 'ok'], properties: { command: { type: 'string' }, ok: { type: 'boolean' }, outputTail: { type: 'string' } } } },
+    verify: { type: 'array', items: { type: 'object', required: ['command', 'ok'], properties: { command: { type: 'string' }, ok: { type: 'boolean' }, outputTail: { type: 'string' }, credited: { type: 'string' } } } },
     ok: { type: 'boolean' },
+    // Card level-adversary-empty-diff: the integration branch's HEAD sha before this stage's merges; the level
+    // adversary diffs from it. Optional: a missing or malformed value falls back to the level's base branch.
+    baseCommit: { type: 'string' },
     // Card integration-acceptance-recorded: only the last level's integrate stage fills this in (step 3b of
     // integratePrompt); not required, since an earlier level has not built the whole plan yet.
     acceptance: { type: 'array', description: 'one entry per acceptance command listed in the prompt, [] when none', items: { type: 'object', required: ['text', 'command', 'ok', 'exitCode'], properties: { text: { type: 'string' }, command: { type: 'string' }, ok: { type: 'boolean' }, exitCode: { type: ['integer', 'null'] } } } },
@@ -303,7 +306,7 @@ const INTEGRATE_SCHEMA = {
 // (empty, prose, or unrecognised) is dropped rather than trusted or blamed. A plan command with no matching
 // report is appended as { ..., reported: false } - unreported and failed are different causes and get different
 // reason clauses. Pure: never mutates its argument, never throws on odd shapes.
-function enforceIntegrationAcceptance(integration, isLastLevel, entries) {
+function enforceIntegrationAcceptance(integration, isLastLevel, entries, verifyCommands = []) {
   if (!integration || typeof integration !== 'object') return integration
   if (!isLastLevel) {
     const rest = { ...integration }
@@ -312,10 +315,20 @@ function enforceIntegrationAcceptance(integration, isLastLevel, entries) {
   }
   const reported = Array.isArray(integration.acceptance) ? integration.acceptance.filter(a => a && typeof a === 'object') : []
   const acceptance = []
+  const verifyList = Array.isArray(integration.verify) ? integration.verify.filter(v => v && typeof v === 'object') : []
+  const repeated = new Set((Array.isArray(verifyCommands) ? verifyCommands : []).map(c => String(c).trim()))
   for (const e of entries) {
     if (!e.command) continue
     const wantCommand = String(e.command).trim()
     if (!wantCommand) continue
+    // Card flow-suite-dedupe: a command that repeats a plan.verify command takes its result from the verify item.
+    if (repeated.has(wantCommand)) {
+      const v = verifyList.find(x => typeof x.command === 'string' && String(x.command).trim() === wantCommand)
+      acceptance.push(v
+        ? { text: e.text, command: e.command, ok: v.ok === true, exitCode: v.ok === true ? 0 : null, from: 'verify' }
+        : { text: e.text, command: e.command, ok: false, exitCode: null, reported: false })
+      continue
+    }
     const match = reported.find(a => typeof a.command === 'string' && String(a.command).trim() === wantCommand)
     acceptance.push(match
       ? { text: match.text, command: e.command, ok: match.ok, exitCode: match.exitCode }
@@ -1215,10 +1228,9 @@ function levelSpecLines(sReady) {
 // codex-review over a level's size-S tasks on the integration branch, once, after the merge (and once more to confirm
 // a fix pass). Every blocker must name a file, because that is how it finds the task it goes back to.
 function levelAdversaryPrompt(li, sReady, levelBase, confirming) {
-  const verify = (plan.verify || []).filter(Boolean)
   const guard = t => String(t).replace(/^DOUG_SPEC_EOF$/gm, 'DOUG_SPEC_EOF ')
   const command = [
-    `cat <<'DOUG_SPEC_EOF' | ${adversary.command} --base ${shellQuote(levelBase)} --head ${shellQuote(integrationBranch)} --dir ${shellQuote(INTEGRATION_WORKTREE)} --spec - --timeout-ms ${adversary.timeoutMs}${typeof adversary.effort === 'string' && adversary.effort ? ` --effort ${adversary.effort}` : ''}${verify.map(v => ` --verify ${shellQuote(v)}`).join('')}`,
+    `cat <<'DOUG_SPEC_EOF' | ${adversary.command} --base ${shellQuote(levelBase)} --head ${shellQuote(integrationBranch)} --dir ${shellQuote(INTEGRATION_WORKTREE)} --spec - --timeout-ms ${adversary.timeoutMs}${typeof adversary.effort === 'string' && adversary.effort ? ` --effort ${adversary.effort}` : ''}`,
     `Level ${li} of plan "${guard(plan.title)}": the size-S tasks below were merged into ${integrationBranch} with one focused check each and no adversary of their own. Review them together against their specs. Every blocker must name the file it is about, so it can go back to the task that owns that file.`,
     ...(confirming ? [`A fix pass answered the blockers you raised on this level; confirm each one is fixed, name it as fixed or still open, and check the fix for regressions rather than exploring afresh.`] : [`This is the first review of this level: explore freely and try to refute the changes however you can.`]),
     ``,
@@ -1313,7 +1325,7 @@ function confirmationLines(pass, ledger, impl) {
 }
 
 function adversaryPrompt(task, impl, baseBranch, pass, ledger) {
-  const verify = [task.verify, ...(plan.verify || [])].filter(Boolean)
+  const verify = [task.verify].filter(Boolean)
   const guard = s => String(s).replace(/^DOUG_SPEC_EOF$/gm, 'DOUG_SPEC_EOF ')
   const command = [
     `cat <<'DOUG_SPEC_EOF' | ${adversary.command} --base ${shellQuote(baseBranch)} --head ${shellQuote(impl.branch)} --dir ${shellQuote(impl.worktreePath)} --spec - --timeout-ms ${adversary.timeoutMs}${typeof adversary.effort === 'string' && adversary.effort ? ` --effort ${adversary.effort}` : ''}${verify.map(v => ` --verify ${shellQuote(v)}`).join('')}`,
@@ -1420,14 +1432,26 @@ function integratePrompt(levelIndex, results, baseBranch, isLastLevel, keepWorkt
         `   if it exists (a previous level made it): use it as is; it already has ${integrationBranch} checked out.`,
       ]),
     `   Do every following git and verify command inside that worktree (git -C or cd into it).`,
+    `   Before any merge of this stage, run git rev-parse HEAD in that worktree and report the full 40-character sha as baseCommit.`,
     `2. Merge each branch with a merge commit (git merge --no-ff <branch>). If a merge conflicts, resolve it only if the resolution is mechanical and obviously correct; otherwise git merge --abort and list the branch in conflicts. ${NO_TRAILERS} That includes the merge commits you make here.`,
     `3. Install dependencies there if the verify commands need them and they are missing${plan.install ? ` (${plan.install})` : ''}. Then run every command in: ${plan.verify.length ? plan.verify.map(v => `"${v}"`).join(', ') : 'the project test command'} and record real exit statuses.`,
+    ...(plan.verify.length
+      ? [
+        `   When .doug/hooks/scripts/verify.mjs exists, run them from the repository root (not inside the worktree) as one command, so a tree already verified is credited instead of re-run:`,
+        `   node .doug/hooks/scripts/verify.mjs --json --by integrate --cwd .claude/worktrees/doug-integration --record-dir . ${worktrees.map(w => `--credit-dir ${shellQuote(w)}`).join(' ')} ${plan.verify.map(v => `--command ${shellQuote(v)}`).join(' ')}`,
+        `   Copy each entry of its JSON results[] into verify as { command, ok, outputTail }, and add credited: "verified-tree" to each when the JSON's credited is not null. When verify.mjs does not exist, run the commands one by one as above.`,
+      ]
+      : []),
     // Card integration-acceptance-recorded: only the last level runs the plan's acceptance commands, and only
     // after the merges above - the plan is not complete at an earlier level, so its prompt never mentions this.
     ...(isLastLevel
       ? [
         `3b. Plan acceptance criteria (a line starting with $ is the command that checks the criterion above it and exits 0 when it holds; the plan is complete at this level, so run every one now):`,
-        ...acceptanceEntries(plan.acceptance || []).flatMap(a => a.command ? [`- ${a.text}`, `  $ ${a.command}`] : [`- ${a.text}`]),
+        ...acceptanceEntries(plan.acceptance || []).flatMap(a => a.command
+          ? ((plan.verify || []).some(v => String(v).trim() === String(a.command).trim())
+            ? [`- ${a.text} is checked by step 3's \`${a.command}\`; do not run it again and do not report it in acceptance; the workflow takes its result from verify.`]
+            : [`- ${a.text}`, `  $ ${a.command}`])
+          : [`- ${a.text}`]),
         `Run every $ command above inside this integration worktree, exactly as written, after the merges, and report each one in \`acceptance\` as { text, command, ok, exitCode } with its real exit code (ok means exit code 0; exitCode null only if the command could not start). Never report one you did not run; return acceptance: [] when the plan lists no commands.`,
         `Report each command string exactly as it is written above, character for character, even when you ran it behind a cd or git -C prefix: the workflow matches your report to the plan by that string, and a command it cannot match counts as not run and fails the integration.`,
         `A criterion with no $ line is not yours to judge here: do not report it.`,
@@ -1444,8 +1468,8 @@ function integratePrompt(levelIndex, results, baseBranch, isLastLevel, keepWorkt
 // ---- Task loop -------------------------------------------------------------------
 // One task from start to a verdict: implement (or check out a reused branch), then verify, review and the
 // adversary. While the block is one the checks described inside the task's own files, relaunch the implementer in
-// the same worktree; a fix pass reruns the stage that blocked, then one focused check, then the adversary, and the
-// loop stops as soon as it stops converging (no new commit, two consecutive novel blockers, or the task budget).
+// the same worktree; a fix pass reruns the verifier or reviewer that blocked, then one focused check and the
+// adversary together, and the loop stops as soon as it stops converging (no new commit, two consecutive novel blockers, or the task budget).
 async function startTask(task, baseBranch, launch = agent) {
   if (task.reuse) return launch(reusePrompt(task, baseBranch), { label: `reuse:${task.id}`, phase: 'Implement', isolation: 'worktree', schema: IMPLEMENT_SCHEMA, model: CHECKOUT_MODEL })
   if (swarmApplies(task)) return runSwarm(task, baseBranch, launch)
@@ -1811,7 +1835,7 @@ function retriable(task, r) {
   if (contradiction) return { ok: false, reason: `spec contradicts acceptance: ${contradiction}`, stopClass: 'spec-contradiction' }
   const environmentOnly = texts.find(t => typeof t === 'string' && t.includes(ENVIRONMENT_MARKER))
   if (environmentOnly) return { ok: false, reason: `environment, not the code: ${environmentOnly}`, stopClass: 'environment' }
-  if (adversary && r.adv && !r.adv.ran) return { ok: false, reason: `adversary did not run: ${r.adv.error || 'no reason given'}`, stopClass: 'adversary-not-run' }
+  if (adversary && r.adv && !r.adv.ran && !r.blockingStage) return { ok: false, reason: `adversary did not run: ${r.adv.error || 'no reason given'}`, stopClass: 'adversary-not-run' }
   const outside = [...new Set(findingPaths(r).filter(p => !ownsPath(task, p) && !ownedBySibling(task, p)))]
   if (outside.length) return { ok: false, reason: `findings name files outside the owned set: ${outside.join(', ')}`, stopClass: 'outside-owned' }
   return { ok: true, reason: 'every finding is within the owned files' }
@@ -2097,9 +2121,9 @@ function stageHead(ver, check) {
 }
 
 // baseBranch is a parameter, not the outer binding, so this block can be built and exercised on its own.
-// ctx: { ledger, launch, lead, prevCommit, blocking }. On pass 1 the verifier and the reviewer both run and the
-// adversary follows when both passed. On a fix pass only the stage that blocked reruns, then the focused check,
-// then the adversary; the first stage that blocks ends the pass.
+// ctx: { ledger, launch, lead, prevCommit, blocking }. On pass 1 the verifier, the reviewer, and the adversary run
+// together. On a fix pass the verifier or the reviewer reruns first when it is the stage that blocked, and ends the
+// pass if it blocks again; then the focused check and the adversary run together.
 async function runChecks(task, impl, pass, baseBranch, ctx) {
   const c = ctx || {}
   const ledger = c.ledger || []
@@ -2120,57 +2144,68 @@ async function runChecks(task, impl, pass, baseBranch, ctx) {
     if (check) ({ ver, rev } = readCheck(check))
     blockingStage = !(check && check.passed && rev && rev.approve) ? 'check' : null
   } else if (pass === 1) {
-    // The verifier and the reviewer are both read-only and neither reads the other's result, so a first pass
-    // launches them together; a null from either (skipped, or dead after retries) is that stage returning nothing.
+    // The verifier, the reviewer, and the adversary are read-only and none reads another's result, so a first pass
+    // launches them together; a null from any (skipped, or dead after retries) is that stage returning nothing.
     stages.push('verify')
     stages.push('review')
     const crew = crewOf(task)
     for (let seat = 2; seat <= crew.reviewers; seat++) stages.push(`review-${seat}`)
+    const withAdversary = adversaryRequired(task)
+    const advStages = []
     const pair = await parallel([
       () => launch(verifyPrompt(task, impl, baseBranch), agentOpts('verify', task, { label: `verify:${task.id}`, phase: 'Verify', agentType: 'doug-flow:verifier', schema: VERIFY_SCHEMA })),
       () => launch(reviewPrompt(task, impl, baseBranch), agentOpts('review', task, { label: `review:${task.id}`, phase: 'Review', agentType: 'doug-flow:reviewer', schema: REVIEW_SCHEMA })),
       ...Array.from({ length: crew.reviewers - 1 }, (_, i) => () => launch(reviewPrompt(task, impl, baseBranch, i + 2), agentOpts('review', task, { label: `review-${i + 2}:${task.id}`, phase: 'Review', agentType: 'doug-flow:reviewer', schema: REVIEW_SCHEMA }))),
+      ...(withAdversary ? [() => runAdversaryCrew(task, impl, pass, baseBranch, ledger, launch, advStages)] : []),
     ])
     ver = (pair && pair[0]) || null
-    rev = pair ? mergeReviews(pair.slice(1)) : null
+    rev = pair ? mergeReviews(pair.slice(1, 1 + crew.reviewers)) : null
     stageResults.verify = ver
     stageResults.review = rev
-    // Only changes that already passed verification and review are worth a second model's time.
-    if (adversary && ver && ver.passed && rev && rev.approve) {
-      adv = await runAdversaryCrew(task, impl, pass, baseBranch, ledger, launch, stages)
+    // The adversary no longer waits for verify and review (card flow-adversary-parallel, 2026-10-07): waiting
+    // added about five minutes to every full task. The cost is a Codex review of trees verify or review rejects;
+    // integration still needs all three verdicts (isReady), and the ledger reads each stage's findings.
+    if (withAdversary) {
+      stages.push(...advStages)
+      adv = (pair && pair[1 + crew.reviewers]) || null
       stageResults.adversary = adv
     }
     blockingStage = !(ver && ver.passed) ? 'verify' : !(rev && rev.approve) ? 'review' : adversaryBlocked(adv) ? 'adversary' : null
   } else {
     const first = c.blocking || 'verify'
-    const order = [first, ...['check', 'adversary'].filter(s => s !== first)]
-    for (const stage of order) {
-      if (stage === 'adversary' && !adversaryRequired(task)) continue
-      if (stage === 'verify') {
-        stages.push('verify')
-        ver = await launch(verifyPrompt(task, impl, baseBranch), agentOpts('verify', task, { label: `verify:${task.id}${suffix}`, phase: 'Verify', agentType: 'doug-flow:verifier', schema: VERIFY_SCHEMA }))
-        stageResults.verify = ver
-        if (!(ver && ver.passed)) { blockingStage = 'verify'; break }
-      } else if (stage === 'review') {
-        stages.push('review')
-        const crew = crewOf(task)
-        for (let seat = 2; seat <= crew.reviewers; seat++) stages.push(`review-${seat}`)
-        const seats = await parallel(Array.from({ length: crew.reviewers }, (_, i) => () => launch(reviewPrompt(task, impl, baseBranch, i + 1), agentOpts('review', task, { label: `review${i ? `-${i + 1}` : ''}:${task.id}${suffix}`, phase: 'Review', agentType: 'doug-flow:reviewer', schema: REVIEW_SCHEMA }))))
-        rev = mergeReviews(seats || [])
-        stageResults.review = rev
-        if (!(rev && rev.approve)) { blockingStage = 'review'; break }
-      } else if (stage === 'check') {
-        stages.push('check')
-        check = await launch(checkPrompt(task, impl, c.prevCommit || null, baseBranch, ledger), agentOpts('verify', task, { label: `check:${task.id}:${pass}`, phase: 'Verify', agentType: 'doug-flow:verifier', schema: CHECK_SCHEMA }))
-        stageResults.check = check
-        // The one check stands in for both stages, so the rest of the loop and the report read it as they read them.
-        if (check) ({ ver, rev } = readCheck(check))
-        if (!(check && check.passed && rev && rev.approve)) { blockingStage = 'check'; break }
-      } else {
-        adv = await runAdversaryCrew(task, impl, pass, baseBranch, ledger, launch, stages)
-        stageResults.adversary = adv
-        if (!adversaryOk(adv, !!adversary)) { if (adversaryBlocked(adv)) blockingStage = 'adversary'; break }
-      }
+    if (first === 'verify') {
+      stages.push('verify')
+      ver = await launch(verifyPrompt(task, impl, baseBranch), agentOpts('verify', task, { label: `verify:${task.id}${suffix}`, phase: 'Verify', agentType: 'doug-flow:verifier', schema: VERIFY_SCHEMA }))
+      stageResults.verify = ver
+      if (!(ver && ver.passed)) blockingStage = 'verify'
+    } else if (first === 'review') {
+      stages.push('review')
+      const crew = crewOf(task)
+      for (let seat = 2; seat <= crew.reviewers; seat++) stages.push(`review-${seat}`)
+      const seats = await parallel(Array.from({ length: crew.reviewers }, (_, i) => () => launch(reviewPrompt(task, impl, baseBranch, i + 1), agentOpts('review', task, { label: `review${i ? `-${i + 1}` : ''}:${task.id}${suffix}`, phase: 'Review', agentType: 'doug-flow:reviewer', schema: REVIEW_SCHEMA }))))
+      rev = mergeReviews(seats || [])
+      stageResults.review = rev
+      if (!(rev && rev.approve)) blockingStage = 'review'
+    }
+    if (!blockingStage) {
+      // The focused check and the adversary are both read-only, so they run together (card flow-adversary-parallel).
+      // The stages are recorded in the order the serial loop ran them (the adversary first when it blocked the last
+      // pass), since updateLedger reads them in order to tell a stage confirming a fix from one re-reporting it.
+      const withAdversary = adversaryRequired(task)
+      const adversaryFirst = withAdversary && first === 'adversary'
+      const advStages = []
+      const runCheck = () => launch(checkPrompt(task, impl, c.prevCommit || null, baseBranch, ledger), agentOpts('verify', task, { label: `check:${task.id}:${pass}`, phase: 'Verify', agentType: 'doug-flow:verifier', schema: CHECK_SCHEMA }))
+      const runAdv = () => runAdversaryCrew(task, impl, pass, baseBranch, ledger, launch, advStages)
+      const both = !withAdversary ? [await runCheck()] : await parallel(adversaryFirst ? [runAdv, runCheck] : [runCheck, runAdv])
+      check = (both && both[adversaryFirst ? 1 : 0]) || null
+      stageResults.check = check
+      // The one check stands in for both stages, so the rest of the loop and the report read it as they read them.
+      if (check) ({ ver, rev } = readCheck(check))
+      if (withAdversary) { adv = (both && both[adversaryFirst ? 0 : 1]) || null; stageResults.adversary = adv }
+      stages.push(...(adversaryFirst ? [...advStages, 'check'] : ['check', ...advStages]))
+      const checkBlocked = !(check && check.passed && rev && rev.approve)
+      const advBlocked = withAdversary && adversaryBlocked(adv)
+      blockingStage = adversaryFirst && advBlocked ? 'adversary' : checkBlocked ? 'check' : advBlocked ? 'adversary' : null
     }
   }
   const head = stageHead(ver, check)
@@ -2540,7 +2575,7 @@ for (let li = 0; li < levels.length; li++) {
   const levelBase = baseBranch
   const sReady = adversary ? ready.filter(r => taskShape(r.task) === 'S') : []
   if (ready.length) {
-    integration = enforceIntegrationAcceptance(await retryOnce(integratePrompt(li, ready, baseBranch, li === levels.length - 1, sReady.length > 0, !integratedOnce), agentOpts('integrate', null, { label: `integrate:level-${li}`, phase: 'Integrate', schema: INTEGRATE_SCHEMA }), `level-${li}`), li === levels.length - 1, acceptanceEntries(plan.acceptance || []))
+    integration = enforceIntegrationAcceptance(await retryOnce(integratePrompt(li, ready, baseBranch, li === levels.length - 1, sReady.length > 0, !integratedOnce), agentOpts('integrate', null, { label: `integrate:level-${li}`, phase: 'Integrate', schema: INTEGRATE_SCHEMA }), `level-${li}`), li === levels.length - 1, acceptanceEntries(plan.acceptance || []), plan.verify || [])
     integratedOnce = true
     if (integration && integration.ok) {
       baseBranch = integrationBranch
@@ -2551,7 +2586,12 @@ for (let li = 0; li < levels.length; li++) {
   // branch, after the merge. A blocker goes back to the task that owns its file as a fix pass, the fixed branches are
   // merged again, and the adversary confirms once; a level still blocked after that stops the run.
   if (integration && integration.ok && sReady.length) {
-    levelAdversary = await runLevelAdversary(li, sReady, levelBase, false)
+    // Card level-adversary-empty-diff: the sha the integrator read before the level's first merge is the diff base;
+    // the branch name would equal --head on every level >= 1. The re-integration never replaces it.
+    const reportedBase = integration && integration.baseCommit
+    const adversaryBase = typeof reportedBase === 'string' && /^[0-9a-f]{40}$/.test(reportedBase) ? reportedBase : levelBase
+    if (adversaryBase === levelBase) log(`level ${li} level adversary falls back to ${levelBase} because the integrator reported no base commit`)
+    levelAdversary = await runLevelAdversary(li, sReady, adversaryBase, false)
     if (levelAdversary.blocked) {
       const blockers = levelAdversary.issues.filter(i => i.severity === 'blocker')
       const items = blockers.length ? blockers : [{ severity: 'blocker', file: '', description: levelAdversary.summary || 'the level adversary blocked without an issue', evidence: null }]
@@ -2577,14 +2617,14 @@ for (let li = 0; li < levels.length; li++) {
         }
         const fixedReady = [...perTask.keys()].map(r => byTask.get(r.task)).filter(isReady)
         if (fixedReady.length === perTask.size) {
-          const again = enforceIntegrationAcceptance(await retryOnce(integratePrompt(li, fixedReady, levelBase, li === levels.length - 1, true, false), agentOpts('integrate', null, { label: `integrate:level-${li}:2`, phase: 'Integrate', schema: INTEGRATE_SCHEMA }), `level-${li}`), li === levels.length - 1, acceptanceEntries(plan.acceptance || []))
+          const again = enforceIntegrationAcceptance(await retryOnce(integratePrompt(li, fixedReady, levelBase, li === levels.length - 1, true, false), agentOpts('integrate', null, { label: `integrate:level-${li}:2`, phase: 'Integrate', schema: INTEGRATE_SCHEMA }), `level-${li}`), li === levels.length - 1, acceptanceEntries(plan.acceptance || []), plan.verify || [])
           levelAdversary.reintegration = again
           // The re-integration is the final state of the branch, so its acceptance (not the first integration's)
           // is what the level report carries (card integration-acceptance-recorded, behaviour 4). Only
           // `acceptance` is copied onto the level's `integration`; a failed re-integration's own `ok` and
           // `reason` stay on `levelAdversary.reintegration`, not on the level report.
           if (integration && li === levels.length - 1 && again && typeof again === 'object') integration.acceptance = again.acceptance
-          if (again && again.ok) levelAdversary.confirm = await runLevelAdversary(li, sReady.map(r => byTask.get(r.task) || r), levelBase, true)
+          if (again && again.ok) levelAdversary.confirm = await runLevelAdversary(li, sReady.map(r => byTask.get(r.task) || r), adversaryBase, true)
         }
       }
       const cleared = !!(levelAdversary.confirm && !levelAdversary.confirm.blocked)

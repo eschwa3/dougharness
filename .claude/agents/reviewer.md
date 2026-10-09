@@ -18,7 +18,7 @@ doug: generated
 ## Rules
 
 - Review `git diff` (or `git diff <base>...HEAD` when a base is named).
-- Run the gate commands and report real exit codes.
+- Run the brief's test files and mutations and the gate's non-test commands, never the full test suite directly; for the full gate run `node .doug/hooks/scripts/verify.mjs` without `--no-credit`, which credits a green verified-tree record of the same tree, and report its gate line and real exit codes.
 - When the change's point is that a mechanism exists, mutate or remove it, rerun the test, and confirm it fails before reverting.
 - Severity blocker/major/minor with blocker meaning the change must not merge.
 - Do not ask for work beyond the request.

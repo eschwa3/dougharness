@@ -15,9 +15,11 @@ export interface DougConfig {
   secrets: { enabled: boolean; ignorePaths: string[] };
   editLoop: { threshold: number; windowMinutes: number };
   stopGate: { commands: string[]; onlyIfEdited: boolean; timeoutMs: number; hookTimeoutSec: number; maxBlocks: number; ignoreChangedPaths: string[]; planScope: boolean };
+  preCommit: { noTestPaths: string[] };
   checkpoint: { enabled: boolean; mode: "commit" | "tag" };
   budget: { maxTurns: number | null };
   anchor: string[];
+  autopilot: { contextThreshold: number };
   // Card no-nested-agents-gate: Claude Code's per-project subagent nesting depth
   // (https://code.claude.com/docs/en/sub-agents.md). 1 = subagents cannot spawn subagents (the rule: only
   // the session lead orchestrates agents); null = leave the setting alone. No hook reads this key.
@@ -147,9 +149,12 @@ export function generateConfig(d: Detection): DougConfig {
       ],
       planScope: true,
     },
+    preCommit: { noTestPaths: [".doug/plan.json", ".doug/anchor.md"] },
     checkpoint: { enabled: false, mode: "commit" },
     budget: { maxTurns: null },
     anchor,
-    subagents: { maxSpawnDepth: 1, promptCacheTtl: "1h", maxConcurrentWorkflowAgents: 4 },
+    // Card autopilot-unlimited: the context percentage at which /doug-next --auto ends and hands off.
+    autopilot: { contextThreshold: 60 },
+    subagents: { maxSpawnDepth: 1, promptCacheTtl: "1h", maxConcurrentWorkflowAgents: 16 },
   };
 }

@@ -230,6 +230,75 @@ describe("seam e: doug-implement.js's report key stopClass round-trips into boar
   });
 });
 
+describe("seam f: the adversary runs beside the verifier, the reviewer and the focused check, and its finding reaches the board (card flow-adversary-parallel)", () => {
+  it("launches the adversary while verify and review are still in flight on pass 1 and while the check is in flight on a fix pass, and records a finding only it raised", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "doug-seam-f-"));
+    try {
+      const plan = {
+        version: 1,
+        status: "approved",
+        title: "Seam F adversary parallel",
+        goal: "Prove the adversary no longer waits for the verifier and the reviewer.",
+        install: null,
+        verify: ["true"],
+        acceptance: [],
+        adversary: { command: "codex-review", timeoutMs: 1, fallback: false },
+        fixAttempts: 1,
+        baseBranch: "main",
+        integrationBranch: "doug/int-seam-f",
+        tasks: [{ id: "x", title: "X", spec: "Do the thing for x, with a test.", files: ["src/x.ts"], verify: "true", card: "seam-f" }],
+      };
+      // Each fake agent notes which other agents are in flight when it starts, then stays in flight for 5 ms.
+      const inFlight = new Set();
+      const seen = {};
+      const calls = {};
+      const agent = async (prompt, opts) => {
+        const label = String(opts.label);
+        const prefix = label.split(":")[0];
+        seen[label] = [...inFlight];
+        inFlight.add(label);
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        inFlight.delete(label);
+        const n = (calls[prefix] = (calls[prefix] || 0) + 1);
+        const id = label.split(":")[1];
+        if (prefix === "implement") return { taskId: id, branch: "doug/task-x", worktreePath: `/wt/${id}`, filesTouched: [], commandsRun: [], summary: "done", blocked: false, commit: "c1" };
+        if (prefix === "fix") return { taskId: id, branch: "doug/task-x", worktreePath: `/wt/${id}`, filesTouched: [], commandsRun: [], summary: "fixed", blocked: false, commit: "c2" };
+        if (prefix === "verify") return n === 1 ? { taskId: id, passed: false, commandsRun: [], findings: ["src/x.ts returns 1, expected 2"], acceptance: [] } : { taskId: id, passed: true, commandsRun: [], findings: [], acceptance: [] };
+        if (prefix === "review") return { taskId: id, specCompliant: true, inScope: true, approve: true, issues: [] };
+        if (prefix === "check") return { taskId: id, passed: true, commandsRun: [], acceptance: [], findings: [], issues: [], inScope: true };
+        if (prefix === "adversary") {
+          return n === 1
+            ? { taskId: id, ran: true, verdict: "fail", summary: "drops the last item", issues: [{ severity: "blocker", file: "src/x.ts", description: "drops the last item", evidence: "node -e ..." }], commandsRun: [{ command: "node -e ...", ok: false, exitCode: 1 }], error: null }
+            : { taskId: id, ran: true, verdict: "pass", summary: "F2 fixed: keeps the last item", issues: [], commandsRun: [{ command: "true", ok: true }], error: null };
+        }
+        if (prefix === "integrate") return { branch: "doug/int-seam-f", merged: ["doug/task-x"], conflicts: [], verify: [], ok: true };
+        return null;
+      };
+      const report = await runWorkflowBody(withSpecHashes(plan), agent);
+      expect(seen["adversary:x"]).toEqual(expect.arrayContaining(["verify:x", "review:x"]));
+      expect(seen["adversary:x:2"]).toContain("check:x:2");
+      expect(report.ok).toBe(true);
+      const entry = report.levels[0].tasks[0];
+      expect(entry.attempts[0].stages).toEqual(["implement", "verify", "review", "adversary"]);
+      expect(entry.attempts[0].blockingStage).toBe("verify");
+      expect(entry.attempts[0].adversary.blocked).toBe(true);
+      expect(entry.attempts[1].stages).toEqual(["fix", "verify", "check", "adversary"]);
+      expect(entry.ledger.map((e) => [e.id, e.stage, e.status])).toEqual([["F1", "verify", "fixed"], ["F2", "adversary", "fixed"]]);
+
+      const reportPath = join(dir, "report.json");
+      writeFileSync(reportPath, JSON.stringify(report, null, 2));
+      let board = newBoard({ date: "2026-10-07" });
+      board = addCard(board, { id: "seam-f", title: "Seam F", goal: "prove the adversary runs in parallel", column: "flow" }, { date: "2026-10-07" });
+      saveBoard(dir, board);
+      const rec = runCli(boardCli, ["record", "seam-f", reportPath], dir);
+      expect(rec.status, rec.stderr).toBe(0);
+      expect(readFileSync(join(dir, "docs/live-runs.md"), "utf8")).toContain("- F2 (x, pass 1): unclassified. drops the last item");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("seam b: every board.mjs/plan.mjs/memory.mjs/learn.mjs subcommand a skill or doc names is a real dispatch case (card seam-contracts, extended by card learn-signals)", () => {
   function dispatchSet(scriptPath) {
     const src = readFileSync(scriptPath, "utf8");
@@ -325,4 +394,53 @@ describe("seam d: claude plugin validate catches a broken plugin manifest (card 
       }
     }
   );
+});
+
+describe("seam g: the runtime run file's agent times reach board record and summary as a wall flag (card flow-wall-budget)", () => {
+  it("a task whose agents span 45 min under a 40 min budget is flagged on the summary's first line and in the record's Stage wall row", () => {
+    const dir = mkdtempSync(join(tmpdir(), "doug-seam-g-"));
+    const claudeDir = mkdtempSync(join(tmpdir(), "doug-seam-g-claude-"));
+    try {
+      const MIN = 60_000;
+      const T0 = 1_791_000_000_000;
+      const timeline = [["implement:t", 0, 10], ["verify:t", 10, 19], ["review:t", 10, 14], ["adversary:t", 19, 28], ["fix:t:2", 28, 37], ["check:t:2", 37, 45]];
+      const runDir = join(claudeDir, "projects", "-tmp-seam-g", "sess-1");
+      mkdirSync(join(runDir, "workflows"), { recursive: true });
+      mkdirSync(join(runDir, "subagents", "workflows", "wf_x"), { recursive: true });
+      writeFileSync(join(runDir, "subagents", "workflows", "wf_x", "journal.jsonl"), JSON.stringify({ type: "started", key: "k1", agentId: "a1" }) + "\n");
+      writeFileSync(
+        join(runDir, "workflows", "wf_x.json"),
+        JSON.stringify({ runId: "wf_x", durationMs: 45 * MIN, workflowProgress: timeline.map(([label, from, to]) => ({ type: "workflow_agent", label, startedAt: T0 + from * MIN, durationMs: (to - from) * MIN })) }),
+      );
+      const report = {
+        plan: "Seam G",
+        integrationBranch: "doug/int-seam-g",
+        ok: true,
+        budget: { wallMinutes: 40 },
+        levels: [{ index: 0, tasks: [{ id: "t", card: "seam-g", implemented: true, verified: true, reviewed: true, adversary: null, models: { implement: "sonnet / medium" } }], integration: { ok: true }, integrationModel: "sonnet / medium" }],
+      };
+      const reportPath = join(dir, "report.json");
+      writeFileSync(reportPath, JSON.stringify(report, null, 2));
+      let board = newBoard({ date: "2026-10-07" });
+      board = addCard(board, { id: "seam-g", title: "Seam G", goal: "prove the wall flag round trip", column: "flow" }, { date: "2026-10-07" });
+      saveBoard(dir, board);
+
+      const flags = ["--run", "wf_x", "--claude-dir", claudeDir];
+      const summary = runCli(boardCli, ["summary", reportPath, ...flags], dir);
+      expect(summary.status, summary.stderr).toBe(0);
+      expect(summary.stdout.split("\n")[0]).toContain("over budget: task t 45 min > 40");
+
+      const rec = runCli(boardCli, ["record", "seam-g", reportPath, ...flags], dir);
+      expect(rec.status, rec.stderr).toBe(0);
+      expect(readFileSync(join(dir, "docs/live-runs.md"), "utf8")).toContain("| Stage wall | over: task t 45 min > 40 |");
+
+      // Without --run nothing is measured, and the record says so.
+      const bare = runCli(boardCli, ["summary", reportPath], dir);
+      expect(bare.status, bare.stderr).toBe(0);
+      expect(bare.stdout).not.toContain("over budget");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+      rmSync(claudeDir, { recursive: true, force: true });
+    }
+  });
 });

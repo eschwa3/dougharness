@@ -68,8 +68,8 @@ declare module "@dougharness/flow/lib/board.mjs" {
   export function saveBoard(dir: string, board: Board): void;
   export function findCard(board: Board, id: string): BoardCard;
   export type SkippedCard = { id: string; waitingOn: string[] } | { id: string; hand: true } | { id: string; flow: true };
-  export function nextReadyCard(board: Board, opts?: { track?: "flow" | "hand"; tag?: string }): { card: BoardCard | null; skipped: SkippedCard[] };
-  export function nextReadyCards(board: Board, opts: { track?: "flow" | "hand"; batch: number; tag?: string }): { cards: BoardCard[]; skipped: SkippedCard[] };
+  export function nextReadyCard(board: Board, opts?: { track?: "flow" | "hand" | "any"; tag?: string }): { card: BoardCard | null; skipped: SkippedCard[] };
+  export function nextReadyCards(board: Board, opts: { track?: "flow" | "hand" | "any"; batch: number; tag?: string }): { cards: BoardCard[]; skipped: SkippedCard[] };
   export function filterReportForCard(report: RunReport, cardId: string, taskIds?: string[]): RunReport;
   export function moveCard(board: Board, id: string, column: string, opts?: { source?: string; date?: string }): Board;
   export interface EditFields {
@@ -96,6 +96,7 @@ declare module "@dougharness/flow/lib/board.mjs" {
   ): { board: Board; removed: BoardCard; warnings: string[] };
   export type Placement = { before: string } | { after: string } | { index: number };
   export function reorderCard(board: Board, id: string, placement: Placement, opts?: { date?: string }): Board;
+  export function readyCapWarning(board: Board): string | null;
   export function newBoard(opts?: { date?: string }): Board;
   export function addCard(board: Board, card: NewCard, opts?: { date?: string }): Board;
   export function validateBoard(board: unknown): string[];
@@ -117,12 +118,21 @@ declare module "@dougharness/flow/lib/board.mjs" {
   export function parseAdversaryClasses(values: string | string[]): AdversaryClass[];
   export function classifyBlocks(report: RunReport, classes?: AdversaryClass[]): (AdversaryBlock & { key: string; class: string | null; reason: string | null })[];
   export function precisionLine(blocks: { class: string | null }[]): string;
+  export interface RunWall {
+    measured: boolean;
+    reason: string | null;
+    wallMinutes?: number;
+    unverified: string[];
+    tasks: { task: string; ms: number; passes: { pass: number; ms: number }[]; stages: { label: string; ms: number }[] }[];
+    flags: { kind: "task" | "pass" | "stage"; label: string; ms: number; limitMs: number }[];
+  }
   export function runEntry(args: {
     card: BoardCard;
     report: RunReport;
     cost?: number | null;
     codexCost?: number | null;
     wallClock?: string | null;
+    wall?: RunWall | null;
     mergeCommit?: string | null;
     record?: string | null;
     adversary?: AdversaryClass[];
@@ -143,12 +153,52 @@ declare module "@dougharness/flow/lib/board.mjs" {
     date?: string;
     rehearsal?: string | null;
   }): string;
-  export function runSummary(args: { report: RunReport; cost?: number | null; codexCost?: number | null; wallClock?: string | null; mergeCommit?: string | null }): string;
+  export function runSummary(args: { report: RunReport; cost?: number | null; codexCost?: number | null; wallClock?: string | null; wall?: RunWall | null; mergeCommit?: string | null }): string;
   export function appendRun(dir: string, markdown: string): string;
   export function recordLanding(dir: string, id: string, markdown: string): { file: string; promoted: string | null };
 }
 
+declare module "@dougharness/flow/lib/embeddings.mjs" {
+  export interface EmbeddingsConfig {
+    provider: string;
+    baseUrl?: string;
+    model: string;
+    dims: number;
+    [key: string]: unknown;
+  }
+  export interface EmbeddingProvider {
+    name: string;
+    model: string;
+    dims: number;
+    embed(texts: string[], opts?: { inputType?: "document" | "query" }): Promise<{ ok: boolean; reason?: string; vectors?: Float32Array[] }>;
+  }
+  export interface SanityPairs {
+    margin: number;
+    paraphrase: [string, string][];
+    unrelated: [string, string][];
+  }
+  export const DEFAULT_SANITY_PAIRS: string;
+  export function readMemoryConfig(dir: string): { embeddings: EmbeddingsConfig | null };
+  export function loadSanityPairs(file: string): SanityPairs;
+  export function checkEmbeddingSanity(provider: EmbeddingProvider, pairs: SanityPairs): Promise<{ ok: boolean; reason: string | null; [key: string]: unknown }>;
+  export function createProvider(cfg: { embeddings: EmbeddingsConfig | null }, opts?: { fetch?: typeof fetch; timeoutMs?: number }): EmbeddingProvider;
+  export function probeProvider(cfg: { embeddings: EmbeddingsConfig | null }, opts?: { fetch?: typeof fetch; timeoutMs?: number }): Promise<Record<string, unknown>>;
+  export function doctorReport(cfg: { embeddings: EmbeddingsConfig | null }, probe: Record<string, unknown>, platform?: string): string;
+}
+
 declare module "@dougharness/flow/lib/memory.mjs" {
+  export interface MemoryStore {
+    file: string;
+    exec(sql: string): void;
+    prepare(sql: string): { all(...args: unknown[]): unknown[]; get(...args: unknown[]): unknown; run(...args: unknown[]): unknown };
+    close(): void;
+  }
+  export function openMemory(dir: string): MemoryStore;
+  export function embedLessons(
+    m: MemoryStore,
+    provider: import("@dougharness/flow/lib/embeddings.mjs").EmbeddingProvider,
+    opts?: { batch?: number },
+  ): Promise<{ total: number; embedded: number; failed: number; reason: string | null }>;
   export function probeSqliteFts5(): { ok: boolean; reason: string | null };
   export function inspectMemory(dir: string): {
     file: string;

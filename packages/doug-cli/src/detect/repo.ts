@@ -58,6 +58,19 @@ function git(dir: string, args: string[]): string | null {
   }
 }
 
+const EMPTY_REPO_IGNORED_DIRS = new Set([".git", ".doug", ".claude"]);
+
+// An empty repo is a git repo whose top level holds only .git/.doug/.claude (and anything under them) as
+// directories, plus the files CLAUDE.md, README*, LICENSE*, .gitignore and .gitattributes. The README*/LICENSE*
+// allowance applies to files only: any other top-level directory makes the repo non-empty.
+function isEmptyRepo(dir: string, isGit: boolean): boolean {
+  if (!isGit) return false;
+  return listDir(dir).every((name) => {
+    if (isDir(dir, name)) return EMPTY_REPO_IGNORED_DIRS.has(name);
+    return name === "CLAUDE.md" || name === ".gitignore" || name === ".gitattributes" || /^(README|LICENSE)/.test(name);
+  });
+}
+
 export function detectRepo(dir: string, notes: string[]): RepoDetection {
   const isGit = git(dir, ["rev-parse", "--is-inside-work-tree"]) === "true";
   let defaultBranch: string | null = null;
@@ -95,5 +108,5 @@ export function detectRepo(dir: string, notes: string[]): RepoDetection {
   const readme = readText(dir, "README.md") || "";
   const readmeHasSetup = /^#+\s*(getting started|setup|installation|install|development|running)/im.test(readme);
 
-  return { isGit, defaultBranch, ci, gitHooks, envFiles, migrationDirs, generatedDirs, infraPaths, existingAgentFiles, hasClaudeMd, hasClaudeSettings, readmeHasSetup };
+  return { isGit, defaultBranch, ci, gitHooks, envFiles, migrationDirs, generatedDirs, infraPaths, existingAgentFiles, hasClaudeMd, hasClaudeSettings, readmeHasSetup, isEmpty: isEmptyRepo(dir, isGit) };
 }

@@ -1,15 +1,15 @@
 // Real cost of one doug-implement run, from the local Claude Code transcripts (decision 0005, card cost-per-run).
 // No network: the run's agent ids come from its journal under ~/.claude/projects/<slug>/<session>/subagents/workflows/<run>/,
 // each agent's tokens are summed from its transcript there, and the price comes from the table below.
-import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 
 // USD per million tokens, first-party Claude API list prices. Cache reads are 0.1x input (0.025x on Fable 5.1,
 // 0.05x on Opus 5.5); cache writes are 1.25x input for the 5-minute TTL and 2x for the 1-hour TTL. Opus 5.5:
 // input 4, output 20, cacheRead 0.2, cacheWrite5m 5, cacheWrite1h 8; source
-// https://platform.claude.com/docs/en/about-claude/pricing, fetched 2026-09-23. Update the date with the table.
-export const PRICES_DATED = "2026-09-23";
+// https://platform.claude.com/docs/en/about-claude/pricing, fetched 2026-10-04. Update the date with the table.
+export const PRICES_DATED = "2026-10-04";
 export const PRICES = {
   "claude-fable-5-1": { input: 10, output: 50, cacheRead: 0.25, cacheWrite5m: 12.5, cacheWrite1h: 20 },
   "claude-fable-5": { input: 10, output: 50, cacheRead: 1, cacheWrite5m: 12.5, cacheWrite1h: 20 },
@@ -18,6 +18,7 @@ export const PRICES = {
   "claude-opus-4-8": { input: 5, output: 25, cacheRead: 0.5, cacheWrite5m: 6.25, cacheWrite1h: 10 },
   "claude-opus-4-7": { input: 5, output: 25, cacheRead: 0.5, cacheWrite5m: 6.25, cacheWrite1h: 10 },
   "claude-opus-4-6": { input: 5, output: 25, cacheRead: 0.5, cacheWrite5m: 6.25, cacheWrite1h: 10 },
+  "claude-sonnet-5-5": { input: 2, output: 10, cacheRead: 0.2, cacheWrite5m: 2.5, cacheWrite1h: 4 },
   "claude-sonnet-5": { input: 2, output: 10, cacheRead: 0.2, cacheWrite5m: 2.5, cacheWrite1h: 4 },
   "claude-sonnet-4-6": { input: 3, output: 15, cacheRead: 0.3, cacheWrite5m: 3.75, cacheWrite1h: 6 },
   "claude-haiku-4-5": { input: 1, output: 5, cacheRead: 0.1, cacheWrite5m: 1.25, cacheWrite1h: 2 },
@@ -318,6 +319,64 @@ export function costRun({ runId, claudeDir, projectDir, report, reportPath } = {
   };
 }
 
+// Card flow-wall-budget: slow tasks flagged after the run, from the runtime's run file (workflowProgress[] agents
+// carry startedAt and durationMs). Detection only; the budget is the report's wallMinutes. A task's wall and a
+// pass's wall are spans (latest end minus earliest start), never sums, since agents of a pass run alongside.
+export const PASS_WALL_SHARE = 0.75;
+export const STAGE_WALL_SHARE = 0.25;
+
+export function runWall(run, { wallMinutes } = {}) {
+  const MIN = 60000;
+  const result = (extra) => ({ measured: false, reason: null, wallMinutes, unverified: [], tasks: [], flags: [], ...extra });
+  const agents = run && Array.isArray(run.workflowProgress) ? run.workflowProgress.filter((p) => p && p.type === "workflow_agent") : [];
+  if (!agents.length) return result({ reason: "no run file" });
+  const timed = (a) => typeof a.startedAt === "number" && typeof a.durationMs === "number";
+  if (!agents.some(timed)) return result({ reason: "no agent times" });
+  const taskLimit = wallMinutes * MIN;
+  const passLimit = PASS_WALL_SHARE * taskLimit;
+  const stageLimit = STAGE_WALL_SHARE * taskLimit;
+  const byTask = new Map();
+  const stageFlags = [];
+  for (const a of agents) {
+    const label = String(a.label || "");
+    const parsed = parseLabel(label.replace(/:retry$/, ""));
+    if (timed(a) && a.durationMs > stageLimit) stageFlags.push({ kind: "stage", label, ms: a.durationMs, limitMs: stageLimit });
+    if (!parsed.task || /^level-\d+$/.test(parsed.task)) continue;
+    const t = byTask.get(parsed.task) || { task: parsed.task, agents: [], missing: false };
+    if (timed(a)) t.agents.push({ pass: parsed.pass ?? 1, from: a.startedAt, to: a.startedAt + a.durationMs });
+    else t.missing = true;
+    byTask.set(parsed.task, t);
+  }
+  const span = (list) => Math.max(...list.map((x) => x.to)) - Math.min(...list.map((x) => x.from));
+  const unverified = [];
+  const tasks = [];
+  const flags = [];
+  for (const t of byTask.values()) {
+    if (t.missing || !t.agents.length) {
+      unverified.push(t.task);
+      continue;
+    }
+    const passNums = [...new Set(t.agents.map((x) => x.pass))].sort((x, y) => x - y);
+    const passes = passNums.map((n) => ({ pass: n, ms: span(t.agents.filter((x) => x.pass === n)) }));
+    const ms = span(t.agents);
+    tasks.push({ task: t.task, ms, passes, stages: [] });
+    if (ms > taskLimit) flags.push({ kind: "task", label: t.task, ms, limitMs: taskLimit });
+    for (const p of passes) if (p.ms > passLimit) flags.push({ kind: "pass", label: t.task, pass: p.pass, ms: p.ms, limitMs: passLimit });
+  }
+  return result({ measured: true, unverified, tasks, flags: [...flags, ...stageFlags] });
+}
+
+// runWall for a run id: finds the run file next to the journal; never throws, an unreadable run is not measured.
+export function wallForRun({ runId, claudeDir, projectDir, wallMinutes } = {}) {
+  try {
+    const found = findRunDir({ runId, claudeDir, projectDir });
+    if (!found) return runWall(null, { wallMinutes });
+    return runWall(readJson(found.runFile), { wallMinutes });
+  } catch {
+    return runWall(null, { wallMinutes });
+  }
+}
+
 // A batch run's cost split per card (card parallel-cards): every agent whose task is one of a card's plan tasks
 // counts for that card; the shared stages (integrate, the level adversary: task `level-<n>`) are listed once as
 // `shared`; agents on no card's task are `other`. Nothing estimated: unpriced agents are counted, not summed.
@@ -358,6 +417,72 @@ export function renderCostByCard(byCard) {
 
 const fmtInt = (n) => String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
 const fmtUsd = (n) => (n === null ? "unpriced" : `$${n.toFixed(2)}`);
+
+// The top-level transcript path for a session id or "latest" (the most recently modified one in the project's slug
+// directory). Throws when none is found. Used by costSession and scripts/context.mjs.
+export function sessionTranscriptPath({ session, claudeDir = join(homedir(), ".claude"), projectDir = process.cwd() } = {}) {
+  if (!session) throw new Error("a session id or latest is required");
+  const slugDir = join(claudeDir, "projects", projectSlug(projectDir));
+  let id = session;
+  if (session === "latest") {
+    let best = null;
+    if (existsSync(slugDir)) {
+      for (const e of readdirSync(slugDir, { withFileTypes: true })) {
+        if (!e.isFile() || !e.name.endsWith(".jsonl")) continue;
+        const mtime = statSync(join(slugDir, e.name)).mtimeMs;
+        if (!best || mtime > best.mtime) best = { id: e.name.slice(0, -".jsonl".length), mtime };
+      }
+    }
+    if (!best) throw new Error(`no session transcript under ${slugDir}`);
+    id = best.id;
+  }
+  const top = join(slugDir, `${id}.jsonl`);
+  if (!existsSync(top)) throw new Error(`no transcript for session ${id} under ${slugDir}`);
+  return top;
+}
+
+// The cost of one Claude Code session (card autopilot): its top-level transcript plus every *.jsonl under
+// <slug>/<session>/subagents/, recursively (plain agents and workflows/wf_*/ agents). `session` is an id or "latest",
+// the most recently modified top-level transcript in the project's slug directory. Throws when none is found.
+// Workflow journal.jsonl files carry no usage lines and add nothing.
+export function costSession({ session, claudeDir = join(homedir(), ".claude"), projectDir = process.cwd() } = {}) {
+  const top = sessionTranscriptPath({ session, claudeDir, projectDir });
+  const slugDir = join(claudeDir, "projects", projectSlug(projectDir));
+  const id = basename(top, ".jsonl");
+  const files = [top];
+  const walk = (dir) => {
+    for (const e of readdirSync(dir, { withFileTypes: true })) {
+      const p = join(dir, e.name);
+      if (e.isDirectory()) walk(p);
+      else if (e.isFile() && e.name.endsWith(".jsonl")) files.push(p);
+    }
+  };
+  const subDir = join(slugDir, id, "subagents");
+  if (existsSync(subDir)) walk(subDir);
+  const usage = emptyUsage();
+  let usd = 0;
+  let unpriced = 0;
+  const notes = [];
+  for (const f of files) {
+    const t = transcriptUsage(f);
+    addUsage(usage, t.usage);
+    if (!t.messages) continue;
+    const price = t.model ? priceUsage(t.usage, t.model) : null;
+    if (price === null) {
+      unpriced++;
+      notes.push(`${f}: model ${t.model || "unknown"} is not in the price table; not priced`);
+    } else usd += price;
+  }
+  return { session: id, files: files.length, total: { usage, usd, unpriced, agents: files.length }, pricesDated: PRICES_DATED, notes };
+}
+
+export function renderSession(result) {
+  const t = result.total;
+  const lines = [`Session ${result.session}: ${result.files} transcript${result.files === 1 ? "" : "s"}.`];
+  lines.push(`Session total: ${fmtInt(t.usage.input)} input, ${fmtInt(t.usage.output)} output, ${fmtInt(t.usage.cacheRead)} cache read, ${fmtInt(t.usage.cacheWrite)} cache write tokens; ${fmtUsd(t.usd)}${t.unpriced ? ` (${t.unpriced} transcript(s) unpriced)` : ""} at list prices dated ${result.pricesDated}.`);
+  for (const n of result.notes) lines.push(`Note: ${n}.`);
+  return lines.join("\n") + "\n";
+}
 
 export function renderCost(result) {
   const lines = [];

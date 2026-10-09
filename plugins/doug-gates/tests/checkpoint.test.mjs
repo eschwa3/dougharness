@@ -10,6 +10,9 @@ describe("checkpoint helpers", () => {
     expect(commitMessage({}, [{ name: "typecheck", ok: true }, { name: "test", ok: true }])).toBe("doug: checkpoint\n\ngate: typecheck ok, test ok");
     expect(commitMessage({ checkpoint: { message: "wip" } }, [])).toBe("wip");
   });
+  it("labels a targeted test:unit run in the message body (card gate-docs-skip-unless-named)", () => {
+    expect(commitMessage({}, [{ name: "test:unit", ok: true, targeted: 2 }])).toBe("doug: checkpoint\n\ngate: test:unit (targeted: 2 files) ok");
+  });
   it("skips without touching git when disabled, outside a repo, or with nothing changed", () => {
     const dir = makeProject();
     expect(checkpoint({ dir, cfg: {}, changed: ["a"] })).toEqual({ skipped: "disabled" });

@@ -13,6 +13,21 @@ const DEFAULT_TIMEOUT_MS = 2000;
 const OLLAMA_BASE_URL = "http://localhost:11434";
 const DEFAULT_MODEL = "embeddinggemma";
 
+// Provider presets (card embedding-providers-unsloth): memory.embeddings.preset fills only the fields the
+// config leaves unset. sendsDims: whether the request carries `dimensions`; requiresKey: an unset key env var
+// is refused without calling the server; modelsList: "v1" lists models with GET /v1/models.
+const PRESETS = {
+  ollama: { provider: "openai-compatible", baseUrl: OLLAMA_BASE_URL, apiKeyEnv: undefined, sendsDims: true, requiresKey: false, modelsList: null },
+  unsloth: { provider: "openai-compatible", baseUrl: "http://127.0.0.1:8888", apiKeyEnv: "UNSLOTH_API_KEY", sendsDims: false, requiresKey: true, modelsList: "v1" },
+  openai: { provider: "openai-compatible", baseUrl: "https://api.openai.com", apiKeyEnv: "OPENAI_API_KEY", sendsDims: true, requiresKey: true, modelsList: "v1" },
+  voyage: { provider: "voyage", baseUrl: "https://api.voyageai.com", apiKeyEnv: "VOYAGE_API_KEY", sendsDims: true, requiresKey: true, modelsList: null },
+  custom: { provider: undefined, baseUrl: undefined, apiKeyEnv: undefined, sendsDims: true, requiresKey: false, modelsList: null },
+};
+
+function presetOf(e) {
+  return e && typeof e.preset === "string" && Object.hasOwn(PRESETS, e.preset) ? PRESETS[e.preset] : null;
+}
+
 function isValidEmbeddingsConfig(e) {
   return !!(
     e &&
@@ -44,11 +59,28 @@ export function readMemoryConfig(dir) {
   const memory = raw && typeof raw === "object" ? raw.memory : undefined;
   const e = memory && typeof memory === "object" ? memory.embeddings : undefined;
   if (e === null || e === undefined) return { embeddings: null };
-  if (!isValidEmbeddingsConfig(e)) {
+  const resolved = applyPreset(e);
+  if (!isValidEmbeddingsConfig(resolved)) {
     process.stderr.write(`[doug] ${CONFIG_RELPATH} memory.embeddings is not a valid shape; treating as unset (keyword-only)\n`);
     return { embeddings: null };
   }
+  if (e.preset !== undefined) return {
+      embeddings: { preset: e.preset, provider: resolved.provider, baseUrl: resolved.baseUrl, model: resolved.model, dims: resolved.dims, apiKeyEnv: resolved.apiKeyEnv },
+    };
   return { embeddings: { provider: e.provider, baseUrl: e.baseUrl, model: e.model, dims: e.dims, apiKeyEnv: e.apiKeyEnv } };
+}
+
+// A preset fills provider, baseUrl and apiKeyEnv only where the config leaves them unset. A config with no
+// `preset` key is returned as is.
+function applyPreset(e) {
+  if (!e || typeof e !== "object" || e.preset === undefined) return e;
+  const p = presetOf(e);
+  if (!p) return null;
+  const out = { ...e };
+  for (const k of ["provider", "baseUrl", "apiKeyEnv"]) {
+    if (out[k] === undefined && p[k] !== undefined) out[k] = p[k];
+  }
+  return out;
 }
 
 function isValidIndexConfig(idx) {
@@ -233,7 +265,13 @@ export async function checkEmbeddingSanity(provider, pairs) {
 // Task prefixes the provider layer must add; the server never adds them. Only the models below carry a
 // prefix; every other model gets none. mxbai and qwen3 prefix queries only, documents get "".
 function prefixFor(model, inputType) {
-  const m = String(model || "");
+  // Match on the lowercased basename after the last "/", so HF-style names (org/name) and Ollama names agree.
+  let m = String(model || "").split(/[/\\]/).pop().toLowerCase();
+  // LM Studio-style "text-embedding-<name>" ids: match on <name> when it is a prefixed family (not OpenAI's text-embedding-3-*).
+  if (m.startsWith("text-embedding-")) {
+    const rest = m.slice("text-embedding-".length);
+    if (["mxbai-embed-large", "qwen3-embedding", "embeddinggemma", "nomic"].some((f) => rest.startsWith(f))) m = rest;
+  }
   // https://huggingface.co/mixedbread-ai/mxbai-embed-large-v1 README ("add the prompt for query (not for
   // documents)"); https://ollama.com/library/mxbai-embed-large
   if (m.startsWith("mxbai-embed-large")) {
@@ -259,34 +297,73 @@ function isAbortLike(err) {
   return err && (err.name === "AbortError" || err.name === "TimeoutError");
 }
 
-async function readBodySnippet(res) {
+// The key never reaches a reason: a server that echoes the Authorization header back in an error body gets
+// every occurrence of the key replaced.
+async function readBodySnippet(res, key) {
   try {
-    return (await res.text()).slice(0, 200);
+    let text = await res.text();
+    if (key) text = text.split(key).join("[redacted]");
+    return text.slice(0, 200);
   } catch {
     return "";
   }
 }
 
-async function embedOpenAICompatible(e, texts, inputType, { fetchImpl, timeoutMs }) {
+// A provider whose baseUrl host is localhost, 127.0.0.1 or ::1 never requires a key (card local-provider-no-key):
+// the key is sent only when its env var is set, and a 401/403 says the server wants one. An unparseable URL is not local.
+function isLocalUrl(baseUrl) {
+  try {
+    const h = new URL(baseUrl).hostname;
+    return h === "localhost" || h === "127.0.0.1" || h === "[::1]" || h === "::1";
+  } catch {
+    return false;
+  }
+}
+
+function localKeyReason(e) {
+  const preset = presetOf(e);
+  const name = e.apiKeyEnv || (preset && preset.apiKeyEnv) || "OPENAI_API_KEY";
+  return process.env[name] ? `server rejected the key in ${name}` : `server requires a key: set ${name}`;
+}
+
+// `state` is the provider instance's memory: { omitDims } turns true once a server has rejected `dimensions`.
+async function embedOpenAICompatible(e, texts, inputType, { fetchImpl, timeoutMs }, state = { omitDims: false }) {
+  const preset = presetOf(e);
+  const local = isLocalUrl(e.baseUrl);
+  if (preset && preset.requiresKey && !local) {
+    const name = e.apiKeyEnv || "OPENAI_API_KEY";
+    if (!process.env[name]) return { ok: false, reason: `missing API key: set ${name}` };
+  }
   const prefix = prefixFor(e.model, inputType);
   const input = texts.map((t) => prefix + t);
   const url = `${e.baseUrl.replace(/\/$/, "")}/v1/embeddings`;
   const headers = { "content-type": "application/json" };
-  const key = process.env[e.apiKeyEnv || "OPENAI_API_KEY"];
+  const key = process.env[e.apiKeyEnv || (local && preset && preset.apiKeyEnv) || "OPENAI_API_KEY"];
   if (key) headers.authorization = `Bearer ${key}`;
-  let res;
-  try {
-    res = await fetchImpl(url, {
-      method: "POST",
-      headers,
-      body: JSON.stringify({ model: e.model, input, dimensions: e.dims }),
-      signal: AbortSignal.timeout(timeoutMs),
-    });
-  } catch (err) {
-    return { ok: false, reason: isAbortLike(err) ? "timeout" : `request failed: ${err.message}` };
+  const send = async (withDims) => {
+    const payload = withDims ? { model: e.model, input, dimensions: e.dims } : { model: e.model, input };
+    try {
+      return await fetchImpl(url, { method: "POST", headers, body: JSON.stringify(payload), signal: AbortSignal.timeout(timeoutMs) });
+    } catch (err) {
+      return { failure: { ok: false, reason: isAbortLike(err) ? "timeout" : `request failed: ${err.message}` } };
+    }
+  };
+  const sendsDims = !(preset && !preset.sendsDims) && !state.omitDims;
+  let res = await send(sendsDims);
+  if (res.failure) return res.failure;
+  let body = null;
+  if (!res.ok) {
+    body = await readBodySnippet(res, key);
+    // A server that rejects `dimensions` (400 naming it): retry this batch once without it, remember that.
+    if (sendsDims && res.status === 400 && /dimensions/i.test(body)) {
+      state.omitDims = true;
+      res = await send(false);
+      if (res.failure) return res.failure;
+      body = res.ok ? null : await readBodySnippet(res, key);
+    }
   }
   if (!res.ok) {
-    const body = await readBodySnippet(res);
+    if (local && (res.status === 401 || res.status === 403)) return { ok: false, reason: localKeyReason(e) };
     return { ok: false, reason: `HTTP ${res.status}${body ? `: ${body}` : ""}` };
   }
   let json;
@@ -334,7 +411,7 @@ async function embedVoyage(e, texts, inputType, { fetchImpl, timeoutMs }) {
     return { ok: false, reason: isAbortLike(err) ? "timeout" : `request failed: ${err.message}` };
   }
   if (!res.ok) {
-    const body = await readBodySnippet(res);
+    const body = await readBodySnippet(res, key);
     return { ok: false, reason: `HTTP ${res.status}${body ? `: ${body}` : ""}` };
   }
   let json;
@@ -380,10 +457,11 @@ export function createProvider(cfg, opts = {}) {
   if (!e) return null;
   const fetchImpl = opts.fetch || globalThis.fetch;
   const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const state = { omitDims: false };
   const sendBatch =
     e.provider === "voyage"
       ? (texts, inputType) => embedVoyage(e, texts, inputType, { fetchImpl, timeoutMs })
-      : (texts, inputType) => embedOpenAICompatible(e, texts, inputType, { fetchImpl, timeoutMs });
+      : (texts, inputType) => embedOpenAICompatible(e, texts, inputType, { fetchImpl, timeoutMs }, state);
   return {
     name: e.provider,
     model: e.model,
@@ -424,6 +502,53 @@ function isOllamaPresetUrl(baseUrl) {
   }
 }
 
+// Whether a /v1/models entry is the configured model: the id equals it, or the id's last "/" segment equals or
+// starts with it, case-insensitively.
+function v1ModelMatches(entry, wantModel) {
+  const id = entry && typeof entry.id === "string" ? entry.id.toLowerCase() : "";
+  const want = String(wantModel).toLowerCase();
+  if (!id) return false;
+  if (id === want) return true;
+  const last = id.split("/").pop();
+  return last === want || last.startsWith(want);
+}
+
+// The unsloth/openai presets: GET <base>/v1/models with the Bearer key. Never throws; the key is never put in
+// a reason.
+async function probeV1Models(e, root, wantModel, { fetchImpl, timeoutMs }) {
+  const kind = e.preset;
+  const envName = e.apiKeyEnv || (presetOf(e) && presetOf(e).apiKeyEnv) || "OPENAI_API_KEY";
+  const base = { reachable: false, kind, version: null, models: null, modelPresent: false, modelLoaded: null, embedOk: null };
+  const key = process.env[envName];
+  const local = isLocalUrl(root);
+  if (!key && !local) return { ...base, reason: `missing API key: set ${envName}` };
+  let res;
+  try {
+    res = await fetchImpl(`${root}/v1/models`, { headers: key ? { authorization: `Bearer ${key}` } : {}, signal: AbortSignal.timeout(timeoutMs) });
+  } catch (err) {
+    return { ...base, reason: isAbortLike(err) ? "timeout" : `request failed: ${err.message}` };
+  }
+  if (local && (res.status === 401 || res.status === 403)) return { ...base, reason: localKeyReason(e) };
+  if (res.status === 401) return { ...base, reason: `HTTP 401: key rejected or missing; set ${envName}` };
+  if (!res.ok) return { ...base, reason: `HTTP ${res.status}` };
+  let json;
+  try {
+    json = await res.json();
+  } catch (err) {
+    return { ...base, reason: `invalid JSON response: ${err.message}` };
+  }
+  const entries = Array.isArray(json && json.data) ? json.data : [];
+  const match = entries.find((m) => v1ModelMatches(m, wantModel));
+  return {
+    ...base,
+    reachable: true,
+    models: entries.map((m) => m && m.id).filter((id) => typeof id === "string"),
+    modelPresent: !!match,
+    modelLoaded: match && typeof match.loaded === "boolean" ? match.loaded : null,
+    reason: null,
+  };
+}
+
 // Probes a configured provider, or a local Ollama when nothing is configured. GET /api/version (then /api/tags)
 // is tried first; only when it succeeds is this reported as kind "ollama" with a model list. When /api/version
 // fails — a working llama-server, vLLM, LM Studio, or hosted key never serves it — this falls back to one
@@ -431,15 +556,24 @@ function isOllamaPresetUrl(baseUrl) {
 // reachable non-Ollama provider must never be told to go install Ollama. The one exception: an openai-compatible
 // provider configured at the Ollama preset host:port (localhost/127.0.0.1:11434) that is NOT reachable even via
 // the embed fallback is still reported as kind "ollama" — that combination means a down local Ollama, the one
-// case doctor exists to catch, not a different, genuinely unreachable server. Never throws; every branch has a
+// case doctor exists to catch, not a different, genuinely unreachable server. With nothing configured the probe
+// targets DOUG_OLLAMA_BASE_URL when set and non-empty (read at call time), else localhost:11434; a configured
+// baseUrl always wins. Never throws; every branch has a
 // 2s timeout.
 export async function probeProvider(cfg, opts = {}) {
   const fetchImpl = opts.fetch || globalThis.fetch;
   const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const e = cfg && cfg.embeddings;
-  const baseUrl = e && e.baseUrl ? e.baseUrl : OLLAMA_BASE_URL;
+  const baseUrl = e && e.baseUrl ? e.baseUrl : process.env.DOUG_OLLAMA_BASE_URL || OLLAMA_BASE_URL;
   const wantModel = e && e.model ? e.model : DEFAULT_MODEL;
   const root = baseUrl.replace(/\/$/, "");
+  const preset = presetOf(e);
+  if (preset && preset.modelsList === "v1") return probeV1Models(e, root, wantModel, { fetchImpl, timeoutMs });
+  if (preset && e.provider === "voyage") {
+    // No models endpoint is documented for Voyage: one embed probe, never the Ollama /api/version path.
+    const result = await createProvider(cfg, { fetch: fetchImpl, timeoutMs }).embed(["probe"]);
+    return { reachable: result.ok, kind: "voyage", version: null, models: null, modelPresent: null, embedOk: result.ok, reason: result.ok ? null : result.reason };
+  }
   const isPresetHost = (!e || e.provider === "openai-compatible") && isOllamaPresetUrl(baseUrl);
 
   let version = null;
@@ -498,6 +632,13 @@ const INSTALL_COMMANDS = {
 const PRESET_SNIPPET =
   '"memory": { "embeddings": { "provider": "openai-compatible", "baseUrl": "http://localhost:11434", "model": "embeddinggemma", "dims": 512 } }';
 
+const PRESET_SNIPPETS = [
+  ["ollama", '"memory": { "embeddings": { "preset": "ollama", "model": "embeddinggemma", "dims": 512 } }'],
+  ["unsloth", '"memory": { "embeddings": { "preset": "unsloth", "model": "embeddinggemma", "dims": 512 } }  (a key is only needed if the server enforces auth: UNSLOTH_API_KEY)'],
+  ["openai", '"memory": { "embeddings": { "preset": "openai", "model": "text-embedding-3-small", "dims": 512 } }  (set OPENAI_API_KEY)'],
+  ["voyage", '"memory": { "embeddings": { "preset": "voyage", "model": "voyage-4", "dims": 512 } }  (set VOYAGE_API_KEY)'],
+];
+
 function installCommandFor(platform) {
   return INSTALL_COMMANDS[platform] || INSTALL_COMMANDS.linux;
 }
@@ -527,10 +668,19 @@ export function doctorReport(cfg, probe, platform = process.platform) {
     }
     lines.push("Enable it by adding to .doug/config.json:");
     lines.push(`  ${PRESET_SNIPPET}`);
+    lines.push("Or pick a provider preset (one snippet per preset):");
+    for (const [name, snippet] of PRESET_SNIPPETS) lines.push(`  ${name}: ${snippet}`);
     return lines.join("\n");
   }
 
   lines.push(`memory.embeddings is configured: ${embeddings.provider} ${embeddings.model}/${embeddings.dims} at ${embeddings.baseUrl}.`);
+  if (presetOf(embeddings) && PRESETS[embeddings.preset].modelsList === "v1") {
+    if (!probe.reachable) lines.push(`Not reachable: ${probe.reason || "unknown error"}.`);
+    else if (probe.modelPresent === false) lines.push(`Reachable but ${embeddings.model} is not listed by ${embeddings.baseUrl}/v1/models.`);
+    else if (probe.modelLoaded === false) lines.push(`${embeddings.model} is listed but not loaded; load it on the server.`);
+    else lines.push(`Reachable; would use ${embeddings.model}/${embeddings.dims}.`);
+    return lines.join("\n");
+  }
   if (!probe.reachable) {
     lines.push(`Not reachable: ${probe.reason || "unknown error"}.`);
     // Only an Ollama-shaped miss (or nothing detected at all) gets install instructions — a real, reachable

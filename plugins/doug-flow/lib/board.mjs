@@ -51,6 +51,81 @@ export const DEFAULT_COLUMNS = [
   { id: "done", title: "Done", hint: "merged, gate green, documented" },
 ];
 
+// Ready is capped at 7; only the user promotes cards to Ready. A line for stderr when it holds more, else null.
+export const READY_CAP = 7;
+export function readyCapWarning(board) {
+  const n = board.cards.filter((c) => c.column === "ready").length;
+  return n <= READY_CAP ? null : `warning: Ready holds ${n} cards, above the cap of ${READY_CAP}; only the user promotes cards to Ready\n`;
+}
+
+// Wall-clock budget per card in minutes, a size x class table at p80 of measured landings (cards
+// autopilot-wall-cap-by-size, wall-budget-size-class). Each size has `all`; a class key is present only when its
+// cell had WALL_BUDGET_MIN_N or more landings. `board.mjs budgets --from docs/live-runs.md` recomputes it.
+export const WALL_BUDGET_MIN_N = 5;
+export const WALL_BUDGET_MIN = {"S":{"all":57,"code":53,"docs":29,"gate-script":116,"prose":50,"tests-only":66},"M":{"all":102,"code":112,"gate-script":289},"L":{"all":274}};
+
+// A card's budget: its size's class cell when it has one, else the size's `all`. No or an unknown size counts as M.
+export function cardBudgetMinutes(card, table = WALL_BUDGET_MIN) {
+  const size = card && (card.size === "S" || card.size === "M" || card.size === "L") ? card.size : "M";
+  const row = table[size];
+  const cls = card && card.class;
+  return typeof cls === "string" && Object.prototype.hasOwnProperty.call(row, cls) && cls !== "all" ? row[cls] : row.all;
+}
+
+export function wallCapMinutes(cards, table = WALL_BUDGET_MIN) {
+  return cards.reduce((sum, c) => sum + cardBudgetMinutes(c, table), 0);
+}
+
+// The landings in a docs/live-runs.md text: one { id, minutes } per `## <date>, <id>: <title>` section that has a
+// `| Wall clock | <n> min |` row (text after min is allowed; a decimal n is skipped) (the first such row). Older multi-column tables have no such row and are skipped.
+export function parseLiveRunWalls(text) {
+  const out = [];
+  let id = null;
+  let seen = false;
+  for (const line of String(text).split("\n")) {
+    if (line.startsWith("## ")) {
+      const m = /^## \d{4}-\d{2}-\d{2}, ([^:\s]+): /.exec(line);
+      id = m ? m[1] : null;
+      seen = false;
+      continue;
+    }
+    if (id === null || seen) continue;
+    const w = /^\| Wall clock \| (\d+) min(?:\s[^|]*)? \|\s*$/.exec(line);
+    if (w) {
+      out.push({ id, minutes: Number(w[1]) });
+      seen = true;
+    }
+  }
+  return out;
+}
+
+// The table recomputed from samples joined to their cards: p80 (sorted ascending, index min(floor(0.8 n), n - 1)) per size and per size/class cell. A
+// class cell under minN samples is left out (it falls back to its size's `all`); a size with no samples keeps the
+// fallback's `all`. `cells` lists every cell with its n and p80 (cls "all" is the size row; p80 null when n is 0).
+export function wallBudgetTable(samples, board, { minN = WALL_BUDGET_MIN_N, fallback = WALL_BUDGET_MIN } = {}) {
+  const byId = new Map(board.cards.map((c) => [c.id, c]));
+  const groups = { S: { all: [] }, M: { all: [] }, L: { all: [] } };
+  for (const s of samples) {
+    const card = byId.get(s.id);
+    if (!card || !(card.size === "S" || card.size === "M" || card.size === "L")) continue;
+    groups[card.size].all.push(s.minutes);
+    if (typeof card.class === "string" && card.class && card.class !== "all") (groups[card.size][card.class] ||= []).push(s.minutes);
+  }
+  const p80 = (xs) => [...xs].sort((a, b) => a - b)[Math.min(Math.floor(0.8 * xs.length), xs.length - 1)];
+  const table = {};
+  const cells = [];
+  for (const size of ["S", "M", "L"]) {
+    const g = groups[size];
+    table[size] = { all: g.all.length ? p80(g.all) : fallback[size].all };
+    cells.push({ size, cls: "all", n: g.all.length, p80: g.all.length ? p80(g.all) : null });
+    for (const cls of Object.keys(g).filter((k) => k !== "all").sort()) {
+      cells.push({ size, cls, n: g[cls].length, p80: p80(g[cls]) });
+      if (g[cls].length >= minN) table[size][cls] = p80(g[cls]);
+    }
+  }
+  return { table, cells };
+}
+
 function today() {
   return new Date().toISOString().slice(0, 10);
 }
@@ -221,7 +296,8 @@ export function findCard(board, id) {
 // on something are reported so the user can see why they were skipped.
 // The first Ready card on the given track whose deps are Done. A card on the hand track is built directly in the
 // checkout (tests, gate, commit) through doug-hand, which /doug-next hands it to by id; a flow card the other way round. A Ready card on
-// the other track is skipped with hand: true or flow: true so the skill can say so. Decision 0005.
+// the other track is skipped with hand: true or flow: true so the skill can say so. Decision 0005. `track: "any"`
+// takes a Ready card of either track (card autopilot): no track skip entries, the deps rule unchanged.
 // `tag`, when given, filters to Ready cards carrying it: a card without it is skipped SILENTLY (not pushed onto
 // `skipped`, since a caller-requested filter should not print a "skipping" line per card it filters out); a `tag`
 // outside boardTags(board) throws.
@@ -233,7 +309,7 @@ export function nextReadyCard(board, { track = "flow", tag } = {}) {
     if (c.column !== READY) continue;
     if (tag !== undefined && !(c.tags || []).includes(tag)) continue;
     const cardTrack = c.track === "hand" ? "hand" : "flow";
-    if (cardTrack !== track) {
+    if (track !== "any" && cardTrack !== track) {
       skipped.push(cardTrack === "hand" ? { id: c.id, hand: true } : { id: c.id, flow: true });
       continue;
     }
@@ -260,7 +336,7 @@ export function nextReadyCards(board, { track = "flow", batch, tag } = {}) {
     if (c.column !== READY || cards.length >= batch) continue;
     if (tag !== undefined && !(c.tags || []).includes(tag)) continue;
     const cardTrack = c.track === "hand" ? "hand" : "flow";
-    if (cardTrack !== track) {
+    if (track !== "any" && cardTrack !== track) {
       skipped.push(cardTrack === "hand" ? { id: c.id, hand: true } : { id: c.id, flow: true });
       continue;
     }
@@ -602,7 +678,36 @@ function outcomeOf(report) {
   return "not green";
 }
 
-export function runEntry({ card, report, cost = null, codexCost = null, wallClock = null, mergeCommit = null, record = null, adversary = [], date = new Date().toISOString().slice(0, 10), batch = null, sharedCost = null, taskIds = [], note = null, rehearsal = null }) {
+// Card flow-wall-budget: the Stage wall row and the summary note from cost.mjs's runWall result (passed in; this
+// library does not import cost.mjs). `keep` narrows the flags to one card's entry of a batch run.
+const wallMin = (ms) => {
+  const m = ms / 60000;
+  return Number.isInteger(m) ? String(m) : m.toFixed(1);
+};
+function wallFlagText(f) {
+  const what = f.kind === "pass" ? `${f.label} pass ${f.pass ?? "?"}` : `${f.kind} ${f.label}`;
+  return `${what} ${wallMin(f.ms)} min > ${wallMin(f.limitMs)}`;
+}
+function wallFlagsFor(wall, report, batch, cardId) {
+  const flags = Array.isArray(wall.flags) ? wall.flags : [];
+  if (!Array.isArray(batch) || batch.length < 2) return flags;
+  const ids = (report.levels || []).flatMap((l) => (l.tasks || []).map((t) => t.id));
+  return flags.filter((f) => {
+    const label = String(f.label).replace(/:retry$/, "");
+    if (/(^|:)level-\d+$/.test(label)) return batch[0] === cardId;
+    return ids.some((id) => label === id || label.startsWith(`${id}:`) || label.includes(`:${id}:`) || label.endsWith(`:${id}`));
+  });
+}
+function wallRow(wall, flags) {
+  if (!wall) return "not measured";
+  if (!wall.measured) return `unverified: ${wall.reason || "no agent times"}`;
+  const unverified = Array.isArray(wall.unverified) && wall.unverified.length ? `; unverified tasks: ${wall.unverified.join(", ")}` : "";
+  if (flags.length) return `over: ${flags.map(wallFlagText).join("; ")}${unverified}`;
+  const longest = Math.max(0, ...(wall.tasks || []).map((t) => t.ms));
+  return `within budget (${wall.wallMinutes ?? wallMin(longest)} min a task)${unverified}`;
+}
+
+export function runEntry({ card, report, cost = null, codexCost = null, wallClock = null, wall = null, mergeCommit = null, record = null, adversary = [], date = new Date().toISOString().slice(0, 10), batch = null, sharedCost = null, taskIds = [], note = null, rehearsal = null }) {
   const inBatch = Array.isArray(batch) && batch.length > 1;
   if (inBatch) report = filterReportForCard(report, card.id, taskIds);
   const lines = [];
@@ -632,6 +737,7 @@ export function runEntry({ card, report, cost = null, codexCost = null, wallCloc
   }
   if (inBatch) lines.push(`| Shared integration agents | ${sharedCost === null ? "not measured" : `$${Number(sharedCost).toFixed(2)}, counted once for the batch ${batch[0] === card.id ? "here" : `under ${batch[0]}`}`} |`);
   lines.push(`| Wall clock | ${wallClock === null ? "not measured" : wallClock} |`);
+  lines.push(`| Stage wall | ${wallRow(wall, wall ? wallFlagsFor(wall, report, inBatch ? batch : null, card.id) : [])} |`);
   const blocks = classifyBlocks(report, adversary);
   const shownCommit = rehearsal && mergeCommit ? String(mergeCommit).slice(0, 7) : mergeCommit;
   lines.push(`| Landed as | ${shownCommit ? `\`${shownCommit}\`` : "not landed"} |`);
@@ -792,13 +898,21 @@ function acceptanceUnmet(report, tasks) {
   return { unmet, source: ` (acceptance read per task by [card] tag${asideNote})`, dirty: asideFailing > 0 };
 }
 
+function wallNote(wall, flags) {
+  if (!wall) return "";
+  if (!wall.measured) return " (stage times unverified)";
+  const n = Array.isArray(wall.unverified) ? wall.unverified.length : 0;
+  const unv = n ? ` (stage times unverified for ${n} task${n === 1 ? "" : "s"})` : "";
+  return (flags.length ? ` (over budget: ${flags.map(wallFlagText).join("; ")})` : "") + unv;
+}
+
 // Three lines for the chat after a run: the outcome, the tasks, and what stopped or was not met. Everything in it
 // is read from the report; nothing is estimated.
-export function runSummary({ report, cost = null, codexCost = null, wallClock = null, mergeCommit = null }) {
+export function runSummary({ report, cost = null, codexCost = null, wallClock = null, wall = null, mergeCommit = null, batch = null, card = null }) {
   const tasks = (report.levels || []).flatMap((l) => (l.tasks || []).map((t) => ({ level: l, task: t })));
   const integrated = tasks.filter(({ level }) => level.integration && level.integration.ok).length;
   const outcome = outcomeOf(report);
-  const first = `${report.plan}: ${outcome}; ${tasks.length} task${tasks.length === 1 ? "" : "s"}, ${integrated} integrated; wall ${wallClock === null ? "not measured" : wallClock}; cost ${cost === null ? "not measured" : `$${Number(cost).toFixed(2)}`}${codexCost === null ? "" : `; Codex $${Number(codexCost).toFixed(2)}`}${mergeCommit ? `; landed as ${mergeCommit}` : ""}.`;
+  const first = `${report.plan}: ${outcome}; ${tasks.length} task${tasks.length === 1 ? "" : "s"}, ${integrated} integrated; wall ${wallClock === null ? "not measured" : wallClock}; cost ${cost === null ? "not measured" : `$${Number(cost).toFixed(2)}`}${codexCost === null ? "" : `; Codex $${Number(codexCost).toFixed(2)}`}${mergeCommit ? `; landed as ${mergeCommit}` : ""}${wallNote(wall, wall ? wallFlagsFor(wall, report, batch, card) : [])}.`;
   const second = tasks.length
     ? tasks.map(({ task: t }) => {
         const passes = Array.isArray(t.attempts) && t.attempts.length ? t.attempts.length : 1;

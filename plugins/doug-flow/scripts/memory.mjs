@@ -60,14 +60,24 @@
 //   memory.mjs lesson unstale <id> [dir] [--json]
 //                                                 clear a lesson's stale mark (set by recall's citation
 //                                                 re-check) so it is a candidate again; refuses on an unknown id
+//   memory.mjs brief-lessons <card-id> [dir] [--k <n>] [--json]
+//                                                 (card memory-every-session) recall for a hand-track card's
+//                                                 briefs: query = the card's title and goal, k 8. Prints the
+//                                                 workflow's lessons header, the rendered `- [id] ...` lines
+//                                                 (capped at 2000 chars like plan.mjs), then `memoryUsed: <ids>`;
+//                                                 writes .doug/.state/reports/<card-id>/lessons.json. No database
+//                                                 -> "No lessons recalled for <id>." (database not created);
+//                                                 a database or provider error -> one stderr line, exit 0;
+//                                                 unknown card -> exit 1
 //   memory.mjs recall <query> [dir] [--files <glob,glob>] [--k <n>] [--json]
-//                                                 hybrid recall (card memory-recall): BM25 over FTS5 fused by
-//                                                 reciprocal rank fusion with cosine over stored vectors when a
-//                                                 provider is configured and vectors exist for it, recency-
-//                                                 weighted, scope-boosted by --files, each returned lesson's
-//                                                 citation re-checked against [dir] only when [dir] is a real
-//                                                 project root (contains .doug); keyword-only, and says so, when
-//                                                 no provider is configured or no vectors match it
+//                                                 dense recall (card memory-recall): with a provider and
+//                                                 stored vectors, every live lesson is ranked by cosine x
+//                                                 recency weight x scope boost (--files), ties by lesson id,
+//                                                 then BM25 hits with no vector are appended in BM25 order;
+//                                                 without a provider or vectors the ranking is BM25 x recency
+//                                                 x scope, a keyword-only fallback that says so. Each returned
+//                                                 lesson's citation is re-checked against [dir] only when
+//                                                 [dir] is a real project root (contains .doug)
 //   memory.mjs reflect <report.json> [dir] [--run <wf-id>] [--card <id>] [--commit <sha>]
 //                       [--adversary "<id>=<class>[: <reason>]"]... [--claude-bin <path>] [--claude-dir <path>]
 //                       [--model <name>] [--max-usd <n>] [--dry-run] [--json]
@@ -82,10 +92,17 @@
 //                                                 helpful instead of appending); idempotent on the report's
 //                                                 sha256 (a second reflect on the same report is a no-op, exit
 //                                                 0); --dry-run applies nothing but still runs the LLM pass and
-//                                                 prints what would happen; --hand is refused, since a hand
-//                                                 landing has no report. Cost is measured from the same local
+//                                                 prints what would happen. Cost is measured from the same local
 //                                                 transcripts cost.mjs reads, falling back to the CLI's own
 //                                                 cost estimate. Needs Node >=22.16 (node:sqlite).
+//   memory.mjs reflect --hand <card-id> [dir] --commit <sha> [--rounds <n>] [--review "R1=<class>[: <reason>]"]...
+//                       [--note <text>] [--claude-bin <path>] [--model <name>] [--max-usd <n>] [--dry-run] [--json]
+//                                                 (card memory-every-session) the same pass for a hand landing:
+//                                                 assembles .doug/.state/reports/<card-id>/hand-report.json from
+//                                                 the saved briefs/, reviews/ and lessons.json (memoryUsed = its
+//                                                 ids; verified true; passes = --rounds, default 1; one fixed
+//                                                 blocker ledger entry per --review id), then reflects on it
+//                                                 exactly as above. --commit is required (exit 2). No schema change.
 //   memory.mjs doctor [dir] [--json]
 //                                                 probe the configured embedding provider (memory.embeddings in
 //                                                 .doug/config.json), or a local Ollama at localhost:11434 when
@@ -165,7 +182,7 @@
 // lesson add and import embed only the row(s) they just wrote, best-effort, when a provider is configured: a
 // provider failure prints one stderr line and never turns into a nonzero exit for that add/import. A pending
 // row from an earlier add is left alone until `reembed` (or a later add/import) picks it up.
-import { readFileSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { readFileSync, existsSync, mkdirSync, writeFileSync, readdirSync } from "node:fs";
 import { resolve, join, dirname } from "node:path";
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
@@ -187,7 +204,7 @@ import {
 
 const argv = process.argv.slice(2);
 const FLAGS = new Set(["json", "all", "hand", "dry-run", "check", "no-check"]);
-const REPEATABLE = new Set(["adversary"]);
+const REPEATABLE = new Set(["adversary", "review"]);
 const opts = {};
 const positional = [];
 for (let i = 0; i < argv.length; i++) {
@@ -596,26 +613,88 @@ try {
     case "reflect": {
       const usage =
         'usage: memory.mjs reflect <report.json> [dir] [--run <wf-id>] [--card <id>] [--commit <sha>] [--adversary "<id>=<class>[: <reason>]"]... [--claude-bin <path>] [--claude-dir <path>] [--model <name>] [--max-usd <n>] [--dry-run] [--json]';
-      if (opts.hand) fail(`${usage}\n--hand is not accepted: a hand landing has no report.`, 2);
-      const [reportFile] = rest;
-      if (!reportFile) fail(usage, 2);
-      const dir = dirFrom(rest, 1);
-      const reportPath = resolve(reportFile);
-      if (!existsSync(reportPath)) fail(`no such report file: ${reportPath}`);
+      let dir;
+      let reportPath;
       let reportText;
-      try {
-        reportText = readFileSync(reportPath, "utf8");
-      } catch (err) {
-        fail(`cannot read report file ${reportPath}: ${err.message}`);
-      }
       let report;
-      try {
-        report = unwrapReport(JSON.parse(reportText));
-      } catch (err) {
-        fail(`cannot parse report file ${reportPath} as JSON: ${err.message}`);
+      let classes;
+      let handCard = null;
+      if (opts.hand) {
+        const handUsage =
+          'usage: memory.mjs reflect --hand <card-id> [dir] --commit <sha> [--rounds <n>] [--review "R1=<real|marginal|false>[: <reason>]"]... [--note <text>] [--claude-bin <path>] [--model <name>] [--max-usd <n>] [--dry-run] [--json]';
+        const [id] = rest;
+        if (!id || !opts.commit) fail(handUsage, 2);
+        handCard = id;
+        dir = dirFrom(rest, 1);
+        let rounds = 1;
+        if (opts.rounds !== undefined) {
+          rounds = Number(opts.rounds);
+          if (!Number.isInteger(rounds) || rounds < 1) fail(`${handUsage}\n--rounds must be a positive integer, got ${JSON.stringify(opts.rounds)}.`, 2);
+        }
+        try {
+          classes = parseAdversaryClasses(opts.review || []);
+        } catch (err) {
+          fail(`${handUsage}\n${err.message}`, 2);
+        }
+        const base = join(dir, ".doug", ".state", "reports", id);
+        const readDirFiles = (sub) => {
+          const d = join(base, sub);
+          if (!existsSync(d)) return [];
+          return readdirSync(d)
+            .filter((n) => !n.startsWith("."))
+            .sort()
+            .map((name) => {
+              try {
+                return { name, text: readFileSync(join(d, name), "utf8") };
+              } catch {
+                return null;
+              }
+            })
+            .filter(Boolean);
+        };
+        let memoryUsed = [];
+        try {
+          const saved = JSON.parse(readFileSync(join(base, "lessons.json"), "utf8"));
+          if (saved && Array.isArray(saved.ids)) memoryUsed = saved.ids.filter((x) => typeof x === "string");
+        } catch {
+          memoryUsed = [];
+        }
+        const ledger = classes.map((c) => {
+          return { id: c.id, stage: "adversary", seat: "reviewer", severity: "blocker", status: "fixed", description: c.reason || `reviewer finding ${c.id}` };
+        });
+        const sortKeys = (v) =>
+          Array.isArray(v) ? v.map(sortKeys) : v && typeof v === "object" ? Object.fromEntries(Object.keys(v).sort().map((k) => [k, sortKeys(v[k])])) : v;
+        const handReport = sortKeys({
+          track: "hand",
+          card: id,
+          commit: opts.commit,
+          levels: [{ index: 0, tasks: [{ id, card: id, commit: opts.commit, verified: true, passes: rounds, stopReason: null, memoryUsed, ledger }] }],
+          hand: { briefs: readDirFiles("briefs"), reviews: readDirFiles("reviews"), note: textOrNull(opts.note) },
+        });
+        reportText = JSON.stringify(handReport, null, 2) + "\n";
+        reportPath = join(base, "hand-report.json");
+        mkdirSync(base, { recursive: true });
+        writeFileSync(reportPath, reportText, "utf8");
+        report = handReport;
+      } else {
+        const [reportFile] = rest;
+        if (!reportFile) fail(usage, 2);
+        dir = dirFrom(rest, 1);
+        reportPath = resolve(reportFile);
+        if (!existsSync(reportPath)) fail(`no such report file: ${reportPath}`);
+        try {
+          reportText = readFileSync(reportPath, "utf8");
+        } catch (err) {
+          fail(`cannot read report file ${reportPath}: ${err.message}`);
+        }
+        try {
+          report = unwrapReport(JSON.parse(reportText));
+        } catch (err) {
+          fail(`cannot parse report file ${reportPath} as JSON: ${err.message}`);
+        }
+        classes = parseAdversaryClasses(opts.adversary || []);
       }
       const reportHash = createHash("sha256").update(reportText).digest("hex");
-      const classes = parseAdversaryClasses(opts.adversary || []);
       const plan = loadPlan(dir);
       const models = loadModels(dir);
       const model = textOrNull(opts.model) || (models.tiers.cheap && models.tiers.cheap.model) || "haiku";
@@ -640,7 +719,7 @@ try {
           classes,
           plan,
           run: opts.run ?? null,
-          card: opts.card ?? null,
+          card: handCard ?? opts.card ?? null,
           commit: opts.commit ?? null,
           model,
           claudeDir,
@@ -843,14 +922,18 @@ try {
       }
       const provider = createProvider(readMemoryConfig(dir));
       const staleDays = readMemoryStaleDays(dir);
-      const { openMemory, recallLessons } = await import("../lib/memory.mjs");
+      const { openMemory, recallLessons, degradedWarning, detectLocalProvider } = await import("../lib/memory.mjs");
+      // Probed once, and only when no provider is configured; a failed probe is just "not detected".
+      const detectedProvider = provider ? null : await detectLocalProvider();
       const m = openMemory(dir);
       let result;
       try {
-        result = await recallLessons(m, query, { files, k, provider, checkoutDir: dir, staleDays });
+        result = await recallLessons(m, query, { files, k, provider, checkoutDir: dir, staleDays, detectedProvider });
       } finally {
         m.close();
       }
+      const recallWarning = degradedWarning(result, { what: "memory recall", detectedProvider });
+      if (recallWarning) process.stderr.write(recallWarning + "\n");
       if (opts.json) {
         process.stdout.write(JSON.stringify(result, null, 2) + "\n");
       } else {
@@ -860,6 +943,67 @@ try {
             : `recall: keyword-only (${result.reason})`;
         const lines = [header, ...result.lessons.map((l) => `${l.id}  ${l.score.toFixed(4)}  ${l.kind}  ${l.text}`)];
         process.stdout.write(lines.join("\n") + "\n");
+      }
+      break;
+    }
+    case "brief-lessons": {
+      const usage = "usage: memory.mjs brief-lessons <card-id> [dir] [--k <n>] [--json]";
+      const [id, ...extra] = rest;
+      if (!id) fail(usage, 2);
+      const dir = dirFrom(extra, 0);
+      let k = 8;
+      if (opts.k !== undefined) {
+        k = Number(opts.k);
+        if (!Number.isInteger(k) || k < 1) fail(`${usage}\n--k must be an integer >= 1, got ${JSON.stringify(opts.k)}.`, 2);
+      }
+      let card;
+      try {
+        card = findCard(loadBoard(dir), id);
+      } catch (err) {
+        fail(`no card ${id}: ${err.message}`);
+      }
+      const query = `${card.title}\n${card.goal ?? ""}`;
+      const header = "Lessons from earlier runs on this repository (memory; each cites where it was learned):";
+      const saved = { card: id, query, mode: null, reason: null, ids: [], text: null, recalledAt: new Date().toISOString() };
+      let error = null;
+      if (existsSync(join(dir, ".doug", ".state", "memory", "memory.db"))) {
+        try {
+          const provider = createProvider(readMemoryConfig(dir));
+          const staleDays = readMemoryStaleDays(dir);
+          const { openMemory, recallLessons, degradedWarning, degradedReason, detectLocalProvider, renderLessons } = await import("../lib/memory.mjs");
+          const detectedProvider = provider ? null : await detectLocalProvider();
+          const m = openMemory(dir);
+          try {
+            const result = await recallLessons(m, query, { k, checkoutDir: dir, provider, staleDays, detectedProvider });
+            const warning = degradedWarning(result, { what: "memory recall", detectedProvider });
+            if (warning) process.stderr.write(warning + "\n");
+            const rendered = renderLessons(result.lessons);
+            saved.mode = result.mode;
+            saved.reason = result.degraded ? degradedReason(result, detectedProvider) : null;
+            saved.ids = rendered.ids;
+            saved.text = rendered.text === null ? null : result.degraded ? `(recall was keyword-only: ${saved.reason})\n${rendered.text}` : rendered.text;
+          } finally {
+            m.close();
+          }
+        } catch (err) {
+          error = err.message;
+          saved.mode = null;
+          saved.reason = null;
+          saved.ids = [];
+          saved.text = null;
+          saved.error = error;
+          process.stderr.write(`[doug] memory recall skipped: ${error}\n`);
+        }
+      }
+      const reportDir = join(dir, ".doug", ".state", "reports", id);
+      mkdirSync(reportDir, { recursive: true });
+      writeFileSync(join(reportDir, "lessons.json"), JSON.stringify(saved, null, 2) + "\n", "utf8");
+      if (opts.json) {
+        process.stdout.write(JSON.stringify(saved, null, 2) + "\n");
+      } else if (saved.ids.length) {
+        process.stdout.write([header, saved.text, `memoryUsed: ${saved.ids.join(", ")}`].join("\n") + "\n");
+      } else {
+        process.stdout.write(`No lessons recalled for ${id}.\n`);
       }
       break;
     }
@@ -919,10 +1063,12 @@ try {
       if (opts.check && opts["no-check"]) {
         fail(`${usage}\n--check and --no-check are mutually exclusive.`, 2);
       }
-      const { openMemory, embedLessons } = await import("../lib/memory.mjs");
+      const { openMemory, embedLessons, lessonsNeedingEmbedding } = await import("../lib/memory.mjs");
       const m = openMemory(dir);
       let result;
       let checkStatus;
+      let stillMissing = 0;
+      let liveTotal = 0;
       try {
         if (opts["no-check"]) {
           process.stderr.write("embed-check: skipped (--no-check)\n");
@@ -944,6 +1090,8 @@ try {
           batch,
           onProgress: ({ embedded, total }) => process.stderr.write(`embedded ${embedded}/${total}\n`),
         });
+        stillMissing = lessonsNeedingEmbedding(m, { model: provider.model, dims: provider.dims }).length;
+        liveTotal = m.prepare("SELECT COUNT(*) AS n FROM lessons WHERE superseded_by IS NULL AND stale IS NULL").get().n;
       } finally {
         m.close();
       }
@@ -952,6 +1100,11 @@ try {
       } else {
         process.stdout.write(
           `Embedded ${result.embedded}/${result.total} lesson(s) with ${provider.model}/${provider.dims} (${result.failed} failed).\n`
+        );
+      }
+      if (stillMissing > 0) {
+        process.stderr.write(
+          `WARNING: ${stillMissing} of ${liveTotal} lessons still have no vector for ${provider.model}/${provider.dims}; retry with memory.mjs reembed --batch 4\n`
         );
       }
       break;
@@ -1076,15 +1229,18 @@ try {
           }
         }
         const provider = createProvider(readMemoryConfig(dir));
-        const { openMemory } = await import("../lib/memory.mjs");
+        const { openMemory, degradedWarning, detectLocalProvider } = await import("../lib/memory.mjs");
         const { searchIndex } = await import("../lib/code-index.mjs");
+        const detectedProvider = provider ? null : await detectLocalProvider();
         const m = openMemory(dir);
         let result;
         try {
-          result = await searchIndex(m, query, { k, files, provider });
+          result = await searchIndex(m, query, { k, files, provider, detectedProvider });
         } finally {
           m.close();
         }
+        const searchWarning = degradedWarning(result, { what: "code index search", code: true, detectedProvider });
+        if (searchWarning) process.stderr.write(searchWarning + "\n");
         if (opts.json) {
           process.stdout.write(JSON.stringify(result, null, 2) + "\n");
         } else {
@@ -1268,7 +1424,7 @@ try {
       break;
     }
     default:
-      fail("usage: memory.mjs <record|reflect|outcomes|lessons|lesson|import|recall|doctor|reembed|embed-check|index|condition|decision|rule|claude-md> ...", 2);
+      fail("usage: memory.mjs <record|reflect|outcomes|lessons|lesson|import|recall|brief-lessons|doctor|reembed|embed-check|index|condition|decision|rule|claude-md> ...", 2);
   }
 } catch (err) {
   fail(err.message);

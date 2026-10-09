@@ -14,6 +14,11 @@ export function generateClaudeMd(d: Detection, cfg: DougConfig): string {
   lines.push("Guardrails are enforced by hooks configured in `.doug/config.json`; this file carries only what hooks cannot.");
   lines.push("");
 
+  if (d.repo.isEmpty) {
+    lines.push("The gates check nothing until a walking skeleton exists (see https://github.com/eschwa3/dougharness/blob/main/docs/getting-started.md#starting-from-an-empty-repository). Once it does, re-run `doug init` so they detect its commands.");
+    lines.push("");
+  }
+
   const cmds = Object.entries(cfg.commands);
   if (cmds.length) {
     lines.push("## Commands");

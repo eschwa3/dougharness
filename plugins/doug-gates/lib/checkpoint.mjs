@@ -43,7 +43,7 @@ export function refName(at = new Date()) {
 
 export function commitMessage(cfg, gateResults) {
   const head = (cfg.checkpoint && cfg.checkpoint.message) || DEFAULT_MESSAGE;
-  const gate = (gateResults || []).map((r) => `${r.name} ${r.ok ? "ok" : "failed"}`).join(", ");
+  const gate = (gateResults || []).map((r) => `${r.name}${r.targeted ? ` (targeted: ${r.targeted} files)` : ""} ${r.ok ? "ok" : "failed"}`).join(", ");
   return gate ? `${head}\n\ngate: ${gate}` : head;
 }
 

@@ -1,0 +1,33 @@
+#!/bin/sh
+# Shared by post-commit and post-merge (card cli-dist-rebuild-post-commit). Reads the changed paths, one per
+# line, on stdin; rebuilds packages/doug-cli's dist when one is a trigger path. dist is gitignored, so nothing
+# else rebuilds it after a source change. plugins/doug-flow/lib is not a trigger: dist loads it live through
+# the @dougharness/flow workspace link. A convenience, never a gate: every path exits 0.
+set -u
+
+paths=$(cat)
+
+triggered=0
+while IFS= read -r p; do
+  case "$p" in
+    packages/doug-cli/src/* | packages/doug-cli/package.json | packages/doug-cli/tsconfig*.json) triggered=1 ;;
+  esac
+done <<EOP
+$paths
+EOP
+[ "$triggered" -eq 1 ] || exit 0
+
+cd "$(git rev-parse --show-toplevel)" 2>/dev/null || exit 0
+
+# git exports its own location (GIT_DIR, GIT_INDEX_FILE, ...) to hooks; drop them before running pnpm.
+unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_PREFIX GIT_COMMON_DIR \
+  GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_NAMESPACE \
+  GIT_IMPLICIT_WORK_TREE GIT_QUARANTINE_PATH GIT_REFLOG_ACTION
+
+out=$(pnpm --filter ./packages/doug-cli run build 2>&1)
+status=$?
+if [ "$status" -ne 0 ]; then
+  printf '%s\n' "$out" >&2
+  echo "rebuild-dist: pnpm --filter ./packages/doug-cli run build failed (exit ${status}); dist is stale or partly rebuilt; run it by hand" >&2
+fi
+exit 0

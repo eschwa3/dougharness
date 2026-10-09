@@ -25,22 +25,21 @@ flowchart LR
 
 ## Why Doug
 
-- **Nothing lands without your yes.** A change becomes a written plan first; `plugins/doug-flow/workflows/doug-implement.js` refuses to run an unapproved plan, and `/doug-approve` (`plan.mjs approve`) is what approves one.
-- **A turn blocks on broken or untested work, up to a cap.** The stop gate runs typecheck and tests before Claude's turn finishes and blocks it while they fail, or while the session never ran a check itself, for up to 3 blocks in a row (each subagent counted separately; the count resets on a green gate); past that, or on the gate's own crash or timeout, it stands down and fails open (`plugins/doug-gates/scripts/stop-gate.mjs`).
-- **The model can't edit its way around the rules.** `.env` files, the lockfile, migrations, and anything outside the project are denied at the edit itself (`plugins/doug-gates/scripts/protect-paths.mjs`).
-- **A second, different model argues against the first.** After review, `codex-review` re-reads the diff on Codex and tries to refute it; a blocker keeps the change out (`packages/doug-codex`). Codex is optional: without `@dougharness/codex` and the Codex CLI installed, the Claude `adversary-claude` agent stands in instead.
-- **It remembers what went wrong before.** Past lessons are recalled by keyword (semantic recall with `memory.embeddings` set) and put in front of the next task before it starts (`plugins/doug-flow/lib/memory.mjs`).
+- **Gates an agent cannot talk past.** Hooks run outside the model: the stop gate blocks a turn while typecheck or tests fail, for up to 3 blocks in a row, then stands down and says so, and fails open on its own crash or timeout; `.env` files, the lockfile, migrations, and anything outside the project are denied at the edit itself. Nothing lands without your yes: an approved plan for the flow, the start gate for a hand card (`plugins/doug-gates/scripts/stop-gate.mjs`, `plugins/doug-flow/workflows/doug-implement.js`).
+- **Tests first on the hand track, mechanisms mutation-proven.** A tester writes the failing tests before the coder touches code (a flow implementer writes them before or with the change), and a hand-track card whose point is a mechanism is proved by breaking the mechanism and watching a test go red; the flow has no mutation stage (`plugins/doug-flow/skills/doug-hand/SKILL.md`).
+- **An adversary on a different model tries to break each flow-track change.** After review, `codex-review` re-reads the diff on Codex and tries to refute it, and a blocker keeps the change out; without Codex, the Claude `adversary-claude` agent stands in, and a plan can turn it off (`packages/doug-codex`).
+- **Memory carries lessons into the next run.** Lessons from past runs are recalled at session start and in each brief, and put in front of the next task before it starts; set [`memory.embeddings`](docs/memory.md) for semantic recall, otherwise recall is keyword-only (`plugins/doug-flow/lib/memory.mjs`).
+- **A board and autopilot run the queue.** Cards live on a board you can watch with `doug board serve`; `/doug-next --auto` takes the Ready cards in order on one approval, with caps on cards, wall clock, and spend (`plugins/doug-flow/skills/doug-next/SKILL.md`).
 
 ## Quickstart
 
 ```sh
-claude plugin marketplace add eschwa3/dougharness
-claude plugin install doug-gates@dougharness
-claude plugin install doug-flow@dougharness
+claude plugin marketplace add eschwa3/dougharness && claude plugin install doug-gates@dougharness && claude plugin install doug-flow@dougharness
 npx @dougharness/cli init .
+claude
 ```
 
-Open Claude Code in the repo and run `/doug-plan <what you want built>`: it plans, you approve with `/doug-approve`, and `/doug-implement` runs it. See [docs/getting-started.md](docs/getting-started.md) for the global install and the Codex adversary, and [docs/onboarding.md](docs/onboarding.md) for the board and `/doug-next`.
+Then run `/doug-plan <what you want built>`: it plans, you approve with `/doug-approve`, and `/doug-implement` runs it. See [docs/getting-started.md](docs/getting-started.md) for the global install and the Codex adversary, and [docs/onboarding.md](docs/onboarding.md) for the board and `/doug-next`.
 
 ## Docs
 

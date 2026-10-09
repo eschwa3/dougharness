@@ -254,7 +254,7 @@ export function mergeSettings(existing: Settings | null, d: Detection, cfg: Doug
   if (ttl !== null && s[PROMPT_CACHE_TTL_KEY] === undefined) {
     s[PROMPT_CACHE_TTL_KEY] = ttl;
   }
-  const conc = cfg.subagents?.maxConcurrentWorkflowAgents === undefined ? 4 : cfg.subagents.maxConcurrentWorkflowAgents;
+  const conc = cfg.subagents?.maxConcurrentWorkflowAgents === undefined ? 16 : cfg.subagents.maxConcurrentWorkflowAgents;
   if (conc !== null && s.env?.[WORKFLOW_CONCURRENCY_ENV] === undefined) {
     s.env = { ...(s.env || {}), [WORKFLOW_CONCURRENCY_ENV]: String(conc) };
   }

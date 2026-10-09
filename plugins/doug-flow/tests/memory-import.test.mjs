@@ -24,6 +24,10 @@ metadata:
 Commits in this repo carry no Co-Authored-By or Claude-Session lines.
 `;
 
+// Same lesson as HARNESS_FILE but stamped relative to the wall clock, for cases that go through recall (which
+// drops lessons older than staleDays, default 30): a fixed date would age out and flip the result.
+const HARNESS_FILE_FRESH = HARNESS_FILE.replace("2026-09-04T14:27:06.533Z", new Date(Date.now() - 86400000).toISOString());
+
 const BUILD_PROGRESS_FILE = `---
 type: project
 ---
@@ -314,7 +318,7 @@ describe("memory.mjs import: retires a deleted auto-memory file's lesson", () =>
     const slug = projectSlug(projectDir);
     const memDir = join(claudeDir, "projects", slug, "memory");
     mkdirSync(memDir, { recursive: true });
-    writeFileSync(join(memDir, "a.md"), HARNESS_FILE, "utf8");
+    writeFileSync(join(memDir, "a.md"), HARNESS_FILE_FRESH, "utf8");
     writeFileSync(join(memDir, "b.md"), BUILD_PROGRESS_FILE, "utf8");
 
     const first = run(["import", projectDir, "--claude-dir", claudeDir], projectDir);
@@ -451,7 +455,7 @@ describe("memory.mjs import: retires a deleted auto-memory file's lesson", () =>
     const slug = projectSlug(projectDir);
     const memDir = join(claudeDir, "projects", slug, "memory");
     mkdirSync(memDir, { recursive: true });
-    writeFileSync(join(memDir, "a.md"), HARNESS_FILE, "utf8");
+    writeFileSync(join(memDir, "a.md"), HARNESS_FILE_FRESH, "utf8");
 
     run(["import", projectDir, "--claude-dir", claudeDir], projectDir);
     const beforeId = JSON.parse(run(["lessons", projectDir, "--json"], projectDir).stdout)[0].id;
@@ -462,7 +466,7 @@ describe("memory.mjs import: retires a deleted auto-memory file's lesson", () =>
     const staleRow = JSON.parse(run(["lessons", projectDir, "--json"], projectDir).stdout).find((r) => r.id === beforeId);
     expect(staleRow.stale).toBeTruthy();
 
-    writeFileSync(join(memDir, "a.md"), HARNESS_FILE, "utf8");
+    writeFileSync(join(memDir, "a.md"), HARNESS_FILE_FRESH, "utf8");
     const restored = run(["import", projectDir, "--claude-dir", claudeDir], projectDir);
     expect(restored.status, restored.stderr).toBe(0);
     expect(restored.stdout).toContain(

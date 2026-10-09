@@ -1,10 +1,10 @@
 import { describe, it, expect } from "vitest";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { PRICES, PRICES_DATED, normalizeModel, parseLabel, priceUsage, transcriptUsage, findRunDir, costRun, renderCost, codexUsageFromReport, priceCodexUsage, CODEX_PRICES, CODEX_PRICES_DATED, CODEX_DEFAULT_MODEL } from "../lib/cost.mjs";
+import { PRICES, PRICES_DATED, normalizeModel, parseLabel, priceUsage, transcriptUsage, findRunDir, costRun, runWall, wallForRun, PASS_WALL_SHARE, STAGE_WALL_SHARE, renderCost, codexUsageFromReport, priceCodexUsage, CODEX_PRICES, CODEX_PRICES_DATED, CODEX_DEFAULT_MODEL } from "../lib/cost.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const script = join(here, "..", "scripts", "cost.mjs");
@@ -377,5 +377,180 @@ describe("costByCard", () => {
     const noCards = spawnSync(process.execPath, [script, "wf_batch-001", projectDir, "--claude-dir", claudeDir, "--by-card"], { encoding: "utf8", env: { ...process.env, CLAUDE_PROJECT_DIR: "" } });
     expect(noCards.status).toBe(1);
     expect(noCards.stderr).toContain("the plan has no cards");
+  });
+});
+
+// Card autopilot part B: `cost.mjs --session <id|latest>` prices one Claude Code session: its top-level transcript
+// plus every *.jsonl under <id>/subagents/ recursively (plain agents and workflows/wf_*/ agents).
+describe("session cost (card autopilot)", () => {
+  const msg = (id, usage) => JSON.stringify({ type: "assistant", message: { id, model: "claude-opus-5", usage } }) + "\n";
+  const slug = "-tmp-sessproj";
+  const sessProject = "/tmp/sessproj";
+  const build = () => {
+    const claudeDir = mkdtempSync(join(tmpdir(), "doug-cost-sess-"));
+    const proj = join(claudeDir, "projects", slug);
+    const wf = join(proj, "sess-new", "subagents", "workflows", "wf_x");
+    mkdirSync(wf, { recursive: true });
+    mkdirSync(join(proj, "sess-old", "subagents"), { recursive: true });
+    // sess-new: $5 lead (1M input) + $2.50 plain subagent (100k output) + $5 workflow agent (200k output) = $12.50
+    writeFileSync(join(proj, "sess-new.jsonl"), msg("m1", { input_tokens: 1_000_000, output_tokens: 0 }));
+    writeFileSync(join(proj, "sess-new", "subagents", "agent-a.jsonl"), msg("m2", { input_tokens: 0, output_tokens: 100_000 }));
+    writeFileSync(join(wf, "agent-b.jsonl"), msg("m3", { input_tokens: 0, output_tokens: 200_000 }));
+    writeFileSync(join(wf, "journal.jsonl"), JSON.stringify({ type: "started", key: "k", agentId: "b" }) + "\n");
+    // sess-old: $50 lead (10M input) + $25 subagent (1M output) = $75
+    writeFileSync(join(proj, "sess-old.jsonl"), msg("m4", { input_tokens: 10_000_000, output_tokens: 0 }));
+    writeFileSync(join(proj, "sess-old", "subagents", "agent-c.jsonl"), msg("m5", { input_tokens: 0, output_tokens: 1_000_000 }));
+    const old = new Date("2026-01-01T00:00:00Z");
+    const recent = new Date("2026-02-01T00:00:00Z");
+    utimesSync(join(proj, "sess-old.jsonl"), old, old);
+    utimesSync(join(proj, "sess-new.jsonl"), recent, recent);
+    return claudeDir;
+  };
+
+  it("--session <id> --json totals the top-level transcript, plain subagents, and workflow subagents recursively", () => {
+    const claudeDir = build();
+    const r = run(["--session", "sess-new", sessProject, "--claude-dir", claudeDir, "--json"]);
+    expect(r.status, r.stderr).toBe(0);
+    expect(JSON.parse(r.stdout).total.usd).toBeCloseTo(12.5, 6);
+  });
+  it("--session latest picks the most recently modified top-level transcript, not the oldest", () => {
+    const claudeDir = build();
+    const r = run(["--session", "latest", sessProject, "--claude-dir", claudeDir, "--json"]);
+    expect(r.status, r.stderr).toBe(0);
+    expect(JSON.parse(r.stdout).total.usd).toBeCloseTo(12.5, 6);
+    // the older session by id is its own total
+    const old = run(["--session", "sess-old", sessProject, "--claude-dir", claudeDir, "--json"]);
+    expect(JSON.parse(old.stdout).total.usd).toBeCloseTo(75, 6);
+  });
+  it("the text output has a session total line with the dollar figure", () => {
+    const claudeDir = build();
+    const r = run(["--session", "latest", sessProject, "--claude-dir", claudeDir]);
+    expect(r.status, r.stderr).toBe(0);
+    expect(r.stdout).toMatch(/session total[^\n]*\$12\.50/i);
+  });
+  it("exits 1 when the session has no transcript, and when the project has none for latest", () => {
+    const claudeDir = build();
+    expect(run(["--session", "sess-new", sessProject, "--claude-dir", claudeDir, "--json"]).status).toBe(0);
+    const none = run(["--session", "sess-nope", sessProject, "--claude-dir", claudeDir]);
+    expect(none.status).toBe(1);
+    const noProject = run(["--session", "latest", "/tmp/other-proj", "--claude-dir", claudeDir]);
+    expect(noProject.status).toBe(1);
+  });
+  it("the <run-id> form is unchanged next to --session", () => {
+    const r = run(["wf_7092b963-6a5", project, "--claude-dir", fixture]);
+    expect(r.status, r.stderr).toBe(0);
+    expect(r.stdout).toContain("Run total:");
+  });
+});
+
+// Card autopilot fix pass 2: the machine's subagent transcripts carry model "claude-sonnet-5-5"; unpriced, it made
+// `cost.mjs --session` report an unpriced transcript (an autopilot stop). List price 2/10/0.2/2.5/4 per million
+// (platform.claude.com pricing, fetched 2026-10-04).
+describe("claude-sonnet-5-5 price (card autopilot)", () => {
+  it("priceUsage prices claude-sonnet-5-5 at $2/$10/$0.2/$2.5/$4 per million tokens", () => {
+    const usage = { input: 1_000_000, output: 0, cacheRead: 0, cacheWrite: 0, cacheWrite1h: 0 };
+    expect(priceUsage(usage, "claude-sonnet-5-5")).toBe(2);
+    expect(priceUsage({ ...usage, input: 0, output: 1_000_000 }, "claude-sonnet-5-5")).toBe(10);
+    expect(priceUsage({ ...usage, input: 0, cacheRead: 1_000_000 }, "claude-sonnet-5-5")).toBeCloseTo(0.2, 10);
+    expect(priceUsage({ ...usage, input: 0, cacheWrite: 1_000_000 }, "claude-sonnet-5-5")).toBe(2.5);
+    expect(priceUsage({ ...usage, input: 0, cacheWrite: 1_000_000, cacheWrite1h: 1_000_000 }, "claude-sonnet-5-5")).toBe(4);
+    expect(PRICES["claude-sonnet-5-5"]).toBeDefined();
+  });
+  it("a session whose transcripts run on claude-sonnet-5-5 is priced, with nothing unpriced", () => {
+    const claudeDir = mkdtempSync(join(tmpdir(), "doug-cost-s55-"));
+    const proj = join(claudeDir, "projects", "-tmp-s55proj");
+    mkdirSync(join(proj, "sess-1", "subagents"), { recursive: true });
+    const line = (id, usage) => JSON.stringify({ type: "assistant", message: { id, model: "claude-sonnet-5-5", usage } }) + "\n";
+    writeFileSync(join(proj, "sess-1.jsonl"), line("m1", { input_tokens: 1_000_000, output_tokens: 0 }));
+    writeFileSync(join(proj, "sess-1", "subagents", "agent-a.jsonl"), line("m2", { input_tokens: 0, output_tokens: 100_000 }));
+    const r = run(["--session", "sess-1", "/tmp/s55proj", "--claude-dir", claudeDir, "--json"]);
+    expect(r.status, r.stderr).toBe(0);
+    const parsed = JSON.parse(r.stdout);
+    expect(parsed.total.unpriced).toBe(0);
+    expect(parsed.total.usd).toBeCloseTo(3, 6);
+    expect(r.stdout).not.toMatch(/not in the price table/);
+    const text = run(["--session", "sess-1", "/tmp/s55proj", "--claude-dir", claudeDir]);
+    expect(text.stdout).not.toMatch(/unpriced/);
+  });
+});
+
+// Card flow-wall-budget: the runtime's run file (workflowProgress[]) holds every agent's start and duration, so the
+// wall a task, a pass and a stage took is measured after the run from it; detection only, nothing is killed.
+describe("card flow-wall-budget", () => {
+  const MIN = 60_000;
+  const T0 = 1_791_000_000_000;
+  // Agents as [label, startMin, endMin]; a null end drops durationMs.
+  const runOf = (agents, durationMs = 60 * MIN) => ({
+    runId: "wf_x",
+    durationMs,
+    workflowProgress: agents.map(([label, from, to]) => ({ type: "workflow_agent", label, startedAt: T0 + from * MIN, ...(to === null ? {} : { durationMs: (to - from) * MIN }) })),
+  });
+  const kinds = (r, kind) => r.flags.filter((f) => f.kind === kind);
+
+  it("the shares are exported: a pass is 0.75 and a stage 0.25 of the wall budget", () => {
+    expect(PASS_WALL_SHARE).toBe(0.75);
+    expect(STAGE_WALL_SHARE).toBe(0.25);
+  });
+
+  it("W1: a task whose passes run in sequence is flagged over the budget by its first-start to last-end span, with each pass's span", () => {
+    const r = runWall(runOf([["implement:t", 0, 10], ["verify:t", 10, 19], ["review:t", 10, 14], ["adversary:t", 19, 28], ["fix:t:2", 28, 37], ["check:t:2", 37, 45]]), { wallMinutes: 40 });
+    expect(r.measured).toBe(true);
+    expect(r.flags).toEqual([{ kind: "task", label: "t", ms: 45 * MIN, limitMs: 40 * MIN }]);
+    expect(r.tasks).toHaveLength(1);
+    expect(r.tasks[0].task).toBe("t");
+    expect(r.tasks[0].ms).toBe(45 * MIN);
+    expect(r.tasks[0].passes).toEqual([{ pass: 1, ms: 28 * MIN }, { pass: 2, ms: 17 * MIN }]);
+  });
+
+  it("W2: agents running alongside count once (a span, never a sum): no task flag at 35 min, a pass flag over 30, and a stage flag for each long agent", () => {
+    const r = runWall(runOf([["implement:u", 0, 5], ["verify:u", 5, 35], ["review:u", 5, 35]]), { wallMinutes: 40 });
+    expect(kinds(r, "task")).toEqual([]);
+    expect(r.tasks[0].ms).toBe(35 * MIN);
+    const pass = kinds(r, "pass");
+    expect(pass).toHaveLength(1);
+    expect(pass[0]).toMatchObject({ label: "u", ms: 35 * MIN, limitMs: 30 * MIN });
+    expect(kinds(r, "stage").map((f) => f.label).sort()).toEqual(["review:u", "verify:u"]);
+    expect(kinds(r, "stage")[0]).toMatchObject({ ms: 30 * MIN, limitMs: 10 * MIN });
+  });
+
+  it("W3: a :retry suffix and a swarm worker's trailing number do not start a new task or pass", () => {
+    const r = runWall(runOf([["worker:t:3", 0, 2], ["verify:t:retry", 2, 4], ["fix:t:2:retry", 4, 6]]), { wallMinutes: 40 });
+    expect(r.tasks.map((t) => t.task)).toEqual(["t"]);
+    expect(r.tasks[0].passes).toEqual([{ pass: 1, ms: 4 * MIN }, { pass: 2, ms: 2 * MIN }]);
+    expect(r.tasks[0].ms).toBe(6 * MIN);
+  });
+
+  it("W4: no run file is not measured, with a reason; an agent with no duration leaves its task unverified and unflagged for task and pass", () => {
+    const none = runWall(null, { wallMinutes: 40 });
+    expect(none.measured).toBe(false);
+    expect(typeof none.reason).toBe("string");
+    expect(none.reason).not.toBe("");
+    const r = runWall(runOf([["implement:t", 0, 30], ["verify:t", 30, null], ["review:t", 30, 60]]), { wallMinutes: 40 });
+    expect(r.unverified).toEqual(["t"]);
+    expect(r.flags.filter((f) => f.label === "t")).toEqual([]);
+  });
+
+  it("W5: a level's integrate agent gets only a stage flag, and no task entry", () => {
+    const r = runWall(runOf([["integrate:level-0", 0, 12]]), { wallMinutes: 40 });
+    expect(r.flags).toEqual([{ kind: "stage", label: "integrate:level-0", ms: 12 * MIN, limitMs: 10 * MIN }]);
+    expect(r.tasks.map((t) => t.task)).not.toContain("level-0");
+  });
+
+  it("W6: the real wf_f923de23-f38 run (trimmed): doctor-feature-checks at 36 min is not flagged, its 606640 ms implement stage is; a run with no agent times is not measured", () => {
+    const claudeDir = fixture;
+    const r = wallForRun({ runId: "wf_f923de23-f38", claudeDir, projectDir: project, wallMinutes: 40 });
+    expect(r.measured).toBe(true);
+    const doctor = r.tasks.find((t) => t.task === "doctor-feature-checks");
+    expect(Math.round(doctor.ms / MIN)).toBe(36);
+    expect(r.flags).toEqual([{ kind: "stage", label: "implement:doctor-feature-checks", ms: 606640, limitMs: 10 * MIN }]);
+    const old = wallForRun({ runId: "wf_7092b963-6a5", claudeDir, projectDir: project, wallMinutes: 40 });
+    expect(old.measured).toBe(false);
+    expect(old.reason).toBe("no agent times");
+  });
+
+  it("wallForRun never throws: an unknown run id is not measured", () => {
+    const r = wallForRun({ runId: "wf_nope", claudeDir: fixture, projectDir: project, wallMinutes: 40 });
+    expect(r.measured).toBe(false);
+    expect(typeof r.reason).toBe("string");
   });
 });

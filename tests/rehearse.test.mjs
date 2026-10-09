@@ -5,9 +5,10 @@
 // assertion against doug-hand's real commit order, error handling around a claude binary that cannot run, the
 // per-stage spend cap, and recording that always goes through the board.mjs CLI. Never spawns the real claude
 // binary; every fixture and temp directory this file creates is removed in afterAll.
-import { describe, it, expect, afterAll } from "vitest";
+import { describe, it, expect, afterAll, vi } from "vitest";
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, chmodSync, rmSync, existsSync, readdirSync } from "node:fs";
-import { spawnSync, execFileSync } from "node:child_process";
+import { spawn } from "node:child_process";
+import { Worker } from "node:worker_threads";
 import { tmpdir } from "node:os";
 import { dirname, join, relative } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -100,11 +101,80 @@ function cannedStream({ plugins = ["doug-flow"], commands = ["doug-flow:doug-nex
 
 // Every spawn this file makes uses the library's own cleanEnv, so the file is green whether or not a leaked
 // CLAUDE_PROJECT_DIR/GIT_* is set in this process's environment (card workflow-rehearsal-review, round 2).
-function git(dir, ...args) {
-  return execFileSync("git", args, { cwd: dir, encoding: "utf8", env: cleanEnv() }).trim();
+//
+// Load-proofing (card rehearse-worker-rpc-timeout): vitest's worker answers its main process over an RPC whose
+// calls time out after 60 s (DEFAULT_TIMEOUT in vitest's dist/chunks/index.68735LiX.js, raised as "[vitest-worker]:
+// Timeout calling onTaskUpdate" from rpc.C3q9uwRX.js). A synchronous spawn (spawnSync, execFileSync) blocks this
+// worker's event loop for as long as the child runs, so on a loaded machine a run of consecutive sync spawns
+// (prepareFixture alone is a shell setup, doug init, and a dozen git calls) outlasts that timeout and the whole
+// file fails to report. So no test here spawns synchronously: child processes go through `run` (async spawn) and
+// the rehearse-lib functions that spawn internally go through `inLib` (a worker thread, whose own loop is the one
+// that blocks). Only the spawn mechanics are async; every assertion is unchanged.
+//
+// With the loop turning, vitest's per-test timeout (20 s in vitest.config.ts) is enforceable here, which it never
+// was while a sync spawn blocked the worker: a test that builds a fixture (a shell setup, doug init, git) takes
+// seconds on an idle machine and minutes on a loaded one. This file's own bound is a ceiling for a hung child,
+// not a performance pin.
+vi.setConfig({ testTimeout: 600_000 });
+//
+// An async spawn that never rejects: resolves { status, stdout, stderr, error } like spawnSync's result.
+function run(bin, args, { cwd, env, trim = false } = {}) {
+  return new Promise((resolve) => {
+    let child;
+    let stdout = "";
+    let stderr = "";
+    let error = null;
+    try {
+      child = spawn(bin, args, { cwd, env, stdio: ["ignore", "pipe", "pipe"] });
+    } catch (e) {
+      resolve({ status: null, stdout, stderr, error: e });
+      return;
+    }
+    child.stdout.setEncoding("utf8").on("data", (d) => (stdout += d));
+    child.stderr.setEncoding("utf8").on("data", (d) => (stderr += d));
+    child.on("error", (e) => (error = e));
+    child.on("close", (status, signal) => resolve({ status, signal, stdout: trim ? stdout.trim() : stdout, stderr, error }));
+  });
+}
+async function git(dir, ...args) {
+  const r = await run("git", args, { cwd: dir, env: cleanEnv(), trim: true });
+  if (r.error || r.status !== 0) throw new Error(`git ${args.join(" ")} failed (${r.status}): ${r.stderr}`);
+  return r.stdout;
 }
 function spawnScript(script, args) {
-  return spawnSync(process.execPath, [script, ...args], { encoding: "utf8", env: cleanEnv() });
+  return run(process.execPath, [script, ...args], { env: cleanEnv() });
+}
+
+// Calls a rehearse-lib export in a worker thread and resolves with its (structured-cloned) return value, or
+// rejects with an Error carrying the thrown message. The worker takes its environment from process.env at the
+// moment of the call, so a test that sets CLAUDE_PROJECT_DIR around a call still hands the library that value.
+// A stage object holds functions and cannot be cloned, so a stage argument is passed as { $expr: "<source>" },
+// evaluated inside the worker with the library bound to `lib` (e.g. "lib.SCENARIO_STAGES.hand[0]").
+const LIB_URL = pathToFileURL(join(dirname(fileURLToPath(import.meta.url)), "..", "scripts", "rehearse-lib.mjs")).href;
+const LIB_WORKER = `
+const { parentPort, workerData } = require("node:worker_threads");
+(async () => {
+  try {
+    const lib = await import(workerData.libUrl);
+    const args = workerData.args.map((a) => (a && typeof a.$expr === "string" ? new Function("lib", "return " + a.$expr)(lib) : a));
+    parentPort.postMessage({ value: await lib[workerData.fn](...args) });
+  } catch (e) {
+    parentPort.postMessage({ error: String((e && e.message) || e) });
+  }
+})();
+`;
+function inLib(fn, ...args) {
+  return new Promise((resolve, reject) => {
+    const worker = new Worker(LIB_WORKER, { eval: true, env: { ...process.env }, workerData: { libUrl: LIB_URL, fn, args } });
+    worker.once("message", (m) => {
+      worker.terminate();
+      if (m.error === undefined) resolve(m.value);
+      else reject(new Error(m.error));
+    });
+    worker.once("error", reject);
+    // A no-op once the message has settled the promise; otherwise a worker that exits silently cannot hang the test.
+    worker.once("exit", (code) => reject(new Error(`rehearse-lib worker exited (${code}) without a result`)));
+  });
 }
 
 // The uncommitted move /doug-next's own step 1 does before it ever reaches the planner (task
@@ -117,10 +187,10 @@ function moveUncommitted(dir) {
 }
 
 // What a run that (incorrectly) commits the board move leaves behind, used to prove assertFlowGateHeld fails it.
-function moveAndCommit(dir) {
+async function moveAndCommit(dir) {
   moveUncommitted(dir);
-  git(dir, "add", "-A");
-  git(dir, "commit", "-q", "-m", "Board: fix-hours moved to In flow");
+  await git(dir, "add", "-A");
+  await git(dir, "commit", "-q", "-m", "Board: fix-hours moved to In flow");
 }
 
 // A draft plan shaped like the one the real planner wrote in the first live flow rehearsal (fixture
@@ -152,25 +222,25 @@ function draftPlan(overrides = {}) {
 }
 
 describe("rehearse.mjs CLI never spawns claude without --spend and a --card", () => {
-  function run(args, env) {
-    return spawnSync(process.execPath, [cli, ...args], { encoding: "utf8", env: { ...process.env, ...env } });
+  function runCli(args, env) {
+    return run(process.execPath, [cli, ...args], { env: { ...process.env, ...env } });
   }
   function withMarker() {
     const marker = join(trackedTempDir("rehearse-marker-"), "spawned");
     return { marker, claudeBin: makeFakeClaude("", { marker }) };
   }
 
-  it("no arguments: prints the estimate table (a USD figure per scenario) and exits non-zero, spawning nothing", () => {
+  it("no arguments: prints the estimate table (a USD figure per scenario) and exits non-zero, spawning nothing", async () => {
     const { marker, claudeBin } = withMarker();
-    const r = run([], { DOUG_REHEARSE_CLAUDE: claudeBin });
+    const r = await runCli([], { DOUG_REHEARSE_CLAUDE: claudeBin });
     expect(r.status).toBe(2);
     for (const s of SCENARIOS) expect(r.stdout).toContain(`$${scenarioTotal(s).toFixed(2)}`);
     expect(existsSync(marker)).toBe(false);
   });
 
-  it("a scenario without --spend: prints that scenario's per-stage estimate and 'add --spend', exits non-zero, spawns nothing", () => {
+  it("a scenario without --spend: prints that scenario's per-stage estimate and 'add --spend', exits non-zero, spawns nothing", async () => {
     const { marker, claudeBin } = withMarker();
-    const r = run(["hand"], { DOUG_REHEARSE_CLAUDE: claudeBin });
+    const r = await runCli(["hand"], { DOUG_REHEARSE_CLAUDE: claudeBin });
     expect(r.status).toBe(2);
     expect(r.stdout).toContain(`$${scenarioTotal("hand").toFixed(2)}`);
     for (const stage of Object.keys(ESTIMATES.hand.stages)) expect(r.stdout).toContain(stage);
@@ -178,17 +248,17 @@ describe("rehearse.mjs CLI never spawns claude without --spend and a --card", ()
     expect(existsSync(marker)).toBe(false);
   });
 
-  it("--spend without --card: exits non-zero naming --card, spawns nothing", () => {
+  it("--spend without --card: exits non-zero naming --card, spawns nothing", async () => {
     const { marker, claudeBin } = withMarker();
-    const r = run(["hand", "--spend"], { DOUG_REHEARSE_CLAUDE: claudeBin });
+    const r = await runCli(["hand", "--spend"], { DOUG_REHEARSE_CLAUDE: claudeBin });
     expect(r.status).toBe(2);
     expect(r.stderr).toContain("--card");
     expect(existsSync(marker)).toBe(false);
   });
 
-  it("an unknown scenario is refused before anything is spawned", () => {
+  it("an unknown scenario is refused before anything is spawned", async () => {
     const { marker, claudeBin } = withMarker();
-    const r = run(["bogus", "--spend", "--card", "x"], { DOUG_REHEARSE_CLAUDE: claudeBin });
+    const r = await runCli(["bogus", "--spend", "--card", "x"], { DOUG_REHEARSE_CLAUDE: claudeBin });
     expect(r.status).toBe(2);
     expect(r.stderr).toContain("unknown scenario");
     expect(existsSync(marker)).toBe(false);
@@ -352,159 +422,157 @@ describe("syntheticReport renders as a stopped run through runEntry, and never i
 });
 
 describe("dirtyOutsideDoug ignores .doug/ the way lib/land.mjs's own tracked-files filter does (review 2, blocker #16)", () => {
-  it("an untracked .doug/plan.json and a modified, already-tracked .doug/board.json still read clean; an untracked file outside .doug/ does not", () => {
+  it("an untracked .doug/plan.json and a modified, already-tracked .doug/board.json still read clean; an untracked file outside .doug/ does not", async () => {
     const dir = trackedTempDir("rehearse-dirty-doug-");
-    git(dir, "init", "-q", "-b", "main");
-    git(dir, "config", "user.email", "t@example.com");
-    git(dir, "config", "user.name", "t");
+    await git(dir, "init", "-q", "-b", "main");
+    await git(dir, "config", "user.email", "t@example.com");
+    await git(dir, "config", "user.name", "t");
     mkdirSync(join(dir, ".doug"), { recursive: true });
     writeFileSync(join(dir, ".doug/board.json"), JSON.stringify({ v: 1 }));
-    git(dir, "add", "-A");
-    git(dir, "commit", "-q", "-m", "base");
+    await git(dir, "add", "-A");
+    await git(dir, "commit", "-q", "-m", "base");
 
     writeFileSync(join(dir, ".doug/plan.json"), JSON.stringify({ status: "draft" })); // untracked
     writeFileSync(join(dir, ".doug/board.json"), JSON.stringify({ v: 2 })); // modified, tracked
-    expect(dirtyOutsideDoug(dir)).toEqual([]);
+    expect(await inLib("dirtyOutsideDoug", dir)).toEqual([]);
 
     writeFileSync(join(dir, "stray.txt"), "oops"); // untracked, outside .doug/
-    const dirty = dirtyOutsideDoug(dir);
+    const dirty = await inLib("dirtyOutsideDoug", dir);
     expect(dirty.length).toBe(1);
     expect(dirty[0]).toContain("stray.txt");
   });
 });
 
 describe("assertTwoParents (review #11)", () => {
-  it("passes on a real --no-ff merge and fails on a single-commit repo", () => {
+  it("passes on a real --no-ff merge and fails on a single-commit repo", async () => {
     const dir = trackedTempDir("rehearse-merge-");
-    git(dir, "init", "-q", "-b", "main");
-    git(dir, "config", "user.email", "t@example.com");
-    git(dir, "config", "user.name", "t");
+    await git(dir, "init", "-q", "-b", "main");
+    await git(dir, "config", "user.email", "t@example.com");
+    await git(dir, "config", "user.name", "t");
     writeFileSync(join(dir, "a.txt"), "1");
-    git(dir, "add", "-A");
-    git(dir, "commit", "-q", "-m", "base");
-    const single = assertTwoParents(dir);
+    await git(dir, "add", "-A");
+    await git(dir, "commit", "-q", "-m", "base");
+    const single = await inLib("assertTwoParents", dir);
     expect(single.ok).toBe(false);
 
-    git(dir, "checkout", "-q", "-b", "feature");
+    await git(dir, "checkout", "-q", "-b", "feature");
     writeFileSync(join(dir, "b.txt"), "2");
-    git(dir, "add", "-A");
-    git(dir, "commit", "-q", "-m", "feature");
-    git(dir, "checkout", "-q", "main");
-    git(dir, "merge", "--no-ff", "-q", "-m", "merge feature", "feature");
-    const merged = assertTwoParents(dir);
+    await git(dir, "add", "-A");
+    await git(dir, "commit", "-q", "-m", "feature");
+    await git(dir, "checkout", "-q", "main");
+    await git(dir, "merge", "--no-ff", "-q", "-m", "merge feature", "feature");
+    const merged = await inLib("assertTwoParents", dir);
     expect(merged.ok, merged.message).toBe(true);
   });
 });
 
 describe("assertFlowGateHeld: the flow gate stage now includes the planner (item rehearsal-first-live-findings #1)", () => {
-  function baseRepo(prefix) {
+  async function baseRepo(prefix) {
     const dir = trackedTempDir(prefix);
-    git(dir, "init", "-q", "-b", "main");
-    git(dir, "config", "user.email", "t@example.com");
-    git(dir, "config", "user.name", "t");
+    await git(dir, "init", "-q", "-b", "main");
+    await git(dir, "config", "user.email", "t@example.com");
+    await git(dir, "config", "user.name", "t");
     mkdirSync(join(dir, ".doug"), { recursive: true });
     writeFileSync(join(dir, BOARD_RELPATH), JSON.stringify(addCard({ ...newBoard(), components: ["flow"] }, { id: "fix-hours", title: "Fix hours", goal: "g", component: "flow", size: "S", column: "ready" }), null, 2));
-    git(dir, "add", "-A");
-    git(dir, "commit", "-q", "-m", "fixture");
+    await git(dir, "add", "-A");
+    await git(dir, "commit", "-q", "-m", "fixture");
     return dir;
   }
   const goodStream = cannedStream({ plugins: ["doug-flow"], commands: ["doug-flow:doug-next"] });
 
-  it("fails naming plan.mjs validate on an invalid plan, not only JSON.parse (review #8)", () => {
-    const dir = baseRepo("rehearse-flowgate-invalid-");
+  it("fails naming plan.mjs validate on an invalid plan, not only JSON.parse (review #8)", async () => {
+    const dir = await baseRepo("rehearse-flowgate-invalid-");
     moveUncommitted(dir);
     writeFileSync(join(dir, ".doug/plan.json"), JSON.stringify({ status: "draft" }));
-    const result = assertFlowGateHeld(dir, goodStream, { plugins: ["doug-flow"], command: "doug-flow:doug-next", cardId: "fix-hours" });
+    const result = await inLib("assertFlowGateHeld", dir, goodStream, { plugins: ["doug-flow"], command: "doug-flow:doug-next", cardId: "fix-hours" });
     expect(result.ok).toBe(false);
     expect(result.message).toContain("plan.mjs validate failed");
   });
 
-  it("fails when the card is still Ready: a run that never moved it must not read as a held gate", () => {
-    const dir = baseRepo("rehearse-flowgate-ready-");
+  it("fails when the card is still Ready: a run that never moved it must not read as a held gate", async () => {
+    const dir = await baseRepo("rehearse-flowgate-ready-");
     writeFileSync(join(dir, ".doug/plan.json"), JSON.stringify(draftPlan()));
-    const result = assertFlowGateHeld(dir, goodStream, { plugins: ["doug-flow"], command: "doug-flow:doug-next", cardId: "fix-hours" });
+    const result = await inLib("assertFlowGateHeld", dir, goodStream, { plugins: ["doug-flow"], command: "doug-flow:doug-next", cardId: "fix-hours" });
     expect(result.ok).toBe(false);
     expect(result.message).toContain("does not have fix-hours in flow");
   });
 
-  it("fails when the plan is already approved: the planner must never approve on its own", () => {
-    const dir = baseRepo("rehearse-flowgate-approved-");
+  it("fails when the plan is already approved: the planner must never approve on its own", async () => {
+    const dir = await baseRepo("rehearse-flowgate-approved-");
     moveUncommitted(dir);
     writeFileSync(join(dir, ".doug/plan.json"), JSON.stringify(draftPlan({ status: "approved" })));
-    const result = assertFlowGateHeld(dir, goodStream, { plugins: ["doug-flow"], command: "doug-flow:doug-next", cardId: "fix-hours" });
+    const result = await inLib("assertFlowGateHeld", dir, goodStream, { plugins: ["doug-flow"], command: "doug-flow:doug-next", cardId: "fix-hours" });
     expect(result.ok).toBe(false);
     expect(result.message).toContain("already approved");
   });
 
-  it("passes when the move is uncommitted and a draft plan exists and validates", () => {
-    const dir = baseRepo("rehearse-flowgate-ok-");
+  it("passes when the move is uncommitted and a draft plan exists and validates", async () => {
+    const dir = await baseRepo("rehearse-flowgate-ok-");
     moveUncommitted(dir);
     writeFileSync(join(dir, ".doug/plan.json"), JSON.stringify(draftPlan()));
-    const result = assertFlowGateHeld(dir, goodStream, { plugins: ["doug-flow"], command: "doug-flow:doug-next", cardId: "fix-hours" });
+    const result = await inLib("assertFlowGateHeld", dir, goodStream, { plugins: ["doug-flow"], command: "doug-flow:doug-next", cardId: "fix-hours" });
     expect(result.ok, result.message).toBe(true);
   });
 
-  it("fails when the move is committed instead of left as working state: /doug-next leaves the move uncommitted", () => {
-    const dir = baseRepo("rehearse-flowgate-committed-move-");
-    moveAndCommit(dir);
+  it("fails when the move is committed instead of left as working state: /doug-next leaves the move uncommitted", async () => {
+    const dir = await baseRepo("rehearse-flowgate-committed-move-");
+    await moveAndCommit(dir);
     writeFileSync(join(dir, ".doug/plan.json"), JSON.stringify(draftPlan()));
-    const result = assertFlowGateHeld(dir, goodStream, { plugins: ["doug-flow"], command: "doug-flow:doug-next", cardId: "fix-hours" });
+    const result = await inLib("assertFlowGateHeld", dir, goodStream, { plugins: ["doug-flow"], command: "doug-flow:doug-next", cardId: "fix-hours" });
     expect(result.ok).toBe(false);
     expect(result.message).toContain("moved to In flow");
     expect(result.message).toContain("leaves the move uncommitted");
   });
 
-  it("fails when an integration branch already exists: the session proceeded past the gate", () => {
-    const dir = baseRepo("rehearse-flowgate-branch-");
+  it("fails when an integration branch already exists: the session proceeded past the gate", async () => {
+    const dir = await baseRepo("rehearse-flowgate-branch-");
     moveUncommitted(dir);
     writeFileSync(join(dir, ".doug/plan.json"), JSON.stringify(draftPlan()));
-    git(dir, "branch", "doug/fix-hours-factor");
-    const result = assertFlowGateHeld(dir, goodStream, { plugins: ["doug-flow"], command: "doug-flow:doug-next", cardId: "fix-hours" });
+    await git(dir, "branch", "doug/fix-hours-factor");
+    const result = await inLib("assertFlowGateHeld", dir, goodStream, { plugins: ["doug-flow"], command: "doug-flow:doug-next", cardId: "fix-hours" });
     expect(result.ok).toBe(false);
     expect(result.message).toContain("integration branch already exists");
   });
 });
 
 describe("runStage and runSessionStage error handling (review #5)", () => {
-  it("a nonexistent claude binary surfaces as 'claude could not run', not a stream-shape failure", () => {
+  it("a nonexistent claude binary surfaces as 'claude could not run', not a stream-shape failure", async () => {
     const dir = trackedTempDir("rehearse-enoent-");
     const bogus = join(dir, "no-such-claude-binary");
-    const r = runStage({ dir, prompt: "hi", maxTurns: 1, stage: "x", claudeBin: bogus });
+    const r = await inLib("runStage", { dir, prompt: "hi", maxTurns: 1, stage: "x", claudeBin: bogus });
     expect(r.status).toBeNull();
     expect(r.error).toBeTruthy();
     expect(r.stdout).toBe("");
 
-    const stage = SCENARIO_STAGES.hand[0];
-    const result = runSessionStage(stage, { dir, card: { id: "fix-hours" }, claudeBin: bogus });
+    const result = await inLib("runSessionStage", { $expr: "lib.SCENARIO_STAGES.hand[0]" }, { dir, card: { id: "fix-hours" }, claudeBin: bogus });
     expect(result.ok).toBe(false);
     expect(result.message).toContain("claude could not run");
     expect(result.message).not.toContain("plugins did not name");
   });
-  it("an assertion that throws is turned into a failed result, not a crash", () => {
+  it("an assertion that throws is turned into a failed result, not a crash", async () => {
     const dir = trackedTempDir("rehearse-throws-");
-    const throwingStage = { name: "boom", maxTurns: 1, prompt: () => "ok", assert: () => { throw new Error("kaboom"); } };
     const bin = makeFakeClaude(cannedStream());
-    const result = runSessionStage(throwingStage, { dir, card: {}, claudeBin: bin });
+    const result = await inLib("runSessionStage", { $expr: `({ name: "boom", maxTurns: 1, prompt: () => "ok", assert: () => { throw new Error("kaboom"); } })` }, { dir, card: {}, claudeBin: bin });
     expect(result.ok).toBe(false);
     expect(result.message).toContain("kaboom");
   });
-  it("the cap passed to claude is 3x the stage's own estimate, not the scenario total", () => {
+  it("the cap passed to claude is 3x the stage's own estimate, not the scenario total", async () => {
     const dir = trackedTempDir("rehearse-cap-");
     const argvFile = join(dir, "argv.json");
     const bin = makeFakeClaude(cannedStream(), { argvFile });
     const cap = capFor("hand", "gate");
-    expect(cap).toBeCloseTo(0.75, 5);
-    runStage({ dir, prompt: "/doug-next fix-hours", maxTurns: 12, stage: "gate", capUsd: cap, claudeBin: bin });
+    expect(cap).toBeCloseTo(1.5, 5);
+    await inLib("runStage", { dir, prompt: "/doug-next fix-hours", maxTurns: 12, stage: "gate", capUsd: cap, claudeBin: bin });
     const argv = JSON.parse(readFileSync(argvFile, "utf8"));
     const i = argv.indexOf("--max-budget-usd");
     expect(i).toBeGreaterThan(-1);
     expect(Number(argv[i + 1])).toBeCloseTo(cap, 5);
   });
-  it("every session disallows the Artifact tool (item rehearsal-first-live-findings #5): a gate or build session must never publish from a rehearsal", () => {
+  it("every session disallows the Artifact tool (item rehearsal-first-live-findings #5): a gate or build session must never publish from a rehearsal", async () => {
     const dir = trackedTempDir("rehearse-artifact-lockout-");
     const argvFile = join(dir, "argv.json");
     const bin = makeFakeClaude(cannedStream(), { argvFile });
-    runStage({ dir, prompt: "/doug-next fix-hours", maxTurns: 12, stage: "gate", claudeBin: bin });
+    await inLib("runStage", { dir, prompt: "/doug-next fix-hours", maxTurns: 12, stage: "gate", claudeBin: bin });
     const argv = JSON.parse(readFileSync(argvFile, "utf8"));
     const i = argv.indexOf("--disallowedTools");
     expect(i).toBeGreaterThan(-1);
@@ -548,14 +616,14 @@ describe("prepareFixture's setup spawn uses commandEnv (card land-force-color-en
 describe("prepareFixture builds a real fixture (no claude)", () => {
   it.skipIf(!existsSync(CLI))(
     "hand: runs the suite's setup (node_modules exists), a git repo with one commit (baseline), a board with fix-hours ready on the hand track, and doug init's settings.json; swarm: an approved plan with swarm true",
-    () => {
-      const hand = prepareFixture({ scenario: "hand", tempPrefix: TEST_PREFIX });
+    async () => {
+      const hand = await inLib("prepareFixture", { scenario: "hand", tempPrefix: TEST_PREFIX });
       tempDirs.push(hand.dir);
       expect(existsSync(join(hand.dir, ".git"))).toBe(true);
       expect(existsSync(join(hand.dir, "node_modules"))).toBe(true); // suite.setup ran (review #2)
-      const log = git(hand.dir, "log", "--oneline").split("\n").filter(Boolean);
+      const log = (await git(hand.dir, "log", "--oneline")).split("\n").filter(Boolean);
       expect(log.length).toBe(1);
-      expect(hand.baseline).toBe(git(hand.dir, "rev-parse", "HEAD"));
+      expect(hand.baseline).toBe(await git(hand.dir, "rev-parse", "HEAD"));
       expect(existsSync(join(hand.dir, ".claude/settings.json"))).toBe(true);
       // .claude/worktrees/ is gitignored so a workflow run's worktrees never show up dirty (review 2 #17).
       expect(readFileSync(join(hand.dir, ".gitignore"), "utf8")).toContain(".claude/worktrees/");
@@ -566,16 +634,16 @@ describe("prepareFixture builds a real fixture (no claude)", () => {
       expect(hand.card.id).toBe("fix-hours");
       expect(existsSync(join(hand.dir, ".doug/plan.json"))).toBe(false);
 
-      const swarm = prepareFixture({ scenario: "swarm", tempPrefix: TEST_PREFIX });
+      const swarm = await inLib("prepareFixture", { scenario: "swarm", tempPrefix: TEST_PREFIX });
       tempDirs.push(swarm.dir);
       const plan = JSON.parse(readFileSync(join(swarm.dir, ".doug/plan.json"), "utf8"));
       expect(plan.status).toBe("approved");
       expect(plan.swarm).toBe(true);
-      expect(plan.card).toBe("fix-hours");
+      expect(plan.card).toBe("swarm-split-planned");
       const swarmBoard = JSON.parse(readFileSync(join(swarm.dir, ".doug/board.json"), "utf8"));
-      expect(swarmBoard.cards.find((c) => c.id === "fix-hours").track).toBeUndefined();
+      expect(swarmBoard.cards.find((c) => c.id === "swarm-split-planned").track).toBeUndefined();
 
-      const flow = prepareFixture({ scenario: "flow", tempPrefix: TEST_PREFIX });
+      const flow = await inLib("prepareFixture", { scenario: "flow", tempPrefix: TEST_PREFIX });
       tempDirs.push(flow.dir);
       expect(existsSync(join(flow.dir, ".doug/plan.json"))).toBe(false);
       const flowBoard = JSON.parse(readFileSync(join(flow.dir, ".doug/board.json"), "utf8"));
@@ -584,7 +652,7 @@ describe("prepareFixture builds a real fixture (no claude)", () => {
   );
 
   it("refuses an unknown scenario", () => {
-    expect(() => prepareFixture({ scenario: "bogus" })).toThrow(/unknown scenario/);
+    expect(() => prepareFixture({ scenario: "bogus" })).toThrow(/unknown scenario/); // throws before any spawn
   });
 });
 
@@ -604,7 +672,7 @@ describe("a prepared fixture's Models table is the one doug init generates, uned
       expect(generatedRows.length).toBeGreaterThan(0);
 
       for (const scenario of ["hand", "flow", "swarm"]) {
-        const { dir } = prepareFixture({ scenario, tempPrefix: TEST_PREFIX });
+        const { dir } = await inLib("prepareFixture", { scenario, tempPrefix: TEST_PREFIX });
         tempDirs.push(dir);
         const claudeMd = readFileSync(join(dir, "CLAUDE.md"), "utf8");
         for (const row of generatedRows) expect(claudeMd).toContain(row);
@@ -622,24 +690,24 @@ describe("rehearse.mjs source no longer defines withWorkerRow (card rehearse-wor
 });
 
 describe("one dry pass of the hand scenario's gate stage", () => {
-  it.skipIf(!existsSync(CLI))("a fake claude naming doug-flow and doug-flow:doug-next passes the gate stage's assertions; one lacking doug-flow fails naming it, and does nothing to the fixture", () => {
-    const { dir, card } = prepareFixture({ scenario: "hand", tempPrefix: TEST_PREFIX });
+  it.skipIf(!existsSync(CLI))("a fake claude naming doug-flow and doug-flow:doug-next passes the gate stage's assertions; one lacking doug-flow fails naming it, and does nothing to the fixture", async () => {
+    const { dir, card } = await inLib("prepareFixture", { scenario: "hand", tempPrefix: TEST_PREFIX });
     tempDirs.push(dir);
     const gate = SCENARIO_STAGES.hand[0];
     expect(gate.name).toBe("gate");
 
     const goodBin = makeFakeClaude(cannedStream({ plugins: ["doug-flow"], commands: ["doug-flow:doug-next"] }));
-    const good = runSessionStage(gate, { dir, card, claudeBin: goodBin });
+    const good = await inLib("runSessionStage", { $expr: "lib.SCENARIO_STAGES.hand[0]" }, { dir, card, claudeBin: goodBin });
     expect(good.ok, good.message).toBe(true);
     expect(existsSync(good.streamPath)).toBe(true);
 
     const badBin = makeFakeClaude(cannedStream({ plugins: ["some-other-plugin"], commands: ["doug-flow:doug-next"] }));
-    const bad = runSessionStage(gate, { dir, card, claudeBin: badBin });
+    const bad = await inLib("runSessionStage", { $expr: "lib.SCENARIO_STAGES.hand[0]" }, { dir, card, claudeBin: badBin });
     expect(bad.ok).toBe(false);
     expect(bad.message).toContain("doug-flow");
 
     // The fake did nothing: the fixture is exactly as prepareFixture left it.
-    const log = git(dir, "log", "--oneline").split("\n").filter(Boolean);
+    const log = (await git(dir, "log", "--oneline")).split("\n").filter(Boolean);
     expect(log.length).toBe(1);
     const board = JSON.parse(readFileSync(join(dir, ".doug/board.json"), "utf8"));
     expect(board.cards.find((c) => c.id === "fix-hours").column).toBe("ready");
@@ -678,30 +746,30 @@ function makeFlowGateFake({ moveCard = true, commitMove = false, planStatus = "d
 describe("one dry pass of the flow scenario's gate stage (item rehearsal-first-live-findings #1)", () => {
   it.skipIf(!existsSync(CLI))(
     "a fake claude that moves the card (uncommitted) and writes a draft plan passes; one that leaves the card Ready fails, one that commits the move fails, and one that approves the plan fails too",
-    () => {
+    async () => {
       const gate = SCENARIO_STAGES.flow[0];
       expect(gate.name).toBe("gate");
 
-      const okDir = prepareFixture({ scenario: "flow", tempPrefix: TEST_PREFIX }).dir;
+      const okDir = (await inLib("prepareFixture", { scenario: "flow", tempPrefix: TEST_PREFIX })).dir;
       tempDirs.push(okDir);
-      const ok = runSessionStage(gate, { dir: okDir, card: { id: "fix-hours" }, claudeBin: makeFlowGateFake() });
+      const ok = await inLib("runSessionStage", { $expr: "lib.SCENARIO_STAGES.flow[0]" }, { dir: okDir, card: { id: "fix-hours" }, claudeBin: makeFlowGateFake() });
       expect(ok.ok, ok.message).toBe(true);
 
-      const readyDir = prepareFixture({ scenario: "flow", tempPrefix: TEST_PREFIX }).dir;
+      const readyDir = (await inLib("prepareFixture", { scenario: "flow", tempPrefix: TEST_PREFIX })).dir;
       tempDirs.push(readyDir);
-      const stillReady = runSessionStage(gate, { dir: readyDir, card: { id: "fix-hours" }, claudeBin: makeFlowGateFake({ moveCard: false }) });
+      const stillReady = await inLib("runSessionStage", { $expr: "lib.SCENARIO_STAGES.flow[0]" }, { dir: readyDir, card: { id: "fix-hours" }, claudeBin: makeFlowGateFake({ moveCard: false }) });
       expect(stillReady.ok).toBe(false);
       expect(stillReady.message).toContain("does not have fix-hours in flow");
 
-      const committedDir = prepareFixture({ scenario: "flow", tempPrefix: TEST_PREFIX }).dir;
+      const committedDir = (await inLib("prepareFixture", { scenario: "flow", tempPrefix: TEST_PREFIX })).dir;
       tempDirs.push(committedDir);
-      const committed = runSessionStage(gate, { dir: committedDir, card: { id: "fix-hours" }, claudeBin: makeFlowGateFake({ commitMove: true }) });
+      const committed = await inLib("runSessionStage", { $expr: "lib.SCENARIO_STAGES.flow[0]" }, { dir: committedDir, card: { id: "fix-hours" }, claudeBin: makeFlowGateFake({ commitMove: true }) });
       expect(committed.ok).toBe(false);
       expect(committed.message).toContain("leaves the move uncommitted");
 
-      const approvedDir = prepareFixture({ scenario: "flow", tempPrefix: TEST_PREFIX }).dir;
+      const approvedDir = (await inLib("prepareFixture", { scenario: "flow", tempPrefix: TEST_PREFIX })).dir;
       tempDirs.push(approvedDir);
-      const approved = runSessionStage(gate, { dir: approvedDir, card: { id: "fix-hours" }, claudeBin: makeFlowGateFake({ planStatus: "approved" }) });
+      const approved = await inLib("runSessionStage", { $expr: "lib.SCENARIO_STAGES.flow[0]" }, { dir: approvedDir, card: { id: "fix-hours" }, claudeBin: makeFlowGateFake({ planStatus: "approved" }) });
       expect(approved.ok).toBe(false);
       expect(approved.message).toContain("already approved");
     },
@@ -752,7 +820,7 @@ function makeHandScenarioFake() {
 describe("scripts/rehearse.mjs: an evidence-archive failure does not abort the run (reviewer follow-up on item #2)", () => {
   it.skipIf(!existsSync(CLI))(
     "an unwritable .doug/.state in the target repository: the CLI still records the outcome and keeps the fixture instead of removing it",
-    () => {
+    async () => {
       // The target repository the outcome records under (never the internal ts-basic fixture prepareFixture makes).
       const targetDir = trackedTempDir("rehearse-archivefail-target-");
       let board = { ...newBoard(), components: ["flow"] };
@@ -763,8 +831,7 @@ describe("scripts/rehearse.mjs: an evidence-archive failure does not abort the r
       mkdirSync(join(targetDir, ".doug/.state"), { recursive: true });
       chmodSync(join(targetDir, ".doug/.state"), 0o555);
 
-      const r = spawnSync(process.execPath, [cli, "hand", "--spend", "--card", "fix-hours", targetDir], {
-        encoding: "utf8",
+      const r = await run(process.execPath, [cli, "hand", "--spend", "--card", "fix-hours", targetDir], {
         env: { ...process.env, DOUG_REHEARSE_CLAUDE: makeHandScenarioFake() },
       });
       chmodSync(join(targetDir, ".doug/.state"), 0o755); // restore before any assertion can throw and skip cleanup
@@ -792,52 +859,52 @@ describe("scripts/rehearse.mjs: an evidence-archive failure does not abort the r
 describe("assertHandBuilt against doug-hand's real commit order (review #1, blocker)", () => {
   it.skipIf(!existsSync(CLI))(
     "passes when the code commit precedes the board's own 'done' commit (as doug-hand step 4.3 leaves it), and fails when the board's source names a different sha",
-    () => {
-      const { dir, baseline } = prepareFixture({ scenario: "hand", tempPrefix: TEST_PREFIX });
+    async () => {
+      const { dir, baseline } = await inLib("prepareFixture", { scenario: "hand", tempPrefix: TEST_PREFIX });
       tempDirs.push(dir);
 
       fixDurationBug(dir);
-      git(dir, "add", "-A");
-      git(dir, "commit", "-q", "-m", "fix: hours multiplier");
-      const codeCommit = git(dir, "rev-parse", "HEAD");
+      await git(dir, "add", "-A");
+      await git(dir, "commit", "-q", "-m", "fix: hours multiplier");
+      const codeCommit = await git(dir, "rev-parse", "HEAD");
       expect(codeCommit).not.toBe(baseline);
 
       // Exactly doug-hand step 4: record the hand landing (writes docs/live-runs.md), move the card to done
       // with the code commit as its source, then commit both as one "board" commit — AFTER the code commit.
-      const record = spawnScript(BOARD_MJS, ["record", "fix-hours", "--hand", "--commit", codeCommit, "--gate", "typecheck 0; unit 3 passed", dir]);
+      const record = await spawnScript(BOARD_MJS, ["record", "fix-hours", "--hand", "--commit", codeCommit, "--gate", "typecheck 0; unit 3 passed", dir]);
       expect(record.status, record.stderr).toBe(0);
-      const move = spawnScript(BOARD_MJS, ["move", "fix-hours", "done", "--source", `commit ${codeCommit}`, dir]);
+      const move = await spawnScript(BOARD_MJS, ["move", "fix-hours", "done", "--source", `commit ${codeCommit}`, dir]);
       expect(move.status, move.stderr).toBe(0);
-      git(dir, "add", "-A");
-      git(dir, "commit", "-q", "-m", `Board: fix-hours done as ${codeCommit.slice(0, 7)}`);
-      const boardCommit = git(dir, "rev-parse", "HEAD");
+      await git(dir, "add", "-A");
+      await git(dir, "commit", "-q", "-m", `Board: fix-hours done as ${codeCommit.slice(0, 7)}`);
+      const boardCommit = await git(dir, "rev-parse", "HEAD");
       expect(boardCommit).not.toBe(codeCommit); // HEAD is the board commit, not the code commit (the bug this fixes)
 
-      const result = assertHandBuilt({ dir, baseline });
+      const result = await inLib("assertHandBuilt", { dir, baseline });
       expect(result.ok, result.message).toBe(true);
       expect(result.commit).toBe(codeCommit);
       // The held-out test file was removed again, and the tree is clean.
       expect(existsSync(join(dir, "tests/heldout-fix-hours.test.ts"))).toBe(false);
-      expect(git(dir, "status", "--porcelain")).toBe("");
+      expect(await git(dir, "status", "--porcelain")).toBe("");
     },
   );
 
-  it.skipIf(!existsSync(CLI))("fails when the board's source names a commit that never touched both owned files", () => {
-    const { dir, baseline } = prepareFixture({ scenario: "hand", tempPrefix: TEST_PREFIX });
+  it.skipIf(!existsSync(CLI))("fails when the board's source names a commit that never touched both owned files", async () => {
+    const { dir, baseline } = await inLib("prepareFixture", { scenario: "hand", tempPrefix: TEST_PREFIX });
     tempDirs.push(dir);
 
     fixDurationBug(dir);
-    git(dir, "add", "-A");
-    git(dir, "commit", "-q", "-m", "fix: hours multiplier");
-    const codeCommit = git(dir, "rev-parse", "HEAD");
+    await git(dir, "add", "-A");
+    await git(dir, "commit", "-q", "-m", "fix: hours multiplier");
+    const codeCommit = await git(dir, "rev-parse", "HEAD");
 
     const bogus = "0".repeat(40);
-    const move = spawnScript(BOARD_MJS, ["move", "fix-hours", "done", "--source", `commit ${bogus}`, dir]);
+    const move = await spawnScript(BOARD_MJS, ["move", "fix-hours", "done", "--source", `commit ${bogus}`, dir]);
     expect(move.status, move.stderr).toBe(0);
-    git(dir, "add", "-A");
-    git(dir, "commit", "-q", "-m", "Board: fix-hours done as 0000000");
+    await git(dir, "add", "-A");
+    await git(dir, "commit", "-q", "-m", "Board: fix-hours done as 0000000");
 
-    const result = assertHandBuilt({ dir, baseline });
+    const result = await inLib("assertHandBuilt", { dir, baseline });
     expect(result.ok).toBe(false);
     expect(result.message).toContain("does not name the code commit");
     expect(result.message).toContain(codeCommit);
@@ -866,14 +933,14 @@ describe("recording always goes through the board.mjs CLI (review #3)", () => {
     return dir;
   }
 
-  it("pins the scrub: a leaked CLAUDE_PROJECT_DIR pointing at a board without the card does not redirect the record (deleting cleanEnv() from runBoardCli fails this test)", () => {
+  it("pins the scrub: a leaked CLAUDE_PROJECT_DIR pointing at a board without the card does not redirect the record (deleting cleanEnv() from runBoardCli fails this test)", async () => {
     const target = tempRepoWithCard();
     const decoy = trackedTempDir("rehearse-decoy-");
     saveBoard(decoy, { ...newBoard(), components: ["flow"] }); // a board with no "fix-hours" card
     const original = process.env.CLAUDE_PROJECT_DIR;
     process.env.CLAUDE_PROJECT_DIR = decoy;
     try {
-      recordHandOutcome(target, "fix-hours", { commit: null, wallClock: "1 min", gate: "not observed", note: "Rehearsal hand on the ts-basic fixture: passed; stages gate (1 min)" });
+      await inLib("recordHandOutcome", target, "fix-hours", { commit: null, wallClock: "1 min", gate: "not observed", note: "Rehearsal hand on the ts-basic fixture: passed; stages gate (1 min)" });
     } finally {
       if (original === undefined) delete process.env.CLAUDE_PROJECT_DIR;
       else process.env.CLAUDE_PROJECT_DIR = original;
@@ -882,37 +949,37 @@ describe("recording always goes through the board.mjs CLI (review #3)", () => {
     expect(existsSync(join(decoy, "docs/live-runs.md"))).toBe(false);
   });
 
-  it("recordHandOutcome spawns board.mjs record --hand: the entry lands in a TEMP repository's docs/live-runs.md (never the real checkout), and the note begins with 'Rehearsal hand'", () => {
+  it("recordHandOutcome spawns board.mjs record --hand: the entry lands in a TEMP repository's docs/live-runs.md (never the real checkout), and the note begins with 'Rehearsal hand'", async () => {
     const tempRepo = tempRepoWithCard();
     const note = rehearsalNote({ scenario: "hand", outcome: "passed", stages: [{ name: "gate", wallClock: "1 min" }], cost: 0.01 });
     expect(note.startsWith("Rehearsal hand")).toBe(true);
-    recordHandOutcome(tempRepo, "fix-hours", { commit: null, wallClock: "1 min", gate: "not observed", note });
+    await inLib("recordHandOutcome", tempRepo, "fix-hours", { commit: null, wallClock: "1 min", gate: "not observed", note });
     const text = readFileSync(join(tempRepo, "docs/live-runs.md"), "utf8");
     expect(text).toContain("`fix-hours`");
     const noteLine = text.split("\n").find((l) => l.startsWith("Rehearsal"));
     expect(noteLine.startsWith("Rehearsal hand")).toBe(true);
   });
 
-  it("recordRunOutcome spawns board.mjs record <id> <report>: the entry lands in docs/live-runs.md with the note and the measures", () => {
+  it("recordRunOutcome spawns board.mjs record <id> <report>: the entry lands in docs/live-runs.md with the note and the measures", async () => {
     const tempRepo = tempRepoWithCard();
     const reportFile = join(tempRepo, "report.json");
     writeFileSync(reportFile, JSON.stringify({ ok: true, plan: "Fix hours", integrationBranch: "doug/fix-hours", levels: [{ index: 0, tasks: [{ id: "fix-hours", implemented: true, verified: true, reviewed: true, adversary: { ran: true, verdict: "pass", blocked: false } }], integration: { ok: true } }] }));
     const note = rehearsalNote({ scenario: "flow", outcome: "passed", stages: [{ name: "gate", wallClock: "1 min" }, { name: "implement", wallClock: "5 min" }] });
-    recordRunOutcome(tempRepo, "fix-hours", { reportFile, wallClock: "6 min", cost: 3.2, mergeCommit: "abc1234", note });
+    await inLib("recordRunOutcome", tempRepo, "fix-hours", { reportFile, wallClock: "6 min", cost: 3.2, mergeCommit: "abc1234", note });
     const text = readFileSync(join(tempRepo, "docs/live-runs.md"), "utf8");
     expect(text).toContain("| Cost | $3.20 |");
     expect(text).toContain("| Landed as | `abc1234` |");
     expect(text.split("\n").find((l) => l.startsWith("Rehearsal")).startsWith("Rehearsal flow")).toBe(true);
   });
 
-  it("throws (never swallows) when board.mjs record fails, e.g. an unknown card", () => {
+  it("throws (never swallows) when board.mjs record fails, e.g. an unknown card", async () => {
     const tempRepo = tempRepoWithCard();
-    expect(() => recordHandOutcome(tempRepo, "no-such-card", { note: "x" })).toThrow();
+    await expect(inLib("recordHandOutcome", tempRepo, "no-such-card", { note: "x" })).rejects.toThrow();
   });
 
-  it("passes --rehearsal <scenario> through: the entry reads as a rehearsal, not a landing of the card (item rehearsal-first-live-findings #3)", () => {
+  it("passes --rehearsal <scenario> through: the entry reads as a rehearsal, not a landing of the card (item rehearsal-first-live-findings #3)", async () => {
     const tempRepo = tempRepoWithCard();
-    recordHandOutcome(tempRepo, "fix-hours", { commit: "47fe70cca7eb3444ae8a382ee14018f3950bfe1c", wallClock: "3 min", gate: "unit 5 passed", rehearsal: "hand" });
+    await inLib("recordHandOutcome", tempRepo, "fix-hours", { commit: "47fe70cca7eb3444ae8a382ee14018f3950bfe1c", wallClock: "3 min", gate: "unit 5 passed", rehearsal: "hand" });
     const handText = readFileSync(join(tempRepo, "docs/live-runs.md"), "utf8");
     expect(handText).toContain("Rehearsal hand for card `fix-hours` on the ts-basic fixture");
     expect(handText).not.toContain("Built by hand through doug-hand");
@@ -921,7 +988,7 @@ describe("recording always goes through the board.mjs CLI (review #3)", () => {
     const tempRepo2 = tempRepoWithCard();
     const reportFile = join(tempRepo2, "report.json");
     writeFileSync(reportFile, JSON.stringify({ ok: false, stoppedAtLevel: 0, plan: "P", integrationBranch: "none", levels: [] }));
-    recordRunOutcome(tempRepo2, "fix-hours", { reportFile, wallClock: "1 min", mergeCommit: "47fe70cca7eb3444ae8a382ee14018f3950bfe1c", rehearsal: "flow" });
+    await inLib("recordRunOutcome", tempRepo2, "fix-hours", { reportFile, wallClock: "1 min", mergeCommit: "47fe70cca7eb3444ae8a382ee14018f3950bfe1c", rehearsal: "flow" });
     const runText = readFileSync(join(tempRepo2, "docs/live-runs.md"), "utf8");
     expect(runText).toContain("Rehearsal flow for card `fix-hours` on the ts-basic fixture");
     expect(runText).not.toContain("Ran through /doug-next");
@@ -930,14 +997,14 @@ describe("recording always goes through the board.mjs CLI (review #3)", () => {
 });
 
 describe("board.mjs record --note (review #3, the CLI-level path board.test.mjs's unit test does not cover)", () => {
-  it("board.mjs record <id> <report> --note renders the note through the real CLI", () => {
+  it("board.mjs record <id> <report> --note renders the note through the real CLI", async () => {
     const dir = trackedTempDir("rehearse-board-note-cli-");
     let board = { ...newBoard(), components: ["flow"] };
     board = addCard(board, { id: "c1", title: "C1", goal: "g", component: "flow", size: "S", column: "ready" });
     saveBoard(dir, board);
     const reportFile = join(dir, "report.json");
     writeFileSync(reportFile, JSON.stringify({ ok: true, plan: "P", integrationBranch: "doug/x", levels: [{ index: 0, tasks: [{ id: "c1", implemented: true, verified: true, reviewed: true, adversary: null }], integration: { ok: true } }] }));
-    const r = spawnScript(BOARD_MJS, ["record", "c1", reportFile, dir, "--note", "a note from the CLI"]);
+    const r = await spawnScript(BOARD_MJS, ["record", "c1", reportFile, dir, "--note", "a note from the CLI"]);
     expect(r.status, r.stderr).toBe(0);
     const text = readFileSync(join(dir, "docs/live-runs.md"), "utf8");
     expect(text).toContain("a note from the CLI");
@@ -1011,7 +1078,7 @@ describe("T1 (R1): requireWorkers reads a task's swarm record before falling bac
   }
   const okTask = { id: "fix-hours-factor", verified: true, reviewed: true, adversary: { ran: true, verdict: "pass" } };
 
-  it("a task with swarm.applies:false and no workers fails naming the task, the reason, and rehearsal-swarm-splittable; a report with workers still passes; a report with neither keeps the old message", () => {
+  it("a task with swarm.applies:false and no workers fails naming the task and the reason; a report with workers still passes; a report with neither keeps the old message", () => {
     const gated = assertImplemented(
       reportDir({ ok: true, levels: [{ tasks: [{ ...okTask, swarm: { applies: false, reason: "one source file and its tests" } }] }] }),
       cannedStream(),
@@ -1020,7 +1087,8 @@ describe("T1 (R1): requireWorkers reads a task's swarm record before falling bac
     expect(gated.ok).toBe(false);
     expect(gated.message).toContain("fix-hours-factor");
     expect(gated.message).toContain("one source file and its tests");
-    expect(gated.message).toContain("rehearsal-swarm-splittable");
+    expect(gated.message).not.toContain("rehearsal-swarm-splittable");
+    expect(gated.message).not.toContain("cannot prove a split");
 
     const withWorkers = assertImplemented(
       reportDir({ ok: true, levels: [{ tasks: [{ ...okTask, workers: [{ id: "brief-a" }], swarm: { applies: false, reason: "one source file and its tests" } }] }] }),
@@ -1042,17 +1110,17 @@ describe("T1 (R1): requireWorkers reads a task's swarm record before falling bac
     expect(result.message).toContain("fix-hours-message");
     expect(result.message).not.toContain("fix-hours-factor");
     expect(result.message).toContain("one source file and its tests");
-    expect(result.message).toContain("rehearsal-swarm-splittable");
+    expect(result.message).not.toContain("rehearsal-swarm-splittable");
   });
 });
 
 describe("T2 (R2): the prepared fixture's card carries a class (hand, flow, and swarm fixtures)", () => {
-  it.skipIf(!existsSync(CLI))("prepareFixture gives fix-hours class \"code\" on every scenario", () => {
+  it.skipIf(!existsSync(CLI))("prepareFixture gives fix-hours class \"code\" on every scenario", async () => {
     for (const scenario of SCENARIOS) {
-      const { dir } = prepareFixture({ scenario, tempPrefix: TEST_PREFIX });
+      const { dir } = await inLib("prepareFixture", { scenario, tempPrefix: TEST_PREFIX });
       tempDirs.push(dir);
       const board = JSON.parse(readFileSync(join(dir, ".doug/board.json"), "utf8"));
-      const card = board.cards.find((c) => c.id === "fix-hours");
+      const card = board.cards.find((c) => c.id === (scenario === "swarm" ? "swarm-split-planned" : "fix-hours"));
       expect(card.class, `${scenario} fixture card`).toBe("code");
     }
   });
@@ -1061,8 +1129,8 @@ describe("T2 (R2): the prepared fixture's card carries a class (hand, flow, and 
 describe("T3 (R2): the hand start-gate act stamps the fixture's condition, never this repository's", () => {
   it.skipIf(!existsSync(CLI))(
     "leaves .doug/.state/reports/fix-hours/condition.json in the fixture and returns ok; a leaked CLAUDE_PROJECT_DIR must not redirect the write (deleting cleanEnv() from act() fails this: idiom at rehearse.test.mjs:806-816)",
-    () => {
-      const { dir } = prepareFixture({ scenario: "hand", tempPrefix: TEST_PREFIX });
+    async () => {
+      const { dir } = await inLib("prepareFixture", { scenario: "hand", tempPrefix: TEST_PREFIX });
       tempDirs.push(dir);
       const startGate = SCENARIO_STAGES.hand[1];
       expect(startGate.name).toBe("start-gate");
@@ -1077,7 +1145,7 @@ describe("T3 (R2): the hand start-gate act stamps the fixture's condition, never
       process.env.CLAUDE_PROJECT_DIR = decoy;
       let result;
       try {
-        result = runActStage(startGate, { dir, card: { id: "fix-hours" } });
+        result = await inLib("runActStage", { $expr: "lib.SCENARIO_STAGES.hand[1]" }, { dir, card: { id: "fix-hours" } });
       } finally {
         if (original === undefined) delete process.env.CLAUDE_PROJECT_DIR;
         else process.env.CLAUDE_PROJECT_DIR = original;
@@ -1094,8 +1162,8 @@ describe("T3 (R2): the hand start-gate act stamps the fixture's condition, never
 describe("T3 fails closed (R2): a condition-open failure must stop the start-gate act, not be swallowed", () => {
   it.skipIf(!existsSync(CLI))(
     "a fixture whose card class was removed before the act runs: result not ok, message carries memory.mjs's stderr, and no condition.json is written",
-    () => {
-      const { dir } = prepareFixture({ scenario: "hand", tempPrefix: TEST_PREFIX });
+    async () => {
+      const { dir } = await inLib("prepareFixture", { scenario: "hand", tempPrefix: TEST_PREFIX });
       tempDirs.push(dir);
       const boardFile = join(dir, ".doug/board.json");
       const board = JSON.parse(readFileSync(boardFile, "utf8"));
@@ -1103,7 +1171,7 @@ describe("T3 fails closed (R2): a condition-open failure must stop the start-gat
       writeFileSync(boardFile, JSON.stringify(board, null, 2) + "\n");
 
       const startGate = SCENARIO_STAGES.hand[1];
-      const result = runActStage(startGate, { dir, card: { id: "fix-hours" } });
+      const result = await inLib("runActStage", { $expr: "lib.SCENARIO_STAGES.hand[1]" }, { dir, card: { id: "fix-hours" } });
 
       expect(result.ok).toBe(false);
       expect(result.message).toContain("condition open failed");
@@ -1163,4 +1231,441 @@ describe("card report-save-wrapper: the implement-stage prompts name the result 
     const implement = SCENARIO_STAGES.swarm.find((s) => s.name === "implement");
     expect(implement.prompt()).toContain("the `result` object of the Workflow");
   });
+});
+
+// Card autopilot part D: the `auto` scenario runs a bare `/doug-next --auto` (unlimited, card autopilot-unlimited) over
+// two Ready hand cards with no gate prompt between them, and leaves one Backlog card untouched. Everything here uses fixtures and the fake claude; nothing spawns the real binary.
+describe("card autopilot: the auto scenario's registry entries", () => {
+  it("SCENARIOS includes auto, and ESTIMATES.auto has gate 0.5 and build 8.0 with a source saying two hand builds, unmeasured", () => {
+    expect(SCENARIOS).toContain("auto");
+    expect(ESTIMATES.auto.stages).toEqual({ gate: 0.5, build: 8.0 });
+    expect(scenarioTotal("auto")).toBeCloseTo(8.5, 10);
+    expect(ESTIMATES.auto.source).toContain("two hand builds");
+    expect(ESTIMATES.auto.source).toContain("unmeasured");
+  });
+  it("SCENARIO_STAGES.auto is a gate session then a build session, both on a bare /doug-next --auto (unlimited)", () => {
+    const [gate, build] = SCENARIO_STAGES.auto;
+    expect(SCENARIO_STAGES.auto.length).toBe(2);
+    expect([gate.kind, gate.name]).toEqual(["session", "gate"]);
+    expect([build.kind, build.name]).toEqual(["session", "build"]);
+    expect(gate.prompt({ card: { id: "fix-hours" } })).toBe("/doug-next --auto");
+    const prompt = build.prompt({ card: { id: "fix-hours" } });
+    expect(prompt.startsWith("/doug-next --auto\n")).toBe(true);
+    expect(prompt).not.toContain("--auto 2");
+    expect(prompt).toContain("I approved the queue as shown, with the caps you proposed.");
+    expect(prompt).toContain("Do not invoke the doug-board skill at any step: this checkout publishes nothing.");
+    expect(prompt).not.toContain("core-next");
+    expect(build.maxTurns).toBeGreaterThanOrEqual(100);
+    expect(build.maxTurns).toBeLessThanOrEqual(200);
+  });
+  it("rehearse.mjs auto without --spend prints the auto estimate and spawns nothing", async () => {
+    const marker = join(trackedTempDir("rehearse-marker-"), "spawned");
+    const claudeBin = makeFakeClaude("", { marker });
+    const r = await run(process.execPath, [cli, "auto"], { env: { ...process.env, DOUG_REHEARSE_CLAUDE: claudeBin } });
+    expect(r.status).toBe(2);
+    expect(r.stdout).toContain("$8.50");
+    expect(existsSync(marker)).toBe(false);
+  });
+  it("rehearsalNote has an auto wording that starts with 'Rehearsal auto'", () => {
+    const note = rehearsalNote({ scenario: "auto", outcome: "passed", stages: [{ name: "gate", wallClock: "1 min" }, { name: "build", wallClock: "9 min" }], cost: 7.5 });
+    expect(note.startsWith("Rehearsal auto on the ts-basic fixture: passed")).toBe(true);
+    expect(note).toContain("cost $7.50");
+  });
+});
+
+describe("card autopilot: prepareFixture for auto", () => {
+  it.skipIf(!existsSync(CLI))("has two Ready S hand cards of class code, fix-hours then add-truncate, with add-truncate's goal from ts-basic.json, one Backlog card, and one commit", async () => {
+    const fx = await inLib("prepareFixture", { scenario: "auto", tempPrefix: TEST_PREFIX });
+    tempDirs.push(fx.dir);
+    const board = JSON.parse(readFileSync(join(fx.dir, ".doug/board.json"), "utf8"));
+    const ready = board.cards.filter((c) => c.column === "ready");
+    expect(ready.map((c) => c.id)).toEqual(["fix-hours", "add-truncate"]);
+    for (const c of ready) expect([c.column, c.size, c.track, c.class], c.id).toEqual(["ready", "S", "hand", "code"]);
+    const tasks = JSON.parse(readFileSync(TASKS_FILE, "utf8")).tasks;
+    const truncate = tasks.find((t) => t.id === "add-truncate");
+    expect(ready[1].goal).toBe(truncate.prompt);
+    expect(ready[1].title).toBeTruthy();
+    const backlog = board.cards.filter((c) => c.column === "backlog");
+    expect(backlog, "exactly one Backlog card, which autopilot must leave alone").toHaveLength(1);
+    expect(["fix-hours", "add-truncate"]).not.toContain(backlog[0].id);
+    expect(backlog[0].title).toBeTruthy();
+    expect(backlog[0].goal).toBeTruthy();
+    expect(board.cards).toHaveLength(3);
+    expect(fx.card.id).toBe("fix-hours");
+    expect((await git(fx.dir, "log", "--oneline")).split("\n").filter(Boolean).length).toBe(1);
+    expect(fx.baseline).toBe(await git(fx.dir, "rev-parse", "HEAD"));
+    expect(existsSync(join(fx.dir, ".doug/plan.json"))).toBe(false);
+  });
+  it.skipIf(!existsSync(CLI))("leaves the hand fixture with only fix-hours (no Backlog card outside the auto scenario)", async () => {
+    const hand = await inLib("prepareFixture", { scenario: "hand", tempPrefix: TEST_PREFIX });
+    tempDirs.push(hand.dir);
+    const board = JSON.parse(readFileSync(join(hand.dir, ".doug/board.json"), "utf8"));
+    expect(board.cards.map((c) => c.id)).toEqual(["fix-hours"]);
+  });
+});
+
+describe("card autopilot: the auto gate stage", () => {
+  it.skipIf(!existsSync(CLI))("passes on an untouched fixture, and fails when a card left Ready or a commit appeared", async () => {
+    const { dir, card } = await inLib("prepareFixture", { scenario: "auto", tempPrefix: TEST_PREFIX });
+    tempDirs.push(dir);
+    const goodBin = makeFakeClaude(cannedStream({ plugins: ["doug-flow"], commands: ["doug-flow:doug-next"] }));
+    const good = await inLib("runSessionStage", { $expr: "lib.SCENARIO_STAGES.auto[0]" }, { dir, card, claudeBin: goodBin });
+    expect(good.ok, good.message).toBe(true);
+
+    const board = JSON.parse(readFileSync(join(dir, ".doug/board.json"), "utf8"));
+    board.cards.find((c) => c.id === "add-truncate").column = "flow";
+    writeFileSync(join(dir, ".doug/board.json"), JSON.stringify(board, null, 2));
+    const moved = await inLib("runSessionStage", { $expr: "lib.SCENARIO_STAGES.auto[0]" }, { dir, card, claudeBin: goodBin });
+    expect(moved.ok).toBe(false);
+    expect(moved.message).toContain("add-truncate");
+    board.cards.find((c) => c.id === "add-truncate").column = "ready";
+    writeFileSync(join(dir, ".doug/board.json"), JSON.stringify(board, null, 2));
+
+    writeFileSync(join(dir, "src/duration.ts"), readFileSync(join(dir, "src/duration.ts"), "utf8") + "\n// touched\n");
+    const touched = await inLib("runSessionStage", { $expr: "lib.SCENARIO_STAGES.auto[0]" }, { dir, card, claudeBin: goodBin });
+    expect(touched.ok).toBe(false);
+  });
+  it.skipIf(!existsSync(CLI))("fails when the plugin is not loaded", async () => {
+    const { dir, card } = await inLib("prepareFixture", { scenario: "auto", tempPrefix: TEST_PREFIX });
+    tempDirs.push(dir);
+    const badBin = makeFakeClaude(cannedStream({ plugins: ["some-other-plugin"], commands: ["doug-flow:doug-next"] }));
+    const bad = await inLib("runSessionStage", { $expr: "lib.SCENARIO_STAGES.auto[0]" }, { dir, card, claudeBin: badBin });
+    expect(bad.ok).toBe(false);
+    expect(bad.message).toContain("doug-flow");
+  });
+});
+
+describe("card autopilot: assertAutoBuilt", () => {
+  const askStream = () =>
+    cannedStream() + JSON.stringify({ type: "assistant", message: { content: [{ type: "tool_use", id: "t1", name: "AskUserQuestion", input: { questions: [] } }] } }) + "\n";
+  // What doug-hand leaves for one card: a code commit, then a board commit (record --hand, move to done).
+  async function landCard(dir, id, edit, message, { record = true, move = true, source = null } = {}) {
+    edit(dir);
+    await git(dir, "add", "-A");
+    await git(dir, "commit", "-q", "-m", message);
+    const sha = await git(dir, "rev-parse", "HEAD");
+    if (record) {
+      const rec = await spawnScript(BOARD_MJS, ["record", id, "--hand", "--commit", sha, "--gate", "typecheck 0; unit 3 passed", dir]);
+      expect(rec.status, rec.stderr).toBe(0);
+    }
+    if (move) {
+      const mv = await spawnScript(BOARD_MJS, ["move", id, "done", "--source", source || `commit ${sha}`, dir]);
+      expect(mv.status, mv.stderr).toBe(0);
+    }
+    if (record || move) {
+      await git(dir, "add", "-A");
+      await git(dir, "commit", "-q", "-m", `Board: ${id} done as ${sha.slice(0, 7)}`);
+    }
+    return sha;
+  }
+  const addTruncate = (dir) => {
+    writeFileSync(join(dir, "src/strings.ts"), readFileSync(join(dir, "src/strings.ts"), "utf8") + '\nexport function truncate(input: string, max: number): string {\n  return input.length <= max ? input : input.slice(0, max - 1) + "\\u2026";\n}\n');
+    writeFileSync(join(dir, "tests/strings.test.ts"), readFileSync(join(dir, "tests/strings.test.ts"), "utf8").replace('import { slugify }', 'import { slugify, truncate }') + '\ndescribe("truncate", () => {\n  it("cuts", () => {\n    expect(truncate("hello world", 5)).toBe("hell\\u2026");\n  });\n});\n');
+  };
+  const cleanStream = () => cannedStream({ plugins: ["doug-flow"], commands: ["doug-flow:doug-next"] });
+
+  it.skipIf(!existsSync(CLI))("passes when both cards are built and Done, with no AskUserQuestion in the stream", async () => {
+    const { dir, baseline } = await inLib("prepareFixture", { scenario: "auto", tempPrefix: TEST_PREFIX });
+    tempDirs.push(dir);
+    await landCard(dir, "fix-hours", fixDurationBug, "fix: hours multiplier");
+    await landCard(dir, "add-truncate", addTruncate, "feat: truncate");
+    const result = await inLib("assertAutoBuilt", { dir, baseline, stream: cleanStream() });
+    expect(result.ok, result.message).toBe(true);
+    expect(existsSync(join(dir, "tests/heldout-add-truncate.test.ts"))).toBe(false);
+    expect(existsSync(join(dir, "tests/heldout-fix-hours.test.ts"))).toBe(false);
+    expect(await git(dir, "status", "--porcelain")).toBe("");
+  });
+  it.skipIf(!existsSync(CLI))("fails naming AskUserQuestion when the build stream carries one, even though both cards are built", async () => {
+    const { dir, baseline } = await inLib("prepareFixture", { scenario: "auto", tempPrefix: TEST_PREFIX });
+    tempDirs.push(dir);
+    await landCard(dir, "fix-hours", fixDurationBug, "fix: hours multiplier");
+    await landCard(dir, "add-truncate", addTruncate, "feat: truncate");
+    const result = await inLib("assertAutoBuilt", { dir, baseline, stream: askStream() });
+    expect(result.ok).toBe(false);
+    expect(result.message).toContain("AskUserQuestion");
+  });
+  it.skipIf(!existsSync(CLI))("fails naming add-truncate when only the first card is Done", async () => {
+    const { dir, baseline } = await inLib("prepareFixture", { scenario: "auto", tempPrefix: TEST_PREFIX });
+    tempDirs.push(dir);
+    await landCard(dir, "fix-hours", fixDurationBug, "fix: hours multiplier");
+    const result = await inLib("assertAutoBuilt", { dir, baseline, stream: cleanStream() });
+    expect(result.ok).toBe(false);
+    expect(result.message).toContain("add-truncate");
+  });
+  it.skipIf(!existsSync(CLI))("fails naming fix-hours when only the second card is Done", async () => {
+    const { dir, baseline } = await inLib("prepareFixture", { scenario: "auto", tempPrefix: TEST_PREFIX });
+    tempDirs.push(dir);
+    await landCard(dir, "add-truncate", addTruncate, "feat: truncate");
+    const result = await inLib("assertAutoBuilt", { dir, baseline, stream: cleanStream() });
+    expect(result.ok).toBe(false);
+    expect(result.message).toContain("fix-hours");
+  });
+
+  it.skipIf(!existsSync(CLI))("fails naming AskUserQuestion when it appears in a LATER assistant message, after earlier ones without it", async () => {
+    const { dir, baseline } = await inLib("prepareFixture", { scenario: "auto", tempPrefix: TEST_PREFIX });
+    tempDirs.push(dir);
+    await landCard(dir, "fix-hours", fixDurationBug, "fix: hours multiplier");
+    await landCard(dir, "add-truncate", addTruncate, "feat: truncate");
+    const assistant = (content) => JSON.stringify({ type: "assistant", message: { content } }) + "\n";
+    const stream =
+      cannedStream() +
+      assistant([{ type: "text", text: "building card one" }]) +
+      assistant([{ type: "tool_use", id: "t0", name: "Bash", input: { command: "true" } }]) +
+      assistant([{ type: "text", text: "now card two" }, { type: "tool_use", id: "t9", name: "AskUserQuestion", input: { questions: [] } }]);
+    const result = await inLib("assertAutoBuilt", { dir, baseline, stream });
+    expect(result.ok).toBe(false);
+    expect(result.message).toContain("AskUserQuestion");
+  });
+  it.skipIf(!existsSync(CLI))("fails naming add-truncate when it is committed and Done with its live-runs entry but its held-out test fails", async () => {
+    const { dir, baseline } = await inLib("prepareFixture", { scenario: "auto", tempPrefix: TEST_PREFIX });
+    tempDirs.push(dir);
+    await landCard(dir, "fix-hours", fixDurationBug, "fix: hours multiplier");
+    // a wrong truncate (no ellipsis): both owned files change, the card is Done and recorded, the held-out test fails
+    await landCard(dir, "add-truncate", (d) => {
+      writeFileSync(join(d, "src/strings.ts"), readFileSync(join(d, "src/strings.ts"), "utf8") + "\nexport function truncate(input: string, max: number): string {\n  return input.slice(0, max);\n}\n");
+      writeFileSync(join(d, "tests/strings.test.ts"), readFileSync(join(d, "tests/strings.test.ts"), "utf8").replace("import { slugify }", "import { slugify, truncate }") + '\ndescribe("truncate", () => {\n  it("cuts", () => {\n    expect(truncate("hello world", 5)).toBe("hello");\n  });\n});\n');
+    }, "feat: truncate");
+    const result = await inLib("assertAutoBuilt", { dir, baseline, stream: cleanStream() });
+    expect(result.ok).toBe(false);
+    expect(result.message).toContain("add-truncate");
+    expect(await git(dir, "status", "--porcelain")).toBe("");
+    expect(existsSync(join(dir, "tests/heldout-add-truncate.test.ts"))).toBe(false);
+  });
+
+  // Isolation of the Backlog clause: both Ready cards are landed correctly, so only the Backlog card's state can fail.
+  const editBacklog = async (dir, edit) => {
+    const file = join(dir, ".doug/board.json");
+    const board = JSON.parse(readFileSync(file, "utf8"));
+    const card = board.cards.find((c) => c.column === "backlog");
+    expect(card, "the fixture must carry a Backlog card").toBeTruthy();
+    const id = card.id;
+    edit(card);
+    writeFileSync(file, JSON.stringify(board, null, 2) + "\n");
+    await git(dir, "add", "-A");
+    await git(dir, "commit", "-q", "-m", "board: touch backlog card");
+    return id;
+  };
+  it.skipIf(!existsSync(CLI))("passes with the Backlog card untouched while both Ready cards land", async () => {
+    const { dir, baseline } = await buildBothThen({});
+    const board = JSON.parse(readFileSync(join(dir, ".doug/board.json"), "utf8"));
+    expect(board.cards.filter((c) => c.column === "backlog")).toHaveLength(1);
+    const result = await inLib("assertAutoBuilt", { dir, baseline, stream: cleanStream() });
+    expect(result.ok, result.message).toBe(true);
+  });
+  it.skipIf(!existsSync(CLI))("fails naming the Backlog card when autopilot moved it out of Backlog", async () => {
+    const { dir, baseline } = await buildBothThen({});
+    const id = await editBacklog(dir, (c) => {
+      c.column = "ready";
+    });
+    const result = await inLib("assertAutoBuilt", { dir, baseline, stream: cleanStream() });
+    expect(result.ok).toBe(false);
+    expect(result.message).toContain(id);
+  });
+  it.skipIf(!existsSync(CLI))("fails naming the Backlog card when its goal changed", async () => {
+    const { dir, baseline } = await buildBothThen({});
+    const id = await editBacklog(dir, (c) => {
+      c.goal = c.goal + " (edited by the run)";
+    });
+    const result = await inLib("assertAutoBuilt", { dir, baseline, stream: cleanStream() });
+    expect(result.ok).toBe(false);
+    expect(result.message).toContain(id);
+  });
+
+  // Isolation of the per-card clause: in each case add-truncate's code is in place and its held-out test passes
+  // (the tree is clean), so only the Done/commit/live-runs check can name the failure.
+  const buildBothThen = async (truncateOpts, truncateEdit = addTruncate) => {
+    const { dir, baseline } = await inLib("prepareFixture", { scenario: "auto", tempPrefix: TEST_PREFIX });
+    tempDirs.push(dir);
+    await landCard(dir, "fix-hours", fixDurationBug, "fix: hours multiplier");
+    await landCard(dir, "add-truncate", truncateEdit, "feat: truncate", truncateOpts);
+    return { dir, baseline };
+  };
+  it.skipIf(!existsSync(CLI))("fails naming add-truncate and 'done' when its code is committed and passes the held-out test but the board never moved it to Done", async () => {
+    const { dir, baseline } = await buildBothThen({ record: false, move: false });
+    const result = await inLib("assertAutoBuilt", { dir, baseline, stream: cleanStream() });
+    expect(result.ok).toBe(false);
+    expect(result.message).toContain("add-truncate");
+    expect(result.message).toContain("done");
+  });
+  it.skipIf(!existsSync(CLI))("fails naming add-truncate and its source when Done's source names a different commit", async () => {
+    const { dir, baseline } = await buildBothThen({ source: `commit ${"0".repeat(40)}` });
+    const result = await inLib("assertAutoBuilt", { dir, baseline, stream: cleanStream() });
+    expect(result.ok).toBe(false);
+    expect(result.message).toContain("add-truncate");
+    expect(result.message).toContain("source");
+  });
+  it.skipIf(!existsSync(CLI))("fails naming add-truncate and docs/live-runs.md when it is Done but has no hand-track entry", async () => {
+    const { dir, baseline } = await buildBothThen({ record: false });
+    const result = await inLib("assertAutoBuilt", { dir, baseline, stream: cleanStream() });
+    expect(result.ok).toBe(false);
+    expect(result.message).toContain("add-truncate");
+    expect(result.message).toContain("live-runs");
+  });
+  it.skipIf(!existsSync(CLI))("fails naming add-truncate when no single commit changes both its source and test files", async () => {
+    const { dir, baseline } = await inLib("prepareFixture", { scenario: "auto", tempPrefix: TEST_PREFIX });
+    tempDirs.push(dir);
+    await landCard(dir, "fix-hours", fixDurationBug, "fix: hours multiplier");
+    // src in one commit, tests in another: the held-out test passes, but no commit owns both files
+    await landCard(dir, "add-truncate", (d) => {
+      writeFileSync(join(d, "src/strings.ts"), readFileSync(join(d, "src/strings.ts"), "utf8") + '\nexport function truncate(input: string, max: number): string {\n  return input.length <= max ? input : input.slice(0, max - 1) + "\\u2026";\n}\n');
+    }, "feat: truncate src", { record: false, move: false });
+    await landCard(dir, "add-truncate", (d) => {
+      writeFileSync(join(d, "tests/strings.test.ts"), readFileSync(join(d, "tests/strings.test.ts"), "utf8") + "\n// truncate tests\n");
+    }, "test: truncate");
+    const result = await inLib("assertAutoBuilt", { dir, baseline, stream: cleanStream() });
+    expect(result.ok).toBe(false);
+    expect(result.message).toContain("add-truncate");
+  });
+});
+
+// A fake `claude` that carries the whole auto scenario through the real CLI: the build prompt (told apart by "I
+// approved the queue") fixes both cards and lands each as doug-hand does (code commit, record --hand, move to done,
+// board commit).
+function makeAutoScenarioFake() {
+  const dir = trackedTempDir("fake-claude-autoscenario-");
+  const bin = join(dir, "claude");
+  const truncSrc = '\nexport function truncate(input: string, max: number): string {\n  return input.length <= max ? input : input.slice(0, max - 1) + "\\u2026";\n}\n';
+  const script = [
+    "#!/usr/bin/env node",
+    "const { execFileSync } = require('node:child_process');",
+    "const fs = require('node:fs');",
+    "const prompt = process.argv[process.argv.indexOf('-p') + 1] || '';",
+    `const sh = (args) => execFileSync(${JSON.stringify(process.execPath)}, [${JSON.stringify(BOARD_MJS)}, ...args]);`,
+    "const land = (id, msg) => {",
+    "  execFileSync('git', ['add', '-A']);",
+    "  execFileSync('git', ['commit', '-q', '-m', msg]);",
+    "  const sha = execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();",
+    "  sh(['record', id, '--hand', '--commit', sha, '--gate', 'typecheck 0; unit 1 passed']);",
+    "  sh(['move', id, 'done', '--source', 'commit ' + sha]);",
+    "  execFileSync('git', ['add', '-A']);",
+    "  execFileSync('git', ['commit', '-q', '-m', 'Board: ' + id + ' done as ' + sha.slice(0, 7)]);",
+    "};",
+    "if (prompt.includes('I approved the queue')) {",
+    `  fs.writeFileSync('src/duration.ts', fs.readFileSync('src/duration.ts', 'utf8').replace(${JSON.stringify("return n * 60_000; // bug: should be 3_600_000")}, ${JSON.stringify("return n * 3_600_000;")}));`,
+    `  fs.writeFileSync('tests/duration.test.ts', fs.readFileSync('tests/duration.test.ts', 'utf8').replace(${JSON.stringify('  it("rejects garbage"')}, ${JSON.stringify('  it("parses hours", () => {\n    expect(parseDuration("2h")).toBe(7_200_000);\n  });\n  it("rejects garbage"')}));`,
+    "  land('fix-hours', 'fix: hours multiplier');",
+    `  fs.appendFileSync('src/strings.ts', ${JSON.stringify(truncSrc)});`,
+    `  fs.writeFileSync('tests/strings.test.ts', fs.readFileSync('tests/strings.test.ts', 'utf8').replace('import { slugify }', 'import { slugify, truncate }') + ${JSON.stringify('\ndescribe("truncate", () => {\n  it("cuts", () => {\n    expect(truncate("hello world", 5)).toBe("hell\\u2026");\n  });\n});\n')});`,
+    "  land('add-truncate', 'feat: truncate');",
+    "}",
+    `process.stdout.write(${JSON.stringify(cannedStream({ plugins: ["doug-flow"], commands: ["doug-flow:doug-next"] }))});`,
+    "process.exit(0);",
+  ].join("\n");
+  writeFileSync(bin, script);
+  chmodSync(bin, 0o755);
+  return bin;
+}
+
+describe("card autopilot: scripts/rehearse.mjs auto --spend end to end with a fake claude", () => {
+  it.skipIf(!existsSync(CLI))("passes and records through the hand path: a hand-track entry in the target's docs/live-runs.md, no synthetic or flow report", async () => {
+    const targetDir = trackedTempDir("rehearse-auto-target-");
+    let board = { ...newBoard(), components: ["flow"] };
+    board = addCard(board, { id: "fix-hours", title: "Fix hours", goal: "g", component: "flow", size: "S", track: "hand", column: "ready" });
+    saveBoard(targetDir, board);
+    const r = await run(process.execPath, [cli, "auto", "--spend", "--card", "fix-hours", targetDir], { env: { ...process.env, DOUG_REHEARSE_CLAUDE: makeAutoScenarioFake() } });
+    expect(r.status, r.stderr || r.stdout).toBe(0);
+    expect(r.stdout).toContain("auto: passed");
+    expect(r.stdout).not.toContain("recording failed");
+    const text = readFileSync(join(targetDir, "docs/live-runs.md"), "utf8");
+    expect(text).toContain("Rehearsal auto for card `fix-hours` on the ts-basic fixture");
+    expect(text).not.toContain("Built by hand through doug-hand");
+    // no workflow report was written or synthesised for the hand path
+    const found = [];
+    const walk = (d) => {
+      for (const e of readdirSync(d, { withFileTypes: true })) {
+        if (e.isDirectory()) walk(join(d, e.name));
+        else if (/synthetic-report\.json$|last-report\.json$/.test(e.name)) found.push(join(d, e.name));
+      }
+    };
+    walk(targetDir);
+    expect(found).toEqual([]);
+  });
+});
+
+describe("the swarm scenario runs a splittable task (card rehearsal-swarm-splittable)", () => {
+  const NEW_ID = "swarm-split-planned";
+  const isTestFile = (f) => /(^|\/)tests\//.test(f) || /\.(test|spec)\./.test(f);
+  const suite = JSON.parse(readFileSync(join(here, "..", "evals", "tasks", "ts-basic.json"), "utf8"));
+  const newTask = suite.tasks.find((t) => t.id === NEW_ID);
+
+  it("T3: ts-basic carries the task, its plan owns src/duration.ts and src/strings.ts, and its held-out files exist", () => {
+    expect(newTask, `${NEW_ID} task`).toBeDefined();
+    const files = newTask.plan.tasks.flatMap((t) => t.files);
+    expect(files).toContain("src/duration.ts");
+    expect(files).toContain("src/strings.ts");
+    expect(newTask.heldOut.length).toBeGreaterThan(0);
+    for (const h of newTask.heldOut) expect(existsSync(join(here, "..", "evals", "heldout", h.from)), h.from).toBe(true);
+  });
+
+  it.skipIf(!existsSync(CLI))(
+    "T1/T2: swarm installs an approved swarm plan with a splittable, non-S task and the new card; hand and flow stay on fix-hours",
+    async () => {
+      const swarm = await inLib("prepareFixture", { scenario: "swarm", tempPrefix: TEST_PREFIX });
+      tempDirs.push(swarm.dir);
+      const plan = JSON.parse(readFileSync(join(swarm.dir, ".doug/plan.json"), "utf8"));
+      expect(plan.status).toBe("approved");
+      expect(plan.swarm).toBe(true);
+      const splittable = plan.tasks.filter((t) => t.size !== "S" && t.files.filter((f) => !isTestFile(f)).length >= 2);
+      expect(splittable.length).toBeGreaterThanOrEqual(1);
+      expect(plan.card).toBe(NEW_ID);
+      expect(plan.card).not.toBe("fix-hours");
+      expect(swarm.card.id).toBe(plan.card);
+      const board = JSON.parse(readFileSync(join(swarm.dir, ".doug/board.json"), "utf8"));
+      expect(board.cards.find((c) => c.id === plan.card)).toBeDefined();
+
+      for (const scenario of ["hand", "flow"]) {
+        const f = await inLib("prepareFixture", { scenario, tempPrefix: TEST_PREFIX });
+        tempDirs.push(f.dir);
+        expect(f.card.id).toBe("fix-hours");
+        expect(f.card.title).toBe("Fix hours in parseDuration");
+        const b = JSON.parse(readFileSync(join(f.dir, ".doug/board.json"), "utf8"));
+        expect(b.cards.find((c) => c.id === "fix-hours")).toBeDefined();
+        expect(b.cards.find((c) => c.id === NEW_ID)).toBeUndefined();
+      }
+    },
+  );
+
+  it("T5: the swarm estimate source no longer says it fails at implement, and the page names the new task without the until-lands phrasing", () => {
+    expect(ESTIMATES.swarm.source).not.toContain("fails at implement");
+    expect(ESTIMATES.swarm.source).toContain(NEW_ID);
+    const lib = readFileSync(join(here, "..", "scripts", "rehearse-lib.mjs"), "utf8");
+    expect(lib).not.toMatch(/until (card )?`?rehearsal-swarm-splittable/);
+  });
+
+  // The public snapshot leaves out docs/rehearsals.md; scripts/export-public.mjs is itself excluded, so its absence
+  // marks a snapshot. In dev a missing page must fail, not skip.
+  const IS_SNAPSHOT = !existsSync(join(here, "..", "scripts/export-public.mjs"));
+  it.skipIf(IS_SNAPSHOT)("T5: docs/rehearsals.md names the new task without the until-lands phrasing", () => {
+    const page = readFileSync(join(here, "..", "docs", "rehearsals.md"), "utf8");
+    expect(page).not.toContain("until `rehearsal-swarm-splittable`");
+    expect(page).not.toContain("until card `rehearsal-swarm-splittable`");
+    expect(page).not.toContain("until card rehearsal-swarm-splittable");
+    expect(page).toContain(NEW_ID);
+  });
+});
+
+describe("the swarm scenario's land stage uses the swarm held-out test (card rehearsal-swarm-splittable)", () => {
+  // A reference implementation of swarm-split-planned on the integration branch plan.mjs land merges: the swarm
+  // held-out test passes on it, and fix-hours' default held-out test (parseDuration('2h')) fails on it.
+  const REF_DURATION = "\nexport function toSeconds(text: string): number {\n  return parseDuration(text) / 1000;\n}\n";
+  const REF_STRINGS =
+    "\nexport function titleCase(input: string): string {\n  return input\n    .trim()\n    .split(/\\s+/)\n    .filter(Boolean)\n    .map((w) => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase())\n    .join(\" \");\n}\n";
+
+  it.skipIf(!existsSync(CLI))("lands the split-helpers branch and runs evals/heldout/swarm-split-planned.test.ts, leaving no held-out file behind", async () => {
+    const fx = await inLib("prepareFixture", { scenario: "swarm", tempPrefix: TEST_PREFIX });
+    tempDirs.push(fx.dir);
+    const landStage = SCENARIO_STAGES.swarm.find((st) => st.name === "land");
+    expect(landStage).toBeDefined();
+    await git(fx.dir, "checkout", "-q", "-b", "doug/split-helpers");
+    writeFileSync(join(fx.dir, "src/duration.ts"), readFileSync(join(fx.dir, "src/duration.ts"), "utf8") + REF_DURATION);
+    writeFileSync(join(fx.dir, "src/strings.ts"), readFileSync(join(fx.dir, "src/strings.ts"), "utf8") + REF_STRINGS);
+    await git(fx.dir, "add", "-A");
+    await git(fx.dir, "commit", "-q", "-m", "reference split-helpers");
+    await git(fx.dir, "checkout", "-q", "main");
+    const result = await inLib("runActStage", { $expr: "lib.SCENARIO_STAGES.swarm.find((st) => st.name === 'land')" }, { dir: fx.dir, card: fx.card, baseline: fx.baseline });
+    expect(result.message, result.message).toContain("landed as");
+    expect(result.ok).toBe(true);
+    expect(existsSync(join(fx.dir, "tests/heldout-swarm-split-planned.test.ts"))).toBe(false);
+    expect(existsSync(join(fx.dir, "tests/heldout-fix-hours.test.ts"))).toBe(false);
+  }, 240000);
 });
