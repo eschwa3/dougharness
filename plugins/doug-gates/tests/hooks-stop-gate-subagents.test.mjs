@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { writeFileSync, appendFileSync, mkdirSync, readFileSync, existsSync } from "node:fs";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { join, dirname } from "node:path";
 import { makeProject, runHookScript } from "./helpers.mjs";
 // card stop-gate-skips-orphan-subagent-stops: the state file the test seeds directly is written/read through
@@ -9,7 +9,7 @@ import { loadState, saveState } from "../lib/state.mjs";
 import { baseConfig } from "./hooks-fixtures.mjs";
 import { mkdtempSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { computeTree, writeRecord as writeTreeRecord } from "../lib/verified-tree.mjs";
+import { computeTree, readRecord as readTreeRecord, removeRecord as removeTreeRecord, writeRecord as writeTreeRecord } from "../lib/verified-tree.mjs";
 
 // card stop-gate-read-only-subagent-skip: the other half of the 2026-09-16 process storm — a researcher (or
 // other read-only-by-policy agent) that edited nothing still ran the full verification suite at its own
@@ -1426,6 +1426,134 @@ describe("card worktree-agent-gate", () => {
     expect(cwdsRun(marker).map(real), "the worktree's src commit must be verified in the worktree, not skipped as no-test-paths").toEqual([real(dir), real(wt)]);
   });
 
+  // card worktree-gate-unpinned-clauses: one isolating case per clause the worktree-agent-gate reviewer's own
+  // mutations (M7, M8, M9, M11, M13, M14) left unpinned. Each case is shaped so that exactly its clause changes
+  // the outcome.
+  const stateOf = (dir) => join(dir, ".doug/.state/test-session.json");
+  const recordFor = (tree, cfg) => ({
+    version: 1,
+    tree,
+    node: process.version,
+    at: new Date().toISOString(),
+    by: "pre-commit",
+    commands: [{ name: "test", command: cfg.commands.test, exit: 0, durationMs: 5 }],
+    totals: {},
+  });
+
+  it("W9 (M14) input.cwd alone names the worktree: no trace path names any tree", () => {
+    const { dir, wt, marker } = makeFixture();
+    wtCommit(wt, "src/a.ts", "agent A work", "A");
+    // The only Edit-type trace line names a path outside the project and every worktree, so a trace path adds no tree.
+    appendTrace(dir, [
+      { event: "SubagentStart", agent: "agA", agentType },
+      { event: "PostToolUse", agent: "agA", agentType, tool: "Write", ok: true, detail: join(tmpdir(), "elsewhere/x.ts") },
+      { event: "PostToolUse", agent: "agA", agentType, tool: "Bash", ok: true, detail: "git add src/a.ts && git commit -m work" },
+    ]);
+    runHookScript("edit-loop", { tool_name: "Write", tool_input: { file_path: join(wt, "src/a.ts") }, agent_id: "agA" }, { dir });
+    const r = subagentStop(dir, "agA", { cwd: wt });
+    expect(r.json, JSON.stringify(r.json)).toBeNull();
+    expect(cwdsRun(marker).map(real), "input.cwd inside the worktree must make the worktree the verification target").toEqual([real(wt)]);
+  });
+
+  it("W10 (M8) a failed Write in a worktree adds no tree: only the main checkout is verified", () => {
+    const { dir, wt, marker } = makeFixture();
+    wtCommit(wt, "src/b.ts", "committed in the worktree", "B"); // so a verified wt would run the command
+    writeFileSync(join(dir, "src/a.ts"), "edited in main");
+    appendTrace(dir, [
+      { event: "SubagentStart", agent: "agA", agentType },
+      { event: "PostToolUse", agent: "agA", agentType, tool: "Write", ok: false, detail: join(wt, "src/b.ts") },
+      { event: "PostToolUse", agent: "agA", agentType, tool: "Write", ok: true, detail: join(dir, "src/a.ts") },
+    ]);
+    runHookScript("edit-loop", { tool_name: "Write", tool_input: { file_path: join(dir, "src/a.ts") }, agent_id: "agA" }, { dir });
+    const r = subagentStop(dir, "agA");
+    expect(r.json, JSON.stringify(r.json)).toBeNull();
+    expect(cwdsRun(marker).map(real), "a Write that failed (ok:false) must not name its worktree").toEqual([real(dir)]);
+  });
+
+  it("W11 (M9) another agent's worktree Write adds no tree to this agent's stop", () => {
+    const { dir, wt, marker } = makeFixture();
+    wtCommit(wt, "src/b.ts", "committed in the worktree", "B"); // so a verified wt would run the command
+    writeFileSync(join(dir, "src/a.ts"), "edited in main");
+    appendTrace(dir, [
+      { event: "SubagentStart", agent: "agB", agentType },
+      { event: "PostToolUse", agent: "agB", agentType, tool: "Write", ok: true, detail: join(wt, "src/b.ts") },
+    ]);
+    agentEdits(dir, "agA", join(dir, "src/a.ts"));
+    const r = subagentStop(dir, "agA");
+    expect(r.json, JSON.stringify(r.json)).toBeNull();
+    expect(cwdsRun(marker).map(real), "agent B's worktree must not be verified at agent A's stop").toEqual([real(dir)]);
+  });
+
+  it("W12 (M11) a green run in the worktree records its verified tree in the worktree, not in the main checkout", () => {
+    const { dir, wt, marker } = makeFixture();
+    wtCommit(wt, "src/a.ts", "agent A work", "A");
+    agentEdits(dir, "agA", join(wt, "src/a.ts"));
+    expect(readTreeRecord(wt)).toBeNull();
+    expect(readTreeRecord(dir)).toBeNull();
+    const r = subagentStop(dir, "agA");
+    expect(r.json, JSON.stringify(r.json)).toBeNull();
+    expect(cwdsRun(marker).map(real)).toEqual([real(wt)]);
+    const rec = readTreeRecord(wt);
+    expect(rec && rec.tree, "the worktree must carry the record of the tree it was verified at").toBe(computeTree(wt));
+    expect(readTreeRecord(dir), "the main checkout must carry no record of a tree it never ran").toBeNull();
+  });
+
+  it("W13 (M13) a red run in the worktree removes the worktree's stale record and leaves the main checkout's alone", () => {
+    const { dir, wt, cfg } = makeFixture({ failIfFlag: true });
+    wtCommit(wt, "fail.flag", "1", "A"); // only the worktree fails
+    const stale = recordFor(computeTree(dir), cfg); // a valid record of some other tree, so nothing is credited
+    expect(writeTreeRecord(wt, stale)).toBe(true);
+    expect(writeTreeRecord(dir, stale)).toBe(true);
+    agentEdits(dir, "agA", join(wt, "fail.flag"));
+    const r = subagentStop(dir, "agA");
+    expect(r.json && r.json.decision, JSON.stringify(r.json)).toBe("block");
+    expect(readTreeRecord(wt), "the red run must remove the record in the tree it verified").toBeNull();
+    expect(readTreeRecord(dir), "the main checkout's record must survive a red run in the worktree").not.toBeNull();
+  });
+
+  it("W14 (M7) after waiting out a live gate.lock, the reloaded verified tree is compared with the worktree's fingerprint", async () => {
+    const { dir, wt, marker } = makeFixture();
+    wtCommit(wt, "src/a.ts", "agent A work", "A");
+    // A real green stop in the worktree records state.verified for it.
+    agentEdits(dir, "agA", join(wt, "src/a.ts"));
+    expect(subagentStop(dir, "agA").json).toBeNull();
+    expect(cwdsRun(marker).map(real)).toEqual([real(wt)]);
+    const savedState = readFileSync(stateOf(dir), "utf8");
+    expect(JSON.parse(savedState).verified, "the first stop must have recorded the worktree's verified tree").toBeTruthy();
+    // Agent B stops in the same worktree with no verified tree on disk and a live holder on gate.lock; the holder
+    // restores the verified state and releases the lock partway through, as a concurrent gate's green run would.
+    writeFileSync(stateOf(dir), JSON.stringify({ ...JSON.parse(savedState), verified: undefined }));
+    removeTreeRecord(wt); // nothing for credit to use: only the post-wait comparison can skip the commands
+    const lockPath = join(dir, ".doug/.state/gate.lock");
+    const holderScript = join(dir, ".doug/.state/holder-w14.mjs");
+    writeFileSync(
+      holderScript,
+      [
+        'import { writeFileSync, unlinkSync } from "node:fs";',
+        "setTimeout(() => {",
+        `  writeFileSync(${JSON.stringify(stateOf(dir))}, ${JSON.stringify(savedState)});`,
+        `  try { unlinkSync(${JSON.stringify(lockPath)}); } catch {}`,
+        "}, 1200);",
+      ].join("\n"),
+    );
+    const holder = spawn(process.execPath, [holderScript], { cwd: dir, stdio: "ignore" });
+    writeFileSync(lockPath, JSON.stringify({ pid: holder.pid, session: "holder-session", at: Date.now() }));
+    try {
+      agentEdits(dir, "agB", join(wt, "src/a.ts"));
+      const started = Date.now();
+      const r = subagentStop(dir, "agB");
+      expect(Date.now() - started, "a live lock must actually be waited for").toBeGreaterThanOrEqual(900);
+      expect(r.json, JSON.stringify(r.json)).toBeNull();
+      expect(cwdsRun(marker).map(real), "the reloaded verified tree matches the worktree's fingerprint: no command may run again").toEqual([real(wt)]);
+    } finally {
+      try {
+        process.kill(holder.pid, "SIGKILL");
+      } catch {
+        // already exited
+      }
+    }
+  });
+
   // card worktree-gate-mixed-tree-agent: an agent whose successful Edit/Write paths span the main checkout and a
   // worktree (or two worktrees) is verified in every tree it touched, and any red blocks.
   function agentEditsMany(dir, agent, absFiles) {
@@ -1517,6 +1645,51 @@ describe("card worktree-agent-gate", () => {
     expect(r.json, JSON.stringify(r.json)).toBeNull();
     expect(cwdsRun(marker).map(real)).toEqual([real(dir)]);
   });
+
+  // card mixed-tree-ignore-state-writes: untracked state under <dir>/.doug/.state is never project code, so a
+  // main-checkout write there adds no tree; any other main-checkout path still adds the main tree.
+  const mainWriteCase = (mainPath) => {
+    const { dir, wt, marker } = makeFixture({ failIfFlag: true });
+    wtCommit(wt, "src/b.ts", "agent work", "B");
+    writeFileSync(join(dir, "fail.flag"), "1"); // only the main checkout fails
+    agentEditsMany(dir, "agA", [join(wt, "src/b.ts"), mainPath(dir)]);
+    const r = subagentStop(dir, "agA", { cwd: wt });
+    return { r, ran: cwdsRun(marker).map(real), dir, wt };
+  };
+
+  it("X7 a worktree agent whose only main-checkout write is .doug/.state/scratch/x runs the worktree only", () => {
+    const { r, ran, dir, wt } = mainWriteCase((d) => join(d, ".doug/.state/scratch/x"));
+    expect(r.json, JSON.stringify(r.json)).toBeNull();
+    expect(ran).toEqual([real(wt)]);
+    expect(ran).not.toContain(real(dir));
+  });
+
+  it("X8 the same agent plus a main-checkout src write runs the main tree too and blocks when main fails", () => {
+    const { dir, wt, marker } = makeFixture({ failIfFlag: true });
+    wtCommit(wt, "src/b.ts", "agent work", "B");
+    writeFileSync(join(dir, "fail.flag"), "1");
+    agentEditsMany(dir, "agA", [join(wt, "src/b.ts"), join(dir, ".doug/.state/scratch/x"), join(dir, "src/x.ts")]);
+    const r = subagentStop(dir, "agA", { cwd: wt });
+    expect(blocked(r), JSON.stringify(r.json)).toBe("block");
+    const ran = cwdsRun(marker).map(real);
+    expect(ran).toContain(real(wt));
+    expect(ran).toContain(real(dir));
+  });
+
+  for (const [id, label, mainPath] of [
+    ["X9a", ".doug/anchor.md is not under .doug/.state", (d) => join(d, ".doug/anchor.md")],
+    ["X9b", ".doug/plan.json is not under .doug/.state", (d) => join(d, ".doug/plan.json")],
+    ["X10a", ".doug/.state-x/y is a sibling, not a segment match", (d) => join(d, ".doug/.state-x/y")],
+    ["X10b", ".doug/.stateful is a sibling, not a segment match", (d) => join(d, ".doug/.stateful")],
+    ["X11", ".doug/.state/../../src/x.ts resolves out of .doug/.state", (d) => `${d}/.doug/.state/../../src/x.ts`],
+  ]) {
+    it(`${id} ${label}: still adds the main tree, which blocks when it fails`, () => {
+      const { r, ran, dir, wt } = mainWriteCase(mainPath);
+      expect(blocked(r), JSON.stringify(r.json)).toBe("block");
+      expect(ran).toContain(real(wt));
+      expect(ran).toContain(real(dir));
+    });
+  }
 
   // card worktree-gate-mixed-tree-agent, fix pass (review round 1: B1, J1, J2, J3, m2).
   const decisionLines = (dir, agent) =>

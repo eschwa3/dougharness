@@ -183,14 +183,14 @@ describe("status and rendering", () => {
     expect(text).not.toContain("Fix attempts per blocked task: 0 (default)");
   });
   it("prints the budget line with defaults for a plan without budget", () => {
-    expect(renderPlan(plan())).toContain("Budget per task: agents 12 (default), tokens 400000 (default), wall 40 min (default)");
+    expect(renderPlan(plan())).toContain("Budget per task: agents 26 (default), tokens 400000 (default), wall 40 min (default)");
   });
   it("prints the budget line with specific values and defaults appropriately mixed", () => {
     const text = renderPlan(plan({ budget: { agents: 8, wallMinutes: 30 } }));
     expect(text).toContain("Budget per task: agents 8, tokens 400000 (default), wall 30 min");
   });
   it("DEFAULT_BUDGET has the expected literal values", () => {
-    expect(DEFAULT_BUDGET).toEqual({ agents: 12, tokens: 400000, wallMinutes: 40 });
+    expect(DEFAULT_BUDGET).toEqual({ agents: 26, tokens: 400000, wallMinutes: 40 });
   });
   it("renders an acceptance command under its criterion", () => {
     expect(renderPlan(plan({ acceptance: ["p", { text: "t", command: "c" }] }))).toContain("Acceptance:\n  - p\n  - t\n    $ c\n");

@@ -726,8 +726,8 @@ function skipPrefixOptions(w, i, argFlags, onArgFlag) {
 // exactly as before. For the separate-token form the value is already its own token, so this returns { next }
 // pointing at it and lets matchesShellWords's loop continue from there. For an attached form (whose value can't
 // be pulled back out as its own token) there is no token to point { next } at, so this returns { splice: value,
-// next } instead: the caller replaces everything up to `next` with the single token `value` and resumes its own
-// loop at index 0 - a rebuild, not a recursive call, so nested attached values (env -Senv -Senv ... sh) cost no
+// next } instead: the caller overwrites the attached token's slot (next - 1) with the single token `value` and resumes its own
+// loop at that slot - a linear overwrite, not a recursive call, so nested attached values (env -Senv -Senv ... sh) cost no
 // call-stack depth no matter how many there are. Otherwise (the value is missing, empty, or itself option-
 // shaped) it isn't the command, so env keeps parsing options from there: for the separate-token form the walk
 // re-examines that same value token as the next option (advancing by 1, not 2, past just the flag), and for an
@@ -892,10 +892,13 @@ function redirWordSpan(tok) {
 // Walks a stage's already-split words from index i, resolving prefixes (env assignments, sudo, env, nice,
 // time, nohup, exec, command, busybox) until it lands on the candidate verb. Split out of matchesShellStage so
 // scanEnvOptions can hand an -S/--split-string value back into this same walk when that value qualifies as
-// env's command. That handoff is a rebuild of `w`, not a recursive call (see the "splice" case below): every
-// handoff replaces one or more consumed tokens with the single value token, so `w` strictly shrinks by at least
-// one token each time, and the loop below runs no deeper than one stack frame no matter how many wrappers are
-// nested (env -Senv -Senv ... sh).
+// env's command. That handoff is an in-place overwrite of one slot of a single copy of `w`, not a recursive call (see the "splice" case below): every
+// handoff replaces one or more consumed tokens with the single value token, so the walk's unread tail strictly
+// shrinks by at least one token each time, and the loop below runs no deeper than one stack frame no matter how
+// many wrappers are nested (env -Senv -Senv ... sh). The handoff is linear (card bash-rules-env-splice-quadratic):
+// the value overwrites the attached token's slot in a single copy of `w` and the walk resumes there, instead of
+// rebuilding the array per handoff (quadratic: 25 s at 80000 nestings). No token cap is applied: a cap would deny
+// commands that are allowed today, and the linear walk removes the timeout risk that a cap would guard.
 // Card bash-rules-prefixed-commands: also shared with commandForms, which needs the resolved word array and
 // verb index (not just a shell/not-shell verdict), so the walk itself no longer decides an outcome - it returns
 // { w, i } once it lands on a candidate verb (i may be w.length when nothing followed the prefixes), or
@@ -920,7 +923,7 @@ function redirWordSpan(tok) {
 //     still reads the RAW token, unchanged - a quoted FLAG is out of this card's scope, and dequoting it too
 //     would risk changing which flag a cluster or an attached form is read as, for no fixture that needs it.
 //     The returned `{w, i}` itself is unaffected by this: `w` is still the array the caller passed in (or
-//     resolveVerb's own env-splice rebuild, unrelated to this round), and `i` is just an index into it - the
+//     resolveVerb's own single copy after an env splice, unrelated to this round), and `i` is just an index into it - the
 //     caller (isShellVerb by way of commandForms/matchesShellWords) dequotes `w[i]` itself before comparing it
 //     against a shell name, the same way this loop now does for a prefix name.
 //
@@ -936,6 +939,7 @@ function redirWordSpan(tok) {
 // ...) reads the prefix/verb token's text again - everything after it operates on the RAW words that follow,
 // unaffected by which reading recognised the name in front of them.
 function resolveVerb(w, i) {
+  const original = w;
   while (i < w.length) {
     const tok = w[i];
     const span = redirWordSpan(tok);
@@ -970,11 +974,14 @@ function resolveVerb(w, i) {
     if (isBase("env")) {
       const result = scanEnvOptions(w, i + 1);
       if ("splice" in result) {
-        // An attached -S/--split-string value qualified as env's command: rebuild the word array with that
-        // value as the new first word, followed by whatever came after it, and resume this same loop at 0 -
-        // no recursive call, so this is safe no matter how many attached values are nested.
-        w = [result.splice, ...w.slice(result.next)];
-        i = 0;
+        // An attached -S/--split-string value qualified as env's command: the value becomes the walk's next word.
+        // It overwrites the slot of the attached token just before result.next (copying w once, on the first
+        // splice, so the caller's array is never mutated) and the walk resumes AT that slot - the same words,
+        // from the same start, the old rebuilt array [value, ...rest] held at its index 0. Each handoff consumes at
+        // least one token and costs O(1), so n nested values cost O(n), and no recursion either.
+        if (w === original) w = original.slice();
+        i = result.next - 1;
+        w[i] = result.splice;
         continue;
       }
       i = result.next; // separate-token -S/--split-string value, or no qualifying value: continue the walk
@@ -1335,8 +1342,8 @@ function dequoteScript(word, reading = "bash") {
 // behind a resolvable prefix (sudo, an env assignment, env, nice, time, nohup, exec, command, busybox) or a
 // shell's -c string. Always includes cmd itself. When resolveVerb's walk consumed or rebuilt anything - i > 0
 // (an ordinary prefix was skipped) or the returned word array isn't the one passed in (an attached env
-// -S/--split-string value spliced in a new array and reset i to 0 on it, so i > 0 alone missed a denied command
-// sitting right behind it, e.g. env -Sgit reset --hard) - also includes the resolved word array from the verb
+// -S/--split-string value was spliced into a single copy of the array, overwriting the attached token's slot;
+// the walk resumes there, so i stays >= 1 after a splice) - also includes the resolved word array from the verb
 // onward. When that verb's basename is a shell, findScriptCandidates (above) locates 0, 1, or 2 candidate -c
 // script words; each candidate is dequoted (dequoteScript) - the ONLY word this function dequotes - twice, once
 // per shell reading (review round 3: bash and zsh decode an unrecognised ANSI-C escape differently, see

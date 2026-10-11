@@ -64,14 +64,15 @@ def serve(setup, search, close=None):
             send({"ok": False, "error": f"{type(err).__name__}: {str(err)[:300]}"})
 
 
-# The bench's per-model task prefixes (evals/bench-memory.mjs PREFIXES, same values), for adapters asked to prefix
-# (`config.prefix: true`). Keyed by the bare model name.
+# The bench's per-model task prefixes (evals/bench-memory.mjs PREFIXES, same values; evals/tests/bench-memory.test.mjs
+# parses this table and pins it equal to the bench's), for adapters asked to prefix (`config.prefix: true`). Keyed by
+# the bare model name. Keep every value a double-quoted literal on one line: the test refuses anything else.
 PREFIXES = {
     "embeddinggemma": {"query": "task: search result | query: ", "doc": "title: none | text: "},
     "nomic-embed-text": {"query": "search_query: ", "doc": "search_document: "},
     "mxbai-embed-large": {"query": "Represent this sentence for searching relevant passages: ", "doc": ""},
     "bge-m3": {"query": "", "doc": ""},
-    "qwen3-embedding": {"query": "Instruct: Given a search query, retrieve relevant passages that answer the query\nQuery: ", "doc": ""},
+    "qwen3-embedding": {"query": "Instruct: Given a web search query, retrieve relevant passages that answer the query\nQuery:", "doc": ""},
 }
 
 

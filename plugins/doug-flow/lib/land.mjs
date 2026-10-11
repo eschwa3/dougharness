@@ -90,10 +90,15 @@ function run(command, cwd, timeoutMs) {
 // the MAIN checkout (--record-dir). Returns the entries land records under `verify` (command, ok, status, timedOut,
 // durationMs, outputTail, plus credited: "verified-tree" when credited), stopping at the first failure like
 // today's loop, or null when the output cannot be read (the caller then runs the loop unchanged).
+// verify.mjs may wait timeoutMs x n on a held gate.lock and then run n commands of timeoutMs each.
+export function vendoredVerifySpawnTimeoutMs(timeoutMs, n) {
+  return 2 * timeoutMs * n + 60000;
+}
+
 function verifyViaVendored(script, dir, work, commands, timeoutMs) {
   try {
     const args = [script, "--json", "--by", "land", "--cwd", work, "--record-dir", dir, "--timeout-ms", String(timeoutMs), ...commands.flatMap((c) => ["--command", c])];
-    const r = spawnSync(process.execPath, args, { cwd: work, encoding: "utf8", timeout: timeoutMs * commands.length + 60000, maxBuffer: 64 * 1024 * 1024, env: commandEnv() });
+    const r = spawnSync(process.execPath, args, { cwd: work, encoding: "utf8", timeout: vendoredVerifySpawnTimeoutMs(timeoutMs, commands.length), maxBuffer: 64 * 1024 * 1024, env: commandEnv() });
     let out = null;
     try {
       out = JSON.parse(String(r.stdout || "").trim().split("\n").pop());

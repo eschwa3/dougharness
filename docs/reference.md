@@ -59,6 +59,8 @@ claude --plugin-dir plugins/doug-gates --plugin-dir plugins/doug-flow
 /doug-next
 ```
 
+`doug --version` (or `-v`) prints the cli version.
+
 See [docs/onboarding.md](onboarding.md) for what each step writes and never does.
 
 ## Gates
@@ -119,7 +121,7 @@ The plan file is the contract. Each task names the files it owns, a verification
 
 **Crew per task.** A task or the plan may carry `crew: { researchers, reviewers, adversaries }`, one each by default. Extra reviewers and adversaries run in parallel and every seat's findings enter a finding ledger, where a fingerprint collapses a duplicate to one id.
 
-**The swarm inside a task.** A plan opts in with `plan.mjs set swarm on`. Every full-shape task then runs as a swarm instead of one implementer: the `lead` agent creates the task branch, splits the task into worker briefs each owning a disjoint subset of the task's files, and the `implementer` agents on the `worker` row implement them in their own worktrees before the lead merges the branches back and runs the task's verify command. Verify, review, the adversary, the ledger, and integration then run unchanged on the merged branch. `swarm-launch` is the launch step `/doug-implement` and `/doug-swarm` share; `/doug-swarm <card-id | goal>` plans on the `plan` row with swarm on and runs the same launch step. A deterministic shape gate keeps a task that owns one source file and its tests off the lead entirely (a single implementer runs it instead), and every split the lead does make carries a required `splitReason` so the report can tell an unsplittable task from one nobody tried to split. A worker that blocks (not still-partial) gets the lead back once, in its own worktree, to re-brief the unfinished pieces from the blocked briefs' own files before the task blocks; a second block ends it. `plan.mjs set workerCheck on` (default off) adds a deterministic check before the merge - a worker whose filesTouched strayed outside its brief, or who never committed, is blocked the same way and follows the same one-re-brief-then-block path. The swarm pays on a task with independent deliverables that share no new symbol; a plan of small coupled tasks runs as the pipeline (decision 0001, Amendment 2026-09-20: one brief per task at +2.67 USD and +6.1 min against the pipeline on 2026-09-11; five briefs, 8/8 hidden tests, 8.31 USD, 8.5 min on 2026-09-19).
+**The swarm inside a task.** A plan opts in with `plan.mjs set swarm on`. Every full-shape task then runs as a swarm instead of one implementer: the `lead` agent creates the task branch, splits the task into worker briefs each owning a disjoint subset of the task's files, and the `implementer` agents on the `worker` row implement them in their own worktrees before the lead merges the branches back and runs the task's verify command. Verify, review, the adversary, the ledger, and integration then run unchanged on the merged branch. `swarm-launch` is the launch step `/doug-implement` and `/doug-swarm` share; `/doug-swarm <card-id | goal>` plans on the `plan` row with swarm on and runs the same launch step. A deterministic shape gate keeps a task that owns one source file and its tests off the lead entirely (a single implementer runs it instead), and every split the lead does make carries a required `splitReason` so the report can tell an unsplittable task from one nobody tried to split. A worker that blocks (not still-partial) gets the lead back once, reading from the repository root, read-only, editing nothing and not using the lead's earlier worktree, to re-brief the unfinished pieces from the blocked briefs' own files before the task blocks; a second block ends it. `plan.mjs set workerCheck on` (default off) adds a deterministic check before the merge - a worker whose filesTouched strayed outside its brief, or who never committed, is blocked the same way and follows the same one-re-brief-then-block path. The swarm pays on a task with independent deliverables that share no new symbol; a plan of small coupled tasks runs as the pipeline (decision 0001, Amendment 2026-09-20: one brief per task at +2.67 USD and +6.1 min against the pipeline on 2026-09-11; five briefs, 8/8 hidden tests, 8.31 USD, 8.5 min on 2026-09-19).
 
 **The fix loop.** After the implementer, verifier, reviewer, and adversary have run, a task that is not ready for integration is retried when the block is retriable (every finding that names a file names one of the task's owned files, the implementer did not report itself blocked, the checking stages ran, and no finding is a spec contradiction). A fix pass relaunches the same implementer in the same worktree and branch, then reruns the blocking stage; once it passes, a focused check replaces the full verifier and reviewer reruns before the adversary confirms. Findings live in a finding ledger with stable ids, fingerprinted by stage, file, and text, and recorded per task in the report.
 
@@ -172,7 +174,8 @@ doug board reorder # moves a card within its column
 doug board move    # changes a card's column and optionally its source
 doug board remove  # deletes a card from the record (--force for a done, in-flow, or planned card); prints the removed card as JSON
 doug board edit    # changes a card's fields through the record's validation (never the id or the column)
-doug board record  # appends a run entry to docs/live-runs.md
+doug board record <id> --hand --summary "<one sentence>"  # appends a run entry to docs/live-runs.md; --summary is required, one sentence of what changed for the user
+doug board summary <report.json> --summary "<one sentence>"  # prints the three-line run summary for a workflow report
 doug board build   # renders the page to stdout or --out
 doug board serve   # the live board page: --open opens a browser, --detach backgrounds it, --stop ends it
 ```
@@ -188,7 +191,7 @@ doug board serve   # the live board page: --open opens a browser, --detach backg
 `doug init` proposes `"statusLine": { "type": "command", "command": "node .doug/hooks/scripts/statusline.mjs" }` in `.claude/settings.json`. The script reads the status-line JSON on stdin and prints one line, e.g.:
 
 ```
-Doug 1.1.0 · Opus · main · ctx 8%
+Doug 1.1.1 · Opus · main · ctx 8%
 ```
 
 The segments are the product name from `.doug/config.json`, the installed `doug-gates` version (`.doug/hooks/VERSION`, falling back to config `doug.version`), `model.display_name`, the current git branch, and the used context-window percentage. Fallbacks: `ctx --` before the first API call or after `/compact`, no branch segment outside a git repo, and the bare line `Doug` on any error. Always exits 0. Tests in `plugins/doug-gates/tests/statusline.test.mjs`.

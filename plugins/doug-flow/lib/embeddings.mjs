@@ -264,7 +264,9 @@ export async function checkEmbeddingSanity(provider, pairs) {
 
 // Task prefixes the provider layer must add; the server never adds them. Only the models below carry a
 // prefix; every other model gets none. mxbai and qwen3 prefix queries only, documents get "".
-function prefixFor(model, inputType) {
+export const PREFIXED_MODELS = ["embeddinggemma", "nomic-embed-text", "mxbai-embed-large", "qwen3-embedding"];
+
+export function prefixFor(model, inputType) {
   // Match on the lowercased basename after the last "/", so HF-style names (org/name) and Ollama names agree.
   let m = String(model || "").split(/[/\\]/).pop().toLowerCase();
   // LM Studio-style "text-embedding-<name>" ids: match on <name> when it is a prefixed family (not OpenAI's text-embedding-3-*).

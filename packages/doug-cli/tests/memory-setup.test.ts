@@ -45,6 +45,7 @@ interface FakeOpts {
 }
 
 const servers: Server[] = [];
+const hitCounts = new Map<string, { models: number; embeddings: number }>();
 async function fake(o: FakeOpts): Promise<Endpoint> {
   const server = createServer((req, res) => {
     if (req.method === "GET" && req.url === "/v1/models") {
@@ -79,6 +80,12 @@ async function fake(o: FakeOpts): Promise<Endpoint> {
   servers.push(server);
   await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
   const port = (server.address() as AddressInfo).port;
+  const counts = { models: 0, embeddings: 0 };
+  hitCounts.set(`http://127.0.0.1:${port}`, counts);
+  server.on("request", (req) => {
+    if (req.url === "/v1/models") counts.models++;
+    else if (req.url === "/v1/embeddings") counts.embeddings++;
+  });
   return { id: "fake", label: "Fake", url: `http://127.0.0.1:${port}`, hint: "fake hint: ollama pull embeddinggemma" };
 }
 
@@ -335,6 +342,65 @@ describe.skipIf(listenDenied !== "")("card memory-setup-choose-server", () => {
     expect(foundLine(h.text(), "Beta", b, "nomic-embed-text:latest")).toBeDefined();
     expect(h.text()).toContain("Run `doug memory setup --yes` to enable it.");
     expect(readFileSync(config, "utf8")).toBe(before);
+  });
+});
+
+describe.skipIf(listenDenied !== "")("card memory-setup-dedupe-url", () => {
+  const emb = (config: string) => JSON.parse(readFileSync(config, "utf8")).memory.embeddings;
+
+  for (const suffix of ["", "/", "/v1", "/v1/"]) {
+    it(`D1: --url ${JSON.stringify(suffix)} naming a running default endpoint is probed once, keeps the default's label, single prompt`, async () => {
+      const ep = { ...(await fake({ models: [{ id: "embeddinggemma:latest" }] })), label: "Defaultsrv" };
+      const { dir, config } = project();
+      const questions: string[] = [];
+      const h = harness();
+      const r = await runMemorySetup({ dir, url: ep.url + suffix }, { ...h.deps, ask: async (q: string) => (questions.push(q), ""), endpoints: [ep] });
+      expect(r.status).toBe("enabled");
+      const found = h.lines.filter((l) => l.includes("Found"));
+      expect(found).toHaveLength(1);
+      expect(found[0]).toContain("Defaultsrv");
+      expect(found[0]).not.toContain("the given server");
+      expect(found[0]).not.toMatch(/^\s*\d+\./);
+      expect(questions).toEqual([`Enable semantic memory with embeddinggemma:latest at ${ep.url}? [Y/n] `]);
+      expect(hitCounts.get(ep.url)!.models).toBe(1);
+      const sameModelEmbeds = hitCounts.get(ep.url)!.embeddings;
+      expect(sameModelEmbeds).toBeGreaterThan(0);
+      expect(emb(config).baseUrl).toBe(ep.url);
+    });
+  }
+
+  it("D1b: the default's verification runs once, not twice (embedding requests match a plain run)", async () => {
+    const plain = await fake({ models: [{ id: "embeddinggemma:latest" }] });
+    const dup = await fake({ models: [{ id: "embeddinggemma:latest" }] });
+    await runMemorySetup({ dir: project().dir }, { ...harness().deps, endpoints: [plain] });
+    await runMemorySetup({ dir: project().dir, url: `${dup.url}/v1` }, { ...harness().deps, endpoints: [dup] });
+    expect(hitCounts.get(dup.url)!.embeddings).toBe(hitCounts.get(plain.url)!.embeddings);
+  });
+
+  it("D2: --url naming a different server than every default still adds the given server", async () => {
+    const def = { ...(await fake({ models: [{ id: "embeddinggemma:latest" }] })), label: "Defaultsrv" };
+    const other = await fake({ models: [{ id: "nomic-embed-text:latest" }] });
+    const { dir } = project();
+    const questions: string[] = [];
+    const h = harness();
+    await runMemorySetup({ dir, url: `${other.url}/v1` }, { ...h.deps, ask: async (q: string) => (questions.push(q), "1"), endpoints: [def] });
+    const found = h.lines.filter((l) => l.includes("Found"));
+    expect(found).toHaveLength(2);
+    expect(found.some((l) => l.includes("Defaultsrv") && l.includes(def.url))).toBe(true);
+    expect(found.some((l) => l.includes("the given server") && l.includes(other.url))).toBe(true);
+    expect(questions).toHaveLength(1);
+    expect(questions[0]).toMatch(/\b1\b[\s\S]*\b2\b/);
+  });
+
+  it("D3: --url with host localhost is not aliased to the default's 127.0.0.1 (exact equality after normalising)", async () => {
+    const ep = { ...(await fake({ models: [{ id: "embeddinggemma:latest" }] })), label: "Defaultsrv" };
+    const port = new URL(ep.url).port;
+    const alias = `http://localhost:${port}`;
+    const { dir } = project();
+    const h = harness();
+    await runMemorySetup({ dir, url: `${alias}/v1` }, { ...h.deps, endpoints: [ep] });
+    expect(h.lines.some((l) => l.includes("Found") && l.includes("Defaultsrv") && l.includes(ep.url))).toBe(true);
+    expect(h.lines.some((l) => l.includes("the given server") && l.includes(alias))).toBe(true);
   });
 });
 

@@ -9,7 +9,7 @@ import {
   cpSync,
   writeFileSync,
 } from "node:fs";
-import { join, dirname } from "node:path";
+import { join, dirname, posix } from "node:path";
 import { fileURLToPath } from "node:url";
 
 export const VERSIONED_MANIFESTS = [
@@ -208,7 +208,65 @@ export function checkRelease(root) {
     }
   }
 
+  // Rule 7: the bin of the two published packages is already what npm's normalizePackageBin
+  // (@npmcli/package-json lib/normalize.js:31-84, npm 10.9.8) would produce, so npm publish prints
+  // no "auto-corrected some errors" warning: an object, every key a bare command name, every value
+  // a clean non-empty path. A null bin is ignored by npm and is no problem.
+  for (const [relPath] of PUBLISHED_PACKAGE_MANIFESTS) {
+    const manifest = manifestsByPath[relPath];
+    if (!manifest || manifest.bin === undefined || manifest.bin === null) continue;
+    const bin = manifest.bin;
+    if (!bin) {
+      problems.push(`${relPath}: field "bin" is empty or invalid (${JSON.stringify(bin)})`);
+    } else if (typeof bin === "string") {
+      problems.push(`${relPath}: field "bin" is a string (${JSON.stringify(bin)}), npm converts it to an object keyed by the package name`);
+    } else if (Array.isArray(bin)) {
+      problems.push(`${relPath}: field "bin" is an array, npm converts it to an object keyed by basename`);
+    } else if (typeof bin !== "object") {
+      problems.push(`${relPath}: field "bin" must be an object`);
+    } else {
+      const entries = Object.entries(bin);
+      if (entries.length === 0) {
+        problems.push(`${relPath}: field "bin" is an empty object, npm removes it`);
+      }
+      for (const [name, value] of entries) {
+        const field = `bin.${name}`;
+        if (typeof value !== "string") {
+          problems.push(`${relPath}: field "${field}" must be a string`);
+          continue;
+        }
+        const base = posix.basename(npmNormaliseBinPath(name));
+        if (!base) {
+          problems.push(`${relPath}: field "${field}" has an empty command name, npm removes it`);
+          continue;
+        }
+        if (base !== name) {
+          problems.push(
+            `${relPath}: field "${field}" is named ${JSON.stringify(name)}, npm renames it to ${JSON.stringify(base)}`,
+          );
+        }
+        const normalised = npmNormaliseBinPath(value);
+        if (!normalised) {
+          problems.push(`${relPath}: field "${field}" is ${JSON.stringify(value)}, an empty path, npm removes it`);
+        } else if (normalised !== value) {
+          problems.push(
+            `${relPath}: field "${field}" is ${JSON.stringify(value)}, npm normalises it to ${JSON.stringify(normalised)}`,
+          );
+        }
+      }
+    }
+  }
+
   return problems;
+}
+
+// Mirrors npm's secureAndUnixifyPath (@npmcli/package-json lib/normalize.js:127-134): `\` and `:`
+// become `/`, the path is rooted and re-joined so `..` cannot escape, and a result still starting
+// with `./` becomes "".
+function npmNormaliseBinPath(value) {
+  const unixify = (p) => p.replace(/\\|:/g, "/");
+  const secured = unixify(posix.join(".", posix.join("/", unixify(value))));
+  return secured.startsWith("./") ? "" : secured;
 }
 
 /**

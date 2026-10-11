@@ -1,8 +1,12 @@
 import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+import { spawnSync } from "node:child_process";
 
 const binSrc = readFileSync(fileURLToPath(new URL("../src/bin.ts", import.meta.url)), "utf8");
+const PACKAGE_DIR = fileURLToPath(new URL("..", import.meta.url));
+const pkgVersion = (JSON.parse(readFileSync(fileURLToPath(new URL("../package.json", import.meta.url)), "utf8")) as { version: string }).version;
+const referenceDoc = readFileSync(fileURLToPath(new URL("../../../docs/reference.md", import.meta.url)), "utf8");
 const boardSrc = readFileSync(fileURLToPath(new URL("../src/board.ts", import.meta.url)), "utf8");
 
 describe("doug help usage text", () => {
@@ -33,5 +37,26 @@ describe("doug help usage text", () => {
     const summaryLine = binSrc.slice(summaryIdx, binSrc.indexOf("\n", summaryIdx));
     expect(recordLine, "record usage line must gain [--codex-cost <usd>]").toContain("[--codex-cost <usd>]");
     expect(summaryLine, "summary usage line must gain [--codex-cost <usd>]").toContain("[--codex-cost <usd>]");
+  });
+
+  for (const flag of ["--version", "-v"]) {
+    it(`card cli-version-flag: \`doug ${flag}\` prints the package version on one line and exits 0`, () => {
+      const r = spawnSync(process.execPath, ["--import", "tsx", "src/bin.ts", flag], {
+        cwd: PACKAGE_DIR,
+        env: { ...process.env, PATH: process.env.PATH },
+        encoding: "utf8",
+      });
+      expect(r.status).toBe(0);
+      expect(r.stdout).toBe(`${pkgVersion}\n`);
+      expect(r.stdout).not.toContain("doug init detects");
+    }, 60_000);
+  }
+
+  it("card cli-version-flag: the HELP text lists doug --version", () => {
+    expect(binSrc).toContain("doug --version");
+  });
+
+  it("card cli-version-flag: docs/reference.md names doug --version", () => {
+    expect(referenceDoc).toContain("doug --version");
   });
 });

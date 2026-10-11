@@ -5,6 +5,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFi
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import * as landLib from "../lib/land.mjs";
 import { landPlan, INTEGRATION_WORKTREE, trailerCommits, commandEnv } from "../lib/land.mjs";
 import { integrationBranchFor, loadPlan, savePlan } from "../lib/plan.mjs";
 import { syncHooks } from "../../../scripts/sync-hooks.mjs";
@@ -522,5 +523,16 @@ describe("landPlan and the verified-tree record (card verified-tree-record)", ()
     expect(r.reason).toContain("verify failed");
     expect(r.reason).toContain("no readable result");
     expect(existsSync(verifyMarker), "no fallback re-run").toBe(false);
+  });
+});
+
+// Card verify-lock-wait-bound D2: land's spawn timeout for the vendored verify.mjs covers the lock wait
+// (timeoutMs x n) plus the commands (timeoutMs x n), so land never SIGTERMs a verify still waiting.
+describe("vendoredVerifySpawnTimeoutMs (card verify-lock-wait-bound)", () => {
+  it("is 2 x timeoutMs x commands + 60000", () => {
+    expect(typeof landLib.vendoredVerifySpawnTimeoutMs).toBe("function");
+    expect(landLib.vendoredVerifySpawnTimeoutMs(600000, 2)).toBe(2460000);
+    expect(landLib.vendoredVerifySpawnTimeoutMs(1000, 1)).toBe(62000);
+    expect(landLib.vendoredVerifySpawnTimeoutMs(1000, 3)).toBe(66000);
   });
 });

@@ -2,7 +2,8 @@
 import { describe, it, expect, afterEach } from "vitest";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
-import { mkdtempSync, cpSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, cpSync, rmSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { runInit, READY_LINE, NOT_READY_LINE } from "../src/init.js";
 import type { InitOptions } from "../src/init.js";
@@ -134,5 +135,34 @@ describe("doug init guided flow", () => {
     const lines: string[] = [];
     expect(await initClean({ dir, yes: true, dryRun: false, color: false, quiet: true, showHookFiles: false, isTTY: false, out: (s) => void lines.push(s), doctor: doctorDeps() })).toBe(0);
     expect(lines).toEqual([]);
+  });
+
+  it("(e) a real fail row (no throw) ends with NOT_READY_LINE, not READY_LINE, and exits 0", async () => {
+    const dir = tmp("doug-guided-");
+    cpSync(fixture, dir, { recursive: true });
+    // A memory store that cannot be opened: the memory check reports fail without throwing. A garbage file
+    // (not a chmod) so it also bites when the suite runs as root.
+    mkdirSync(join(dir, ".doug", ".state", "memory"), { recursive: true });
+    writeFileSync(join(dir, ".doug", ".state", "memory", "memory.db"), "this is not a sqlite database\n".repeat(64));
+    const lines: string[] = [];
+    expect(await run(dir, doctorDeps(), lines)).toBe(0);
+    const failRows = lines.filter((l) => /^fail\s/.test(l));
+    expect(failRows.length).toBeGreaterThan(0);
+    expect(lines.join("\n")).not.toContain("Setup check failed");
+    expect(lines).toContain(NOT_READY_LINE);
+    expect(lines).not.toContain(READY_LINE);
+  });
+
+  it("(f) an empty repository's step 2 points at the walking-skeleton card, not the board-add line", async () => {
+    const dir = tmp("doug-guided-empty-");
+    const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.startsWith("GIT_")));
+    expect(spawnSync("git", ["init", "-q"], { cwd: dir, env }).status).toBe(0);
+    const lines: string[] = [];
+    expect(await run(dir, doctorDeps(), lines)).toBe(0);
+    // Copied exactly from init.ts finalScreen, the isEmpty branch of step 2 (line 100).
+    const EMPTY_STEP2 = '  2. write the walking-skeleton card first (docs/getting-started.md, "Starting from an empty repository"), then re-run doug init';
+    expect(lines).toContain(EMPTY_STEP2);
+    // The non-empty step 2, copied exactly from init.ts line 101.
+    expect(lines).not.toContain("  2. doug board add <id> --title <t> --goal <g>   queue a card; doug board serve --open shows the board");
   });
 });

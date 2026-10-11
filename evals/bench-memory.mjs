@@ -42,7 +42,7 @@ import {
   recordOutcomes,
 } from "../plugins/doug-flow/lib/memory.mjs";
 import { importAutoMemory } from "../plugins/doug-flow/lib/memory-import.mjs";
-import { readMemoryConfig, createProvider, probeProvider } from "../plugins/doug-flow/lib/embeddings.mjs";
+import { readMemoryConfig, createProvider, probeProvider, prefixFor as libPrefixFor, PREFIXED_MODELS } from "../plugins/doug-flow/lib/embeddings.mjs";
 import { projectSlug } from "../plugins/doug-flow/lib/cost.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -515,20 +515,14 @@ const dot = (a, b) => {
 
 // --- dense retrieval pieces: prefixes, vector cache, cosine, fusion, rerank, ANN recall, store loader -------------
 
-// Per-model task prefixes, keyed by the BARE model name (a ":tag" is stripped by prefixFor). These come from the
-// model cards as the research note and docs/research/memory-recall.md §2 recorded them; none can be checked
-// against the local Ollama install (every modelfile here is `TEMPLATE {{ .Prompt }}`, so Ollama adds no prefix
-// itself). embeddinggemma: EmbeddingGemma card, "task: search result | query: " / "title: none | text: ".
-// nomic-embed-text: Nomic card, "search_query: " / "search_document: ". mxbai-embed-large: mixedbread card, the
-// query prompt "Represent this sentence for searching relevant passages: ", documents raw. bge-m3: the BGE-M3
-// card needs no instruction on either side. qwen3-embedding: Qwen3-Embedding card, queries are
-// "Instruct: <task>\nQuery: <query>", documents raw. See the report for what was and was not confirmed.
+// Per-model task prefixes, keyed by the BARE model name (a ":tag" is stripped by prefixFor). The entries for every
+// model the shipped provider layer prefixes (PREFIXED_MODELS) are built from its prefixFor in
+// plugins/doug-flow/lib/embeddings.mjs (kind "doc" is its inputType "document"), so the benchmark measures what
+// ships. Models the lib does not list keep their own entry here: bge-m3's card needs no instruction on either
+// side. (evals/frameworks/_proto.py keeps its own copy, since Python cannot import the lib; evals/tests/bench-memory.test.mjs pins it equal to this table.)
 export const PREFIXES = {
-  embeddinggemma: { query: "task: search result | query: ", doc: "title: none | text: " },
-  "nomic-embed-text": { query: "search_query: ", doc: "search_document: " },
-  "mxbai-embed-large": { query: "Represent this sentence for searching relevant passages: ", doc: "" },
+  ...Object.fromEntries(PREFIXED_MODELS.map((m) => [m, { query: libPrefixFor(m, "query"), doc: libPrefixFor(m, "document") }])),
   "bge-m3": { query: "", doc: "" },
-  "qwen3-embedding": { query: "Instruct: Given a search query, retrieve relevant passages that answer the query\nQuery: ", doc: "" },
 };
 
 export function prefixFor(model, kind, { noprefix = false } = {}) {

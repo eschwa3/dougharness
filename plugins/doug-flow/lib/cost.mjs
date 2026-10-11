@@ -9,7 +9,10 @@ import { basename, join } from "node:path";
 // 0.05x on Opus 5.5); cache writes are 1.25x input for the 5-minute TTL and 2x for the 1-hour TTL. Opus 5.5:
 // input 4, output 20, cacheRead 0.2, cacheWrite5m 5, cacheWrite1h 8; source
 // https://platform.claude.com/docs/en/about-claude/pricing, fetched 2026-10-04. Update the date with the table.
-export const PRICES_DATED = "2026-10-04";
+// Haiku 5.5 is priced per request by prompt length (the same page, fetched 2026-10-10): a row may carry `over`, the
+// prices for a request whose prompt (input + cacheRead + cacheWrite) is strictly over `over.above` tokens; a request
+// at or under it pays the row's own prices. Sonnet 5.5 cacheRead is 0.1 (corrected 2026-10-10).
+export const PRICES_DATED = "2026-10-10";
 export const PRICES = {
   "claude-fable-5-1": { input: 10, output: 50, cacheRead: 0.25, cacheWrite5m: 12.5, cacheWrite1h: 20 },
   "claude-fable-5": { input: 10, output: 50, cacheRead: 1, cacheWrite5m: 12.5, cacheWrite1h: 20 },
@@ -18,9 +21,13 @@ export const PRICES = {
   "claude-opus-4-8": { input: 5, output: 25, cacheRead: 0.5, cacheWrite5m: 6.25, cacheWrite1h: 10 },
   "claude-opus-4-7": { input: 5, output: 25, cacheRead: 0.5, cacheWrite5m: 6.25, cacheWrite1h: 10 },
   "claude-opus-4-6": { input: 5, output: 25, cacheRead: 0.5, cacheWrite5m: 6.25, cacheWrite1h: 10 },
-  "claude-sonnet-5-5": { input: 2, output: 10, cacheRead: 0.2, cacheWrite5m: 2.5, cacheWrite1h: 4 },
+  "claude-sonnet-5-5": { input: 2, output: 10, cacheRead: 0.1, cacheWrite5m: 2.5, cacheWrite1h: 4 },
   "claude-sonnet-5": { input: 2, output: 10, cacheRead: 0.2, cacheWrite5m: 2.5, cacheWrite1h: 4 },
   "claude-sonnet-4-6": { input: 3, output: 15, cacheRead: 0.3, cacheWrite5m: 3.75, cacheWrite1h: 6 },
+  "claude-haiku-5-5": {
+    input: 0.1, output: 0.5, cacheRead: 0.01, cacheWrite5m: 0.125, cacheWrite1h: 0.2,
+    over: { above: 100_000, input: 0.5, output: 2.5, cacheRead: 0.05, cacheWrite5m: 0.625, cacheWrite1h: 1 },
+  },
   "claude-haiku-4-5": { input: 1, output: 5, cacheRead: 0.1, cacheWrite5m: 1.25, cacheWrite1h: 2 },
 };
 
@@ -61,8 +68,9 @@ function addUsage(a, b) {
 
 // Price one usage record for a model; null when the model is not in the table.
 export function priceUsage(usage, model) {
-  const p = PRICES[normalizeModel(model)];
+  let p = PRICES[normalizeModel(model)];
   if (!p) return null;
+  if (p.over && usage.input + usage.cacheRead + usage.cacheWrite > p.over.above) p = p.over;
   const write5m = Math.max(0, usage.cacheWrite - usage.cacheWrite1h);
   return (usage.input * p.input + usage.output * p.output + usage.cacheRead * p.cacheRead + write5m * p.cacheWrite5m + usage.cacheWrite1h * p.cacheWrite1h) / 1e6;
 }
@@ -100,7 +108,22 @@ export function transcriptUsage(file) {
   }
   // The agent's model is the one most of its messages ran on (a transcript names one model in practice).
   const model = [...models.entries()].sort((a, b) => b[1] - a[1]).map(([m]) => m)[0] || null;
-  return { usage, model, messages: perMessage.size };
+  // The transcript's USD: each message priced on its own model and tier (a tiered model is priced per request), null
+  // when any message's model is not in the table. A message without a model uses the transcript's.
+  let usd = model ? 0 : null;
+  if (model) {
+    for (const v of perMessage.values()) {
+      // An all-zero message (Claude Code's "<synthetic>" ones) costs nothing whatever its model.
+      if (!v.input && !v.output && !v.cacheRead && !v.cacheWrite && !v.cacheWrite1h) continue;
+      const price = priceUsage(v, v.model || model);
+      if (price === null) {
+        usd = null;
+        break;
+      }
+      usd += price;
+    }
+  }
+  return { usage, model, messages: perMessage.size, usd };
 }
 
 // The workflow's label for an agent: `stage:task[:pass]` (`integrate:level-0`, `fix:agents-generator:2`). A swarm's
@@ -254,7 +277,7 @@ export function costRun({ runId, claudeDir, projectDir, report, reportPath } = {
       agent.model = t.model;
       agent.messages = t.messages;
       agent.usage = t.usage;
-      agent.usd = t.model ? priceUsage(t.usage, t.model) : null;
+      agent.usd = t.usd;
       if (t.model && agent.usd === null) notes.push(`${j.agentId} (${agent.label || agent.stage}): model ${t.model} is not in the price table; not priced`);
       if (!t.model && t.messages === 0) notes.push(`${j.agentId} (${agent.label || agent.stage}): transcript has no usage lines; not priced`);
     } else {
@@ -467,7 +490,7 @@ export function costSession({ session, claudeDir = join(homedir(), ".claude"), p
     const t = transcriptUsage(f);
     addUsage(usage, t.usage);
     if (!t.messages) continue;
-    const price = t.model ? priceUsage(t.usage, t.model) : null;
+    const price = t.usd;
     if (price === null) {
       unpriced++;
       notes.push(`${f}: model ${t.model || "unknown"} is not in the price table; not priced`);

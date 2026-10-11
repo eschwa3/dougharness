@@ -159,11 +159,11 @@ describe("seam a: doug-implement.js's report key round-trips into memory, board,
       expect(rows[0].review_issue_count).toBe(entry.reviewIssues.length);
       expect(rows[0].review_issues).toEqual(entry.reviewIssues);
 
-      const boardRec = runCli(boardCli, ["record", "seam-a", reportPath], dir);
+      const boardRec = runCli(boardCli, ["record", "seam-a", reportPath, "--summary", "Test summary."], dir);
       expect(boardRec.status, boardRec.stderr).toBe(0);
       expect(existsSync(join(dir, "docs/live-runs.md"))).toBe(true);
 
-      const summary = runCli(boardCli, ["summary", reportPath], dir);
+      const summary = runCli(boardCli, ["summary", reportPath, "--summary", "Test summary."], dir);
       expect(summary.status, summary.stderr).toBe(0);
       expect(summary.stdout).toContain("Seam A round trip");
 
@@ -217,11 +217,11 @@ describe("seam e: doug-implement.js's report key stopClass round-trips into boar
       board = addCard(board, { id: "seam-e", title: "Seam E", goal: "prove the stop class round trip", column: "flow" }, { date: "2026-10-01" });
       saveBoard(dir, board);
 
-      const summary = runCli(boardCli, ["summary", reportPath], dir);
+      const summary = runCli(boardCli, ["summary", reportPath, "--summary", "Test summary."], dir);
       expect(summary.status, summary.stderr).toBe(0);
       expect(summary.stdout).toContain('x [fix-attempts-exhausted]: "');
 
-      const rec = runCli(boardCli, ["record", "seam-e", reportPath], dir);
+      const rec = runCli(boardCli, ["record", "seam-e", reportPath, "--summary", "Test summary."], dir);
       expect(rec.status, rec.stderr).toBe(0);
       expect(readFileSync(join(dir, "docs/live-runs.md"), "utf8")).toContain('Stopped: x [fix-attempts-exhausted]: "');
     } finally {
@@ -290,7 +290,7 @@ describe("seam f: the adversary runs beside the verifier, the reviewer and the f
       let board = newBoard({ date: "2026-10-07" });
       board = addCard(board, { id: "seam-f", title: "Seam F", goal: "prove the adversary runs in parallel", column: "flow" }, { date: "2026-10-07" });
       saveBoard(dir, board);
-      const rec = runCli(boardCli, ["record", "seam-f", reportPath], dir);
+      const rec = runCli(boardCli, ["record", "seam-f", reportPath, "--summary", "Test summary."], dir);
       expect(rec.status, rec.stderr).toBe(0);
       expect(readFileSync(join(dir, "docs/live-runs.md"), "utf8")).toContain("- F2 (x, pass 1): unclassified. drops the last item");
     } finally {
@@ -426,16 +426,16 @@ describe("seam g: the runtime run file's agent times reach board record and summ
       saveBoard(dir, board);
 
       const flags = ["--run", "wf_x", "--claude-dir", claudeDir];
-      const summary = runCli(boardCli, ["summary", reportPath, ...flags], dir);
+      const summary = runCli(boardCli, ["summary", reportPath, ...flags, "--summary", "Test summary."], dir);
       expect(summary.status, summary.stderr).toBe(0);
-      expect(summary.stdout.split("\n")[0]).toContain("over budget: task t 45 min > 40");
+      expect(summary.stdout.split("\n")[1]).toContain("over budget: task t 45 min > 40");
 
-      const rec = runCli(boardCli, ["record", "seam-g", reportPath, ...flags], dir);
+      const rec = runCli(boardCli, ["record", "seam-g", reportPath, ...flags, "--summary", "Test summary."], dir);
       expect(rec.status, rec.stderr).toBe(0);
       expect(readFileSync(join(dir, "docs/live-runs.md"), "utf8")).toContain("| Stage wall | over: task t 45 min > 40 |");
 
       // Without --run nothing is measured, and the record says so.
-      const bare = runCli(boardCli, ["summary", reportPath], dir);
+      const bare = runCli(boardCli, ["summary", reportPath, "--summary", "Test summary."], dir);
       expect(bare.status, bare.stderr).toBe(0);
       expect(bare.stdout).not.toContain("over budget");
     } finally {

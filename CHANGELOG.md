@@ -1,5 +1,26 @@
 # Changelog
 
+## 1.1.1
+
+- Every landing starts with a one-sentence summary: `board.mjs record` and `summary`, and `doug board record` and `summary`, require `--summary "<one sentence>"` and print it first; the docs show the flag on every form.
+- `doug --version` and `-v` print the cli version.
+- `doug board move`, `board.mjs move`, and a drag on the served board warn when a move fills Ready past the cap.
+- A card the user asks for during autopilot is scoped at once and filed to Backlog, and the queue resumes.
+- A hand-track landing whose wall clock exceeds its size x class budget is flagged.
+- Flow verify, check, review, and adversary prompts carry the recalled lessons, marked as context, not spec.
+- Reflect bumps a lesson's harmful count only when the lead names it with `--harmful`.
+- `context.mjs` reads the lead's own session by default, via `CLAUDE_CODE_SESSION_ID`.
+- `cost.mjs` prices claude-haiku-5-5 per request by prompt-length tier.
+- `verify.mjs` takes `gate.lock` like the Stop gate and waits on it for the gate's bound; `plan.mjs land`'s timeout covers the wait.
+- The stop gate adds no main-checkout run for a write under `.doug/.state`.
+- The default agent budget is 26, so the default fix attempts stay reachable.
+- The Claude fallback adversary runs only the task's own verify, like Codex.
+- Swarm runs: the lead's merge and re-brief work from their own worktree and the repository root, not the lead's removed worktree.
+- `plan.mjs json` fills a missing `baseBranch` from the checked-out branch, and the planner gets the absolute scripts path in its prompt.
+- `doug memory setup` probes a `--url` equal to a default endpoint once.
+- `guard-bash`'s `env -S` handling is linear, so a deeply nested payload cannot outrun the hook.
+- Published bin paths are in npm's normal form, and `release:check` flags every bin form `npm publish` would rewrite.
+
 ## 1.1.0
 
 - `doug init` is guided: it runs the doctor checks at the end, prints each warning with its fix line, and finishes with a "You're ready. Next:" screen.

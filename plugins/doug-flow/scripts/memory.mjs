@@ -79,11 +79,14 @@
 //                                                 lesson's citation is re-checked against [dir] only when
 //                                                 [dir] is a real project root (contains .doug)
 //   memory.mjs reflect <report.json> [dir] [--run <wf-id>] [--card <id>] [--commit <sha>]
-//                       [--adversary "<id>=<class>[: <reason>]"]... [--claude-bin <path>] [--claude-dir <path>]
+//                       [--adversary "<id>=<class>[: <reason>]"]... [--harmful <id>]... [--claude-bin <path>] [--claude-dir <path>]
 //                       [--model <name>] [--max-usd <n>] [--dry-run] [--json]
 //                                                 runs after record: applies deterministic helpful/harmful
 //                                                 counters to lessons named in each task's memoryUsed (committed
-//                                                 even if the LLM pass below fails), then a cheap-row `claude -p
+//                                                 even if the LLM pass below fails; a real block alone bumps no
+//                                                 harmful: each --harmful <id>, a recalled lesson that misled the
+//                                                 work, gets harmful +1 and no helpful; an id outside every
+//                                                 task's memoryUsed exits 1 before any write), then a cheap-row `claude -p
 //                                                 --json-schema` pass proposes at most 3 lessons from the report,
 //                                                 filtered in code (a pitfall needs a block classed real, a
 //                                                 pattern needs a first-pass verified task, the citation must be
@@ -96,7 +99,7 @@
 //                                                 transcripts cost.mjs reads, falling back to the CLI's own
 //                                                 cost estimate. Needs Node >=22.16 (node:sqlite).
 //   memory.mjs reflect --hand <card-id> [dir] --commit <sha> [--rounds <n>] [--review "R1=<class>[: <reason>]"]...
-//                       [--note <text>] [--claude-bin <path>] [--model <name>] [--max-usd <n>] [--dry-run] [--json]
+//                       [--harmful <id>]... [--note <text>] [--claude-bin <path>] [--model <name>] [--max-usd <n>] [--dry-run] [--json]
 //                                                 (card memory-every-session) the same pass for a hand landing:
 //                                                 assembles .doug/.state/reports/<card-id>/hand-report.json from
 //                                                 the saved briefs/, reviews/ and lessons.json (memoryUsed = its
@@ -204,7 +207,7 @@ import {
 
 const argv = process.argv.slice(2);
 const FLAGS = new Set(["json", "all", "hand", "dry-run", "check", "no-check"]);
-const REPEATABLE = new Set(["adversary", "review"]);
+const REPEATABLE = new Set(["adversary", "review", "harmful"]);
 const opts = {};
 const positional = [];
 for (let i = 0; i < argv.length; i++) {
@@ -612,7 +615,7 @@ try {
     }
     case "reflect": {
       const usage =
-        'usage: memory.mjs reflect <report.json> [dir] [--run <wf-id>] [--card <id>] [--commit <sha>] [--adversary "<id>=<class>[: <reason>]"]... [--claude-bin <path>] [--claude-dir <path>] [--model <name>] [--max-usd <n>] [--dry-run] [--json]';
+        'usage: memory.mjs reflect <report.json> [dir] [--run <wf-id>] [--card <id>] [--commit <sha>] [--adversary "<id>=<class>[: <reason>]"]... [--harmful <id>]... [--claude-bin <path>] [--claude-dir <path>] [--model <name>] [--max-usd <n>] [--dry-run] [--json]';
       let dir;
       let reportPath;
       let reportText;
@@ -621,7 +624,7 @@ try {
       let handCard = null;
       if (opts.hand) {
         const handUsage =
-          'usage: memory.mjs reflect --hand <card-id> [dir] --commit <sha> [--rounds <n>] [--review "R1=<real|marginal|false>[: <reason>]"]... [--note <text>] [--claude-bin <path>] [--model <name>] [--max-usd <n>] [--dry-run] [--json]';
+          'usage: memory.mjs reflect --hand <card-id> [dir] --commit <sha> [--rounds <n>] [--review "R1=<real|marginal|false>[: <reason>]"]... [--harmful <id>]... [--note <text>] [--claude-bin <path>] [--model <name>] [--max-usd <n>] [--dry-run] [--json]';
         const [id] = rest;
         if (!id || !opts.commit) fail(handUsage, 2);
         handCard = id;
@@ -724,6 +727,7 @@ try {
           model,
           claudeDir,
           dryRun,
+          harmful: opts.harmful || [],
           propose,
         });
         if (!dryRun && result.ok && result.appended && result.appended.length) {

@@ -42,6 +42,7 @@ import {
   USAGE,
 } from "../bench-memory.mjs";
 import { openMemory, addLesson, searchLessons } from "../../plugins/doug-flow/lib/memory.mjs";
+import { prefixFor as libPrefixFor, PREFIXED_MODELS } from "../../plugins/doug-flow/lib/embeddings.mjs";
 
 // Card memory-benchmark, tester-first. The contract the coder implements in evals/bench-memory.mjs
 // (offline, no real store, no network, no grep spawn). Fixture: evals/memory/bench-fixture/ (synthetic).
@@ -556,10 +557,30 @@ describe("prefix table", () => {
   it("embeddinggemma, qwen3 and bge-m3 follow the brief", () => {
     expect(prefixFor("embeddinggemma", "query")).toBe("task: search result | query: ");
     expect(prefixFor("embeddinggemma", "doc")).toBe("title: none | text: ");
-    expect(prefixFor("qwen3-embedding", "query")).toBe("Instruct: Given a search query, retrieve relevant passages that answer the query\nQuery: ");
+    // Card bench-prefixes-from-lib: the bench now uses the shipped qwen3 prompt (with "web", no trailing space).
+    expect(prefixFor("qwen3-embedding", "query")).toBe("Instruct: Given a web search query, retrieve relevant passages that answer the query\nQuery:");
     expect(prefixFor("qwen3-embedding", "doc")).toBe("");
     expect(prefixFor("bge-m3", "query")).toBe("");
     expect(prefixFor("bge-m3", "doc")).toBe("");
+  });
+  // Card bench-prefixes-from-lib: the benchmark measures what ships.
+  it("bench and lib agree for every lib-listed model, through prefixFor and PREFIXES", () => {
+    expect(PREFIXED_MODELS.length).toBeGreaterThan(0);
+    for (const name of PREFIXED_MODELS) {
+      expect(prefixFor(name, "query")).toBe(libPrefixFor(name, "query"));
+      expect(prefixFor(name, "doc")).toBe(libPrefixFor(name, "document"));
+      expect(PREFIXES[name].query).toBe(libPrefixFor(name, "query"));
+      expect(PREFIXES[name].doc).toBe(libPrefixFor(name, "document"));
+    }
+  });
+  it("every PREFIXED_MODELS name gets a non-empty lib prefix on at least one side", () => {
+    for (const name of PREFIXED_MODELS) {
+      expect(libPrefixFor(name, "query") !== "" || libPrefixFor(name, "document") !== "", name).toBe(true);
+    }
+  });
+  it("bge-m3 keeps its own empty bench entry", () => {
+    expect(PREFIXES["bge-m3"]).toEqual({ query: "", doc: "" });
+    expect(PREFIXED_MODELS).not.toContain("bge-m3");
   });
   it("the noprefix variant gets none on either side, for every model", () => {
     for (const model of Object.keys(PREFIXES)) {
@@ -567,6 +588,80 @@ describe("prefix table", () => {
       expect(prefixFor(model, "doc", { noprefix: true })).toBe("");
     }
     expect(Object.keys(PREFIXES).sort()).toEqual(["bge-m3", "embeddinggemma", "mxbai-embed-large", "nomic-embed-text", "qwen3-embedding"]);
+  });
+});
+
+// Card proto-prefixes-from-bench: evals/frameworks/_proto.py keeps its own copy of PREFIXES (Python cannot import the
+// lib), so this test parses its dict literal in JS and pins it equal to the bench's. No python is spawned. Only
+// double-quoted strings, braces, colons and commas are readable; anything else throws rather than being skipped.
+function parseProtoPrefixes(src) {
+  const start = src.search(/^PREFIXES\s*=\s*\{/m);
+  if (start < 0) throw new Error("_proto.py: no PREFIXES = { table found");
+  let i = src.indexOf("{", start);
+  const tokens = [];
+  let depth = 0;
+  for (; i < src.length; ) {
+    const c = src[i];
+    if (c === " " || c === "\t" || c === "\n" || c === "\r") { i++; continue; }
+    if (c === "{") { depth++; tokens.push("{"); i++; continue; }
+    if (c === "}") { depth--; tokens.push("}"); i++; if (depth === 0) break; continue; }
+    if (c === ":" || c === ",") { tokens.push(c); i++; continue; }
+    if (c === '"') {
+      let j = i + 1;
+      while (j < src.length && src[j] !== '"') j += src[j] === "\\" ? 2 : 1;
+      if (j >= src.length) throw new Error("_proto.py: unterminated string in PREFIXES");
+      tokens.push({ s: JSON.parse(src.slice(i, j + 1)) });
+      i = j + 1;
+      continue;
+    }
+    throw new Error(`_proto.py: cannot read ${JSON.stringify(src.slice(i, i + 30))} in PREFIXES`);
+  }
+  if (depth !== 0) throw new Error("_proto.py: unbalanced braces in PREFIXES");
+  let p = 0;
+  const next = () => tokens[p++];
+  const expectTok = (t) => { const got = next(); if (got !== t) throw new Error(`_proto.py: expected ${t} in PREFIXES`); };
+  const str = () => { const t = next(); if (!t || typeof t !== "object") throw new Error("_proto.py: expected a double-quoted string in PREFIXES"); return t.s; };
+  const object = (readValue) => {
+    expectTok("{");
+    const out = {};
+    while (tokens[p] !== "}") {
+      const key = str();
+      expectTok(":");
+      out[key] = readValue();
+      if (tokens[p] === ",") p++;
+      else if (tokens[p] !== "}") throw new Error("_proto.py: expected , or } in PREFIXES");
+    }
+    expectTok("}");
+    return out;
+  };
+  const table = object(() => object(str));
+  if (p !== tokens.length) throw new Error("_proto.py: trailing tokens after PREFIXES");
+  return table;
+}
+
+describe("_proto.py PREFIXES copy", () => {
+  const protoSrc = readFileSync(join(here, "..", "frameworks", "_proto.py"), "utf8");
+
+  it("parser reads escapes exactly and refuses constructs it cannot read", () => {
+    expect(parseProtoPrefixes('PREFIXES = {\n  "m": {"query": "a\\nb\\\\c\\"d", "doc": ""},\n}\n')).toEqual({ m: { query: 'a\nb\\c"d', doc: "" } });
+    expect(() => parseProtoPrefixes("PREFIXES = {\"m\": {'query': \"a\", \"doc\": \"\"}}")).toThrow();
+    expect(() => parseProtoPrefixes('PREFIXES = {"m": {"query": "a" "b", "doc": ""}}')).toThrow();
+    expect(() => parseProtoPrefixes('PREFIXES = {"m": {"query": "a" + "b", "doc": ""}}')).toThrow();
+    expect(() => parseProtoPrefixes("x = 1")).toThrow();
+  });
+
+  it("has the same model keys as the bench PREFIXES", () => {
+    expect(Object.keys(parseProtoPrefixes(protoSrc)).sort()).toEqual(Object.keys(PREFIXES).sort());
+  });
+
+  it("has the same query and doc strings as the bench PREFIXES for every model", () => {
+    const proto = parseProtoPrefixes(protoSrc);
+    for (const model of Object.keys(PREFIXES)) {
+      expect(proto[model], `${model} query`).toBeDefined();
+      expect(proto[model].query, `${model} query`).toBe(PREFIXES[model].query);
+      expect(proto[model].doc, `${model} doc`).toBe(PREFIXES[model].doc);
+      expect(Object.keys(proto[model]).sort(), `${model} fields`).toEqual(["doc", "query"]);
+    }
   });
 });
 

@@ -1467,6 +1467,22 @@ describe("recallLessons", () => {
     expect(result.lessons).toHaveLength(1);
   });
 
+  it("returns every lessons column (except the embedding trio) on a recalled lesson, derived from the live schema", async () => {
+    // The by-id load in recallLessons (the only place text, kind, citation, source_*, task, card, commit_sha,
+    // helpful, harmful and superseded_by are read) names its columns; a column added to the schema but missing
+    // there would silently vanish from recall output. The expected list comes from PRAGMA table_info.
+    addLesson(m, { text: "flaky test needs a retry policy", kind: "pattern", source: { agent: "worker" } });
+    const result = await recallLessons(m, "flaky test retry", { checkoutDir: dir });
+    expect(result.lessons).toHaveLength(1);
+    const returned = result.lessons[0];
+    const omitted = new Set(["embedding", "embedding_model", "embedding_dims"]);
+    const columns = m.prepare("PRAGMA table_info(lessons)").all().map((c) => c.name);
+    expect(columns.length).toBeGreaterThan(omitted.size);
+    const missing = columns.filter((c) => !omitted.has(c) && !(c in returned));
+    expect(missing).toEqual([]);
+    expect(returned.hasVector).toBe(false);
+  });
+
   it("ranks the high-cosine weak keyword match ahead of the strong keyword match, with sides naming bm25 and vector", async () => {
     const l1 = addLesson(m, { text: "flaky test needs a retry policy", kind: "pattern", source: { agent: "worker" } });
     const l2 = addLesson(m, { text: "the test suite", kind: "pattern", source: { agent: "worker" } });
@@ -2182,7 +2198,10 @@ describe("runReflect: counters (A)", () => {
     m = openMemory(dir);
   });
 
-  it("real wins over verified (harmful, not helpful), a first-verified task's used lessons get helpful, an unknown id is reported not thrown, and a task with neither touches nothing", async () => {
+  // Changed (card reflect-harmful-irrelevant-lessons): this test pinned "a real block bumps harmful on every used
+  // lesson". A real block alone now bumps nothing, and still earns no helpful (C1, "real wins"); only an explicit
+  // `harmful` id bumps harmful. The assertions on harmfulLesson changed from harmful 1 to harmful 0.
+  it("a real block alone bumps nothing and earns no helpful (real wins), a first-verified task's used lessons get helpful, an unknown id is reported not thrown, and a task with neither touches nothing", async () => {
     const helpfulLesson = addLesson(m, { text: "a pattern worth keeping around", kind: "pattern", source: { agent: "worker" } });
     const harmfulLesson = addLesson(m, { text: "a pitfall that bit us badly", kind: "pitfall", source: { agent: "worker" } });
     const report = buildReflectReport();
@@ -2192,16 +2211,84 @@ describe("runReflect: counters (A)", () => {
     const result = await runReflect(m, report, { reportHash: "hash-counters-1", dir, classes: REFLECT_CLASSES, propose: noopPropose });
     expect(result.ok).toBe(true);
     expect(result.counters.helpful).toEqual([helpfulLesson.id]);
-    expect(result.counters.harmful).toEqual([harmfulLesson.id]);
+    expect(result.counters.harmful).toEqual([]);
     expect(result.counters.unknown).toEqual(["lesson-missing"]);
     expect(getLesson(m, helpfulLesson.id).helpful).toBe(1);
     expect(getLesson(m, helpfulLesson.id).harmful).toBe(0);
-    expect(getLesson(m, harmfulLesson.id).harmful).toBe(1);
+    expect(getLesson(m, harmfulLesson.id).harmful).toBe(0);
     expect(getLesson(m, harmfulLesson.id).helpful).toBe(0);
     // neither-task's memoryUsed (an id naming no lesson) never shows up anywhere: nothing bumped, nothing unknown.
     expect(result.counters.helpful).not.toContain("lesson-untouched");
     expect(result.counters.harmful).not.toContain("lesson-untouched");
     expect(result.counters.unknown).not.toContain("lesson-untouched");
+  });
+
+  // Card reflect-harmful-irrelevant-lessons: harmful is an explicit mark, never inferred from a real block.
+  it("T1: a real block unrelated to a recalled lesson leaves its harmful and helpful counts unchanged", async () => {
+    const L = addLesson(m, { text: "an unrelated recalled lesson about releases", kind: "pattern", source: { agent: "worker" } });
+    const report = buildReflectReport();
+    report.levels[0].tasks[1].memoryUsed = [L.id];
+    const result = await runReflect(m, report, { reportHash: "hash-harm-t1", dir, classes: REFLECT_CLASSES, propose: noopPropose });
+    expect(result.ok).toBe(true);
+    expect(result.counters.harmful).toEqual([]);
+    expect(result.counters.helpful).toEqual([]);
+    expect(getLesson(m, L.id).harmful).toBe(0);
+    expect(getLesson(m, L.id).helpful).toBe(0);
+  });
+
+  it("T2: harmful [L] bumps L once and leaves a second used lesson K that is not named unchanged", async () => {
+    const L = addLesson(m, { text: "the lesson that misled the agent", kind: "pitfall", source: { agent: "worker" } });
+    const K = addLesson(m, { text: "a lesson that was merely recalled", kind: "pattern", source: { agent: "worker" } });
+    const report = buildReflectReport();
+    report.levels[0].tasks[1].memoryUsed = [L.id, K.id];
+    const result = await runReflect(m, report, { reportHash: "hash-harm-t2", dir, classes: REFLECT_CLASSES, harmful: [L.id], propose: noopPropose });
+    expect(result.ok).toBe(true);
+    expect(result.counters.harmful).toEqual([L.id]);
+    expect(getLesson(m, L.id).harmful).toBe(1);
+    expect(getLesson(m, L.id).helpful).toBe(0);
+    expect(getLesson(m, K.id).harmful).toBe(0);
+    expect(getLesson(m, K.id).helpful).toBe(0);
+  });
+
+  it("T3: a harmful id that is in no task's memoryUsed refuses before any write, naming the id and the memoryUsed ids", async () => {
+    const L = addLesson(m, { text: "a recalled lesson", kind: "pattern", source: { agent: "worker" } });
+    const other = addLesson(m, { text: "a lesson nobody recalled", kind: "pattern", source: { agent: "worker" } });
+    const report = buildReflectReport();
+    report.levels[0].tasks[0].memoryUsed = [L.id];
+    report.levels[0].tasks[1].memoryUsed = [L.id];
+    let err;
+    try {
+      await runReflect(m, report, { reportHash: "hash-harm-t3", dir, classes: REFLECT_CLASSES, harmful: [L.id, other.id], propose: noopPropose });
+    } catch (e) {
+      err = e;
+    }
+    expect(err, "runReflect must throw").toBeTruthy();
+    expect(err.message).toContain(other.id);
+    expect(err.message).toContain(L.id);
+    expect(m.prepare("SELECT * FROM reflections WHERE report_hash = ?").get("hash-harm-t3")).toBeUndefined();
+    expect(getLesson(m, L.id).harmful).toBe(0);
+    expect(getLesson(m, L.id).helpful).toBe(0);
+    expect(getLesson(m, other.id).harmful).toBe(0);
+  });
+
+  it("T4: an id named twice bumps once; a named id on a verified task gets harmful and no helpful while its unnamed sibling gets helpful", async () => {
+    const L = addLesson(m, { text: "the lesson that misled the agent", kind: "pitfall", source: { agent: "worker" } });
+    const K = addLesson(m, { text: "a lesson that helped", kind: "pattern", source: { agent: "worker" } });
+    const twice = buildReflectReport();
+    twice.levels[0].tasks[1].memoryUsed = [L.id];
+    await runReflect(m, twice, { reportHash: "hash-harm-t4a", dir, classes: REFLECT_CLASSES, harmful: [L.id, L.id], propose: noopPropose });
+    expect(getLesson(m, L.id).harmful).toBe(1);
+
+    const verified = buildReflectReport();
+    verified.levels[0].tasks[0].memoryUsed = [L.id, K.id];
+    const result = await runReflect(m, verified, { reportHash: "hash-harm-t4b", dir, classes: [], harmful: [L.id], propose: noopPropose });
+    expect(result.ok).toBe(true);
+    expect(result.counters.harmful).toEqual([L.id]);
+    expect(result.counters.helpful).toEqual([K.id]);
+    expect(getLesson(m, L.id).harmful).toBe(2);
+    expect(getLesson(m, L.id).helpful).toBe(0);
+    expect(getLesson(m, K.id).helpful).toBe(1);
+    expect(getLesson(m, K.id).harmful).toBe(0);
   });
 
   it("is idempotent on report_hash: a second reflect on the same report does nothing and returns the stored row", async () => {
@@ -2225,10 +2312,12 @@ describe("runReflect: counters (A)", () => {
     const harmfulLesson = addLesson(m, { text: "a pitfall that bit us badly", kind: "pitfall", source: { agent: "worker" } });
     const report = buildReflectReport();
     report.levels[0].tasks[1].memoryUsed = [harmfulLesson.id];
+    // Changed (card reflect-harmful-irrelevant-lessons): the counter now needs an explicit harmful id, not a bare real block.
     const result = await runReflect(m, report, {
       reportHash: "hash-fail-1",
       dir,
       classes: REFLECT_CLASSES,
+      harmful: [harmfulLesson.id],
       propose: async () => {
         throw new Error("claude printed no parseable JSON: boom");
       },
@@ -2245,14 +2334,31 @@ describe("runReflect: counters (A)", () => {
   it("--dry-run applies nothing (no counters, no reflections row, no appends) but still runs the LLM pass and reports what would happen", async () => {
     const helpfulLesson = addLesson(m, { text: "a pattern worth keeping around", kind: "pattern", source: { agent: "worker" } });
     const report = buildReflectReport();
-    report.levels[0].tasks[0].memoryUsed = [helpfulLesson.id];
-    const result = await runReflect(m, report, { reportHash: "hash-dry-1", dir, classes: REFLECT_CLASSES, dryRun: true, propose: noopPropose });
+    const misled = addLesson(m, { text: "a lesson named harmful in a dry run", kind: "pitfall", source: { agent: "worker" } });
+    report.levels[0].tasks[0].memoryUsed = [helpfulLesson.id, misled.id];
+    const result = await runReflect(m, report, { reportHash: "hash-dry-1", dir, classes: REFLECT_CLASSES, dryRun: true, harmful: [misled.id], propose: noopPropose });
     expect(result.ok).toBe(true);
     expect(result.dryRun).toBe(true);
     expect(result.counters.helpful).toEqual([helpfulLesson.id]);
+    expect(result.counters.harmful).toEqual([misled.id]);
     expect(getLesson(m, helpfulLesson.id).helpful).toBe(0);
+    expect(getLesson(m, misled.id).harmful).toBe(0);
     expect(m.prepare("SELECT * FROM reflections WHERE report_hash = ?").get("hash-dry-1")).toBeUndefined();
-    expect(listLessons(m)).toHaveLength(1);
+    expect(listLessons(m)).toHaveLength(2);
+  });
+
+  // Added for reviewer gaps (card reflect-harmful-irrelevant-lessons): the recalled-ids check is a union over levels.
+  it("accepts a harmful id that is in a level-1 task's memoryUsed only", async () => {
+    const L = addLesson(m, { text: "a lesson recalled only in the second level", kind: "pitfall", source: { agent: "worker" } });
+    const report = buildReflectReport();
+    report.levels.push({
+      index: 1,
+      tasks: [{ id: "later-task", verified: true, passes: 1, stopReason: null, reviewIssues: [], verifierFindings: [], memoryUsed: [L.id] }],
+    });
+    const result = await runReflect(m, report, { reportHash: "hash-harm-lv2", dir, classes: REFLECT_CLASSES, harmful: [L.id], propose: noopPropose });
+    expect(result.ok).toBe(true);
+    expect(result.counters.harmful).toEqual([L.id]);
+    expect(getLesson(m, L.id).harmful).toBe(1);
   });
 
   it("throws on an --adversary id the report lacks, the same way record fails, before any write", async () => {

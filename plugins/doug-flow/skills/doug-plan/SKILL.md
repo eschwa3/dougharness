@@ -12,7 +12,7 @@ Produce a plan file the user can approve. No code is written by this skill.
 1. If the request depends on a fact outside the repository (a Claude Code hook contract, a CLI's output format, a third-party API), invoke the `research` skill first: it writes one cited note to `.doug/.state/research/<id>.md` (one researcher, or several in parallel with distinct questions).
 
    The planner runs on the `plan` row: read it with the `plan.mjs models` command, `node "${CLAUDE_PLUGIN_ROOT}/scripts/plan.mjs" models`, which prints the parsed table as JSON (`roles.plan.model`, `roles.plan.effort`). Spawn the planner subagent with the user's request verbatim plus any constraints they gave, and the note's path when there is one, passing that row's model (omit `model` when the row says `inherit`):
-   `Agent({ subagent_type: "doug-flow:planner", model: "<the plan row's model>", prompt: "<request and constraints>. Research note: <path>. Write .doug/plan.json and return the rendered plan." })`
+   `Agent({ subagent_type: "doug-flow:planner", model: "<the plan row's model>", prompt: "<request and constraints>. Research note: <path>. Scripts: ${CLAUDE_PLUGIN_ROOT}/scripts. Write .doug/plan.json and return the rendered plan." })`
    The Agent tool carries no effort parameter; the row's effort applies through the planner agent's own frontmatter (`effort: high`). The session model never plans itself: it hands the request over and shows the plan.
 2. When it returns, validate and render the plan:
    `node "${CLAUDE_PLUGIN_ROOT}/scripts/plan.mjs" show`

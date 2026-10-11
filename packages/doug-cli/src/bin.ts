@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { readFileSync } from "node:fs";
 import { runInit } from "./init.js";
 import { runBoard } from "./board.js";
 import { runAblate } from "./ablate.js";
@@ -19,9 +20,9 @@ Usage:
   doug board move <id> <column> [dir] [--source <text>]
   doug board edit <id> [dir] [--title <t>] [--goal <g> | --goal-file <path>] [--size S|M|L] [--component <c>] [--track flow|hand] [--class <c>] [--deps a,b] [--tag a,b] [--source <s>] [--force]
   doug board remove <id> [dir] [--force]
-  doug board record <id> <report.json> [dir] [--cost <usd>] [--codex-cost <usd>] [--shared-cost <usd>] [--wall <text>] [--commit <sha>] [--adversary "<id>=<class>[: <reason>]"]...
-  doug board record <id> --hand [dir] [--commit <sha>] [--wall <text>] [--gate <text>] [--note <text>]
-  doug board summary <report.json> [--cost <usd>] [--codex-cost <usd>] [--wall <text>] [--commit <sha>] [--card <id>]
+  doug board record <id> <report.json> [dir] --summary "<one sentence>" [--cost <usd>] [--codex-cost <usd>] [--shared-cost <usd>] [--wall <text>] [--commit <sha>] [--adversary "<id>=<class>[: <reason>]"]...
+  doug board record <id> --hand [dir] --summary "<one sentence>" [--commit <sha>] [--wall <text>] [--gate <text>] [--note <text>]
+  doug board summary <report.json> --summary "<one sentence>" [--cost <usd>] [--codex-cost <usd>] [--wall <text>] [--commit <sha>] [--card <id>]
   doug board build [dir] [--out <file>]
   doug board serve [dir] [--port <n>] [--open] [--detach | --stop]
   doug ablate --from <evals/out/file.json> [--from <file> ...] [--json]
@@ -31,6 +32,7 @@ Usage:
   doug doctor [dir] [--json]   Read-only install health check; exit 1 on any fail.
   doug memory setup [dir] [--url <url>] [--yes]   Find a local embedding server, verify it, enable semantic memory.
   doug --help
+  doug --version | -v   Print the cli version.
 
 doug init detects the project's tooling deterministically, prints a diff of every file it
 would write, and writes nothing until you approve. Re-run it to refresh the vendored hooks.
@@ -47,6 +49,11 @@ function parse(argv: string[]) {
 }
 
 async function main(): Promise<number> {
+  if (process.argv[2] === "--version" || process.argv[2] === "-v") {
+    const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as { version: string };
+    process.stdout.write(`${pkg.version}\n`);
+    return 0;
+  }
   if (process.argv[2] === "board") return runBoard(process.argv.slice(3));
   if (process.argv[2] === "ablate") return runAblate(process.argv.slice(3));
   if (process.argv[2] === "trace") return runTrace(process.argv.slice(3));

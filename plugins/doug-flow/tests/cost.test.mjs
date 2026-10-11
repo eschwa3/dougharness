@@ -444,14 +444,14 @@ describe("session cost (card autopilot)", () => {
 });
 
 // Card autopilot fix pass 2: the machine's subagent transcripts carry model "claude-sonnet-5-5"; unpriced, it made
-// `cost.mjs --session` report an unpriced transcript (an autopilot stop). List price 2/10/0.2/2.5/4 per million
-// (platform.claude.com pricing, fetched 2026-10-04).
+// `cost.mjs --session` report an unpriced transcript (an autopilot stop). List price 2/10/0.1/2.5/4 per million
+// (platform.claude.com pricing; cacheRead corrected from 0.2 to 0.1 by card cost-price-haiku-5-5, fetched 2026-10-10).
 describe("claude-sonnet-5-5 price (card autopilot)", () => {
-  it("priceUsage prices claude-sonnet-5-5 at $2/$10/$0.2/$2.5/$4 per million tokens", () => {
+  it("priceUsage prices claude-sonnet-5-5 at $2/$10/$0.1/$2.5/$4 per million tokens", () => {
     const usage = { input: 1_000_000, output: 0, cacheRead: 0, cacheWrite: 0, cacheWrite1h: 0 };
     expect(priceUsage(usage, "claude-sonnet-5-5")).toBe(2);
     expect(priceUsage({ ...usage, input: 0, output: 1_000_000 }, "claude-sonnet-5-5")).toBe(10);
-    expect(priceUsage({ ...usage, input: 0, cacheRead: 1_000_000 }, "claude-sonnet-5-5")).toBeCloseTo(0.2, 10);
+    expect(priceUsage({ ...usage, input: 0, cacheRead: 1_000_000 }, "claude-sonnet-5-5")).toBeCloseTo(0.1, 10);
     expect(priceUsage({ ...usage, input: 0, cacheWrite: 1_000_000 }, "claude-sonnet-5-5")).toBe(2.5);
     expect(priceUsage({ ...usage, input: 0, cacheWrite: 1_000_000, cacheWrite1h: 1_000_000 }, "claude-sonnet-5-5")).toBe(4);
     expect(PRICES["claude-sonnet-5-5"]).toBeDefined();
@@ -552,5 +552,186 @@ describe("card flow-wall-budget", () => {
     const r = wallForRun({ runId: "wf_nope", claudeDir: fixture, projectDir: project, wallMinutes: 40 });
     expect(r.measured).toBe(false);
     expect(typeof r.reason).toBe("string");
+  });
+});
+
+// Card cost-price-haiku-5-5: claude-haiku-5-5 (the current haiku alias) was not in PRICES, so cost.mjs --session reported
+// an unpriced transcript. Haiku 5.5 is priced per request by prompt length (platform.claude.com pricing, fetched
+// 2026-10-10): a request whose prompt (input + cacheRead + cacheWrite) is over 100,000 tokens pays the high tier on every
+// category; exactly 100,000 pays the low tier. USD per MTok:
+//   low  (<= 100k): input 0.10, output 0.50, cacheRead 0.01, cacheWrite5m 0.125, cacheWrite1h 0.20
+//   high (>  100k): input 0.50, output 2.50, cacheRead 0.05, cacheWrite5m 0.625, cacheWrite1h 1
+// Every case goes through costSession (cost.mjs --session --json) or costRun, the real callers, so the tests do not pin
+// how the coder shapes the tiered row or what transcriptUsage names its per-transcript USD.
+describe("card cost-price-haiku-5-5", () => {
+  const H = "claude-haiku-5-5";
+  // One assistant line per message: [id, model, {input, output, cacheRead, cacheWrite, cacheWrite1h}].
+  const lineOf = (id, model, u = {}) => JSON.stringify({
+    type: "assistant",
+    message: {
+      id, model,
+      usage: {
+        input_tokens: u.input || 0, output_tokens: u.output || 0,
+        cache_read_input_tokens: u.cacheRead || 0, cache_creation_input_tokens: u.cacheWrite || 0,
+        ...(u.cacheWrite1h ? { cache_creation: { ephemeral_5m_input_tokens: (u.cacheWrite || 0) - u.cacheWrite1h, ephemeral_1h_input_tokens: u.cacheWrite1h } } : {}),
+      },
+    },
+  }) + "\n";
+  // A one-transcript session; returns the parsed `cost.mjs --session --json` result.
+  const sessionOf = (messages) => {
+    const claudeDir = mkdtempSync(join(tmpdir(), "doug-cost-h55-"));
+    const proj = join(claudeDir, "projects", "-tmp-h55proj");
+    mkdirSync(proj, { recursive: true });
+    writeFileSync(join(proj, "sess-1.jsonl"), messages.map(([id, model, u]) => lineOf(id, model, u)).join(""));
+    const r = run(["--session", "sess-1", "/tmp/h55proj", "--claude-dir", claudeDir, "--json"]);
+    expect(r.status, r.stderr).toBe(0);
+    return JSON.parse(r.stdout);
+  };
+
+  it("H1 (M1): a claude-haiku-5-5 transcript is priced at the low tier, with nothing unpriced", () => {
+    // 50,000 input + 20,000 cache read + 10,000 cache write (4,000 on 1h, 6,000 on 5m) = 80,000 prompt, low tier.
+    // (50000*0.10 + 10000*0.50 + 20000*0.01 + 6000*0.125 + 4000*0.20) / 1e6 = (5000+5000+200+750+800)/1e6 = 0.01175
+    const parsed = sessionOf([["m1", H, { input: 50_000, output: 10_000, cacheRead: 20_000, cacheWrite: 10_000, cacheWrite1h: 4_000 }]]);
+    expect(parsed.total.unpriced, JSON.stringify(parsed.notes)).toBe(0);
+    expect(parsed.total.usd).toBeCloseTo(0.01175, 10);
+    expect(Object.keys(PRICES)).toContain(H);
+  });
+
+  it("H2 (M2): a dated-suffix and a [1m] variant of claude-haiku-5-5 price the same, through normalizeModel", () => {
+    expect(normalizeModel("claude-haiku-5-5-20260101")).toBe(H);
+    expect(normalizeModel("claude-haiku-5-5[1m]")).toBe(H);
+    // Same 80,000-token usage as H1: 0.01175.
+    const u = { input: 50_000, output: 10_000, cacheRead: 20_000, cacheWrite: 10_000, cacheWrite1h: 4_000 };
+    const dated = sessionOf([["m1", "claude-haiku-5-5-20260101", u]]);
+    expect(dated.total.unpriced, JSON.stringify(dated.notes)).toBe(0);
+    expect(dated.total.usd).toBeCloseTo(0.01175, 10);
+  });
+
+  it("H3 (M3): a request whose prompt is over 100,000 tokens pays the high tier on input and output", () => {
+    // 150,000 input, 10,000 output: (150000*0.50 + 10000*2.50) / 1e6 = (75000+25000)/1e6 = 0.1 (the low tier would give 0.02)
+    expect(sessionOf([["m1", H, { input: 150_000, output: 10_000 }]]).total.usd).toBeCloseTo(0.1, 10);
+  });
+
+  it("H4 (M4): prompt length counts cache reads and cache writes, not input alone", () => {
+    // 60,000 input + 50,000 cache read = 110,000 prompt, high tier; input alone (60,000) would be low.
+    // (60000*0.50 + 50000*0.05 + 1000*2.50) / 1e6 = (30000+2500+2500)/1e6 = 0.035 (low tier: 0.007)
+    expect(sessionOf([["m1", H, { input: 60_000, output: 1_000, cacheRead: 50_000 }]]).total.usd).toBeCloseTo(0.035, 10);
+    // 10,000 input + 95,000 cache write (5m) = 105,000 prompt, high tier; cache reads absent, so a prompt length that
+    // dropped cacheWrite would stay low.
+    // (10000*0.50 + 95000*0.625) / 1e6 = (5000+59375)/1e6 = 0.064375
+    expect(sessionOf([["m1", H, { input: 10_000, cacheWrite: 95_000 }]]).total.usd).toBeCloseTo(0.064375, 10);
+    // The 1h share is a cache write too: 10,000 input + 95,000 write of which 95,000 on 1h = 105,000 prompt.
+    // (10000*0.50 + 95000*1) / 1e6 = 0.1
+    expect(sessionOf([["m1", H, { input: 10_000, cacheWrite: 95_000, cacheWrite1h: 95_000 }]]).total.usd).toBeCloseTo(0.1, 10);
+  });
+
+  it("H5 (M5): exactly 100,000 prompt tokens pays the low tier; 100,001 pays the high tier", () => {
+    // 100,000 input, 1,000 output: (100000*0.10 + 1000*0.50) / 1e6 = (10000+500)/1e6 = 0.0105
+    expect(sessionOf([["m1", H, { input: 100_000, output: 1_000 }]]).total.usd).toBeCloseTo(0.0105, 10);
+    // 100,001 input, 1,000 output: (100001*0.50 + 1000*2.50) / 1e6 = (50000.5+2500)/1e6 = 0.0525005
+    expect(sessionOf([["m1", H, { input: 100_001, output: 1_000 }]]).total.usd).toBeCloseTo(0.0525005, 10);
+    // The boundary counts the cache too: 40,000 input + 30,000 read + 30,000 write = exactly 100,000, low tier.
+    // (40000*0.10 + 30000*0.01 + 30000*0.125) / 1e6 = (4000+300+3750)/1e6 = 0.00805
+    expect(sessionOf([["m1", H, { input: 40_000, cacheRead: 30_000, cacheWrite: 30_000 }]]).total.usd).toBeCloseTo(0.00805, 10);
+  });
+
+  it("H6 (M6): each message in a transcript is priced on its own tier, not the transcript's summed usage", () => {
+    // Two 60,000-input messages: each is low (60000*0.10/1e6 = 0.006), total 0.012; their sum (120,000) would be high (0.06).
+    expect(sessionOf([["m1", H, { input: 60_000 }], ["m2", H, { input: 60_000 }]]).total.usd).toBeCloseTo(0.012, 10);
+    // One large, one small: 150,000*0.50 = 75000 and 10,000*0.10 = 1000, total 76000/1e6 = 0.076 (summed 160,000 high: 0.08).
+    expect(sessionOf([["m1", H, { input: 150_000 }], ["m2", H, { input: 10_000 }]]).total.usd).toBeCloseTo(0.076, 10);
+  });
+
+  it("H7: a transcript with a message on a model outside the table is unpriced as a whole, never partly estimated", () => {
+    const parsed = sessionOf([["m1", H, { input: 1_000 }], ["m2", H, { input: 1_000 }], ["m3", "claude-future-9", { input: 1_000 }]]);
+    expect(parsed.total.unpriced).toBe(1);
+    expect(parsed.total.usd).toBe(0);
+    expect(parsed.notes.join("\n")).toMatch(/not in the price table/);
+  });
+
+  it("H8 (M7): claude-sonnet-5-5 prices cache reads at $0.1 per million", () => {
+    const usage = { input: 0, output: 0, cacheRead: 1_000_000, cacheWrite: 0, cacheWrite1h: 0 };
+    expect(priceUsage(usage, "claude-sonnet-5-5")).toBeCloseTo(0.1, 10);
+    // End to end: 1,000,000 cache read at 0.1 = 0.1
+    expect(sessionOf([["m1", "claude-sonnet-5-5", { cacheRead: 1_000_000 }]]).total.usd).toBeCloseTo(0.1, 10);
+  });
+
+  it("H9: every current model alias resolves to a PRICES row (opus, sonnet, haiku, and fable)", () => {
+    for (const id of ["claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5", "claude-fable-5-1"]) expect(PRICES[id], id).toBeDefined();
+    expect(PRICES_DATED).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+    expect(PRICES_DATED >= "2026-10-10", `PRICES_DATED ${PRICES_DATED} must be updated to the fetch date`).toBe(true);
+  });
+
+  it("H10 (M8): costRun prices each message of an agent transcript on its own tier", () => {
+    const claudeDir = mkdtempSync(join(tmpdir(), "doug-cost-claude-"));
+    const dir = join(claudeDir, "projects", "-tmp-proj", "sess-1", "subagents", "workflows", "wf_h55-001");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "journal.jsonl"), [
+      JSON.stringify({ type: "started", key: "k1", agentId: "a1" }),
+      JSON.stringify({ type: "result", key: "k1", agentId: "a1", result: { taskId: "t1" } }),
+    ].join("\n") + "\n");
+    writeFileSync(join(dir, "agent-a1.meta.json"), JSON.stringify({ agentType: "doug-flow:researcher" }));
+    // Two 60,000-input messages: 0.012 priced per message, 0.06 if the summed 120,000 were priced.
+    writeFileSync(join(dir, "agent-a1.jsonl"), lineOf("m1", H, { input: 60_000 }) + lineOf("m2", H, { input: 60_000 }));
+    const r = costRun({ runId: "wf_h55-001", claudeDir, projectDir: "/tmp/proj" });
+    expect(r.notes.some((n) => /not in the price table/.test(n)), `notes: ${JSON.stringify(r.notes)}`).toBe(false);
+    expect(r.agents[0].usd).toBeCloseTo(0.012, 10);
+    expect(r.total.usd).toBeCloseTo(0.012, 10);
+    // A message on an unknown model makes the agent unpriced and keeps the note.
+    writeFileSync(join(dir, "agent-a1.jsonl"), lineOf("m1", H, { input: 1_000 }) + lineOf("m2", "claude-future-9", { input: 1_000 }) + lineOf("m3", H, { input: 1_000 }));
+    const u = costRun({ runId: "wf_h55-001", claudeDir, projectDir: "/tmp/proj" });
+    expect(u.agents[0].usd).toBeNull();
+    expect(u.notes.some((n) => /not in the price table/.test(n))).toBe(true);
+  });
+
+  // Fix pass 1 (reviewer R1): Claude Code writes "<synthetic>" messages with every usage field 0; they cost $0 on any
+  // model and must not make a transcript unpriced.
+  const runOf1 = (body) => {
+    const claudeDir = mkdtempSync(join(tmpdir(), "doug-cost-claude-"));
+    const dir = join(claudeDir, "projects", "-tmp-proj", "sess-1", "subagents", "workflows", "wf_fix-001");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "journal.jsonl"), [
+      JSON.stringify({ type: "started", key: "k1", agentId: "a1" }),
+      JSON.stringify({ type: "result", key: "k1", agentId: "a1", result: { taskId: "t1" } }),
+    ].join("\n") + "\n");
+    writeFileSync(join(dir, "agent-a1.meta.json"), JSON.stringify({ agentType: "doug-flow:researcher" }));
+    writeFileSync(join(dir, "agent-a1.jsonl"), body);
+    return costRun({ runId: "wf_fix-001", claudeDir, projectDir: "/tmp/proj" });
+  };
+
+  it("F1 (a): a zero-usage <synthetic> message costs $0 and leaves the transcript priced, through --session and costRun", () => {
+    // Two 60,000-input haiku-5-5 messages, each low tier: 2 * 60000 * 0.10 / 1e6 = 0.012; the zero-usage message adds 0.
+    const msgs = [["m1", H, { input: 60_000 }], ["m2", "<synthetic>", {}], ["m3", H, { input: 60_000 }]];
+    const parsed = sessionOf(msgs);
+    expect(parsed.total.unpriced, JSON.stringify(parsed.notes)).toBe(0);
+    expect(parsed.total.usd).toBeCloseTo(0.012, 10);
+    const r = runOf1(msgs.map(([id, model, u]) => lineOf(id, model, u)).join(""));
+    expect(r.notes.some((n) => /not in the price table/.test(n)), `notes: ${JSON.stringify(r.notes)}`).toBe(false);
+    expect(r.agents[0].usd).toBeCloseTo(0.012, 10);
+    // Same on opus-5-5 ($4/$20): 1,000 input + 2,000 output = (4000 + 40000) / 1e6 = 0.044.
+    const opus = sessionOf([["m1", "claude-opus-5-5", { input: 1_000, output: 2_000 }], ["m2", "<synthetic>", {}]]);
+    expect(opus.total.unpriced, JSON.stringify(opus.notes)).toBe(0);
+    expect(opus.total.usd).toBeCloseTo(0.044, 10);
+  });
+
+  it("F2 (b): a <synthetic> message with non-zero usage still makes the transcript unpriced, with the note", () => {
+    const msgs = [["m1", H, { input: 60_000 }], ["m2", "<synthetic>", { output: 10 }], ["m3", H, { input: 60_000 }]];
+    const parsed = sessionOf(msgs);
+    expect(parsed.total.unpriced).toBe(1);
+    expect(parsed.notes.join("\n")).toMatch(/not in the price table/);
+    const r = runOf1(msgs.map(([id, model, u]) => lineOf(id, model, u)).join(""));
+    expect(r.agents[0].usd).toBeNull();
+    expect(r.notes.some((n) => /not in the price table/.test(n))).toBe(true);
+  });
+
+  it("F3 (c): a non-zero message with no model of its own is priced on the transcript's majority model", () => {
+    // Two haiku-5-5 messages and one with no model, 60,000 input each; the model-less one takes the majority (haiku-5-5)
+    // low tier: 3 * 60000 * 0.10 / 1e6 = 0.018.
+    const msgs = [["m1", H, { input: 60_000 }], ["m2", undefined, { input: 60_000 }], ["m3", H, { input: 60_000 }]];
+    const parsed = sessionOf(msgs);
+    expect(parsed.total.unpriced, JSON.stringify(parsed.notes)).toBe(0);
+    expect(parsed.total.usd).toBeCloseTo(0.018, 10);
+    const r = runOf1(msgs.map(([id, model, u]) => lineOf(id, model, u)).join(""));
+    expect(r.agents[0].usd).toBeCloseTo(0.018, 10);
   });
 });

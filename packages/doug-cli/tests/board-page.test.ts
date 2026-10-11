@@ -475,6 +475,98 @@ describe.skipIf(listenDenied !== "")(`doug board serve${listenDenied ? ` (${list
     }
   });
 
+  // Card serve-ready-cap-warning: the move response body stays the board; the cap warning
+  // travels in the x-doug-warning header, mirroring `doug board move` (requested column is ready).
+  describe("ready cap warning on a served move", () => {
+    function capBoard(dir: string, ready: number, backlog = ["mover"]): void {
+      mkdirSync(join(dir, ".doug"), { recursive: true });
+      const cards: object[] = [];
+      for (let i = 1; i <= ready; i++) cards.push({ id: `r${i}`, column: "ready", title: `Ready ${i}`, deps: [], goal: "g" });
+      for (const id of backlog) cards.push({ id, column: "backlog", title: id, deps: [], goal: "g" });
+      writeFileSync(join(dir, ".doug/board.json"), boardFile(cards));
+    }
+    const put = (url: string, id: string, body: object) =>
+      fetch(url + "api/cards/" + id, {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      });
+
+    it("sets x-doug-warning when a move fills Ready to 8, keeps the board as the body, and still saves", async () => {
+      const dir = fresh();
+      capBoard(dir, 7);
+      const server = await startBoardServer(dir, { port: 0 });
+      try {
+        const res = await put(server.url, "mover", { column: "ready" });
+        expect(res.status).toBe(200);
+        expect(res.headers.get("x-doug-warning")).toBe(
+          "warning: Ready holds 8 cards, above the cap of 7; only the user promotes cards to Ready",
+        );
+        const body = (await res.json()) as { cards: { id: string; column: string }[]; columns: unknown[]; warning?: unknown };
+        expect(Array.isArray(body.cards)).toBe(true);
+        expect(body.warning).toBeUndefined();
+        expect(body).toEqual(readBoard(dir));
+        expect(body.cards.find((c) => c.id === "mover")?.column).toBe("ready");
+        expect(readBoard(dir).cards.filter((c: { column: string }) => c.column === "ready")).toHaveLength(8);
+      } finally {
+        await server.close();
+      }
+    });
+
+    it("sends no x-doug-warning when a move fills Ready to exactly 7", async () => {
+      const dir = fresh();
+      capBoard(dir, 6);
+      const server = await startBoardServer(dir, { port: 0 });
+      try {
+        const res = await put(server.url, "mover", { column: "ready" });
+        expect(res.status).toBe(200);
+        expect(res.headers.has("x-doug-warning")).toBe(false);
+        expect(readBoard(dir).cards.filter((c: { column: string }) => c.column === "ready")).toHaveLength(7);
+      } finally {
+        await server.close();
+      }
+    });
+
+    it("sends no x-doug-warning for a move that does not target Ready, even over the cap", async () => {
+      const dir = fresh();
+      capBoard(dir, 8);
+      const server = await startBoardServer(dir, { port: 0 });
+      try {
+        const res = await put(server.url, "mover", { column: "done" });
+        expect(res.status).toBe(200);
+        expect(res.headers.has("x-doug-warning")).toBe(false);
+      } finally {
+        await server.close();
+      }
+    });
+
+    it("warns on a reorder within Ready while Ready holds 8 (the request column is ready)", async () => {
+      const dir = fresh();
+      capBoard(dir, 8, []);
+      const server = await startBoardServer(dir, { port: 0 });
+      try {
+        const res = await put(server.url, "r1", { column: "ready", after: "r3" });
+        expect(res.status).toBe(200);
+        expect(res.headers.get("x-doug-warning")).toContain("Ready holds 8 cards, above the cap of 7");
+      } finally {
+        await server.close();
+      }
+    });
+  });
+
+  it("the page script reads x-doug-warning from the move response and passes it to say() after the save message (card serve-ready-cap-warning)", () => {
+    const start = templateSource.indexOf("async function save(");
+    expect(start).toBeGreaterThan(-1);
+    const saveSrc = templateSource.slice(start, templateSource.indexOf("function reloadAfter", start));
+    const read = saveSrc.match(/(\w+)\s*=\s*res\.headers\.get\(\s*["']x-doug-warning["']\s*\)/);
+    expect(read).not.toBeNull();
+    const v = (read as RegExpMatchArray)[1];
+    const sayLine = saveSrc.split("\n").find((l) => l.includes('say("Saved to '));
+    expect(sayLine).toBeDefined();
+    expect(sayLine).toMatch(new RegExp(`\\b${v}\\b`));
+    expect(saveSrc).not.toContain("location.reload()");
+  });
+
   it("answers an oversize move body with 413 and leaves the record alone", async () => {
     const dir = fresh();
     await twoCardBoard(dir);

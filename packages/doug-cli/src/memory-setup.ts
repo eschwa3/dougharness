@@ -226,7 +226,10 @@ export async function runMemorySetup(
 
   try {
     const eps: Endpoint[] = [...(deps.endpoints ?? ENDPOINTS)];
-    if (opts.url) eps.push(urlEndpoint(opts.url));
+    if (opts.url) {
+      const given = normaliseUrl(opts.url);
+      if (!eps.some((ep) => normaliseUrl(ep.url) === given)) eps.push(urlEndpoint(opts.url));
+    }
     let probed = await Promise.all(eps.map((ep) => probeModels(ep, listTimeoutMs)));
     // Every unreachable or odd endpoint is reported as one line.
     const report = (list: Probed[]) => {

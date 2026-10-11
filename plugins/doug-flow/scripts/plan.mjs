@@ -51,6 +51,7 @@ import { landPlan, INTEGRATION_WORKTREE } from "../lib/land.mjs";
 import { removeFinishedWorktrees, retireTaskWorktrees, retireIntegrationWorktree, branchHead, isGitRepo } from "../lib/worktrees.mjs";
 import { readMemoryConfig, readMemoryStaleDays, readIndexConfig, createProvider } from "../lib/embeddings.mjs";
 import { existsSync, readFileSync, statSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 
 // The project's install command from .doug/config.json, used when the plan does not name one.
 function configInstall(d) {
@@ -88,8 +89,29 @@ function configDeleteBranches(d) {
     return false;
   }
 }
+// card plan-base-branch-default: the branch checked out in d, or on a detached HEAD its full sha (noted on
+// stderr); null when d is not a git repository or git fails.
+function currentBase(d) {
+  const git = (...args) => execFileSync("git", args, { cwd: d, encoding: "utf8", stdio: "pipe" }).trim();
+  try {
+    const b = git("symbolic-ref", "--short", "-q", "HEAD");
+    if (b) return b;
+  } catch {}
+  try {
+    const sha = git("rev-parse", "--verify", "-q", "HEAD");
+    if (!sha) return null;
+    process.stderr.write(`[doug] plan.mjs: detached HEAD; baseBranch set to ${sha}\n`);
+    return sha;
+  } catch {
+    return null;
+  }
+}
 function withDefaults(p, d) {
   let out = p;
+  if (typeof out.baseBranch !== "string" || !out.baseBranch.trim()) {
+    const base = currentBase(d);
+    if (base) out = { ...out, baseBranch: base };
+  }
   if (!out.install && configInstall(d)) out = { ...out, install: configInstall(d) };
   const hasCommand = out.adversary && typeof out.adversary === "object" && typeof out.adversary.command === "string" && out.adversary.command.trim();
   if (out.adversary !== false && !hasCommand && configAdversary(d)) out = { ...out, adversary: { ...(out.adversary && typeof out.adversary === "object" ? out.adversary : {}), command: configAdversary(d) } };

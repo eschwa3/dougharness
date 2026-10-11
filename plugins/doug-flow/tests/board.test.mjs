@@ -873,13 +873,13 @@ describe("Codex adversary cost on runEntry and runSummary (card run-report-codex
     const dir = project();
     const reportFile = join(dir, "report.json");
     writeFileSync(reportFile, JSON.stringify(report));
-    const rec = run(["record", "first", reportFile, dir, "--cost", "1.4", "--codex-cost", "2.58", "--wall", "3 min", "--commit", "abc1234"], dir);
+    const rec = run(["record", "first", reportFile, dir, "--cost", "1.4", "--codex-cost", "2.58", "--wall", "3 min", "--commit", "abc1234", "--summary", "Test summary."], dir);
     expect(rec.status, rec.stderr).toBe(0);
     const log = readFileSync(join(dir, "docs/live-runs.md"), "utf8");
     expect(log).toContain("| Codex adversary | $2.58, not included in Cost |");
-    const sum = run(["summary", reportFile, "--cost", "1.4", "--codex-cost", "2.58", "--wall", "3 min", "--commit", "abc1234"], dir);
+    const sum = run(["summary", reportFile, "--cost", "1.4", "--codex-cost", "2.58", "--wall", "3 min", "--commit", "abc1234", "--summary", "Test summary."], dir);
     expect(sum.status, sum.stderr).toBe(0);
-    expect(sum.stdout.split("\n")[0]).toContain("; Codex $2.58; landed as abc1234.");
+    expect(sum.stdout.split("\n")[1]).toContain("; Codex $2.58; landed as abc1234.");
   });
   it("B5: in a batch, only the first card's entry shows the Codex adversary row", () => {
     const batchReport = {
@@ -976,7 +976,7 @@ describe("board.mjs record promotes a card's research note", () => {
     const dir = project();
     mkdirSync(join(dir, ".doug/.state/research"), { recursive: true });
     writeFileSync(join(dir, ".doug/.state/research/first.md"), "# First\n\nA decisive fact.\n");
-    const rec = run(["record", "first", "--hand", dir, "--commit", "abc1234", "--wall", "5 min", "--gate", "typecheck 0; unit 1 passed"], dir);
+    const rec = run(["record", "first", "--hand", dir, "--commit", "abc1234", "--wall", "5 min", "--gate", "typecheck 0; unit 1 passed", "--summary", "Test summary."], dir);
     expect(rec.status, rec.stderr).toBe(0);
     expect(rec.stdout).toContain("Promoted the research note for first to docs/research/first.md.\n");
     expect(readFileSync(join(dir, "docs/research/first.md"), "utf8")).toBe("# First\n\nA decisive fact.\n");
@@ -986,16 +986,16 @@ describe("board.mjs record promotes a card's research note", () => {
     const dir = project();
     mkdirSync(join(dir, ".doug/.state/research"), { recursive: true });
     writeFileSync(join(dir, ".doug/.state/research/first.md"), "# First\n\nA decisive fact.\n");
-    const first = run(["record", "first", "--hand", dir, "--commit", "abc1234", "--wall", "5 min", "--gate", "typecheck 0; unit 1 passed"], dir);
+    const first = run(["record", "first", "--hand", dir, "--commit", "abc1234", "--wall", "5 min", "--gate", "typecheck 0; unit 1 passed", "--summary", "Test summary."], dir);
     expect(first.status, first.stderr).toBe(0);
     expect(first.stdout).toContain("Promoted");
-    const second = run(["record", "first", "--hand", dir, "--commit", "def5678", "--wall", "6 min", "--gate", "typecheck 0; unit 2 passed"], dir);
+    const second = run(["record", "first", "--hand", dir, "--commit", "def5678", "--wall", "6 min", "--gate", "typecheck 0; unit 2 passed", "--summary", "Test summary."], dir);
     expect(second.status, second.stderr).toBe(0);
     expect(second.stdout).not.toContain("Promoted");
   });
   it("hand-track record: says nothing about promotion when the card has no note", () => {
     const dir = project();
-    const rec = run(["record", "first", "--hand", dir, "--commit", "abc1234", "--wall", "5 min", "--gate", "typecheck 0; unit 1 passed"], dir);
+    const rec = run(["record", "first", "--hand", dir, "--commit", "abc1234", "--wall", "5 min", "--gate", "typecheck 0; unit 1 passed", "--summary", "Test summary."], dir);
     expect(rec.status, rec.stderr).toBe(0);
     expect(rec.stdout).not.toContain("Promoted");
     expect(existsSync(join(dir, "docs/research"))).toBe(false);
@@ -1006,7 +1006,7 @@ describe("board.mjs record promotes a card's research note", () => {
     writeFileSync(join(dir, ".doug/.state/research/first.md"), "# First\n\nA decisive fact.\n");
     const report = join(dir, "report.json");
     writeFileSync(report, JSON.stringify({ plan: "First", integrationBranch: "doug/x", ok: true, levels: [] }));
-    const rec = run(["record", "first", report, dir, "--wall", "2 min", "--commit", "abc1234"], dir);
+    const rec = run(["record", "first", report, dir, "--wall", "2 min", "--commit", "abc1234", "--summary", "Test summary."], dir);
     expect(rec.status, rec.stderr).toBe(0);
     expect(rec.stdout).toContain("Promoted the research note for first to docs/research/first.md.\n");
     expect(readFileSync(join(dir, "docs/research/first.md"), "utf8")).toBe("# First\n\nA decisive fact.\n");
@@ -1019,7 +1019,7 @@ describe("board.mjs record promotes a card's research note", () => {
     // a plain environmental trigger for the same failure a bad id or a permissions problem would cause.
     mkdirSync(join(dir, "docs"), { recursive: true });
     writeFileSync(join(dir, "docs/research"), "not a directory\n");
-    const rec = run(["record", "first", "--hand", dir, "--commit", "abc1234", "--wall", "5 min", "--gate", "typecheck 0; unit 1 passed"], dir);
+    const rec = run(["record", "first", "--hand", dir, "--commit", "abc1234", "--wall", "5 min", "--gate", "typecheck 0; unit 1 passed", "--summary", "Test summary."], dir);
     expect(rec.status).toBe(1);
     expect(rec.stderr).toContain("EEXIST");
     expect(existsSync(join(dir, "docs/live-runs.md"))).toBe(false);
@@ -1033,11 +1033,11 @@ describe("board.mjs CLI", () => {
     const paused = { plan: "P", ok: false, integrationBranch: "doug/a", paused: { level: 0, gate: "human", next: ["b"] }, levels: [{ index: 0, integration: { ok: true }, tasks: [{ id: "a", implemented: true, verified: true, reviewed: true, adversary: { ran: true, verdict: "pass", blocked: false } }] }] };
     const report = join(dir, "paused.json");
     writeFileSync(report, JSON.stringify(paused));
-    const sum = run(["summary", report, "--wall", "5 min"], dir);
+    const sum = run(["summary", report, "--wall", "5 min", "--summary", "Test summary."], dir);
     expect(sum.status).toBe(0);
-    expect(sum.stdout.split("\n")[0]).toBe("P: paused at the human gate after level 0; 1 task, 1 integrated; wall 5 min; cost not measured.");
-    expect(sum.stdout.split("\n")[2]).toContain("next: b.");
-    const rec = run(["record", "first", report, dir, "--wall", "5 min"], dir);
+    expect(sum.stdout.split("\n")[1]).toBe("P: paused at the human gate after level 0; 1 task, 1 integrated; wall 5 min; cost not measured.");
+    expect(sum.stdout.split("\n")[3]).toContain("next: b.");
+    const rec = run(["record", "first", report, dir, "--wall", "5 min", "--summary", "Test summary."], dir);
     expect(rec.status).toBe(0);
     expect(readFileSync(join(dir, "docs/live-runs.md"), "utf8")).toContain("| Outcome | paused at the human gate after level 0; next: b |");
   });
@@ -1046,10 +1046,10 @@ describe("board.mjs CLI", () => {
     const stopped = { plan: "S", ok: false, integrationBranch: "doug/a", stoppedAtLevel: 0, levels: [{ index: 0, integration: { ok: true }, tasks: [{ id: "a", implemented: true, verified: false, reviewed: false, adversary: null, stopReason: "over budget", stopClass: "budget" }] }] };
     const report = join(dir, "stopped.json");
     writeFileSync(report, JSON.stringify(stopped));
-    const sum = run(["summary", report, "--wall", "5 min"], dir);
+    const sum = run(["summary", report, "--wall", "5 min", "--summary", "Test summary."], dir);
     expect(sum.status, sum.stderr).toBe(0);
-    expect(sum.stdout.split("\n")[2]).toBe('Stopped: a [budget]: "over budget"');
-    const rec = run(["record", "first", report, dir, "--wall", "5 min"], dir);
+    expect(sum.stdout.split("\n")[3]).toBe('Stopped: a [budget]: "over budget"');
+    const rec = run(["record", "first", report, dir, "--wall", "5 min", "--summary", "Test summary."], dir);
     expect(rec.status, rec.stderr).toBe(0);
     expect(readFileSync(join(dir, "docs/live-runs.md"), "utf8")).toContain('\nStopped: a [budget]: "over budget"\n');
   });
@@ -1062,17 +1062,17 @@ describe("board.mjs CLI", () => {
     const wrapped = { summary: "x", agentCount: 1, logs: [], result: paused };
     const report = join(dir, "paused-wrapped.json");
     writeFileSync(report, JSON.stringify(wrapped));
-    const sum = run(["summary", report, "--wall", "5 min"], dir);
+    const sum = run(["summary", report, "--wall", "5 min", "--summary", "Test summary."], dir);
     expect(sum.status).toBe(0);
-    expect(sum.stdout.split("\n")[0]).toBe("P: paused at the human gate after level 0; 1 task, 1 integrated; wall 5 min; cost not measured.");
-    expect(sum.stdout.split("\n")[2]).toContain("next: b.");
-    const rec = run(["record", "first", report, dir, "--wall", "5 min"], dir);
+    expect(sum.stdout.split("\n")[1]).toBe("P: paused at the human gate after level 0; 1 task, 1 integrated; wall 5 min; cost not measured.");
+    expect(sum.stdout.split("\n")[3]).toContain("next: b.");
+    const rec = run(["record", "first", report, dir, "--wall", "5 min", "--summary", "Test summary."], dir);
     expect(rec.status).toBe(0);
     expect(readFileSync(join(dir, "docs/live-runs.md"), "utf8")).toContain("| Outcome | paused at the human gate after level 0; next: b |");
   });
   it("board.mjs record <id> <report> --note renders the note through the run form's CLI (card workflow-rehearsal-review #3)", () => {
     const dir = project();
-    const rec = run(["record", "second", join(here, "fixtures/reports/standard-agents-run1.json"), dir, "--note", "Rehearsal flow on the ts-basic fixture: passed"], dir);
+    const rec = run(["record", "second", join(here, "fixtures/reports/standard-agents-run1.json"), dir, "--note", "Rehearsal flow on the ts-basic fixture: passed", "--summary", "Test summary."], dir);
     expect(rec.status, rec.stderr).toBe(0);
     expect(readFileSync(join(dir, "docs/live-runs.md"), "utf8")).toContain("Rehearsal flow on the ts-basic fixture: passed");
   });
@@ -1098,7 +1098,7 @@ describe("board.mjs CLI", () => {
     expect(noHand.status).toBe(1);
     expect(noHand.stderr).toContain("skipping first: flow track (run it with /doug-next)");
     expect(noHand.stderr).toContain("No Ready hand-track card whose dependencies are Done.");
-    const handRec = run(["record", "byhand", "--hand", byHand, "--commit", "abc1234", "--wall", "20 min", "--gate", "typecheck 0; unit 380 passed", "--note", "kept"], byHand);
+    const handRec = run(["record", "byhand", "--hand", byHand, "--commit", "abc1234", "--wall", "20 min", "--gate", "typecheck 0; unit 380 passed", "--note", "kept", "--summary", "Test summary."], byHand);
     expect(handRec.status, handRec.stderr).toBe(0);
     expect(handRec.stdout).toContain("Appended a hand-track entry for byhand to");
     const handLog = readFileSync(join(byHand, "docs/live-runs.md"), "utf8");
@@ -1107,9 +1107,9 @@ describe("board.mjs CLI", () => {
     expect(handLog).toContain("| Gate | typecheck 0; unit 380 passed |");
     expect(handLog).toContain("\nkept\n");
     expect(run(["record", "--hand"], byHand).status).toBe(2);
-    const sum = run(["summary", join(here, "fixtures/reports/standard-agents-run2.json"), "--wall", "18 min"], dir);
+    const sum = run(["summary", join(here, "fixtures/reports/standard-agents-run2.json"), "--wall", "18 min", "--summary", "Test summary."], dir);
     expect(sum.status, sum.stderr).toBe(0);
-    expect(sum.stdout.split("\n").length).toBe(4);
+    expect(sum.stdout.split("\n").length).toBe(5);
     expect(sum.stdout).toContain("stopped at level 0; 1 task, 0 integrated; wall 18 min; cost not measured.");
     expect(run(["summary"], dir).status).toBe(2);
     expect(JSON.parse(run(["card", "second", dir], dir).stdout).title).toBe("Second");
@@ -1123,7 +1123,7 @@ describe("board.mjs CLI", () => {
 
     const report = join(dir, "report.json");
     writeFileSync(report, JSON.stringify({ plan: "First", integrationBranch: "doug/x", ok: true, levels: [] }));
-    const rec = run(["record", "first", report, dir, "--wall", "2 min", "--commit", "abc1234"], dir);
+    const rec = run(["record", "first", report, dir, "--wall", "2 min", "--commit", "abc1234", "--summary", "Test summary."], dir);
     expect(rec.status, rec.stderr).toBe(0);
     const log = readFileSync(join(dir, "docs/live-runs.md"), "utf8");
     expect(log).toContain("first: First");
@@ -1136,7 +1136,7 @@ describe("board.mjs CLI", () => {
     writeFileSync(join(fallbackDir, "docs/board.json"), JSON.stringify(board()));
     const fallbackReport = join(fallbackDir, "report.json");
     writeFileSync(fallbackReport, JSON.stringify({ plan: "First", integrationBranch: "doug/x", ok: true, levels: [] }));
-    const fallbackRec = run(["record", "first", fallbackReport, fallbackDir, "--commit", "abc1234"], fallbackDir);
+    const fallbackRec = run(["record", "first", fallbackReport, fallbackDir, "--commit", "abc1234", "--summary", "Test summary."], fallbackDir);
     expect(fallbackRec.status, fallbackRec.stderr).toBe(0);
     const fallbackLog = readFileSync(join(fallbackDir, "docs/live-runs.md"), "utf8");
     expect(fallbackLog).toContain("from card `first` in `docs/board.json`");
@@ -1210,7 +1210,7 @@ describe("board.mjs rejects an unknown flag per subcommand (card board-cli-unkno
 
   it("U6: record <id> --hand <dir> --artifact exits 2 and appends nothing to docs/live-runs.md", () => {
     const dir = project();
-    const r = run(["record", "first", "--hand", dir, "--artifact"], dir);
+    const r = run(["record", "first", "--hand", dir, "--artifact", "--summary", "Test summary."], dir);
     expect(r.status).toBe(2);
     expect(existsSync(join(dir, "docs/live-runs.md"))).toBe(false);
   });
@@ -1659,15 +1659,15 @@ describe("adversary precision", () => {
     const run = (args, dir) => spawnSync(process.execPath, [join(here, "..", "scripts", "board.mjs"), ...args], { cwd: dir, encoding: "utf8", env: { ...process.env, CLAUDE_PROJECT_DIR: "" } });
     const dir = project();
     const report = join(here, "fixtures/reports/standard-agents-run1.json");
-    const ok = run(["record", "first", report, dir, "--wall", "30 min", "--adversary", "F1=real: invalid YAML frontmatter, Claude Code would not load the agent"], dir);
+    const ok = run(["record", "first", report, dir, "--wall", "30 min", "--adversary", "F1=real: invalid YAML frontmatter, Claude Code would not load the agent", "--summary", "Test summary."], dir);
     expect(ok.status, ok.stderr).toBe(0);
     const log = readFileSync(join(dir, "docs/live-runs.md"), "utf8");
     expect(log).toContain("| Adversary precision | 1 real / 0 marginal / 0 false |");
     expect(log).toContain("- F1 (agents-generator, pass 1): real. invalid YAML frontmatter, Claude Code would not load the agent");
-    const bad = run(["record", "first", report, dir, "--adversary", "F1=real", "--adversary", "F2=false: nope"], dir);
+    const bad = run(["record", "first", report, dir, "--adversary", "F1=real", "--adversary", "F2=false: nope", "--summary", "Test summary."], dir);
     expect(bad.status).toBe(1);
     expect(bad.stderr).toContain("no adversary block named F2 in this report; its blocks are: F1");
-    expect(run(["record", "first", report, dir, "--adversary", "F1=maybe"], dir).stderr).toContain('unknown adversary class "maybe"');
+    expect(run(["record", "first", report, dir, "--adversary", "F1=maybe", "--summary", "Test summary."], dir).stderr).toContain('unknown adversary class "maybe"');
   });
 });
 
@@ -1817,9 +1817,9 @@ describe("run entries for a batch", () => {
     ] }));
     const report = join(dir, "report.json");
     writeFileSync(report, JSON.stringify({ ...batchReport, levels: batchReport.levels.map((l) => ({ ...l, tasks: l.tasks.map(({ card, ...t }) => t) })) }));
-    const rec = run(["record", "alpha", report, dir, "--cost", "1.2", "--shared-cost", "0.4", "--commit", "abc1234", "--wall", "12 min"], dir);
+    const rec = run(["record", "alpha", report, dir, "--cost", "1.2", "--shared-cost", "0.4", "--commit", "abc1234", "--wall", "12 min", "--summary", "Test summary."], dir);
     expect(rec.status, rec.stderr).toBe(0);
-    const rec2 = run(["record", "beta", report, dir, "--cost", "0.7", "--shared-cost", "0.4", "--commit", "abc1234", "--wall", "12 min", "--adversary", "pass-1=real: it did"], dir);
+    const rec2 = run(["record", "beta", report, dir, "--cost", "0.7", "--shared-cost", "0.4", "--commit", "abc1234", "--wall", "12 min", "--adversary", "pass-1=real: it did", "--summary", "Test summary."], dir);
     expect(rec2.status, rec2.stderr).toBe(0);
     const log = readFileSync(join(dir, "docs/live-runs.md"), "utf8");
     expect(log).toContain("## ");
@@ -1829,7 +1829,7 @@ describe("run entries for a batch", () => {
     expect(log).toContain("| Shared integration agents | $0.40, counted once for the batch under alpha |");
     expect(log.split("| 0 | b1 |").length).toBe(2);
     expect(log.split("| 0 | a1 |").length).toBe(2);
-    const sum = run(["summary", report, "--card", "alpha"], dir);
+    const sum = run(["summary", report, "--card", "alpha", "--summary", "Test summary."], dir);
     expect(sum.status, sum.stderr).toBe(0);
     expect(sum.stdout).toContain("2 cards: alpha, beta: green; 2 tasks, 2 integrated;");
     expect(sum.stdout).toContain("a1: implemented");
@@ -1977,9 +1977,9 @@ describe("runSummary reads a batch report's acceptance without cross-card noise"
     const dir = project();
     const reportPath = join(dir, "report.json");
     writeFileSync(reportPath, JSON.stringify(fixture()));
-    const sum = run(["summary", reportPath, "--card", "alpha"], dir);
+    const sum = run(["summary", reportPath, "--card", "alpha", "--summary", "Test summary."], dir);
     expect(sum.status, sum.stderr).toBe(0);
-    expect(sum.stdout).toBe(runSummary({ report: filterReportForCard(fixture(), "alpha") }));
+    expect(sum.stdout).toBe("Test summary.\n" + runSummary({ report: filterReportForCard(fixture(), "alpha") }));
   });
 });
 
@@ -2110,6 +2110,30 @@ describe("Ready cap (card follow-ups-backlog-ranked)", () => {
     expect(r.status).toBe(0);
     expect(r.stderr).not.toContain("above the cap");
     expect(JSON.parse(r.stdout).id).toBe("r1");
+  });
+  it("board.mjs move into Ready making 8 warns on stderr, leaves stdout and exit alone, and moves the card", () => {
+    const dir = project(withReady(7));
+    const r = run(["move", "later", "ready", dir], dir);
+    expect(r.status, r.stderr).toBe(0);
+    expect(r.stderr).toContain(line(8));
+    expect(r.stdout).toMatch(/^Moved later to ready in .*board\.json\.\n$/);
+    expect(r.stdout).not.toContain("warning");
+    expect(JSON.parse(readFileSync(join(dir, ".doug", "board.json"), "utf8")).cards.find((c) => c.id === "later").column).toBe("ready");
+  });
+  it("board.mjs move into Ready making 7 prints no warning", () => {
+    const dir = project(withReady(6));
+    const r = run(["move", "later", "ready", dir], dir);
+    expect(r.status, r.stderr).toBe(0);
+    expect(r.stderr).not.toContain("warning: Ready holds");
+  });
+  it("board.mjs move out of Ready while still above the cap prints no warning", () => {
+    const dir = project(withReady(9));
+    const r = run(["move", "r1", "backlog", dir], dir);
+    expect(r.status, r.stderr).toBe(0);
+    expect(r.stderr).not.toContain("warning: Ready holds");
+    const r2 = run(["move", "r2", "flow", dir], dir);
+    expect(r2.status, r2.stderr).toBe(0);
+    expect(r2.stderr).not.toContain("warning: Ready holds");
   });
 });
 
@@ -2263,5 +2287,199 @@ describe("stage wall in the run entry and the summary (card flow-wall-budget)", 
     expect(second).not.toContain("a1");
     expect(second).not.toContain("level-0");
     expect(second).toContain("(stage times unverified for 1 task)");
+  });
+});
+
+// Card landing-one-sentence-summary: board.mjs record (hand and report forms) and board.mjs summary take a
+// required --summary "<one sentence>", refuse without it or with more than one sentence (exit 2, --summary named on
+// stderr, nothing appended), and print it unchanged as the first line of stdout. The sentence is chat only: it never
+// reaches docs/live-runs.md.
+describe("card landing-one-sentence-summary", () => {
+  const run = (args, dir) => spawnSync(process.execPath, [cli, ...args], { cwd: dir, encoding: "utf8", env: { ...process.env, CLAUDE_PROJECT_DIR: "" } });
+  const handArgs = (dir) => ["record", "first", "--hand", dir, "--commit", "abc1234", "--wall", "5 min", "--gate", "typecheck 0; unit 1 passed"];
+  const report = () => join(here, "fixtures/reports/standard-agents-run2.json");
+  const liveRuns = (dir) => { const f = join(dir, "docs/live-runs.md"); return existsSync(f) ? readFileSync(f, "utf8") : null; };
+
+  it("S1: record --hand without --summary exits 2, names --summary, and appends nothing", () => {
+    const dir = project();
+    const rec = run(handArgs(dir), dir);
+    expect(rec.status).toBe(2);
+    expect(rec.stderr).toContain("--summary");
+    expect(rec.stdout).toBe("");
+    expect(liveRuns(dir)).toBeNull();
+  });
+
+  it("S1b: a stopped run's record (no --commit) still requires --summary", () => {
+    const dir = project();
+    const rec = run(["record", "first", "--hand", dir, "--wall", "5 min"], dir);
+    expect(rec.status).toBe(2);
+    expect(rec.stderr).toContain("--summary");
+    expect(liveRuns(dir)).toBeNull();
+  });
+
+  it("S2: record --hand --summary prints the sentence as stdout's first line, then the existing line; the entry does not contain it", () => {
+    const dir = project();
+    const rec = run([...handArgs(dir), "--summary", "Adds the X flag."], dir);
+    expect(rec.status, rec.stderr).toBe(0);
+    const lines = rec.stdout.split("\n");
+    expect(lines[0]).toBe("Adds the X flag.");
+    expect(lines[1]).toMatch(/^Appended a hand-track entry/);
+    expect(rec.stdout.split("Adds the X flag.").length - 1, "printed exactly once").toBe(1);
+    expect(liveRuns(dir)).toContain("`first`");
+    expect(liveRuns(dir)).not.toContain("Adds the X flag");
+  });
+
+  it("S2b: the printed sentence is trimmed", () => {
+    const dir = project();
+    const rec = run([...handArgs(dir), "--summary", "  Adds the X flag.  "], dir);
+    expect(rec.status, rec.stderr).toBe(0);
+    expect(rec.stdout.split("\n")[0]).toBe("Adds the X flag.");
+  });
+
+  it("S3: record <id> <report> without --summary exits 2 and appends nothing; with it, the first line is the sentence and the entry lacks it", () => {
+    const dir = project();
+    const missing = run(["record", "first", report(), dir, "--wall", "2 min", "--commit", "abc1234"], dir);
+    expect(missing.status).toBe(2);
+    expect(missing.stderr).toContain("--summary");
+    expect(missing.stdout).toBe("");
+    expect(liveRuns(dir)).toBeNull();
+    const rec = run(["record", "first", report(), dir, "--wall", "2 min", "--commit", "abc1234", "--summary", "Ships the report form."], dir);
+    expect(rec.status, rec.stderr).toBe(0);
+    const lines = rec.stdout.split("\n");
+    expect(lines[0]).toBe("Ships the report form.");
+    expect(lines[1]).toMatch(/^Appended a run entry/);
+    expect(liveRuns(dir)).toContain("`first`");
+    expect(liveRuns(dir)).not.toContain("Ships the report form");
+  });
+
+  it("S4: summary <report> without --summary exits 2; with it, the sentence is the first line and the existing three lines follow", () => {
+    const dir = project();
+    const missing = run(["summary", report(), "--wall", "18 min"], dir);
+    expect(missing.status).toBe(2);
+    expect(missing.stderr).toContain("--summary");
+    expect(missing.stdout).toBe("");
+    const sum = run(["summary", report(), "--wall", "18 min", "--summary", "Stops after level 0."], dir);
+    expect(sum.status, sum.stderr).toBe(0);
+    const lines = sum.stdout.split("\n");
+    expect(lines[0]).toBe("Stops after level 0.");
+    expect(lines.length).toBe(5);
+    expect(lines[1]).toContain("stopped at level 0; 1 task, 0 integrated; wall 18 min; cost not measured.");
+  });
+
+  it("S6: a refused record promotes no research note, in the hand form and the report form", () => {
+    const dir = project();
+    mkdirSync(join(dir, ".doug/.state/research"), { recursive: true });
+    writeFileSync(join(dir, ".doug/.state/research/first.md"), "# First\n\nA decisive fact.\n");
+    expect(existsSync(join(dir, "docs/research/first.md"))).toBe(false);
+    const hand = run(handArgs(dir), dir);
+    expect(hand.status).toBe(2);
+    expect(existsSync(join(dir, "docs/research/first.md")), "hand form promoted before refusing").toBe(false);
+    const rep = run(["record", "first", report(), dir, "--wall", "2 min", "--commit", "abc1234"], dir);
+    expect(rep.status).toBe(2);
+    expect(existsSync(join(dir, "docs/research/first.md")), "report form promoted before refusing").toBe(false);
+    const two = run([...handArgs(dir), "--summary", "Adds X. Fixes Y."], dir);
+    expect(two.status).toBe(2);
+    expect(existsSync(join(dir, "docs/research/first.md")), "two-sentence refusal promoted").toBe(false);
+    expect(liveRuns(dir)).toBeNull();
+  });
+
+  it("S5: more than one sentence, or a newline, exits 2 with nothing appended; a version number or no final period is one sentence", () => {
+    const dir = project();
+    for (const bad of ["Adds X. Fixes Y.", "Adds X! Fixes Y", "Does it? Yes", "Adds X.\nFixes Y", "Line one\nline two", "   ", ""]) {
+      const rec = run([...handArgs(dir), "--summary", bad], dir);
+      expect(rec.status, JSON.stringify(bad)).toBe(2);
+      expect(rec.stderr, JSON.stringify(bad)).toContain("--summary");
+      expect(liveRuns(dir), JSON.stringify(bad)).toBeNull();
+    }
+    const sum = run(["summary", report(), "--summary", "Adds X. Fixes Y."], dir);
+    expect(sum.status).toBe(2);
+    expect(sum.stderr).toContain("--summary");
+    const rep = run(["record", "first", report(), dir, "--summary", "Adds X. Fixes Y."], dir);
+    expect(rep.status).toBe(2);
+    expect(liveRuns(dir)).toBeNull();
+    for (const ok of ["v1.1.0 ships the flag", "Adds X.", "Adds X", "Fixes the 3.5 ms delay"]) {
+      const d = project();
+      const rec = run([...handArgs(d), "--summary", ok], d);
+      expect(rec.status, `${ok}: ${rec.stderr}`).toBe(0);
+      expect(rec.stdout.split("\n")[0]).toBe(ok);
+    }
+  });
+});
+
+// Card hand-wall-flag: a hand entry carries a `| Wall budget |` row judging its wall against the card's p80 budget.
+describe("handEntry Wall budget row (card hand-wall-flag)", () => {
+  const T = { S: { all: 60, code: 50, docs: 30 }, M: { all: 100 }, L: { all: 270 } };
+  const entry = (card, wallClock, extra = {}) => handEntry({ card: { id: "c", title: "C", ...card }, wallClock, date: "2026-10-10", table: T, ...extra });
+  const row = (md) => (md.split("\n").find((l) => l.startsWith("| Wall budget |")) ?? null);
+
+  it("W1 a wall over the class cell is flagged over, naming wall, budget, size/cell, and unverified seats", () => {
+    expect(row(entry({ size: "S", class: "code" }, "75 min"))).toBe("| Wall budget | over: 75 min vs 50 min (S/code, p80); per-seat times unverified |");
+  });
+  it("W2 a wall exactly at the budget is within; one minute over is over", () => {
+    expect(row(entry({ size: "S", class: "code" }, "50 min"))).toBe("| Wall budget | within: 50 min vs 50 min (S/code, p80); per-seat times unverified |");
+    expect(row(entry({ size: "S", class: "code" }, "51 min"))).toContain("| Wall budget | over: 51 min vs 50 min");
+    expect(row(entry({ size: "S", class: "code" }, "10 min"))).toBe("| Wall budget | within: 10 min vs 50 min (S/code, p80); per-seat times unverified |");
+  });
+  it("W3 the class cell wins over all; a class with no cell falls back to all; no size counts as M/all", () => {
+    expect(row(entry({ size: "S", class: "docs" }, "40 min"))).toContain("over: 40 min vs 30 min (S/docs, p80)");
+    expect(row(entry({ size: "S", class: "prose" }, "40 min"))).toBe("| Wall budget | within: 40 min vs 60 min (S/all, p80); per-seat times unverified |");
+    expect(row(entry({ size: "S" }, "61 min"))).toContain("over: 61 min vs 60 min (S/all, p80)");
+    expect(row(entry({}, "101 min"))).toBe("| Wall budget | over: 101 min vs 100 min (M/all, p80); per-seat times unverified |");
+    expect(row(entry({ class: "code" }, "99 min"))).toContain("within: 99 min vs 100 min (M/all, p80)");
+  });
+  it("W4 a wall not in whole minutes, or missing, is not checked and never guessed", () => {
+    for (const w of ["about an hour", "12.5 min", null, "", "min 75"]) {
+      expect(row(entry({ size: "S", class: "code" }, w)), String(w)).toBe("| Wall budget | not checked (wall not in whole minutes) |");
+    }
+  });
+  it("W5 a rehearsal entry gets no Wall budget row", () => {
+    expect(entry({ size: "S", class: "code" }, "75 min", { rehearsal: "hand" })).not.toContain("Wall budget");
+  });
+  it("W6 the row follows the Wall clock row and never reads as one: parseLiveRunWalls still returns the wall once", () => {
+    const md = entry({ size: "S", class: "code" }, "75 min");
+    const lines = md.split("\n");
+    expect(lines.indexOf("| Wall clock | 75 min |") + 1).toBe(lines.findIndex((l) => l.startsWith("| Wall budget |")));
+    expect(md).not.toMatch(/\| Wall clock \| (over|within|not checked)/);
+    expect(lib.parseLiveRunWalls(md)).toEqual([{ id: "c", minutes: 75 }]);
+  });
+  it("W7 without a table argument the shipped table decides", () => {
+    const budget = lib.cardBudgetMinutes({ size: "S", class: "code" });
+    const md = handEntry({ card: { id: "c", title: "C", size: "S", class: "code" }, wallClock: `${budget + 1} min`, date: "2026-10-10" });
+    expect(row(md)).toContain(`over: ${budget + 1} min vs ${budget} min (S/code, p80)`);
+  });
+});
+
+describe("board.mjs record --hand prints the Wall budget line only when over (card hand-wall-flag)", () => {
+  const run = (args, dir) => spawnSync(process.execPath, [cli, ...args], { cwd: dir, encoding: "utf8", env: { ...process.env, CLAUDE_PROJECT_DIR: "" } });
+  const budget = lib.cardBudgetMinutes({ size: "S" });
+  const rec = (wall) => {
+    const dir = project();
+    const r = run(["record", "first", "--hand", dir, "--commit", "abc1234", "--wall", wall, "--gate", "typecheck 0; unit 1 passed", "--summary", "Test summary."], dir);
+    expect(r.status, r.stderr).toBe(0);
+    return { r, dir };
+  };
+  it("H1 over: one Wall budget line after the summary sentence, and the entry carries the row", () => {
+    const { r, dir } = rec(`${budget + 1} min`);
+    const lines = r.stdout.split("\n");
+    expect(lines[0]).toBe("Test summary.");
+    const w = lines.filter((l) => l.startsWith("Wall budget:"));
+    expect(w).toEqual([`Wall budget: over: ${budget + 1} min vs ${budget} min (S/all, p80); per-seat times unverified`]);
+    expect(lines.indexOf(w[0])).toBeGreaterThan(0);
+    expect(readFileSync(join(dir, "docs/live-runs.md"), "utf8")).toContain(`| Wall budget | over: ${budget + 1} min vs ${budget} min`);
+  });
+  it("H2 within and not-checked print no Wall budget line, though the entry still has its row", () => {
+    const at = rec(`${budget} min`);
+    expect(at.r.stdout).not.toContain("Wall budget");
+    expect(readFileSync(join(at.dir, "docs/live-runs.md"), "utf8")).toContain(`| Wall budget | within: ${budget} min vs ${budget} min`);
+    const odd = rec("about an hour");
+    expect(odd.r.stdout).not.toContain("Wall budget");
+    expect(readFileSync(join(odd.dir, "docs/live-runs.md"), "utf8")).toContain("| Wall budget | not checked (wall not in whole minutes) |");
+  });
+  it("H3 a rehearsal record prints no Wall budget line and writes no row", () => {
+    const dir = project();
+    const r = run(["record", "first", "--hand", dir, "--commit", "abc1234", "--wall", `${budget + 50} min`, "--gate", "g", "--rehearsal", "hand", "--summary", "Test summary."], dir);
+    expect(r.status, r.stderr).toBe(0);
+    expect(r.stdout).not.toContain("Wall budget");
+    expect(readFileSync(join(dir, "docs/live-runs.md"), "utf8")).not.toContain("Wall budget");
   });
 });

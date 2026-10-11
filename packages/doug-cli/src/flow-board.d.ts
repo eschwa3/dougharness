@@ -152,7 +152,9 @@ declare module "@dougharness/flow/lib/board.mjs" {
     record?: string | null;
     date?: string;
     rehearsal?: string | null;
+    table?: Record<string, Record<string, number>>;
   }): string;
+  export function handWallVerdict(card: BoardCard, wallClock?: string | null, table?: Record<string, Record<string, number>>): { over: boolean; text: string };
   export function runSummary(args: { report: RunReport; cost?: number | null; codexCost?: number | null; wallClock?: string | null; wall?: RunWall | null; mergeCommit?: string | null }): string;
   export function appendRun(dir: string, markdown: string): string;
   export function recordLanding(dir: string, id: string, markdown: string): { file: string; promoted: string | null };
