@@ -5,7 +5,7 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { watch as fsWatch, watchFile, unwatchFile, type FSWatcher } from "node:fs";
 import { basename, dirname } from "node:path";
-import { boardPath, findCard, loadBoard, moveCard, reorderCard, saveBoard } from "@dougharness/flow/lib/board.mjs";
+import { boardPath, findCard, loadBoard, moveCard, readyCapWarning, reorderCard, saveBoard } from "@dougharness/flow/lib/board.mjs";
 import { buildBoardPage } from "./board-page.js";
 
 const HOST = "127.0.0.1";
@@ -105,8 +105,8 @@ function send(
   res.end(body);
 }
 
-function sendJson(res: ServerResponse, status: number, value: unknown): void {
-  send(res, status, "application/json; charset=utf-8", JSON.stringify(value));
+function sendJson(res: ServerResponse, status: number, value: unknown, headers: Record<string, string> = {}): void {
+  send(res, status, "application/json; charset=utf-8", JSON.stringify(value), headers);
 }
 
 function sendError(
@@ -207,7 +207,8 @@ async function handlePut(dir: string, id: string, req: IncomingMessage, res: Ser
     if (before !== undefined) next = reorderCard(next, id, { before: before as string });
     else if (after !== undefined) next = reorderCard(next, id, { after: after as string });
     saveBoard(dir, next);
-    sendJson(res, 200, next);
+    const warning = column === "ready" ? readyCapWarning(next) : null;
+    sendJson(res, 200, next, warning ? { "x-doug-warning": warning.trim() } : {});
   } catch (err) {
     sendError(res, 400, messageOf(err));
   }

@@ -4,11 +4,13 @@
 //   node .doug/hooks/scripts/verify.mjs [--no-credit] [--json] [--dir <project>] [--cwd <tree dir>] [--timeout-ms <n>]
 //     [--record-dir <dir>] [--credit-dir <dir>]... [--by <writer>] [--command <cmd>]...
 // Exit: 0 all green or credited; 1 any command failed or timed out; 2 usage error or no commands.
-// No count ratchet and no scans here (no session baseline); the Stop gate does those. Takes no gate.lock.
+// No count ratchet and no scans here (no session baseline); the Stop gate does those. Takes the Stop gate's .doug/.state/gate.lock around the commands (card verify-takes-gate-lock).
 
 import { spawnSync } from "node:child_process";
+import { unlinkSync } from "node:fs";
 import { resolve } from "node:path";
 import { loadConfig } from "../lib/config.mjs";
+import { gateLockPath, readGateLock, pidIsLive, writeGateLock, takeOverGateLock, resolveHookTimeoutSec, lockStaleByAge, normalizedTimeoutMs, lockWaitBoundMs } from "../lib/gate-lock.mjs";
 import { runCommand, tail } from "../lib/run.mjs";
 import { parseTotals, readSummaries, sumTotals } from "../lib/test-totals.mjs";
 import { computeTree, readRecord, writeRecord, removeRecord, creditable, resolveCommands } from "../lib/verified-tree.mjs";
@@ -75,8 +77,10 @@ function main() {
     process.stderr.write("[doug] verify: no commands (stopGate.commands is empty and no --command given)\n");
     return 2;
   }
-  const treeBefore = computeTree(cwd);
+  let treeBefore = computeTree(cwd);
 
+  // Credits a verified-tree record of the same tree when one exists; returns the exit code, or null.
+  const tryCredit = () => {
   if (!o.noCredit && treeBefore) {
     const wanted = commands.map((c) => c.command);
     let record = null;
@@ -102,8 +106,59 @@ function main() {
       return 0;
     }
   }
+  return null;
+  };
+  const first = tryCredit();
+  if (first !== null) return first;
 
-  const timeoutMs = o.timeoutMs ? o.timeoutMs : Number.isInteger(cfg.stopGate && cfg.stopGate.timeoutMs) && cfg.stopGate.timeoutMs > 0 ? cfg.stopGate.timeoutMs : 600000;
+  const timeoutMs = o.timeoutMs ? o.timeoutMs : (cfg.stopGate && normalizedTimeoutMs(cfg)) ?? 600000;
+  const waitBoundMs = lockWaitBoundMs(timeoutMs, commands.length);
+
+  // Card verify-takes-gate-lock: one full suite at a time per checkout, the same gate.lock the Stop gate takes
+  // (lib/gate-lock.mjs). A live holder is waited on for up to timeoutMs x command count (the Stop gate's bound), then the record is re-checked (the
+  // holder's green run may have just written it); a lock still held after the bound is taken over and the
+  // commands run. Released only by the exit handler below, so every return path (green, red, throw) frees it.
+  let lockOwned = false;
+  process.on("exit", () => {
+    try {
+      if (!lockOwned) return;
+      const lock = readGateLock(dir);
+      if (lock && lock.pid === process.pid) unlinkSync(gateLockPath(dir));
+    } catch {
+      // never throw from an exit handler
+    }
+  });
+  try {
+    writeGateLock(dir, o.by || "verify");
+    lockOwned = true;
+  } catch (err) {
+    if (!err || err.code !== "EEXIST") {
+      lockOwned = false; // an unwritable .doug/.state: run unlocked rather than hang
+    } else {
+      const hookTimeoutMs = resolveHookTimeoutSec(cfg) * 1000;
+      const stale = (l) => !l || !pidIsLive(l.pid) || lockStaleByAge(l, hookTimeoutMs);
+      const held = readGateLock(dir);
+      if (stale(held)) {
+        takeOverGateLock(dir, o.by || "verify");
+        lockOwned = true;
+      } else {
+        const deadline = Date.now() + waitBoundMs;
+        let live = held;
+        const nap = new Int32Array(new SharedArrayBuffer(4));
+        while (true) {
+          live = readGateLock(dir);
+          if (stale(live) || Date.now() >= deadline) break;
+          Atomics.wait(nap, 0, 0, 200);
+        }
+        treeBefore = computeTree(cwd);
+        const again = tryCredit();
+        if (again !== null) return again;
+        if (!stale(live)) process.stderr.write(`[doug] verify: gate.lock still held by pid ${live.pid} after ${waitBoundMs} ms; running the commands anyway.\n`);
+        takeOverGateLock(dir, o.by || "verify");
+        lockOwned = true;
+      }
+    }
+  }
   const results = [];
   const recCommands = [];
   const totals = {};

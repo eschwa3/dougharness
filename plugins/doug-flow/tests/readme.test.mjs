@@ -706,3 +706,32 @@ describe("recall docs describe the dense ranking (card readme-rewrite, absorbs r
     expect(text, "usage text must not describe the old reciprocal-rank-fusion ranking as the ranking").not.toMatch(/fused by reciprocal rank fusion with cosine/i);
   });
 });
+
+// Card docs-record-summary-flag: `record` and `summary` refuse to run without --summary, so every usage form
+// the docs give for them must show it.
+describe("board docs show --summary on every record and summary form (card docs-record-summary-flag)", () => {
+  // A form is a backtick span or a line in a code fence that is `[doug board | board.mjs] record|summary` followed
+  // by more text; a span that is only the subcommand name ("`record`") is a mention, not a form.
+  function recordSummaryForms(text) {
+    const verb = /^(?:doug board |board\.mjs )?(?:record|summary)\s+\S/;
+    const candidates = [];
+    for (const m of text.matchAll(/`([^`\n]+)`/g)) candidates.push(m[1].trim());
+    for (const m of text.matchAll(/```[a-z]*\n([\s\S]*?)```/g)) {
+      for (const line of m[1].split("\n")) candidates.push(line.trim());
+    }
+    return candidates.filter((c) => verb.test(c));
+  }
+
+  for (const rel of ["docs/board.md", "docs/reference.md"]) {
+    it(`${rel}: every record/summary usage form carries --summary`, () => {
+      const forms = recordSummaryForms(readRoot(rel));
+      expect(forms.length, `${rel} should give record/summary forms`).toBeGreaterThanOrEqual(rel === "docs/board.md" ? 4 : 2);
+      const missing = forms.filter((f) => !f.includes('--summary "<one sentence>"'));
+      expect(missing, `forms without --summary "<one sentence>": ${missing.join(" | ")}`).toEqual([]);
+    });
+  }
+
+  it("docs/reference.md lists doug board summary", () => {
+    expect(readRoot("docs/reference.md")).toMatch(/^doug board summary /m);
+  });
+});

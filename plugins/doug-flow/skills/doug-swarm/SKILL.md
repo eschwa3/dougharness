@@ -22,7 +22,7 @@ Put the card's title and goal (or the goal text) in the chat verbatim, in a fenc
 
 ## 2. Plan on the plan row
 
-The planner runs on the `plan` row, the same row `doug-plan` uses, not the `lead` row (the `lead` row is the swarm's own lead agent inside the workflow, a different job). Read it with the `plan.mjs models` command, `node "${CLAUDE_PLUGIN_ROOT}/scripts/plan.mjs" models` (`roles.plan.model`, `roles.plan.effort`). Spawn the planner on it: `Agent({ subagent_type: "doug-flow:planner", model: "<the plan row's model>", prompt: "Board card <id>, title \"<title>\": <goal>. This plan runs as a swarm: set \"swarm\": true in the plan file, and size every task M or L unless it is truly one bounded change (a size-S task keeps a single implementer). Write .doug/plan.json and return the rendered plan." })` (for a goal, the prompt is the goal text with the same swarm sentence); omit `model` when the row says `inherit`. The planner's rules apply unchanged: disjoint file ownership per task, a verify command per task, acceptance criteria with commands, no tier set on its own.
+The planner runs on the `plan` row, the same row `doug-plan` uses, not the `lead` row (the `lead` row is the swarm's own lead agent inside the workflow, a different job). Read it with the `plan.mjs models` command, `node "${CLAUDE_PLUGIN_ROOT}/scripts/plan.mjs" models` (`roles.plan.model`, `roles.plan.effort`). Spawn the planner on it: `Agent({ subagent_type: "doug-flow:planner", model: "<the plan row's model>", prompt: "Board card <id>, title \"<title>\": <goal>. This plan runs as a swarm: set \"swarm\": true in the plan file, and size every task M or L unless it is truly one bounded change (a size-S task keeps a single implementer). Scripts: ${CLAUDE_PLUGIN_ROOT}/scripts. Write .doug/plan.json and return the rendered plan." })` (for a goal, the prompt is the goal text with the same swarm sentence); omit `model` when the row says `inherit`. The planner's rules apply unchanged: disjoint file ownership per task, a verify command per task, acceptance criteria with commands, no tier set on its own.
 
 Then guarantee the opt-in and the card (`plan.mjs set swarm on`): `node "${CLAUDE_PLUGIN_ROOT}/scripts/plan.mjs" set swarm on`, and `plan.mjs set card <id>` for a card. `node "${CLAUDE_PLUGIN_ROOT}/scripts/plan.mjs" show` and put its complete output in the chat verbatim, in a fenced code block, before anything else; it prints `Swarm: on`. Name any task the planner sized S (it will not swarm) and any assumption it stated.
 
@@ -36,7 +36,7 @@ Invoke the `swarm-launch` skill: it checks the plan is approved with swarm on an
 
 ## 5. Land and record
 
-`/doug-next` step 5 verbatim: `plan.mjs done`, `plan.mjs land`, the card's move to Done with the merge commit, the `run-report` skill (its cost table lists every worker by label), and one commit for the record and the log. A goal without a card lands the same way and skips the board steps; its run entry is not written, since the log is per card.
+`/doug-next` step 5 verbatim: `plan.mjs done`, `plan.mjs land`, the card's move to Done with the merge commit, the `run-report` skill (its cost table lists every worker by label), and one commit for the record and the log. The landing's first chat line is the one-sentence summary `run-report` prints. A goal without a card lands the same way and skips the board steps; its run entry is not written, since the log is per card.
 
 ## 6. Follow-up cards
 

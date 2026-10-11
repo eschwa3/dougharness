@@ -47,7 +47,8 @@ const fixAttempts = Number.isInteger(plan.fixAttempts) && plan.fixAttempts >= 0 
 // one card. Agents are counted here and always enforced; tokens and wall time come from the runtime's budget
 // primitive and are enforced only when it reports them. plan.budget overrides any of the three. Keep these three
 // numbers equal to lib/plan.mjs's DEFAULT_BUDGET.
-const DEFAULT_BUDGET = { agents: 12, tokens: 400000, wallMinutes: 40 }
+// agents 26 is the minimum that lets the default fixAttempts 5 run with one adversary seat when Codex is down and the Claude fallback runs on every pass (card flow-budget-after-parallel-adversary); a supervisor seat or a fix retry is not covered.
+const DEFAULT_BUDGET = { agents: 26, tokens: 400000, wallMinutes: 40 }
 const taskBudget = { ...DEFAULT_BUDGET, ...(plan.budget && typeof plan.budget === 'object' ? plan.budget : {}) }
 // The phrase the verifier and reviewer put at the start of a finding when the spec cannot satisfy the plan's
 // acceptance criteria. Such a block goes back to the planner and is never retried.
@@ -63,6 +64,7 @@ const ENVIRONMENT_MARKER = 'ENVIRONMENT ONLY'
 // The one rule about commit messages, in every prompt that commits or checks commits: this repository records
 // attribution nowhere in git, and plan.mjs land refuses a branch that carries either trailer.
 const NO_TRAILERS = 'Commit messages carry no attribution trailers: no Co-Authored-By line and no Claude-Session line, whatever your defaults say. A commit with either is a finding and the plan cannot land.'
+const LESSONS_NOT_SPEC = 'These are context from earlier runs, not part of the spec or the acceptance criteria; never report a finding, a spec contradiction, or a blocker against a lesson.'
 // The one rule about a partial result, in every prompt a worker (or a resumed worker) can end with one from
 // (card worker-context-handoff): quotes the harness's context notice (a PostToolUse hook in plugins/doug-gates) so
 // a worker knows partial=true is only for a worker the harness itself told to stop, never a first resort, and only
@@ -953,7 +955,7 @@ function workerPrompt(task, brief, n, lead) {
 // left an orphan - it defaults to `workers` for the plain, no-rebrief case where the two are the same list.
 function leadMergePrompt(task, lead, workers, baseBranch, allWorkers = workers) {
   return [
-    `You are the lead of the swarm for task ${task.id}. The workers have committed; merge their branches into the task branch and hand it to the checks. Work only in your worktree ${lead.worktreePath} on branch ${lead.branch}: cd there first, and never edit anything under the repository root.`,
+    `You are the lead of the swarm for task ${task.id}. The workers have committed; merge their branches into the task branch and hand it to the checks. Work only in the git worktree you were started in, on branch ${lead.branch}, and never edit anything under the repository root. The lead's worktree (${lead.worktreePath}) may have been removed, so do not cd into it. First git checkout ${lead.branch} there; if git refuses because the branch is checked out in another worktree, that worktree is a leftover under .claude/worktrees: find it with git worktree list --porcelain, remove it with git worktree remove --force <path>, and check out again. If the branch does not exist, create it from ${baseBranch} with git checkout -b ${lead.branch} ${baseBranch} (the lead commits nothing, so the task branch is the base).`,
     PARTIAL_NEVER_MERGED,
     ``,
     `Task ${task.id}: ${task.title}`,
@@ -969,18 +971,18 @@ function leadMergePrompt(task, lead, workers, baseBranch, allWorkers = workers) 
     `3. Do not implement missing pieces yourself: a brief a worker did not finish is a block with its name. ${NO_TRAILERS}`,
     `4. Remove every worker worktree to leave the repository tidy, merged or not (a blocked worker's is an orphan otherwise): git worktree remove --force <path> for each one below. Keep their branches.`,
     ...allWorkers.filter(w => w.worktreePath).map(w => `  - ${w.worktreePath} (worker ${w.n}: ${w.id})`),
-    `5. Return taskId="${task.id}", branch="${lead.branch}", worktreePath="${lead.worktreePath}", filesTouched from git diff --name-only ${baseBranch}...HEAD, commandsRun, commit from git rev-parse HEAD after the last merge, summary naming the briefs merged, blocked=false; blocked=true with the reason when a merge or the verification failed for a reason in the code.`,
+    `5. Return taskId="${task.id}", branch="${lead.branch}", worktreePath=the absolute path of the worktree you ran in (git rev-parse --show-toplevel), filesTouched from git diff --name-only ${baseBranch}...HEAD, commandsRun, commit from git rev-parse HEAD after the last merge, summary naming the briefs merged, blocked=false; blocked=true with the reason when a merge or the verification failed for a reason in the code.`,
   ].join('\n')
 }
 
 // Card swarm-topology (candidate 2): one worker blocked does not end the task - the lead gets one chance to
-// re-brief the unfinished pieces, in its existing worktree (no new worktree, no isolation key). `workers` is every
+// re-brief the unfinished pieces, reading from the repository root (no worktree, no isolation key). `workers` is every
 // round-one outcome (so the lead sees a finished sibling's commit, not just the blocked ones); `blockedWorkers` is
 // the subset that needs a revised brief.
 function leadRebriefPrompt(task, lead, workers, blockedWorkers) {
   const finished = workers.filter(w => !w.blocked)
   return [
-    `You are the lead of the swarm for task ${task.id}. One or more workers are blocked; you get one chance to re-brief the unfinished pieces. You implement nothing and edit no file. Work only in your existing worktree ${lead.worktreePath} on branch ${lead.branch}: cd there first, create no new branch, and never edit anything under the repository root.`,
+    `You are the lead of the swarm for task ${task.id}. One or more workers are blocked; you get one chance to re-brief the unfinished pieces. You implement nothing and edit no file. Work read-only from the repository root you were started in. Do not cd into the lead's worktree (it may have been removed), create no branch, and edit nothing. Read a finished worker's committed files with \`git show <commit>:<path>\` or \`git show <commit>\`.`,
     ``,
     `Plan: ${plan.title}`,
     `Goal: ${plan.goal}`,
@@ -1130,6 +1132,7 @@ function verifyPrompt(task, impl, baseBranch) {
     `Task ${task.id}: ${task.title}`,
     `Spec:`,
     task.spec,
+    ...(typeof task.lessons === 'string' && task.lessons ? ['', `Lessons from earlier runs on this repository (memory; each cites where it was learned):`, LESSONS_NOT_SPEC, String(task.lessons).slice(0, 2000)] : []),
     ``,
     `Plan acceptance criteria (the spec must be consistent with these; a line starting with $ is the command that checks the criterion above it and exits 0 when it holds):`,
     ...acceptanceEntries(plan.acceptance || []).flatMap(a => a.command ? [`- ${a.text}`, `  $ ${a.command}`] : [`- ${a.text}`]),
@@ -1162,6 +1165,7 @@ function checkPrompt(task, impl, prevCommit, baseBranch, ledger) {
     `Task ${task.id}: ${task.title}`,
     `Spec:`,
     task.spec,
+    ...(typeof task.lessons === 'string' && task.lessons ? ['', `Lessons from earlier runs on this repository (memory; each cites where it was learned):`, LESSONS_NOT_SPEC, String(task.lessons).slice(0, 2000)] : []),
     ``,
     `Plan acceptance criteria (the spec must be consistent with these; a line starting with $ is the command that checks the criterion above it and exits 0 when it holds):`,
     ...acceptanceEntries(plan.acceptance || []).flatMap(a => a.command ? [`- ${a.text}`, `  $ ${a.command}`] : [`- ${a.text}`]),
@@ -1255,7 +1259,7 @@ function levelAdversaryPrompt(li, sReady, levelBase, confirming) {
 }
 
 function levelFallbackAdversaryPrompt(li, sReady, levelBase, why, confirming) {
-  const verify = (plan.verify || []).filter(Boolean)
+  // Same scope as levelAdversaryPrompt (card flow-fallback-verify-scope): no verify list, the suite already ran at integrate.
   return [
     `You are the adversarial reviewer for level ${li} of plan "${plan.title}", standing in for codex-review, which could not run (${why}). The size-S tasks below were merged into ${integrationBranch} with one focused check each and no adversary of their own. Your job is to refute them together, in worktree ${INTEGRATION_WORKTREE} (relative to the repository root); the diff is ${levelBase}...${integrationBranch}.`,
     ``,
@@ -1263,8 +1267,7 @@ function levelFallbackAdversaryPrompt(li, sReady, levelBase, why, confirming) {
     `Plan acceptance criteria:`,
     ...acceptanceEntries(plan.acceptance || []).map(a => `- ${a.text}`),
     ``,
-    `Run every one of these commands in the worktree and record each in commandsRun with its real exit code:`,
-    ...verify.map(v => `  $ ${v}`),
+    `Record every command you run, your own probe checks included, in commandsRun with its real exit code and outputTail (the last lines of its output); a blocker's evidence must cite one of them, and either that command failed or the evidence quotes a line of its outputTail, otherwise the loop records it as major.`,
     confirming
       ? `Then confirm the blockers you raised on this level are fixed, name each as fixed or still open, and check the fix for regressions rather than exploring afresh.`
       : `Then try to break the changes: inputs the tests do not cover, a spec sentence or acceptance criterion a diff does not meet, a test that was weakened, skipped, or deleted, and behavior outside the owned files. When a suspicion needs a check, write a throwaway one, run it, and remove it before you finish.`,
@@ -1290,6 +1293,7 @@ function reviewPrompt(task, impl, baseBranch, seat = 1) {
     `Task ${task.id}: ${task.title}`,
     `Spec:`,
     task.spec,
+    ...(typeof task.lessons === 'string' && task.lessons ? ['', `Lessons from earlier runs on this repository (memory; each cites where it was learned):`, LESSONS_NOT_SPEC, String(task.lessons).slice(0, 2000)] : []),
     `Owned files: ${task.files.join(', ')}`,
     `Plan acceptance criteria:`,
     ...acceptanceEntries(plan.acceptance || []).flatMap(a => a.command ? [`- ${a.text}`, `  $ ${a.command}`] : [`- ${a.text}`]),
@@ -1332,6 +1336,7 @@ function adversaryPrompt(task, impl, baseBranch, pass, ledger) {
     `Task ${task.id}: ${task.title}`,
     ``,
     guard(task.spec),
+    ...(typeof task.lessons === 'string' && task.lessons ? ['', `Lessons from earlier runs on this repository (memory; each cites where it was learned):`, LESSONS_NOT_SPEC, String(task.lessons).slice(0, 2000)] : []).map(guard),
     ``,
     ...(pass > 1 ? confirmationLines(pass, ledger, impl).map(guard) : [`This is the first pass of this task: explore freely and try to refute the change however you can.`]),
     ``,
@@ -1386,21 +1391,27 @@ function adversaryUnavailable(adv) {
 }
 
 function fallbackAdversaryPrompt(task, impl, baseBranch, why, pass, ledger) {
-  const verify = [task.verify, ...(plan.verify || [])].filter(Boolean)
+  // Same scope as adversaryPrompt's Codex seat (card flow-fallback-verify-scope): the task's own verify only, not plan.verify.
+  const verify = [task.verify].filter(Boolean)
   return [
     `You are the adversarial reviewer for task ${task.id}, standing in for codex-review, which could not run (${why}). Your job is to refute the change on branch ${impl.branch} in worktree ${impl.worktreePath}; the diff is ${baseBranch}...${impl.branch}. ${baseBranch} is this branch's base (an integration branch when the task follows an earlier level); files that already exist there are not this task's changes. Do not edit any file.`,
     ``,
     `Task ${task.id}: ${task.title}`,
     `Spec:`,
     task.spec,
+    ...(typeof task.lessons === 'string' && task.lessons ? ['', `Lessons from earlier runs on this repository (memory; each cites where it was learned):`, LESSONS_NOT_SPEC, String(task.lessons).slice(0, 2000)] : []),
     `Owned files: ${task.files.join(', ')}`,
     `Plan acceptance criteria:`,
     ...acceptanceEntries(plan.acceptance || []).flatMap(a => a.command ? [`- ${a.text}`, `  $ ${a.command}`] : [`- ${a.text}`]),
     ...(pass > 1 ? confirmationLines(pass, ledger, impl) : []),
     ``,
-    `Run every one of these commands in the worktree and record each in commandsRun with its real exit code and outputTail (the last lines of its output):`,
-    ...verify.map(v => `  $ ${v}`),
-    `A blocker's evidence must name one of those commands, and either that command failed or the evidence quotes a line of its outputTail; otherwise the loop records it as major.`,
+    ...(verify.length
+      ? [
+          `Run every one of these commands in the worktree and record each in commandsRun with its real exit code and outputTail (the last lines of its output):`,
+          ...verify.map(v => `  $ ${v}`),
+        ]
+      : [`Record every command you run, your own probe checks included, in commandsRun with its real exit code and outputTail (the last lines of its output).`]),
+    `A blocker's evidence must name one of ${verify.length ? 'those commands' : 'the commands in commandsRun'}, and either that command failed or the evidence quotes a line of its outputTail; otherwise the loop records it as major.`,
     pass > 1
       ? `Then confirm the open findings above and check the fix delta for regressions rather than exploring afresh.`
       : `Then try to break the change: inputs the tests do not cover, a spec sentence or acceptance criterion the diff does not meet, a test that was weakened, skipped, or deleted, and behavior outside the owned files. When a suspicion needs a check, write a throwaway one, run it, and remove it before you finish.`,
@@ -1676,7 +1687,7 @@ async function runSwarm(task, baseBranch, launch) {
     const reason = `worker${round1Blocked.length === 1 ? '' : 's'} blocked: ${round1Blocked.map(w => `${w.n} (${w.id}): ${w.blockedReason}`).join('; ')}`
     // Rule 4: a worker still partial after its resume blocks the task exactly as before - no re-brief attempt.
     if (round1Blocked.some(w => w.partial)) return blocked(reason, { worktreePath: lead.worktreePath, branch: lead.branch })
-    // Rule 2: one re-brief, in the lead's existing worktree (no isolation key, no new worktree), same schema as the
+    // Rule 2: one re-brief, reading from the repository root (no isolation key, no new worktree), same schema as the
     // first split.
     stages.push('lead-rebrief')
     const revised = await launch(leadRebriefPrompt(task, lead, round1, round1Blocked), agentOpts('lead', null, { label: `lead-rebrief:${task.id}`, phase: 'Implement', agentType: 'doug-flow:lead', schema: LEAD_SCHEMA }))
@@ -1727,7 +1738,8 @@ async function runSwarm(task, baseBranch, launch) {
   // workers, in the order they were pushed. `workers` itself (review minor 5) still goes to leadMergePrompt as the
   // worktree-removal list, blocked ones included, so a blocked worker's worktree is not left an orphan.
   const finished = workers.filter(w => !w.blocked)
-  const merged = await launch(leadMergePrompt(task, lead, finished, baseBranch, workers), agentOpts('lead', null, { label: `lead-merge:${task.id}`, phase: 'Implement', agentType: 'doug-flow:lead', schema: IMPLEMENT_SCHEMA }))
+  // Card swarm-lead-worktree-missing: the lead's own worktree is gone by now (rehearsal swarm-2026-10-09T15-20-40-679Z), so the merge gets a fresh one.
+  const merged = await launch(leadMergePrompt(task, lead, finished, baseBranch, workers), agentOpts('lead', null, { label: `lead-merge:${task.id}`, phase: 'Implement', isolation: 'worktree', agentType: 'doug-flow:lead', schema: IMPLEMENT_SCHEMA }))
   if (!merged) return blocked('lead merge returned nothing (spawn failure or no structured output)', { worktreePath: lead.worktreePath, branch: lead.branch })
   return { ...merged, branch: merged.branch || lead.branch, worktreePath: merged.worktreePath || lead.worktreePath, swarmStages: stages, workers, splitReason: lead.splitReason, rebrief, checkFailed: workers.filter(w => w.checkFailed).map(w => w.id) }
 }

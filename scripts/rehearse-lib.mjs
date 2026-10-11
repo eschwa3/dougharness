@@ -594,7 +594,7 @@ export function extractGateLine(dir) {
 // copy in tests) by spawning `board.mjs record <id> <report> [dir] ...` exactly as a normal run does. Throws on a
 // non-zero exit (the caller decides how to report that; it is never swallowed).
 export function recordRunOutcome(dir, cardId, { reportFile, wallClock = null, cost = null, mergeCommit = null, note = null, rehearsal = null }) {
-  const args = ["record", cardId, reportFile];
+  const args = ["record", cardId, reportFile, "--summary", "A rehearsal run was recorded."];
   if (cost !== null) args.push("--cost", String(cost));
   if (wallClock !== null) args.push("--wall", wallClock);
   if (mergeCommit) args.push("--commit", mergeCommit);
@@ -609,7 +609,7 @@ export function recordRunOutcome(dir, cardId, { reportFile, wallClock = null, co
 // Records a hand outcome under `cardId` on the board at `dir` by spawning `board.mjs record <id> --hand [dir]
 // ...` exactly as a normal hand-track landing does.
 export function recordHandOutcome(dir, cardId, { commit = null, wallClock = null, gate = null, note = null, rehearsal = null }) {
-  const args = ["record", cardId, "--hand"];
+  const args = ["record", cardId, "--hand", "--summary", "A rehearsal hand landing was recorded."];
   if (commit) args.push("--commit", commit);
   if (wallClock !== null) args.push("--wall", wallClock);
   if (gate !== null) args.push("--gate", gate);

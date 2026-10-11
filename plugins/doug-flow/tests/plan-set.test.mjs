@@ -112,6 +112,47 @@ describe("install default", () => {
   });
 });
 
+describe("baseBranch default (card plan-base-branch-default)", () => {
+  const git = (dir, ...args) => execFileSync("git", ["-c", "user.email=t@t", "-c", "user.name=t", ...args], { cwd: dir, encoding: "utf8", stdio: "pipe", env: { ...process.env, GIT_CONFIG_NOSYSTEM: "1" } }).trim();
+  function gitProject(baseBranch) {
+    const dir = project();
+    if (baseBranch) savePlan(dir, { ...loadPlan(dir), baseBranch });
+    git(dir, "init", "-q", "-b", "feature-x");
+    git(dir, "commit", "-q", "--allow-empty", "-m", "init");
+    return dir;
+  }
+
+  it("json fills baseBranch with the checked-out branch and does not rewrite the plan file", () => {
+    const dir = gitProject();
+    const r = run(["json"], dir);
+    expect(r.status).toBe(0);
+    expect(JSON.parse(r.stdout).baseBranch).toBe("feature-x");
+    expect(loadPlan(dir).baseBranch).toBeUndefined();
+  });
+
+  it("the plan's own baseBranch wins over the checked-out branch", () => {
+    const dir = gitProject("main");
+    expect(JSON.parse(run(["json"], dir).stdout).baseBranch).toBe("main");
+  });
+
+  it("a detached HEAD gets the full commit sha and a stderr note", () => {
+    const dir = gitProject();
+    git(dir, "checkout", "-q", "--detach");
+    const sha = git(dir, "rev-parse", "HEAD");
+    const r = run(["json"], dir);
+    expect(r.status).toBe(0);
+    expect(JSON.parse(r.stdout).baseBranch).toBe(sha);
+    expect(r.stderr).toContain("detached HEAD");
+  });
+
+  it("a directory that is not a git repository leaves baseBranch unset", () => {
+    const dir = project();
+    const r = run(["json"], dir);
+    expect(r.status).toBe(0);
+    expect(JSON.parse(r.stdout).baseBranch).toBeUndefined();
+  });
+});
+
 describe("plan.mjs set guards and config defaults", () => {
   it("refuses a value that is a directory, which is what an omitted value looks like", () => {
     const dir = project();

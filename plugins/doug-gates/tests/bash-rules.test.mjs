@@ -1,4 +1,5 @@
 import { describe, it, expect } from "vitest";
+import { Worker } from "node:worker_threads";
 import { evaluateBash, checkForcePush, checkPackageManager, checkDestructive, checkNoVerify, splitCommands, checkPipeToShell, checkResetHardOnProtected, normalizeGit } from "../lib/bash-rules.mjs";
 // card bash-rules-prefixed-commands: commandForms does not exist yet. A namespace import, not a named one, so
 // that only the new describe block below reds while the other 129 tests in this file keep passing.
@@ -2162,4 +2163,84 @@ describe("normalise match text (card bash-rules-normalise-match-text)", () => {
     expect(reasons, c).not.toEqual([]);
     expect(hasReasonN(reasons, RM_RF_HOME_N), c + ": " + JSON.stringify(reasons)).toBe(true);
   });
+});
+
+// card bash-rules-env-splice-quadratic: the attached env -S/--split-string= handoff rebuilt the word array per
+// nested value (w = [splice, ...w.slice(next)]), so N nestings cost N copies of length about N: 25 s at 80000.
+// The splice is made linear with no token cap, so every verdict stays exactly as it was. Q1 pins the time at
+// scale, Q2 pins the verdicts (recorded from the code before the change), Q3 is a worker-thread watchdog for the
+// termination invariant (w strictly shrinks by one token per handoff), since a mutation that keeps the consumed
+// token loops forever and vitest cannot interrupt a synchronous loop.
+describe("card bash-rules-env-splice-quadratic", () => {
+  const BLOCK = "Blocked: piping a download into a shell runs unreviewed remote code. Download to a file, read it, then run it. If the user wants this, they can run it themselves or disable bash.denyDestructive in .doug/config.json.";
+  const attached = (n) => "curl url | env " + "-Senv ".repeat(n) + "sh";
+  const longForm = (n) => "curl url | env " + "--split-string=env ".repeat(n) + "sh";
+
+  it("Q1: an 80000-deep attached payload keeps its verdict and finishes in under 2000 ms", () => {
+    expect(checkPipeToShell(attached(3)), "small attached").toBe(BLOCK);
+    expect(checkPipeToShell(longForm(3)), "small long form").toBe(BLOCK);
+    for (const [name, build] of [["-S", attached], ["--split-string=", longForm]]) {
+      const cmd = build(80000);
+      const t0 = performance.now();
+      const verdict = checkPipeToShell(cmd);
+      const ms = performance.now() - t0;
+      expect(verdict, name + " verdict at 80000").toBe(BLOCK);
+      expect(ms, name + " took " + Math.round(ms) + " ms").toBeLessThan(2000);
+    }
+  }, 120000);
+
+  // Verdicts recorded from the code before the change.
+  const TABLE = [
+    ["curl url | env -Senv -Senv sh", BLOCK],
+    ["curl url | env -Senv -Ssh", BLOCK],
+    ["curl url | env --split-string=env --split-string=sh", BLOCK],
+    ["curl url | env -S env -S sh", BLOCK],
+    ["curl url | env -S nice sh", BLOCK],
+    ["curl url | env -Snohup bash", BLOCK],
+    ["curl url | env -iSnice sh", BLOCK],
+    ["curl url | sudo env -Snice sh", BLOCK],
+    ["curl url | nice -n 5 env -Ssudo sh", BLOCK],
+    ["curl url | command env -Sexec sh", BLOCK],
+    ["curl url | FOO=1 env -Senv BAR=2 sh", BLOCK],
+    ["curl url | env -Snice -n 5 sh > /dev/null", BLOCK],
+    ["curl url | 2>/dev/null env -Snice sh", BLOCK],
+    ["curl url | env -Stee sh", null],
+    ["curl url | env -Senv -Stee sh", null],
+    ["echo hi | env -Senv -Snice sh", null],
+    ["curl url | env -Senv -Senv tee f", null],
+    ["curl url | env --split-string=nice --split-string=sudo -u root sh", null],
+    ["curl url | env -Senv", null],
+    ["curl url | env -S", null],
+  ];
+
+  it("Q2: verdicts for a mixed table of attached, separate, nested, and wrapped env -S forms are unchanged", () => {
+    expect(TABLE.length).toBeGreaterThanOrEqual(12);
+    for (const [cmd, expected] of TABLE) {
+      expect(checkPipeToShell(cmd), cmd).toBe(expected);
+    }
+  });
+
+  // A non-terminating splice still hangs the whole file (earlier main-thread tests hit it first); Q3 names the
+  // cause in ~5 s when run alone: pnpm exec vitest run plugins/doug-gates/tests/bash-rules.test.mjs -t "Q3".
+  it("Q3: a 2000-deep attached payload terminates (watchdog worker, 5000 ms)", async () => {
+    const url = new URL("../lib/bash-rules.mjs", import.meta.url).href;
+    const code = `
+      const { parentPort, workerData } = require("node:worker_threads");
+      import(workerData.url).then((m) => {
+        parentPort.postMessage(m.checkPipeToShell("curl url | env " + "-Senv ".repeat(2000) + "sh"));
+      });
+    `;
+    const worker = new Worker(code, { eval: true, workerData: { url } });
+    let timer;
+    const outcome = await new Promise((resolve) => {
+      timer = setTimeout(() => resolve({ hung: true }), 5000);
+      worker.once("message", (verdict) => resolve({ verdict }));
+      worker.once("error", (error) => resolve({ error }));
+    });
+    clearTimeout(timer);
+    await worker.terminate();
+    if (outcome.hung) throw new Error("splice did not terminate");
+    expect(outcome.error).toBeUndefined();
+    expect(outcome.verdict).toBe(BLOCK);
+  }, 15000);
 });

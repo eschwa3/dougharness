@@ -29,7 +29,7 @@ import {
   nextReadyCards,
   filterReportForCard,
   removeCard,
-  runEntry, handEntry, runSummary, parseAdversaryClasses,
+  runEntry, handEntry, handWallVerdict, runSummary, parseAdversaryClasses,
   recordLanding,
   saveBoard,
   BOARD_RELPATH,
@@ -53,9 +53,9 @@ export const BOARD_USAGE = `Usage:
   doug board move <id> <column> [dir] [--source <text>]
   doug board edit <id> [dir] [--title <t>] [--goal <g> | --goal-file <path>] [--size S|M|L] [--component <c>] [--track flow|hand] [--class <c>] [--deps a,b] [--tag a,b] [--source <s>] [--force]
   doug board remove <id> [dir] [--force]
-  doug board record <id> <report.json> [dir] [--cost <usd>] [--codex-cost <usd>] [--shared-cost <usd>] [--wall <text>] [--commit <sha>] [--adversary "<id>=<class>[: <reason>]"]...
-  doug board record <id> --hand [dir] [--commit <sha>] [--wall <text>] [--gate <text>] [--note <text>]
-  doug board summary <report.json> [--cost <usd>] [--codex-cost <usd>] [--wall <text>] [--commit <sha>] [--card <id>]
+  doug board record <id> <report.json> [dir] --summary "<one sentence>" [--cost <usd>] [--codex-cost <usd>] [--shared-cost <usd>] [--wall <text>] [--commit <sha>] [--adversary "<id>=<class>[: <reason>]"]...
+  doug board record <id> --hand [dir] --summary "<one sentence>" [--commit <sha>] [--wall <text>] [--gate <text>] [--note <text>]
+  doug board summary <report.json> --summary "<one sentence>" [--cost <usd>] [--codex-cost <usd>] [--wall <text>] [--commit <sha>] [--card <id>]
   doug board build [dir] [--out <file>]
   doug board serve [dir] [--port <n>] [--open] [--detach | --stop]
 
@@ -85,12 +85,12 @@ const SUBCOMMAND_FLAGS: Record<string, string[]> = {
   move: ["source"],
   edit: ["title", "goal", "goal-file", "size", "component", "track", "class", "deps", "tag", "source", "force"],
   remove: ["force"],
-  summary: ["cost", "codex-cost", "wall", "commit", "card"],
+  summary: ["summary", "cost", "codex-cost", "wall", "commit", "card"],
   build: ["out"],
   serve: ["port", "open", "detach", "stop"],
 };
-const RECORD_HAND_FLAGS = ["hand", "commit", "wall", "gate", "note"];
-const RECORD_REPORT_FLAGS = ["cost", "codex-cost", "shared-cost", "commit", "wall", "adversary"];
+const RECORD_HAND_FLAGS = ["summary", "hand", "commit", "wall", "gate", "note"];
+const RECORD_REPORT_FLAGS = ["summary", "cost", "codex-cost", "shared-cost", "commit", "wall", "adversary"];
 
 interface Parsed {
   opts: Record<string, string | true>;
@@ -187,6 +187,22 @@ export async function runBoard(argv: string[], io?: BoardIo): Promise<number> {
       out.stderr(subcommandUsage(cmd));
       return 2;
     }
+  }
+
+  // --summary: required by record and summary, one sentence, checked before anything is appended or
+  // promoted, printed as stdout's first line (mirrors board.mjs).
+  let summarySentence = "";
+  if (cmd === "record" || cmd === "summary") {
+    const text = typeof opts.summary === "string" ? opts.summary.trim() : "";
+    if (!text) {
+      out.stderr(`--summary "<one sentence>" is required for doug board ${cmd}: one sentence, in plain words, of what changed for the user\n`);
+      return 2;
+    }
+    if (/[\r\n]/.test(text) || /[.!?]\s+\S/.test(text)) {
+      out.stderr(`--summary must be one sentence for doug board ${cmd}: no newline, and no sentence end followed by more text\n`);
+      return 2;
+    }
+    summarySentence = text;
   }
 
   try {
@@ -337,8 +353,11 @@ export async function runBoard(argv: string[], io?: BoardIo): Promise<number> {
         const [id, column] = rest;
         if (!id || !column) return usage();
         const dir = dirFrom(rest, 2);
-        saveBoard(dir, moveCard(loadBoard(dir), id, column, { source: stringOpt(opts, "source") }));
+        const moved = moveCard(loadBoard(dir), id, column, { source: stringOpt(opts, "source") });
+        saveBoard(dir, moved);
         out.stdout(`Moved ${id} to ${column} in ${relpathOf(dir, boardPath(dir))}.\n`);
+        const capLine = column === "ready" ? readyCapWarning(moved) : null;
+        if (capLine) out.stderr(capLine);
         return 0;
       }
       case "edit": {
@@ -403,6 +422,9 @@ export async function runBoard(argv: string[], io?: BoardIo): Promise<number> {
             record: relpathOf(dir, boardPath(dir)),
           });
           const { file, promoted } = recordLanding(dir, id, entry);
+          out.stdout(`${summarySentence}\n`);
+          const verdict = handWallVerdict(card, stringOpt(opts, "wall") ?? null);
+          if (verdict.over) out.stdout(`Wall budget: ${verdict.text}\n`);
           if (promoted) out.stdout(`Promoted the research note for ${id} to ${promoted}.\n`);
           out.stdout(`Appended a hand-track entry for ${id} to ${file}.\n`);
           return 0;
@@ -433,6 +455,7 @@ export async function runBoard(argv: string[], io?: BoardIo): Promise<number> {
           sharedCost: sharedCost !== undefined ? Number(sharedCost) : null,
         });
         const { file, promoted } = recordLanding(dir, id, entry);
+        out.stdout(`${summarySentence}\n`);
         if (promoted) out.stdout(`Promoted the research note for ${id} to ${promoted}.\n`);
         out.stdout(`Appended a run entry for ${id} to ${file}.\n`);
         return 0;
@@ -448,6 +471,7 @@ export async function runBoard(argv: string[], io?: BoardIo): Promise<number> {
         }
         const cost = stringOpt(opts, "cost");
         const codexCost = stringOpt(opts, "codex-cost");
+        out.stdout(`${summarySentence}\n`);
         out.stdout(runSummary({ report, cost: cost !== undefined ? Number(cost) : null, codexCost: codexCost !== undefined ? Number(codexCost) : null, wallClock: stringOpt(opts, "wall") ?? null, mergeCommit: stringOpt(opts, "commit") ?? null }));
         return 0;
       }

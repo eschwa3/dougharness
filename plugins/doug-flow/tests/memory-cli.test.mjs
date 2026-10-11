@@ -299,6 +299,25 @@ describe("memory.mjs reflect", () => {
     rmSync(dir, { recursive: true, force: true });
   });
 
+  // Card cost-price-haiku-5-5 (M8): runReflect's cost measurement prices each transcript message on its own tier.
+  it("prices a reflect transcript's claude-haiku-5-5 messages per message by prompt length (usd_source transcript)", () => {
+    const dir = tempDir();
+    const claudeDir = tempDir();
+    const sessionId = "sess-h55";
+    const projDir = join(claudeDir, "projects", projectSlug(dir));
+    mkdirSync(projDir, { recursive: true });
+    // Two 60,000-input messages, each at the low tier ($0.10/MTok): 2 * 60000 * 0.10 / 1e6 = 0.012. Pricing their summed
+    // 120,000 tokens at the high tier ($0.50/MTok) would give 0.06.
+    const line = (id) => JSON.stringify({ type: "assistant", message: { id, model: "claude-haiku-5-5", usage: { input_tokens: 60_000, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 } } });
+    writeFileSync(join(projDir, `${sessionId}.jsonl`), line("msg_1") + "\n" + line("msg_2") + "\n", "utf8");
+    const claudeBin = writeFakeClaudeSuccess(dir, { structured_output: { lessons: [] }, session_id: sessionId, total_cost_usd: 0.9999, is_error: false });
+    const res = run(["reflect", fixtureReport, dir, "--claude-bin", claudeBin, "--claude-dir", claudeDir], dir);
+    expect(res.status, res.stderr).toBe(0);
+    expect(res.stdout).toContain("$0.0120 (transcript)");
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(claudeDir, { recursive: true, force: true });
+  });
+
   it("falls back to the envelope's total_cost_usd (usd_source claude) when the transcript file cannot be found, printed to 4 decimals so a haiku-cheap pass never reads as $0.00 (minor 5)", () => {
     const dir = tempDir();
     const claudeBin = writeFakeClaudeSuccess(dir, { structured_output: { lessons: [] }, session_id: "sess-missing", total_cost_usd: 0.0043, is_error: false });
@@ -381,6 +400,94 @@ describe("memory.mjs reflect", () => {
     expect(res.status).toBe(1);
     expect(res.stderr).toContain("F1");
     rmSync(dir, { recursive: true, force: true });
+  });
+});
+
+describe("memory.mjs reflect --harmful (card reflect-harmful-irrelevant-lessons)", () => {
+  const counters = (dir, id) => {
+    const m = openMemory(dir);
+    try {
+      return m.prepare("SELECT helpful, harmful FROM lessons WHERE id = ?").get(id);
+    } finally {
+      m.close();
+    }
+  };
+  const flowReport = (dir, used) => {
+    const file = join(dir, "flow-report.json");
+    writeFileSync(
+      file,
+      JSON.stringify({
+        plan: "harm",
+        ok: true,
+        levels: [{ index: 0, tasks: [{ id: "t1", verified: true, passes: 1, stopReason: null, reviewIssues: [], verifierFindings: [], memoryUsed: used }] }],
+      }),
+      "utf8"
+    );
+    return file;
+  };
+  const seed = (dir, n) => {
+    const m = openMemory(dir);
+    const ids = [];
+    for (let i = 0; i < n; i++) ids.push(addLesson(m, { kind: "pattern", source: { agent: "worker" }, text: `seeded lesson number ${i} about uploads` }).id);
+    m.close();
+    return ids;
+  };
+  const okBin = (dir) => writeFakeClaudeSuccess(dir, { structured_output: { lessons: [] }, session_id: "sess-harm", total_cost_usd: 0, is_error: false });
+
+  it("flow form: --harmful <id> (repeatable) bumps harmful on the named id only and earns it no helpful", () => {
+    const dir = tempDir();
+    try {
+      const [L, K] = seed(dir, 2);
+      const res = run(["reflect", flowReport(dir, [L, K]), dir, "--harmful", L, "--claude-bin", okBin(dir)], dir);
+      expect(res.status, res.stderr).toBe(0);
+      expect(counters(dir, L)).toEqual({ helpful: 0, harmful: 1 });
+      expect(counters(dir, K)).toEqual({ helpful: 1, harmful: 0 });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("flow form: --harmful repeated names two ids and both are bumped", () => {
+    const dir = tempDir();
+    try {
+      const [L, K] = seed(dir, 2);
+      const res = run(["reflect", flowReport(dir, [L, K]), dir, "--harmful", L, "--harmful", K, "--claude-bin", okBin(dir)], dir);
+      expect(res.status, res.stderr).toBe(0);
+      expect(counters(dir, L)).toEqual({ helpful: 0, harmful: 1 });
+      expect(counters(dir, K)).toEqual({ helpful: 0, harmful: 1 });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("flow form: a --harmful id outside memoryUsed exits 1 naming it, with no counter change and no reflections row", () => {
+    const dir = tempDir();
+    try {
+      const [L, K] = seed(dir, 2);
+      const res = run(["reflect", flowReport(dir, [L]), dir, "--harmful", K, "--claude-bin", okBin(dir)], dir);
+      expect(res.status).toBe(1);
+      expect(res.stderr).toContain(K);
+      expect(counters(dir, L)).toEqual({ helpful: 0, harmful: 0 });
+      expect(counters(dir, K)).toEqual({ helpful: 0, harmful: 0 });
+      const again = run(["reflect", flowReport(dir, [L]), dir, "--claude-bin", okBin(dir)], dir);
+      expect(again.stdout).not.toContain("Already reflected");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("both usage strings mention --harmful", () => {
+    const dir = tempDir();
+    try {
+      const flow = run(["reflect"], dir);
+      expect(flow.status).toBe(2);
+      expect(flow.stderr).toContain("--harmful");
+      const hand = run(["reflect", "--hand"], dir);
+      expect(hand.status).toBe(2);
+      expect(hand.stderr).toContain("--harmful");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 
@@ -520,6 +627,27 @@ describe("memory.mjs reflect --hand", () => {
       } finally {
         rmSync(dir, { recursive: true, force: true });
       }
+    }
+  });
+
+  it("hand form: --harmful <id> bumps harmful on that id with no helpful even though the card verified; an id outside lessons.json exits 1 naming it", () => {
+    const dir = tempDir();
+    try {
+      const L1 = setup(dir);
+      const bad = reflect(dir, claudeOk(dir, []), ["--harmful", "lxnotused"]);
+      expect(bad.status).toBe(1);
+      expect(bad.stderr).toContain("lxnotused");
+      expect(helpfulOf(dir, L1)).toBe(0);
+      const res = reflect(dir, claudeOk(dir, []), ["--harmful", L1]);
+      expect(res.status, res.stderr).toBe(0);
+      const m = openMemory(dir);
+      try {
+        expect(m.prepare("SELECT helpful, harmful FROM lessons WHERE id = ?").get(L1)).toEqual({ helpful: 0, harmful: 1 });
+      } finally {
+        m.close();
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
     }
   });
 

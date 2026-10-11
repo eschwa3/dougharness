@@ -27,25 +27,25 @@
 //                                                 flow, or named by .doug/plan.json (each with --force removes it
 //                                                 and prints a warning to stderr); prints the removed card as JSON
 //                                                 to stdout so a mistaken removal can be re-added by hand
-//   board.mjs record <id> <report.json> [dir] [--cost <usd>] [--codex-cost <usd>] [--shared-cost <usd>] [--wall <text>] [--commit <sha>] [--adversary "<id>=<class>[: <reason>]"]... [--note <text>] [--rehearsal <scenario>] [--run <run-id>] [--claude-dir <dir>]
+//   board.mjs record <id> <report.json> [dir] --summary "<one sentence>" [--cost <usd>] [--codex-cost <usd>] [--shared-cost <usd>] [--wall <text>] [--commit <sha>] [--adversary "<id>=<class>[: <reason>]"]... [--note <text>] [--rehearsal <scenario>] [--run <run-id>] [--claude-dir <dir>]
 //                                                 append a run entry for the card to docs/live-runs.md; every adversary block
 //                                                 in the report is classified real, marginal, or false (repeat the flag per block).
 //                                                 When .doug/plan.json lists the card among its `cards` (a batch), the entry
 //                                                 shows only that card's tasks, --cost is that card's tasks' cost, and
 //                                                 --shared-cost <usd> the shared integration agents', counted once
-//   board.mjs record <id> --hand [dir] [--commit <sha>] [--wall <text>] [--gate <text>] [--note <text>] [--rehearsal <scenario>]
+//   board.mjs record <id> --hand [dir] --summary "<one sentence>" [--commit <sha>] [--wall <text>] [--gate <text>] [--note <text>] [--rehearsal <scenario>]
 //                                                 append a hand-track entry (no report) for the card
 //   --rehearsal <scenario> (either form) marks the entry as a rehearse.mjs run on the ts-basic fixture: the first
 //   prose line and the commit sha (abbreviated to 7 characters) read as the fixture's, not this repository's.
 //   Either record form also promotes .doug/.state/research/<id>.md to docs/research/<id>.md when that note
 //   exists and differs from the docs copy, copying it and printing one line saying so; a card with no note, or
 //   whose docs copy is already byte-identical, is untouched, silently.
-//   board.mjs summary <report.json> [--cost <usd>] [--codex-cost <usd>] [--wall <text>] [--commit <sha>] [--card <id>] [--run <run-id>] [--claude-dir <dir>]
+//   board.mjs summary <report.json> --summary "<one sentence>" [--cost <usd>] [--codex-cost <usd>] [--wall <text>] [--commit <sha>] [--card <id>] [--run <run-id>] [--claude-dir <dir>]
 //                                                 the three-line chat summary of a report (--card: that card's tasks only)
 
 import { readFileSync } from "node:fs";
 import { relative, resolve } from "node:path";
-import { loadBoard, saveBoard, findCard, nextReadyCard, nextReadyCards, moveCard, editCard, removeCard, reorderCard, readyCapWarning, wallCapMinutes, WALL_BUDGET_MIN, WALL_BUDGET_MIN_N, parseLiveRunWalls, wallBudgetTable, runEntry, handEntry, runSummary, boardPath, parseAdversaryClasses, filterReportForCard, recordLanding } from "../lib/board.mjs";
+import { loadBoard, saveBoard, findCard, nextReadyCard, nextReadyCards, moveCard, editCard, removeCard, reorderCard, readyCapWarning, wallCapMinutes, WALL_BUDGET_MIN, WALL_BUDGET_MIN_N, parseLiveRunWalls, wallBudgetTable, runEntry, handEntry, handWallVerdict, runSummary, boardPath, parseAdversaryClasses, filterReportForCard, recordLanding } from "../lib/board.mjs";
 import { loadPlan, unwrapReport, DEFAULT_BUDGET } from "../lib/plan.mjs";
 import { wallForRun } from "../lib/cost.mjs";
 
@@ -66,10 +66,10 @@ const SUBCOMMAND_FLAGS = {
   remove: ["force"],
   reorder: ["before", "after", "top", "bottom"],
   budgets: ["from"],
-  summary: ["cost", "codex-cost", "wall", "commit", "card", "run", "claude-dir"],
+  summary: ["summary", "cost", "codex-cost", "wall", "commit", "card", "run", "claude-dir"],
 };
-const RECORD_HAND_FLAGS = ["hand", "commit", "wall", "gate", "note", "rehearsal"];
-const RECORD_REPORT_FLAGS = ["cost", "codex-cost", "wall", "commit", "adversary", "shared-cost", "note", "rehearsal", "run", "claude-dir"];
+const RECORD_HAND_FLAGS = ["summary", "hand", "commit", "wall", "gate", "note", "rehearsal"];
+const RECORD_REPORT_FLAGS = ["summary", "cost", "codex-cost", "wall", "commit", "adversary", "shared-cost", "note", "rehearsal", "run", "claude-dir"];
 const opts = {};
 const positional = [];
 for (let i = 0; i < argv.length; i++) {
@@ -101,10 +101,10 @@ const USAGE_FOR = {
   remove: "usage: board.mjs remove <id> [dir] [--force]",
   reorder: "usage: board.mjs reorder <id> [dir] --before <other> | --after <other> | --top | --bottom",
   budgets: "usage: board.mjs budgets [dir] [--from <live-runs file>]",
-  summary: "usage: board.mjs summary <report.json> [--cost <usd>] [--codex-cost <usd>] [--wall <text>] [--commit <sha>] [--card <id>] [--run <run-id>] [--claude-dir <dir>]",
+  summary: "usage: board.mjs summary <report.json> --summary \"<one sentence>\" [--cost <usd>] [--codex-cost <usd>] [--wall <text>] [--commit <sha>] [--card <id>] [--run <run-id>] [--claude-dir <dir>]",
 };
-const RECORD_HAND_USAGE = "usage: board.mjs record <id> --hand [dir] [--commit <sha>] [--wall <text>] [--gate <text>] [--note <text>] [--rehearsal <scenario>]";
-const RECORD_REPORT_USAGE = "usage: board.mjs record <id> <report.json> [dir] [--cost <usd>] [--codex-cost <usd>] [--shared-cost <usd>] [--wall <text>] [--commit <sha>] [--adversary \"<id>=<class>[: <reason>]\"]... [--note <text>] [--rehearsal <scenario>] [--run <run-id>] [--claude-dir <dir>]";
+const RECORD_HAND_USAGE = "usage: board.mjs record <id> --hand [dir] --summary \"<one sentence>\" [--commit <sha>] [--wall <text>] [--gate <text>] [--note <text>] [--rehearsal <scenario>]";
+const RECORD_REPORT_USAGE = "usage: board.mjs record <id> <report.json> [dir] --summary \"<one sentence>\" [--cost <usd>] [--codex-cost <usd>] [--shared-cost <usd>] [--wall <text>] [--commit <sha>] [--adversary \"<id>=<class>[: <reason>]\"]... [--note <text>] [--rehearsal <scenario>] [--run <run-id>] [--claude-dir <dir>]";
 
 // An unknown --flag for the given subcommand: exit 2, name the flag and the subcommand's usage.
 // Runs on flag names only (parse order doesn't matter), before any work or write.
@@ -126,6 +126,17 @@ if (cmd === "record" || Object.prototype.hasOwnProperty.call(SUBCOMMAND_FLAGS, c
     const usageLine = cmd === "record" ? (opts.hand ? RECORD_HAND_USAGE : RECORD_REPORT_USAGE) : USAGE_FOR[cmd];
     fail(`unknown option --${unknown} for board.mjs ${cmd}\n${usageLine}`, 2);
   }
+}
+
+// --summary: the lead's one sentence of what changed for the user, required by record and summary (card
+// landing-one-sentence-summary). Trimmed, non-empty, one line, no sentence end followed by more text.
+// Checked before anything is appended or promoted; printed as stdout's first line, never written to a file.
+let summarySentence = null;
+if (cmd === "record" || cmd === "summary") {
+  const text = typeof opts.summary === "string" ? opts.summary.trim() : "";
+  if (!text) fail(`--summary "<one sentence>" is required for board.mjs ${cmd}: one sentence, in plain words, of what changed for the user`, 2);
+  if (/[\r\n]/.test(text) || /[.!?]\s+\S/.test(text)) fail(`--summary must be one sentence for board.mjs ${cmd}: no newline, and no sentence end followed by more text`, 2);
+  summarySentence = text;
 }
 
 try {
@@ -180,8 +191,11 @@ try {
       const [id, column] = rest;
       if (!id || !column) fail("usage: board.mjs move <id> <column> [dir] [--source <text>]", 2);
       const dir = dirFrom(rest, 2);
-      saveBoard(dir, moveCard(loadBoard(dir), id, column, { source: opts.source }));
+      const moved = moveCard(loadBoard(dir), id, column, { source: opts.source });
+      saveBoard(dir, moved);
       process.stdout.write(`Moved ${id} to ${column} in ${relative(dir, boardPath(dir))}.\n`);
+      const capLine = column === "ready" ? readyCapWarning(moved) : null;
+      if (capLine) process.stderr.write(capLine);
       break;
     }
     case "edit": {
@@ -252,17 +266,22 @@ try {
     case "record": {
       if (opts.hand) {
         const [id] = rest;
-        if (!id) fail("usage: board.mjs record <id> --hand [dir] [--commit <sha>] [--wall <text>] [--gate <text>] [--note <text>] [--rehearsal <scenario>]", 2);
+        if (!id) fail("usage: board.mjs record <id> --hand [dir] --summary \"<one sentence>\" [--commit <sha>] [--wall <text>] [--gate <text>] [--note <text>] [--rehearsal <scenario>]", 2);
         const dir = dirFrom(rest, 1);
         const card = findCard(loadBoard(dir), id);
         const entry = handEntry({ card, commit: opts.commit ?? null, wallClock: opts.wall ?? null, gate: opts.gate ?? null, note: opts.note ?? null, record: relative(dir, boardPath(dir)), rehearsal: opts.rehearsal ?? null });
         const { file, promoted } = recordLanding(dir, id, entry);
+        process.stdout.write(`${summarySentence}\n`);
+        if (!opts.rehearsal) {
+          const verdict = handWallVerdict(card, opts.wall ?? null);
+          if (verdict.over) process.stdout.write(`Wall budget: ${verdict.text}\n`);
+        }
         if (promoted) process.stdout.write(`Promoted the research note for ${id} to ${promoted}.\n`);
         process.stdout.write(`Appended a hand-track entry for ${id} to ${file}.\n`);
         break;
       }
       const [id, reportFile] = rest;
-      if (!id || !reportFile) fail("usage: board.mjs record <id> <report.json> [dir] [--cost <usd>] [--codex-cost <usd>] [--shared-cost <usd>] [--wall <text>] [--commit <sha>] [--adversary \"<id>=<class>[: <reason>]\"]... [--note <text>] [--rehearsal <scenario>] [--run <run-id>] [--claude-dir <dir>]", 2);
+      if (!id || !reportFile) fail("usage: board.mjs record <id> <report.json> [dir] --summary \"<one sentence>\" [--cost <usd>] [--codex-cost <usd>] [--shared-cost <usd>] [--wall <text>] [--commit <sha>] [--adversary \"<id>=<class>[: <reason>]\"]... [--note <text>] [--rehearsal <scenario>] [--run <run-id>] [--claude-dir <dir>]", 2);
       const dir = dirFrom(rest, 2);
       const card = findCard(loadBoard(dir), id);
       const report = unwrapReport(JSON.parse(readFileSync(resolve(reportFile), "utf8")));
@@ -273,13 +292,14 @@ try {
       const wall = opts.run ? wallForRun({ runId: opts.run, claudeDir: opts["claude-dir"], projectDir: dir, wallMinutes: report.budget?.wallMinutes ?? DEFAULT_BUDGET.wallMinutes }) : null;
       const entry = runEntry({ card, report, wall, cost: opts.cost !== undefined ? Number(opts.cost) : null, codexCost: opts["codex-cost"] !== undefined ? Number(opts["codex-cost"]) : null, wallClock: opts.wall ?? null, mergeCommit: opts.commit ?? null, record: relative(dir, boardPath(dir)), adversary: parseAdversaryClasses(opts.adversary || []), batch, taskIds, sharedCost: opts["shared-cost"] !== undefined ? Number(opts["shared-cost"]) : null, note: opts.note ?? null, rehearsal: opts.rehearsal ?? null });
       const { file, promoted } = recordLanding(dir, id, entry);
+      process.stdout.write(`${summarySentence}\n`);
       if (promoted) process.stdout.write(`Promoted the research note for ${id} to ${promoted}.\n`);
       process.stdout.write(`Appended a run entry for ${id} to ${file}.\n`);
       break;
     }
     case "summary": {
       const [reportFile] = rest;
-      if (!reportFile) fail("usage: board.mjs summary <report.json> [--cost <usd>] [--codex-cost <usd>] [--wall <text>] [--commit <sha>] [--card <id>] [--run <run-id>] [--claude-dir <dir>]", 2);
+      if (!reportFile) fail("usage: board.mjs summary <report.json> --summary \"<one sentence>\" [--cost <usd>] [--codex-cost <usd>] [--wall <text>] [--commit <sha>] [--card <id>] [--run <run-id>] [--claude-dir <dir>]", 2);
       let report = unwrapReport(JSON.parse(readFileSync(resolve(reportFile), "utf8")));
       if (opts.card !== undefined) {
         // With the plan at hand the filter also covers a report whose tasks carry no card.
@@ -289,6 +309,7 @@ try {
       const wall = opts.run ? wallForRun({ runId: opts.run, claudeDir: opts["claude-dir"], projectDir: process.cwd(), wallMinutes: report.budget?.wallMinutes ?? DEFAULT_BUDGET.wallMinutes }) : null;
       const sumPlan = opts.card !== undefined ? loadPlan(dirFrom(rest, 1)) : null;
       const sumBatch = sumPlan && Array.isArray(sumPlan.cards) && sumPlan.cards.includes(opts.card) ? sumPlan.cards : null;
+      process.stdout.write(`${summarySentence}\n`);
       process.stdout.write(runSummary({ report, wall, batch: sumBatch, card: opts.card ?? null, cost: opts.cost !== undefined ? Number(opts.cost) : null, codexCost: opts["codex-cost"] !== undefined ? Number(opts["codex-cost"]) : null, wallClock: opts.wall ?? null, mergeCommit: opts.commit ?? null }));
       break;
     }

@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { runBoard } from "../src/board.js";
+import { cardBudgetMinutes } from "../../../plugins/doug-flow/lib/board.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 // The doug-flow plugin's equivalent CLI, for the parity test (card cli-record-promotion-drift).
@@ -610,10 +611,10 @@ describe("doug board record", () => {
       report,
       JSON.stringify({ plan: "p", integrationBranch: "doug/p", ok: true, levels: [{ index: 0, tasks: [{ id: "t", implemented: true, verified: true, reviewed: true }], integration: { ok: true } }] }),
     );
-    const r = await run(["record", "x", report, dir, "--cost", "1.5", "--wall", "12m", "--commit", "abc123"]);
+    const r = await run(["record", "x", report, dir, "--cost", "1.5", "--wall", "12m", "--commit", "abc123", "--summary", "Test summary."]);
     expect(r.code).toBe(0);
     const file = join(dir, "docs/live-runs.md");
-    expect(r.stdout).toBe(`Appended a run entry for x to ${file}.\n`);
+    expect(r.stdout).toBe(`Test summary.\nAppended a run entry for x to ${file}.\n`);
     const md = readFileSync(file, "utf8");
     expect(md).toContain("x: X card");
     expect(md).toContain("| Wall clock | 12m |");
@@ -627,12 +628,12 @@ describe("doug board record", () => {
     const report = join(dir, "report.json");
     const task = { id: "t", implemented: true, verified: true, reviewed: true, adversary: { ran: true, verdict: "pass", blocked: false }, attempts: [{ pass: 1, newFindings: ["F1", "F2"] }], ledger: [{ id: "F1", stage: "adversary", severity: "blocker", status: "fixed", description: "d1" }, { id: "F2", stage: "adversary", severity: "blocker", status: "fixed", description: "d2" }] };
     writeFileSync(report, JSON.stringify({ plan: "p", integrationBranch: "doug/p", ok: true, levels: [{ index: 0, tasks: [task], integration: { ok: true } }] }));
-    const r = await run(["record", "x", report, dir, "--adversary", "F1=real: a user would hit it", "--adversary", "F2=false: the spec allows it"]);
+    const r = await run(["record", "x", report, dir, "--adversary", "F1=real: a user would hit it", "--adversary", "F2=false: the spec allows it", "--summary", "Test summary."]);
     expect(r.code, r.stderr).toBe(0);
     const md = readFileSync(join(dir, "docs/live-runs.md"), "utf8");
     expect(md).toContain("| Adversary precision | 1 real / 0 marginal / 1 false |");
     expect(md).toContain("- F1 (t, pass 1): real. a user would hit it\n- F2 (t, pass 1): false. the spec allows it");
-    const bad = await run(["record", "x", report, dir, "--adversary", "F3=real"]);
+    const bad = await run(["record", "x", report, dir, "--adversary", "F3=real", "--summary", "Test summary."]);
     expect(bad.code).toBe(1);
     expect(bad.stderr).toContain("no adversary block named F3 in this report; its blocks are: F1, F2");
   });
@@ -648,18 +649,18 @@ describe("doug board record", () => {
     const dir = fresh();
     const report = join(dir, "report.json");
     writeFileSync(report, JSON.stringify({ plan: "p", ok: true, levels: [{ index: 0, integration: { ok: true }, tasks: [{ id: "t", implemented: true, verified: true, reviewed: true, adversary: null, attempts: [{ pass: 1 }, { pass: 2 }] }] }] }));
-    const r = await run(["summary", report, "--wall", "12m", "--commit", "abc123", "--cost", "2"]);
+    const r = await run(["summary", report, "--wall", "12m", "--commit", "abc123", "--cost", "2", "--summary", "Test summary."]);
     expect(r.code).toBe(0);
-    expect(r.stdout).toBe("p: green; 1 task, 1 integrated; wall 12m; cost $2.00; landed as abc123.\nt: implemented, 2 passes, verify yes, review yes, adversary skipped\nEvery stage and acceptance command passed.\n");
+    expect(r.stdout).toBe("Test summary.\np: green; 1 task, 1 integrated; wall 12m; cost $2.00; landed as abc123.\nt: implemented, 2 passes, verify yes, review yes, adversary skipped\nEvery stage and acceptance command passed.\n");
     expect((await run(["summary"])).code).toBe(2);
   });
   it("appends a hand-track entry with --hand and no report", async () => {
     const dir = fresh();
     writeBoard(dir, [{ id: "h", column: "done", title: "Hand card", track: "hand", deps: [], goal: "g" }]);
-    const r = await run(["record", "h", "--hand", dir, "--commit", "abc123", "--wall", "20 min", "--gate", "typecheck 0; unit 380 passed", "--note", "one line"]);
+    const r = await run(["record", "h", "--hand", dir, "--commit", "abc123", "--wall", "20 min", "--gate", "typecheck 0; unit 380 passed", "--note", "one line", "--summary", "Test summary."]);
     expect(r.code).toBe(0);
     const file = join(dir, "docs/live-runs.md");
-    expect(r.stdout).toBe(`Appended a hand-track entry for h to ${file}.\n`);
+    expect(r.stdout).toBe(`Test summary.\nAppended a hand-track entry for h to ${file}.\n`);
     const md = readFileSync(file, "utf8");
     expect(md).toContain("h: Hand card");
     expect(md).toContain("Built by hand through doug-hand from card `h` in `.doug/board.json` (hand track: a gated by-hand change); no workflow run.");
@@ -675,12 +676,27 @@ describe("doug board record", () => {
     writeBoard(dir, [{ id: "h", column: "done", title: "Hand card", track: "hand", deps: [], goal: "g" }]);
     mkdirSync(join(dir, ".doug/.state/research"), { recursive: true });
     writeFileSync(join(dir, ".doug/.state/research/h.md"), "# H\n\nA decisive fact.\n");
-    const r = await run(["record", "h", "--hand", dir, "--commit", "abc123", "--wall", "5 min", "--gate", "typecheck 0; unit 1 passed"]);
+    const r = await run(["record", "h", "--hand", dir, "--commit", "abc123", "--wall", "5 min", "--gate", "typecheck 0; unit 1 passed", "--summary", "Test summary."]);
     expect(r.code, r.stderr).toBe(0);
     const file = join(dir, "docs/live-runs.md");
-    expect(r.stdout).toBe(`Promoted the research note for h to docs/research/h.md.\nAppended a hand-track entry for h to ${file}.\n`);
+    expect(r.stdout).toBe(`Test summary.\nPromoted the research note for h to docs/research/h.md.\nAppended a hand-track entry for h to ${file}.\n`);
     expect(readFileSync(join(dir, "docs/research/h.md"), "utf8")).toBe("# H\n\nA decisive fact.\n");
     expect(existsSync(join(dir, ".doug/.state/research/h.md"))).toBe(true);
+  });
+  it("--hand prints a Wall budget line only when the wall is over the card's p80 budget (card hand-wall-flag)", async () => {
+    const budget = cardBudgetMinutes({ size: "S" });
+    const over = fresh();
+    writeBoard(over, [{ id: "h", column: "done", title: "Hand card", track: "hand", size: "S", deps: [], goal: "g" }]);
+    const r = await run(["record", "h", "--hand", over, "--commit", "abc123", "--wall", `${budget + 1} min`, "--gate", "g", "--summary", "Test summary."]);
+    expect(r.code, r.stderr).toBe(0);
+    expect(r.stdout.split("\n").filter((l) => l.startsWith("Wall budget:"))).toEqual([`Wall budget: over: ${budget + 1} min vs ${budget} min (S/all, p80); per-seat times unverified`]);
+    expect(readFileSync(join(over, "docs/live-runs.md"), "utf8")).toContain(`| Wall budget | over: ${budget + 1} min vs ${budget} min`);
+    const within = fresh();
+    writeBoard(within, [{ id: "h", column: "done", title: "Hand card", track: "hand", size: "S", deps: [], goal: "g" }]);
+    const w = await run(["record", "h", "--hand", within, "--commit", "abc123", "--wall", `${budget} min`, "--gate", "g", "--summary", "Test summary."]);
+    expect(w.code, w.stderr).toBe(0);
+    expect(w.stdout).not.toContain("Wall budget");
+    expect(readFileSync(join(within, "docs/live-runs.md"), "utf8")).toContain(`| Wall budget | within: ${budget} min vs ${budget} min`);
   });
   it("the run form promotes a card's research note and prints the Promoted line before the Appended line", async () => {
     const dir = fresh();
@@ -689,10 +705,10 @@ describe("doug board record", () => {
     writeFileSync(join(dir, ".doug/.state/research/x.md"), "# X\n\nA decisive fact.\n");
     const report = join(dir, "report.json");
     writeFileSync(report, JSON.stringify({ plan: "p", integrationBranch: "doug/p", ok: true, levels: [] }));
-    const r = await run(["record", "x", report, dir, "--wall", "2 min", "--commit", "abc123"]);
+    const r = await run(["record", "x", report, dir, "--wall", "2 min", "--commit", "abc123", "--summary", "Test summary."]);
     expect(r.code, r.stderr).toBe(0);
     const file = join(dir, "docs/live-runs.md");
-    expect(r.stdout).toBe(`Promoted the research note for x to docs/research/x.md.\nAppended a run entry for x to ${file}.\n`);
+    expect(r.stdout).toBe(`Test summary.\nPromoted the research note for x to docs/research/x.md.\nAppended a run entry for x to ${file}.\n`);
     expect(readFileSync(join(dir, "docs/research/x.md"), "utf8")).toBe("# X\n\nA decisive fact.\n");
   });
 });
@@ -710,9 +726,9 @@ describe("doug board record and board.mjs record agree on the promotion step (ca
       writeFileSync(join(dir, ".doug/.state/research/h.md"), "# H\n\nA decisive, shared fact.\n");
     }
     const args = ["record", "h", "--hand", "--commit", "abc123", "--wall", "5 min", "--gate", "typecheck 0; unit 1 passed", "--note", "kept"];
-    const plugin = runPlugin([...args, dirA], dirA);
+    const plugin = runPlugin([...args, dirA, "--summary", "Test summary."], dirA);
     expect(plugin.status, plugin.stderr).toBe(0);
-    const cli = await run([...args, dirB]);
+    const cli = await run([...args, dirB, "--summary", "Test summary."]);
     expect(cli.code, cli.stderr).toBe(0);
     expect(readFileSync(join(dirA, "docs/live-runs.md"), "utf8")).toBe(readFileSync(join(dirB, "docs/live-runs.md"), "utf8"));
     expect(readFileSync(join(dirA, "docs/research/h.md"), "utf8")).toBe(readFileSync(join(dirB, "docs/research/h.md"), "utf8"));
@@ -728,9 +744,9 @@ describe("doug board record and board.mjs record agree on the promotion step (ca
       writeFileSync(join(dir, "report.json"), JSON.stringify({ plan: "p", integrationBranch: "doug/p", ok: true, levels: [{ index: 0, tasks: [{ id: "t", implemented: true, verified: true, reviewed: true }], integration: { ok: true } }] }));
     }
     const flags = ["--cost", "1.5", "--wall", "12m", "--commit", "abc123"];
-    const plugin = runPlugin(["record", "x", join(dirA, "report.json"), dirA, ...flags], dirA);
+    const plugin = runPlugin(["record", "x", join(dirA, "report.json"), dirA, ...flags, "--summary", "Test summary."], dirA);
     expect(plugin.status, plugin.stderr).toBe(0);
-    const cli = await run(["record", "x", join(dirB, "report.json"), dirB, ...flags]);
+    const cli = await run(["record", "x", join(dirB, "report.json"), dirB, ...flags, "--summary", "Test summary."]);
     expect(cli.code, cli.stderr).toBe(0);
     expect(readFileSync(join(dirA, "docs/live-runs.md"), "utf8")).toBe(readFileSync(join(dirB, "docs/live-runs.md"), "utf8"));
     expect(readFileSync(join(dirA, "docs/research/x.md"), "utf8")).toBe(readFileSync(join(dirB, "docs/research/x.md"), "utf8"));
@@ -746,9 +762,9 @@ describe("doug board record and board.mjs record agree on the promotion step (ca
       writeFileSync(join(dir, "report.json"), JSON.stringify(wrapped));
     }
     const flags = ["--cost", "1.5", "--wall", "12m", "--commit", "abc123"];
-    const plugin = runPlugin(["record", "x", join(dirA, "report.json"), dirA, ...flags], dirA);
+    const plugin = runPlugin(["record", "x", join(dirA, "report.json"), dirA, ...flags, "--summary", "Test summary."], dirA);
     expect(plugin.status, plugin.stderr).toBe(0);
-    const cli = await run(["record", "x", join(dirB, "report.json"), dirB, ...flags]);
+    const cli = await run(["record", "x", join(dirB, "report.json"), dirB, ...flags, "--summary", "Test summary."]);
     expect(cli.code, cli.stderr).toBe(0);
     const cliMd = readFileSync(join(dirB, "docs/live-runs.md"), "utf8");
     expect(cliMd).not.toContain("undefined: not green");
@@ -762,9 +778,9 @@ describe("doug board record and board.mjs record agree on the promotion step (ca
     const report = join(dir, "report.json");
     writeFileSync(report, JSON.stringify(wrapped));
     const flags = ["--wall", "12m", "--commit", "abc123", "--cost", "2"];
-    const plugin = runPlugin(["summary", report, ...flags], dir);
+    const plugin = runPlugin(["summary", report, ...flags, "--summary", "Test summary."], dir);
     expect(plugin.status, plugin.stderr).toBe(0);
-    const cli = await run(["summary", report, ...flags]);
+    const cli = await run(["summary", report, ...flags, "--summary", "Test summary."]);
     expect(cli.code, cli.stderr).toBe(0);
     expect(cli.stdout).not.toContain("undefined: not green");
     expect(cli.stdout).toBe(plugin.stdout);
@@ -779,20 +795,137 @@ describe("doug board record and board.mjs record agree on the promotion step (ca
       writeFileSync(join(dir, "report.json"), JSON.stringify(stopped));
     }
     const flags = ["--wall", "12m", "--commit", "abc123", "--cost", "2"];
-    const plugin = runPlugin(["summary", join(dirA, "report.json"), ...flags], dirA);
+    const plugin = runPlugin(["summary", join(dirA, "report.json"), ...flags, "--summary", "Test summary."], dirA);
     expect(plugin.status, plugin.stderr).toBe(0);
-    const cli = await run(["summary", join(dirB, "report.json"), ...flags]);
+    const cli = await run(["summary", join(dirB, "report.json"), ...flags, "--summary", "Test summary."]);
     expect(cli.code, cli.stderr).toBe(0);
     expect(cli.stdout).toContain('Stopped: a [budget]: "over budget"');
     expect(cli.stdout).toBe(plugin.stdout);
 
-    const pluginRec = runPlugin(["record", "x", join(dirA, "report.json"), dirA, ...flags], dirA);
+    const pluginRec = runPlugin(["record", "x", join(dirA, "report.json"), dirA, ...flags, "--summary", "Test summary."], dirA);
     expect(pluginRec.status, pluginRec.stderr).toBe(0);
-    const cliRec = await run(["record", "x", join(dirB, "report.json"), dirB, ...flags]);
+    const cliRec = await run(["record", "x", join(dirB, "report.json"), dirB, ...flags, "--summary", "Test summary."]);
     expect(cliRec.code, cliRec.stderr).toBe(0);
     const md = readFileSync(join(dirB, "docs/live-runs.md"), "utf8");
     expect(md).toContain('\nStopped: a [budget]: "over budget"\n');
     expect(md).toBe(readFileSync(join(dirA, "docs/live-runs.md"), "utf8"));
+  });
+});
+
+describe("doug board record and summary require --summary, one sentence, printed first (card cli-record-summary-flag)", () => {
+  const GREEN = { plan: "p", integrationBranch: "doug/p", ok: true, levels: [{ index: 0, tasks: [{ id: "t", implemented: true, verified: true, reviewed: true }], integration: { ok: true } }] };
+  function setup() {
+    const dir = fresh();
+    writeBoard(dir, [{ id: "h", column: "done", title: "Hand card", track: "hand", deps: [], goal: "g" }]);
+    mkdirSync(join(dir, ".doug/.state/research"), { recursive: true });
+    writeFileSync(join(dir, ".doug/.state/research/h.md"), "# H\n\nA fact.\n");
+    const report = join(dir, "report.json");
+    writeFileSync(report, JSON.stringify(GREEN));
+    return { dir, report };
+  }
+  const handArgs = (dir: string) => ["record", "h", "--hand", dir, "--commit", "abc123", "--wall", "5 min", "--gate", "g"];
+  const runArgs = (dir: string, report: string) => ["record", "h", report, dir, "--commit", "abc123", "--wall", "5 min"];
+  const sumArgs = (report: string) => ["summary", report, "--commit", "abc123", "--wall", "5 min"];
+  const notWritten = (dir: string) => {
+    expect(existsSync(join(dir, "docs/live-runs.md"))).toBe(false);
+    expect(existsSync(join(dir, "docs/research/h.md"))).toBe(false);
+  };
+
+  it("record <report> requires --summary: missing and blank are exit 2, naming the flag and doug board record, and nothing is appended or promoted", async () => {
+    const { dir, report } = setup();
+    for (const extra of [[], ["--summary", "   "]]) {
+      const r = await run([...runArgs(dir, report), ...extra]);
+      expect(r.code).toBe(2);
+      expect(r.stderr).toContain("--summary");
+      expect(r.stderr).toContain("is required for doug board record");
+      expect(r.stderr).not.toContain("board.mjs");
+      expect(r.stdout).toBe("");
+    }
+    notWritten(dir);
+  });
+  it("record --hand requires --summary: missing and blank are exit 2, and nothing is appended or promoted", async () => {
+    const { dir } = setup();
+    for (const extra of [[], ["--summary", ""]]) {
+      const r = await run([...handArgs(dir), ...extra]);
+      expect(r.code).toBe(2);
+      expect(r.stderr).toContain("is required for doug board record");
+      expect(r.stdout).toBe("");
+    }
+    notWritten(dir);
+  });
+  it("summary requires --summary: missing and blank are exit 2, naming doug board summary, with no output", async () => {
+    const { report } = setup();
+    for (const extra of [[], ["--summary", " "]]) {
+      const r = await run([...sumArgs(report), ...extra]);
+      expect(r.code).toBe(2);
+      expect(r.stderr).toContain("--summary");
+      expect(r.stderr).toContain("is required for doug board summary");
+      expect(r.stderr).not.toContain("board.mjs");
+      expect(r.stdout).toBe("");
+    }
+  });
+  it("two sentences are refused for each form, with exit 2 and the one-sentence message", async () => {
+    const { dir, report } = setup();
+    const two = "Did one thing. Then did another.";
+    for (const [args, cmd] of [[runArgs(dir, report), "record"], [handArgs(dir), "record"], [sumArgs(report), "summary"]] as const) {
+      const r = await run([...args, "--summary", two]);
+      expect(r.code).toBe(2);
+      expect(r.stderr).toContain(`--summary must be one sentence for doug board ${cmd}`);
+      expect(r.stdout).toBe("");
+    }
+    notWritten(dir);
+  });
+  it("a newline inside the sentence is refused for each form, even with no sentence end", async () => {
+    const { dir, report } = setup();
+    for (const [args, cmd] of [[runArgs(dir, report), "record"], [handArgs(dir), "record"], [sumArgs(report), "summary"]] as const) {
+      const r = await run([...args, "--summary", "one\nline"]);
+      expect(r.code).toBe(2);
+      expect(r.stderr).toContain(`--summary must be one sentence for doug board ${cmd}`);
+    }
+    notWritten(dir);
+  });
+  it("a refused record appends nothing and leaves the research note unpromoted (checked before append)", async () => {
+    const { dir, report } = setup();
+    const r = await run([...runArgs(dir, report), "--summary", "A. B."]);
+    expect(r.code).toBe(2);
+    notWritten(dir);
+    const h = await run([...handArgs(dir), "--summary", "A. B."]);
+    expect(h.code).toBe(2);
+    notWritten(dir);
+  });
+  it("a sentence with an inner dot but no following text is accepted and printed (trimmed)", async () => {
+    const { dir, report } = setup();
+    const r = await run([...runArgs(dir, report), "--summary", "  Fixed v1.2 handling.  "]);
+    expect(r.code, r.stderr).toBe(0);
+    expect(r.stdout.split("\n")[0]).toBe("Fixed v1.2 handling.");
+  });
+  it("record <report> prints the sentence as stdout's first line, before Promoted and Appended, and never writes it to a file", async () => {
+    const { dir, report } = setup();
+    const r = await run([...runArgs(dir, report), "--summary", "Users can now see X."]);
+    expect(r.code, r.stderr).toBe(0);
+    const lines = r.stdout.split("\n");
+    expect(lines[0]).toBe("Users can now see X.");
+    expect(lines[1]).toMatch(/^Promoted the research note/);
+    expect(lines[2]).toMatch(/^Appended a run entry/);
+    expect(readFileSync(join(dir, "docs/live-runs.md"), "utf8")).not.toContain("Users can now see X.");
+  });
+  it("record --hand prints the sentence as stdout's first line, before Promoted and Appended", async () => {
+    const { dir } = setup();
+    const r = await run([...handArgs(dir), "--summary", "Users can now see Y."]);
+    expect(r.code, r.stderr).toBe(0);
+    const lines = r.stdout.split("\n");
+    expect(lines[0]).toBe("Users can now see Y.");
+    expect(lines[1]).toMatch(/^Promoted the research note/);
+    expect(lines[2]).toMatch(/^Appended a hand-track entry/);
+    expect(readFileSync(join(dir, "docs/live-runs.md"), "utf8")).not.toContain("Users can now see Y.");
+  });
+  it("summary prints the sentence as stdout's first line, before the summary block", async () => {
+    const { report } = setup();
+    const r = await run([...sumArgs(report), "--summary", "Users can now see Z."]);
+    expect(r.code, r.stderr).toBe(0);
+    const lines = r.stdout.split("\n");
+    expect(lines[0]).toBe("Users can now see Z.");
+    expect(lines[1]).toMatch(/^p: green/);
   });
 });
 
@@ -832,7 +965,7 @@ describe("doug board rejects an unknown flag per subcommand (card board-cli-unkn
   it("rejects --adversary on `record <id> --hand` (the CLI's repeated-key check)", async () => {
     const dir = fresh();
     writeBoard(dir, [{ id: "h", column: "done", title: "Hand card", track: "hand", deps: [], goal: "g" }]);
-    const r = await run(["record", "h", "--hand", dir, "--adversary", "F1=real: x"]);
+    const r = await run(["record", "h", "--hand", dir, "--adversary", "F1=real: x", "--summary", "Test summary."]);
     expect(r.code).toBe(2);
     expect(r.stderr).toContain("--adversary");
     expect(existsSync(join(dir, "docs/live-runs.md"))).toBe(false);
@@ -845,9 +978,9 @@ describe("doug board rejects an unknown flag per subcommand (card board-cli-unkn
       report,
       JSON.stringify({ plan: "p", integrationBranch: "doug/p", ok: true, levels: [{ index: 0, tasks: [{ id: "t", implemented: true, verified: true, reviewed: true }], integration: { ok: true } }] }),
     );
-    const rec = await run(["record", "x", report, dir, "--cost", "1.5", "--shared-cost", "0.4", "--wall", "12m", "--commit", "abc123"]);
+    const rec = await run(["record", "x", report, dir, "--cost", "1.5", "--shared-cost", "0.4", "--wall", "12m", "--commit", "abc123", "--summary", "Test summary."]);
     expect(rec.code, rec.stderr).toBe(0);
-    const sum = await run(["summary", report, dir, "--card", "x"]);
+    const sum = await run(["summary", report, dir, "--card", "x", "--summary", "Test summary."]);
     expect(sum.code, sum.stderr).toBe(0);
   });
 
@@ -859,11 +992,11 @@ describe("doug board rejects an unknown flag per subcommand (card board-cli-unkn
       report,
       JSON.stringify({ plan: "p", integrationBranch: "doug/p", ok: true, levels: [{ index: 0, tasks: [{ id: "t", implemented: true, verified: true, reviewed: true }], integration: { ok: true } }] }),
     );
-    const rec = await run(["record", "x", report, dir, "--cost", "1.5", "--codex-cost", "2.58", "--wall", "12m", "--commit", "abc123"]);
+    const rec = await run(["record", "x", report, dir, "--cost", "1.5", "--codex-cost", "2.58", "--wall", "12m", "--commit", "abc123", "--summary", "Test summary."]);
     expect(rec.code, rec.stderr).toBe(0);
     const md = readFileSync(join(dir, "docs/live-runs.md"), "utf8");
     expect(md).toContain("| Codex adversary | $2.58, not included in Cost |");
-    const sum = await run(["summary", report, "--cost", "1.5", "--codex-cost", "2.58", "--wall", "12m", "--commit", "abc123"]);
+    const sum = await run(["summary", report, "--cost", "1.5", "--codex-cost", "2.58", "--wall", "12m", "--commit", "abc123", "--summary", "Test summary."]);
     expect(sum.code, sum.stderr).toBe(0);
     expect(sum.stdout).toContain("; Codex $2.58; landed as abc123.");
   });
@@ -958,6 +1091,29 @@ describe("doug board Ready cap (card follow-ups-backlog-ranked)", () => {
     const dir = fresh();
     writeBoard(dir, readyCards(7));
     const r = await run(["next", dir]);
+    expect(r.code).toBe(0);
+    expect(r.stderr).not.toContain("above the cap");
+  });
+  it("move into Ready making 8 warns on stderr, leaves stdout alone, exits 0, and moves the card", async () => {
+    const dir = fresh();
+    writeBoard(dir, [...readyCards(7), { id: "x", column: "backlog", title: "X", deps: [], goal: "g" }]);
+    const r = await run(["move", "x", "ready", dir]);
+    expect(r.code).toBe(0);
+    expect(r.stderr).toContain(warning(8));
+    expect(r.stdout).toBe("Moved x to ready in .doug/board.json.\n");
+    expect(readBoard(dir).cards.find((c: { id: string }) => c.id === "x").column).toBe("ready");
+  });
+  it("move out of Ready while still above the cap does not warn", async () => {
+    const dir = fresh();
+    writeBoard(dir, readyCards(9));
+    const r = await run(["move", "r1", "backlog", dir]);
+    expect(r.code).toBe(0);
+    expect(r.stderr).not.toContain("warning: Ready holds");
+  });
+  it("move into Ready making 7 does not warn", async () => {
+    const dir = fresh();
+    writeBoard(dir, [...readyCards(6), { id: "x", column: "backlog", title: "X", deps: [], goal: "g" }]);
+    const r = await run(["move", "x", "ready", dir]);
     expect(r.code).toBe(0);
     expect(r.stderr).not.toContain("above the cap");
   });

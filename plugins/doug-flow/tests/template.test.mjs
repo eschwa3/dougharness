@@ -5,7 +5,7 @@ import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { levelize as libLevelize } from "../lib/plan.mjs";
+import { levelize as libLevelize, DEFAULT_BUDGET as libDefaultBudget } from "../lib/plan.mjs";
 import * as board from "../lib/board.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -752,7 +752,9 @@ describe("fix loop", () => {
     // The lead runs on the lead row in its own worktree; workers are implementers on the worker row, one worktree each.
     expect(calls[0].opts).toEqual({ role: "lead", label: "lead:a", phase: "Implement", isolation: "worktree", agentType: "doug-flow:lead", schema: { schema: "lead" } });
     expect(calls[1].opts).toEqual({ role: "worker", label: "worker:a:1", phase: "Implement", isolation: "worktree", agentType: "doug-flow:implementer", schema: { schema: "implement" } });
-    expect(calls[3].opts).toEqual({ role: "lead", label: "lead-merge:a", phase: "Implement", agentType: "doug-flow:lead", schema: { schema: "implement" } });
+    // card swarm-lead-worktree-missing: the lead commits nothing, so the runtime removes its clean worktree; the merge
+    // therefore gets a fresh worktree of its own (isolation 'worktree', as the fix pass does) instead of assuming the lead's.
+    expect(calls[3].opts).toEqual({ role: "lead", label: "lead-merge:a", phase: "Implement", isolation: "worktree", agentType: "doug-flow:lead", schema: { schema: "implement" } });
     expect(calls[1].prompt).toBe("worker 1 core from doug/task-a");
     expect(calls[3].prompt).toBe("merge doug/task-a-w1, doug/task-a-w2");
     // The checks read the lead's merged branch, and the pass records every agent.
@@ -814,6 +816,80 @@ describe("fix loop", () => {
     const mergePrompt = new Function("plan", CONSTS + fnSlice("function leadMergePrompt(") + "\nreturn leadMergePrompt;")(defaultPlan);
     const mp = mergePrompt(task, leadResult, r.impl.workers, "main");
     for (const s of ["git merge --no-ff", "doug/task-a-w1", "doug/task-a-w2", "git worktree remove --force", "git diff --name-only main...HEAD", "Do not implement missing pieces yourself"]) expect(mp).toContain(s);
+
+    // card swarm-lead-worktree-missing (T2): the lead's own worktree may be gone, so the merge starts in the worktree it
+    // was launched in and checks the task branch out there, mirroring the fix pass's removed-worktree wording.
+    const gone = mergePrompt(task, { ...leadResult, worktreePath: "/wt/gone" }, r.impl.workers, "main");
+    expect(gone).not.toContain("cd there first");
+    expect(gone).not.toContain("Work only in your worktree /wt/gone");
+    expect(gone).not.toContain('worktreePath="/wt/gone"');
+    for (const s of [
+      "Work only in the git worktree you were started in, on branch doug/task-a",
+      "(/wt/gone) may have been removed",
+      "git checkout doug/task-a",
+      "git worktree list --porcelain",
+      "git worktree remove --force <path>",
+      "git checkout -b doug/task-a main",
+      "git rev-parse --show-toplevel",
+    ]) expect(gone).toContain(s);
+  });
+
+  it("card swarm-lead-worktree-missing (T3): later stages read the worktree the merge ran in, not the lead's removed one", async () => {
+    const swarmPlan = { ...defaultPlan, swarm: true };
+    const swarmTask = { ...task, files: ["src/x.ts", "src/y.ts", "tests/x.test.ts"] };
+    const leadResult = { taskId: "a", branch: "doug/task-a", worktreePath: "/wt/lead-gone", briefs: [{ id: "core", title: "Core", spec: "x", files: ["src/x.ts"], verify: null }, { id: "tests", title: "Tests", spec: "t", files: ["tests/x.test.ts"], verify: null }], blocked: false, splitReason: "two independent deliverables: x's behavior and its test, each verified on its own" };
+    const worker = (n) => ({ taskId: "a", branch: `doug/task-a-w${n}`, worktreePath: `/wt/w${n}`, filesTouched: [], commandsRun: [], summary: "done", blocked: false, commit: `w${n}c1` });
+    const { agent } = scripted({
+      "lead:a": () => leadResult,
+      "worker:a": (i) => worker(i + 1),
+      "lead-merge:a": () => ({ ...implResult, worktreePath: "/wt/merge", commit: "m1" }),
+      "verify:a": () => ({ taskId: "a", passed: true, findings: [] }),
+      "review:a": () => passingReview,
+    });
+    const r = await loadLoop({ agent, fixAttempts: 2, plan: swarmPlan }).runTask(swarmTask, "main");
+    // verifyPrompt and reviewPrompt both name impl.worktreePath, and impl is the merge's result.
+    expect(r.impl.worktreePath).toBe("/wt/merge");
+    expect(r.impl.worktreePath).not.toBe("/wt/lead-gone");
+  });
+
+  it("card swarm-rebrief-worktree-missing: the lead re-brief neither cd's into the lead's worktree nor launches one of its own", async () => {
+    const swarmPlan = { ...defaultPlan, swarm: true };
+    const swarmTask = { ...task, files: ["src/x.ts", "src/y.ts", "tests/x.test.ts"] };
+    const goneLead = "/nonexistent/lead-wt";
+    const leadResult = {
+      taskId: "a", branch: "doug/task-a", worktreePath: goneLead,
+      briefs: [
+        { id: "core", title: "Core", spec: "Add x() in src/x.ts.", files: ["src/x.ts"] },
+        { id: "tests", title: "Tests", spec: "Test x().", files: ["tests/x.test.ts"] },
+      ],
+      blocked: false, splitReason: "two independent deliverables, each verified on its own",
+    };
+    const worker1 = { taskId: "a", branch: "doug/task-a-w1", worktreePath: "/wt/w1", filesTouched: ["src/x.ts"], commandsRun: [], summary: "done", blocked: false, commit: "w1c1" };
+    const worker2Blocked = { taskId: "a", branch: "doug/task-a-w2", worktreePath: "/wt/w2", filesTouched: [], commandsRun: [], summary: "blocked", blocked: true, blockedReason: "needs the Task type from src/y.ts", commit: null };
+    const { agent, calls } = scripted({
+      "lead:a": () => leadResult,
+      "worker:a": (i) => (i === 0 ? worker1 : worker2Blocked),
+      "lead-rebrief:a": () => null,
+    });
+    await loadLoop({ agent, fixAttempts: 2, plan: swarmPlan }).runTask(swarmTask, "main");
+    const rebrief = calls.find((c) => c.opts.label === "lead-rebrief:a");
+    expect(rebrief).toBeTruthy();
+    expect(rebrief.opts).not.toHaveProperty("isolation");
+    // loadLoop stubs the prompt text, so the real leadRebriefPrompt is checked directly, with the lead's path gone.
+    const realPrompt = new Function("plan", CONSTS + fnSlice("function leadRebriefPrompt(") + "\nreturn leadRebriefPrompt;")(swarmPlan);
+    const records = [
+      { n: 1, id: "core", title: "Core", files: ["src/x.ts"], blocked: false, commit: "w1c1" },
+      { n: 2, id: "tests", title: "Tests", files: ["tests/x.test.ts"], blocked: true, blockedReason: "needs the Task type from src/y.ts", commit: null },
+    ];
+    const text = realPrompt(swarmTask, leadResult, records, records.filter((w) => w.blocked));
+    expect(text).not.toContain("cd there");
+    expect(text).not.toContain("Work only in your existing worktree");
+    expect(text).not.toContain(`Work only in your existing worktree ${goneLead}`);
+    expect(text).toContain("repository root");
+    expect(text).toContain("git show");
+    // The lead's path may appear only on the step-6 return line, never in an instruction to go there.
+    const withPath = text.split("\n").filter((l) => l.includes(goneLead));
+    expect(withPath).toEqual([`6. Return taskId="a", branch="doug/task-a", worktreePath="${goneLead}".`]);
   });
 
   it("card swarm-topology: a deterministic shape gate, a required splitReason, and interface context in every brief", async () => {
@@ -985,7 +1061,7 @@ describe("fix loop", () => {
     });
     const r = await loadLoop({ agent, fixAttempts: 2, plan: swarmPlan }).runTask(swarmTask, "main");
     expect(calls.map((c) => c.opts.label)).toEqual(["lead:a", "worker:a:1", "worker:a:2", "lead-rebrief:a", "worker:a:3", "lead-merge:a", "verify:a", "review:a"]);
-    // The re-brief runs on the lead row, in the lead's existing worktree - no isolation key.
+    // The re-brief runs on the lead row, reading from the repository root - no isolation key.
     expect(calls[3].opts).toEqual({ role: "lead", label: "lead-rebrief:a", phase: "Implement", agentType: "doug-flow:lead", schema: { schema: "lead" } });
     expect(calls[3].prompt).toContain("tests");
     expect(calls[3].prompt).toContain("needs the Task type from src/y.ts");
@@ -1521,7 +1597,7 @@ describe("fix loop", () => {
     expect(r.impl.summary).toBe("fixed");
     expect(r.impl.worktreePath).toBe("/wt/a");
     expect(r.ledger.map((e) => [e.id, e.status, e.confirmedBy, e.fixedCommit])).toEqual([["F1", "fixed", "verify", "c2"]]);
-    expect(r.budget).toEqual({ limits: { agents: 12, tokens: 400000, wallMinutes: 40 }, spent: { agents: 6, tokens: null, elapsedMs: null }, enforced: ["agents"] });
+    expect(r.budget).toEqual({ limits: { agents: 26, tokens: 400000, wallMinutes: 40 }, spent: { agents: 6, tokens: null, elapsedMs: null }, enforced: ["agents"] });
   });
 
   // ---- The fix-loop supervisor (card fix-loop-supervisor, NVIDIA AVO §3.3) ----
@@ -1891,7 +1967,7 @@ describe("fix loop", () => {
     expect(p).toContain("main...doug/a");
     expect(p).toContain("/wt");
     expect(p).toContain("  $ vitest run src/a.test.ts");
-    expect(p).toContain("  $ pnpm test:unit");
+    expect(p).not.toContain("  $ pnpm test:unit");
     expect(p).toContain("- it works");
     expect(p).toContain("ran=true, error=null");
     expect(p).toContain("Do not edit any file");
@@ -2505,6 +2581,51 @@ describe("fix loop", () => {
     expect(level(1, [{ task: { id: "a", title: "A", spec: "Do S.", files: ["src/x.ts"] } }], "main", false), "A-D3").not.toContain("--verify");
   });
 
+  describe("fallback adversary verify scope (card flow-suite-dedupe follow-up flow-fallback-verify-scope)", () => {
+    const impl = { branch: "doug/a", worktreePath: "/wt", commit: "c2", prevCommit: "c1" };
+    const taskFallback = () => new Function(
+      "plan", "BLOCKER_GATE", "confirmationLines", "acceptanceEntries",
+      fnSlice("function fallbackAdversaryPrompt(") + "\nreturn fallbackAdversaryPrompt;",
+    )({ verify: ["pnpm typecheck", "pnpm test:unit"], acceptance: ["it works"] }, blockerGate(), () => [], acceptanceEntriesFn());
+    const levelFallback = () => new Function(
+      "plan", "integrationBranch", "INTEGRATION_WORKTREE", "levelSpecLines", "acceptanceEntries", "BLOCKER_GATE",
+      fnSlice("function levelFallbackAdversaryPrompt(") + "\nreturn levelFallbackAdversaryPrompt;",
+    )(
+      { verify: ["pnpm typecheck", "pnpm test:unit"], title: "P", acceptance: ["it works"] },
+      "doug/integration",
+      ".claude/worktrees/doug-integration",
+      () => ["Task a: A", "Owned files: src/x.ts", "Do S.", ""],
+      acceptanceEntriesFn(),
+      blockerGate(),
+    );
+
+    it("F-D1: the task fallback runs only the task's own verify, not plan.verify", () => {
+      const p = taskFallback()({ id: "a", title: "A", spec: "Do S.", files: ["src/x.ts"], verify: "pnpm exec vitest run x.test.ts" }, impl, "main", "codex down", 1, []);
+      expect(p, "F-D1").toContain("$ pnpm exec vitest run x.test.ts");
+      expect(p, "F-D1").not.toContain("$ pnpm test:unit");
+      expect(p, "F-D1").not.toContain("$ pnpm typecheck");
+    });
+
+    it("F-D2: a task fallback with no verify lists no command, drops the header, and still tells the reviewer to record its own commands", () => {
+      const p = taskFallback()({ id: "a", title: "A", spec: "Do S.", files: ["src/x.ts"] }, impl, "main", "codex down", 1, []);
+      expect(p, "F-D2").not.toContain("$ pnpm test:unit");
+      expect(p, "F-D2").not.toContain("$ pnpm typecheck");
+      expect(p, "F-D2").not.toContain("Run every one of these commands");
+      expect(p, "F-D2").toContain("commandsRun");
+      expect(p, "F-D2").toContain("outputTail");
+      expect(p, "F-D2").toContain("your own probe checks included");
+    });
+
+    it("L-D1: the level fallback runs no plan.verify, drops the header, and still tells the reviewer to record its own commands", () => {
+      const p = levelFallback()(1, [{ task: { id: "a", title: "A", spec: "Do S.", files: ["src/x.ts"] } }], "main", "codex down", false);
+      expect(p, "L-D1").not.toContain("$ pnpm test:unit");
+      expect(p, "L-D1").not.toContain("$ pnpm typecheck");
+      expect(p, "L-D1").not.toContain("Run every one of these commands");
+      expect(p, "L-D1").toContain("commandsRun");
+      expect(p, "L-D1").toContain("outputTail");
+    });
+  });
+
   it("E5: levelAdversaryPrompt appends --effort <level> right after --timeout-ms <n> the same way, and the workflow sets adversary.effort from tierFor('adversary').effort so a literal cannot replace the row (card codex-review-effort)", () => {
     const shellQuoteFn = new Function(fnSlice("function shellQuote(") + "\nreturn shellQuote;")();
     const stubLevelSpecLines = () => ["Task a: A", "Owned files: src/x.ts", "Do S.", ""];
@@ -2591,6 +2712,69 @@ describe("fix loop", () => {
     expect(fixes[1].prompt).toContain("F1 [verify/verification]");
     expect(fixes[1].prompt).toContain("(reappeared after being fixed)");
     expect(r.stopReason).toBeNull();
+  });
+
+  // Card flow-budget-after-parallel-adversary. The costliest realistic shape that still reaches every fix pass: the
+  // verifier rejects pass 1 only (F1), then the focused check fails every later pass with no finding, and each fix
+  // touches a different file (so no stall, no re-attack). With Codex down every adversary stage also launches the
+  // Claude fallback (on by default), so an adversary stage costs 2 agents. Pass 1 spends implement, verify, review,
+  // adversary + fallback (5); fix pass 2 spends fix, verify, check, adversary + fallback (5); fix passes 3-6 skip
+  // verify (the check blocked, so it runs first) and spend fix, check, adversary + fallback (4 each, 16): 26 agents
+  // for the 5 fix attempts. With Codex running, the same shape costs 20. A supervisor seat or a fix retry is not covered.
+  const costliestShape = (codexDown = true) =>
+    scripted({
+      "implement:a": () => implResult,
+      "verify:a": (i) => (i === 0 ? { taskId: "a", passed: false, findings: ["src/x.ts returns 1, expected 2"] } : { taskId: "a", passed: true, findings: [] }),
+      "review:a": () => passingReview,
+      "check:a": () => ({ ...passingCheck, passed: false }),
+      "fix:a": (i) => ({ ...implResult, filesTouched: [`src/y${i}.ts`], commit: `c${i + 2}` }),
+      "adversary:a": () =>
+        codexDown
+          ? { taskId: "a", ran: false, verdict: "inconclusive", summary: "", issues: [], commandsRun: [], error: "codex-failed: usage limit" }
+          : { taskId: "a", ran: true, verdict: "pass", summary: "ok", issues: [], commandsRun: [], error: null },
+      "adversary-fallback:a": () => ({ taskId: "a", ran: true, verdict: "pass", summary: "could not refute", issues: [], commandsRun: [{ command: "true", ok: true, exitCode: 0 }], error: null }),
+    });
+  const oneSeat = { command: "x", timeoutMs: 1, fallback: { model: "opus", effort: "high" } };
+  const fixLabels = ["fix:a:2", "fix:a:3", "fix:a:4", "fix:a:5", "fix:a:6"];
+
+  it("reaches the default fixAttempts on the default budget with one adversary seat and Codex down", async () => {
+    const { agent, calls } = costliestShape();
+    const r = await loadLoop({ agent, fixAttempts: 5, adversary: oneSeat }).runTask(task, "main");
+    expect(r.stopReason, "stop reason").toContain("fix attempts exhausted");
+    expect(labelled(calls, "fix:").map((c) => c.opts.label)).toEqual(fixLabels);
+    expect(labelled(calls, "adversary-fallback:").length).toBeGreaterThan(0);
+    expect(r.stopClass).toBe("fix-attempts-exhausted");
+    expect(r.stopReason).toContain("fix attempts exhausted (5 of 5)");
+    expect(r.budget.spent.agents).toBeLessThanOrEqual(r.budget.limits.agents);
+  });
+
+  it("reaches the default fixAttempts on the default budget with one adversary seat and Codex running", async () => {
+    const { agent, calls } = costliestShape(false);
+    const r = await loadLoop({ agent, fixAttempts: 5, adversary: oneSeat }).runTask(task, "main");
+    expect(labelled(calls, "fix:").map((c) => c.opts.label)).toEqual(fixLabels);
+    expect(labelled(calls, "adversary-fallback:").length).toBe(0);
+    expect(r.stopClass).toBe("fix-attempts-exhausted");
+    expect(r.budget.spent.agents).toBe(20);
+  });
+
+  it("names 5 as the workflow's default fixAttempts", () => {
+    expect(source).toMatch(/const fixAttempts = Number\.isInteger\(plan\.fixAttempts\) && plan\.fixAttempts >= 0 \? plan\.fixAttempts : 5\b/);
+  });
+
+  it("makes the default agents budget the minimum that reaches the last fix pass", async () => {
+    const { DEFAULT_BUDGET } = budgetsOf({});
+    const full = costliestShape();
+    const ok = await loadLoop({ agent: full.agent, fixAttempts: 5, adversary: oneSeat, plan: { ...defaultPlan, budget: { agents: DEFAULT_BUDGET.agents } } }).runTask(task, "main");
+    expect(labelled(full.calls, "fix:").length).toBe(5);
+    expect(ok.budget.spent.agents).toBe(DEFAULT_BUDGET.agents);
+    const less = costliestShape();
+    const short = await loadLoop({ agent: less.agent, fixAttempts: 5, adversary: oneSeat, plan: { ...defaultPlan, budget: { agents: DEFAULT_BUDGET.agents - 1 } } }).runTask(task, "main");
+    expect(labelled(less.calls, "fix:").map((c) => c.opts.label)).not.toContain("fix:a:6");
+    expect(short.stopClass).toBe("budget");
+  });
+
+  it("keeps lib/plan.mjs's DEFAULT_BUDGET equal to the workflow's", () => {
+    expect(libDefaultBudget).toEqual(budgetsOf({}).DEFAULT_BUDGET);
   });
 
   it("stops before launching a fix the task budget cannot pay for", async () => {
@@ -2713,9 +2897,9 @@ describe("fix loop", () => {
   });
 
   it("keeps the default budget in step with lib/plan.mjs and fingerprints findings stably", () => {
-    expect(budgetsOf({}).DEFAULT_BUDGET).toEqual({ agents: 12, tokens: 400000, wallMinutes: 40 });
+    expect(budgetsOf({}).DEFAULT_BUDGET).toEqual({ agents: 26, tokens: 400000, wallMinutes: 40 });
     expect(budgetsOf({ budget: { agents: 3 } }).taskBudget).toEqual({ agents: 3, tokens: 400000, wallMinutes: 40 });
-    expect(source).toMatch(/const DEFAULT_BUDGET = \{ agents: 12, tokens: 400000, wallMinutes: 40 \}/);
+    expect(source).toMatch(/const DEFAULT_BUDGET = \{ agents: 26, tokens: 400000, wallMinutes: 40 \}/);
 
     const { fingerprint, matchFinding, ledgerText, LEDGER_CHAR_BUDGET } = ledgerModule();
     // However many open findings a long task collects, the rendered ledger stays inside its character budget.
@@ -3579,6 +3763,91 @@ describe("fix loop", () => {
     const fixCapped = fixPrompt(longTask, r, 2, "main", []);
     expect(fixCapped).toContain(long.slice(0, 2000));
     expect(fixCapped).not.toContain(long.slice(0, 2001));
+  });
+
+  // Card flow-review-prompts-lessons: the per-task checking prompts carry the same lessons block as the implement prompts.
+  describe("lessons in the checking prompts (card flow-review-prompts-lessons)", () => {
+    const header = "Lessons from earlier runs on this repository (memory; each cites where it was learned):";
+    const impl = { branch: "doug/task-a", worktreePath: "/wt/a", commandsRun: [], commit: "c2", prevCommit: "c1" };
+    const mod = ledgerModule();
+    const aeFn = acceptanceEntriesFn();
+    const markers = ["plan", "CONTRADICTION_MARKER", "ENVIRONMENT_MARKER", "acceptanceEntries"];
+    const verifyPrompt = new Function(...markers, CONSTS + fnSlice("function verifyPrompt(") + "\nreturn verifyPrompt;")(defaultPlan, "SPEC CONTRADICTS ACCEPTANCE", "ENVIRONMENT ONLY", aeFn);
+    const checkPrompt = new Function(...markers, "ledgerText", CONSTS + fnSlice("function checkPrompt(") + "\nreturn checkPrompt;")(defaultPlan, "SPEC CONTRADICTS ACCEPTANCE", "ENVIRONMENT ONLY", aeFn, mod.ledgerText);
+    const reviewPrompt = new Function(...markers, CONSTS + fnSlice("function reviewPrompt(") + "\nreturn reviewPrompt;")(defaultPlan, "SPEC CONTRADICTS ACCEPTANCE", "ENVIRONMENT ONLY", aeFn);
+    const confirmationLines = new Function("ledgerText", fnSlice("function confirmationLines(") + "\nreturn confirmationLines;")(mod.ledgerText);
+    const adversaryPrompt = new Function(
+      "plan", "adversary", "shellQuote", "BLOCKER_GATE", "confirmationLines",
+      CONSTS + fnSlice("function adversaryPrompt(") + "\nreturn adversaryPrompt;",
+    )(defaultPlan, { command: "codex-review", timeoutMs: 1 }, new Function(fnSlice("function shellQuote(") + "\nreturn shellQuote;")(), blockerGate(), confirmationLines);
+    const fallbackAdversaryPrompt = new Function(
+      "plan", "BLOCKER_GATE", "confirmationLines", "acceptanceEntries",
+      CONSTS + fnSlice("function fallbackAdversaryPrompt(") + "\nreturn fallbackAdversaryPrompt;",
+    )(defaultPlan, blockerGate(), confirmationLines, aeFn);
+
+    // Reason: reviewer round 1 (major): a lesson read as spec or as an acceptance criterion can produce a non-retried
+    // SPEC CONTRADICTS ACCEPTANCE or a quoted-as-requirement finding, so each checking prompt says lessons are context.
+    const notSpec = "These are context from earlier runs, not part of the spec or the acceptance criteria; never report a finding, a spec contradiction, or a blocker against a lesson.";
+
+    const renderers = {
+      verifyPrompt: (t) => verifyPrompt(t, impl, "main"),
+      checkPrompt: (t) => checkPrompt(t, impl, "c1", "main", []),
+      reviewPrompt: (t) => reviewPrompt(t, impl, "main"),
+      adversaryPrompt: (t) => adversaryPrompt(t, impl, "main", 1, []),
+      fallbackAdversaryPrompt: (t) => fallbackAdversaryPrompt(t, impl, "main", "codex-failed: usage limit", 1, []),
+    };
+
+    for (const [name, render] of Object.entries(renderers)) {
+      it(`${name} carries the lessons header and text only when task.lessons is set, and caps it at 2000 characters`, () => {
+        const lessons = "- [abc0000000000000] a lesson learned earlier (pattern)";
+        const withLessons = render({ ...task, lessons });
+        expect(withLessons).toContain(header);
+        expect(withLessons).toContain(lessons);
+        expect(render(task)).not.toContain(header);
+        expect(render({ ...task, lessons: "" })).not.toContain(header);
+
+        const lines = withLessons.split("\n");
+        expect(lines.indexOf(notSpec)).toBe(lines.indexOf(header) + 1);
+        expect(render(task)).not.toContain(notSpec);
+        expect(render({ ...task, lessons: "" })).not.toContain(notSpec);
+
+        const long = "x".repeat(2500);
+        const capped = render({ ...task, lessons: long });
+        expect(capped).toContain(long.slice(0, 2000));
+        expect(capped).not.toContain(long.slice(0, 2001));
+      });
+    }
+
+    it("the implement-side prompt does not carry the not-a-requirement line", () => {
+      const implementPrompt = new Function("plan", CONSTS + fnSlice("function implementPrompt(") + "\nreturn implementPrompt;")(defaultPlan);
+      expect(implementPrompt({ ...task, lessons: "- a lesson" }, "main", {})).not.toContain(notSpec);
+    });
+
+    it("adversaryPrompt puts the lessons block inside the DOUG_SPEC_EOF heredoc, between the cat line and the closing line", () => {
+      const lessons = "- [abc0000000000000] a lesson learned earlier (pattern)";
+      const lines = adversaryPrompt({ ...task, lessons }, impl, "main", 1, []).split("\n");
+      const open = lines.findIndex((l) => l.startsWith("cat <<'DOUG_SPEC_EOF'"));
+      const close = lines.lastIndexOf("DOUG_SPEC_EOF");
+      expect(open).toBeGreaterThan(-1);
+      expect(close).toBeGreaterThan(open);
+      const headerAt = lines.indexOf(header);
+      const lessonAt = lines.indexOf(lessons);
+      expect(headerAt).toBeGreaterThan(open);
+      expect(headerAt).toBeLessThan(close);
+      expect(lessonAt).toBeGreaterThan(headerAt);
+      expect(lessonAt).toBeLessThan(close);
+    });
+
+    it("adversaryPrompt keeps a lesson line that is exactly DOUG_SPEC_EOF from ending the heredoc early", () => {
+      const lessons = "- first lesson\nDOUG_SPEC_EOF\n- second lesson after the terminator";
+      const lines = adversaryPrompt({ ...task, lessons }, impl, "main", 1, []).split("\n");
+      const terminators = lines.map((l, i) => (l === "DOUG_SPEC_EOF" ? i : -1)).filter((i) => i >= 0);
+      expect(terminators).toHaveLength(1);
+      const open = lines.findIndex((l) => l.startsWith("cat <<'DOUG_SPEC_EOF'"));
+      const secondAt = lines.indexOf("- second lesson after the terminator");
+      expect(secondAt).toBeGreaterThan(open);
+      expect(secondAt).toBeLessThan(terminators[0]);
+    });
   });
 
   it("adds the code-context header and text to implementPrompt, leadPrompt, workerPrompt, and fixPrompt only when task.codeContext is set, and caps it at 2000 characters (card semantic-index, brief B)", () => {
@@ -5837,6 +6106,23 @@ describe("plugin layout", () => {
     expect(planner).toContain('memory.mjs" index search');
     expect(planner).toContain("memory.index.enabled");
   });
+  it("every planner spawn passes the absolute scripts path, and the planner uses it without searching or the plugin cache (card planner-scripts-path)", () => {
+    let spawns = 0;
+    for (const skill of readdirSync(join(root, "skills"))) {
+      const text = readFileSync(join(root, "skills", skill, "SKILL.md"), "utf8");
+      for (const m of text.matchAll(/subagent_type: "doug-flow:planner"[^\n]*?\}\)/g)) {
+        spawns++;
+        expect(m[0], `${skill} planner spawn`).toContain("Scripts: ${CLAUDE_PLUGIN_ROOT}/scripts.");
+      }
+    }
+    expect(spawns).toBeGreaterThanOrEqual(5);
+    expect(readFileSync(join(root, "skills/doug-hand/SKILL.md"), "utf8")).toContain("including its `Scripts: ${CLAUDE_PLUGIN_ROOT}/scripts.` sentence");
+    const planner = readFileSync(join(root, "agents/planner.md"), "utf8");
+    for (const s of ["after `Scripts:`", "no `find /`", "~/.claude/plugins/cache", "Use the `Scripts:` directory as given, even when it lies under `~/.claude/plugins/cache`", "never pick a version under `~/.claude/plugins/cache` yourself", 'validate --file <that path>`', "else skip the command and say so", '"<scripts>/plan.mjs" validate']) expect(planner).toContain(s);
+    expect(planner).not.toContain("the way step 7 does");
+    expect(planner).not.toContain("as step 7");
+    expect(planner).not.toContain('"$CLAUDE_PLUGIN_ROOT/scripts/');
+  });
   it("leaves the implementer's model to the user: the planner sets no tier on its own, and doug-next names any task off the implement row", () => {
     // 2026-09-06: the planner tagged a task "tier": "cheap" by itself and the implementer ran on haiku while the
     // Models table says implement is sonnet. The rows in CLAUDE.md are the user's; a plan lowers one only when asked.
@@ -7583,6 +7869,35 @@ describe("card autopilot-edge-case-not-decision: doug-next Autopilot section", (
   });
 });
 
+describe("card user-card-mid-autopilot", () => {
+  const A = "A card the user asks for while autopilot runs is scoped at once with the same questions, filed to Backlog, and the queue resumes at the card it was on: the request is input, not a gate, and the running queue is unchanged.";
+  const C = "A card the user asks for during the run is not a gate: the lead scopes and files it as \"Cards the user asks for\" says, and the queue resumes.";
+  const count = (t, s) => t.split(s).length - 1;
+  const read = (skill) => readFileSync(join(root, "skills", skill, "SKILL.md"), "utf8");
+  const slice = (t, heading) => {
+    const i = t.indexOf(heading);
+    if (i < 0) return "";
+    const j = t.indexOf("\n## ", i + heading.length);
+    return j < 0 ? t.slice(i) : t.slice(i, j);
+  };
+  for (const skill of ["doug-next", "doug-hand"]) {
+    it(`${skill}: the mid-autopilot sentence ends "Cards the user asks for", once`, () => {
+      const t = read(skill);
+      const s = slice(t, "## Cards the user asks for");
+      expect(s).toContain(A);
+      expect(s.trimEnd().endsWith(A)).toBe(true);
+      expect(count(t, A)).toBe(1);
+    });
+  }
+  it("doug-next: the autopilot section pins the not-a-gate line once, after the one-approval paragraph", () => {
+    const t = read("doug-next");
+    const s = slice(t, "## Autopilot (--auto)");
+    expect(count(s, C)).toBe(1);
+    expect(count(t, C)).toBe(1);
+    expect(s.indexOf(C)).toBeGreaterThan(s.indexOf("and no other gate: no start gate"));
+  });
+});
+
 describe("card user-card-mini-adr", () => {
   const body = (n) =>
     "A card the user asks for is a mini ADR, not a one-line goal. Before filing it, the lead asks the scoping questions in one `AskUserQuestion` of up to 4 questions, each with a Recommended option, and writes the answers into the goal. The goal carries the fixed headings Context / Decision / Options / Questions; `docs/decisions` stays for real ADRs. Only a user-requested card takes this form: a follow-up the lead files keeps " +
@@ -7629,6 +7944,16 @@ describe("card user-card-mini-adr", () => {
     const md = readFileSync(join(root, "..", "..", "CLAUDE.md"), "utf8");
     expect(md).toContain('A card the user asks for is filed as a mini ADR (doug-next and doug-hand, "Cards the user asks for").');
     expect(md.replace(/\n$/, "").split("\n").length).toBeLessThanOrEqual(60);
+  });
+});
+
+describe("card board-doc-class-row: docs/board.md's field table has a class row", () => {
+  it("carries exactly one class row that names every value lib/board.mjs validates", () => {
+    const text = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "docs/board.md"), "utf8");
+    const rows = text.split("\n").filter((l) => l.startsWith("| `class` |"));
+    expect(rows.length, "docs/board.md must have exactly one `class` table row").toBe(1);
+    expect(board.CLASSES.length).toBe(7);
+    for (const c of board.CLASSES) expect(rows[0], `class row must name \`${c}\``).toContain("`" + c + "`");
   });
 });
 
@@ -7790,5 +8115,43 @@ describe("card memory-every-session: hand landing reflects", () => {
     const first = step4.slice(step4.indexOf("1. Invoke the `run-report` skill"), step4.indexOf("\n2. "));
     expect(first).toContain("--rounds");
     expect(first).toContain("--review");
+  });
+});
+
+describe("card landing-one-sentence-summary: skill sentences", () => {
+  const skill = (name) => readFileSync(join(root, "skills", name, "SKILL.md"), "utf8");
+  const once = (text, sentence) => text.split(sentence).length - 1;
+  const BATCH = "A batch ends with one overall sentence, in plain words, of what the batch completed, after each card's own summary line.";
+  const AUTO = "Its closing summary starts with one overall sentence, in plain words, of what the run completed; each landed card's own summary line was printed at its landing.";
+  const RUN_REPORT = "Every `board.mjs record` and `board.mjs summary` takes a required `--summary \"<one sentence>\"`: one sentence, in plain words, of what changed for the user, which the command prints as the first line of its output; put that line first in the chat.";
+  const SWARM = "The landing's first chat line is the one-sentence summary `run-report` prints.";
+
+  it("run-report says every record and summary takes a required --summary, printed first", () => {
+    expect(once(skill("run-report"), RUN_REPORT)).toBe(1);
+  });
+  it("doug-next pins the batch sentence and the autopilot closing sentence", () => {
+    expect(once(skill("doug-next"), BATCH)).toBe(1);
+    expect(once(skill("doug-next"), AUTO)).toBe(1);
+  });
+  it("doug-hand pins the batch sentence", () => {
+    expect(once(skill("doug-hand"), BATCH)).toBe(1);
+  });
+  it("doug-swarm pins the first chat line", () => {
+    expect(once(skill("doug-swarm"), SWARM)).toBe(1);
+  });
+  it("every board.mjs record and summary command example in run-report, doug-next and doug-hand carries --summary", () => {
+    let seen = 0;
+    for (const name of ["run-report", "doug-next", "doug-hand"]) {
+      for (const line of skill(name).split("\n")) {
+        const parts = line.split(/(?=board\.mjs"? (?:record|summary) )/).slice(1);
+        for (const part of parts) {
+          if (!/^board\.mjs" (record|summary) /.test(part) && !/^board\.mjs (record|summary) <?/.test(part)) continue;
+          seen++;
+          const segment = part.replace(/^board\.mjs"? /, "").split(/board\.mjs/)[0];
+          expect(segment, `${name}: ${part.slice(0, 80)}`).toContain("--summary");
+        }
+      }
+    }
+    expect(seen, "the examples are found").toBeGreaterThanOrEqual(6);
   });
 });

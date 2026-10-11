@@ -42,7 +42,8 @@ export function crewOf(plan, task) {
 // feature, never more than eight. The validator warns; it does not refuse, since the planner may have a reason.
 export const FEATURE_TASKS = 5;
 export const TASK_CAP = 8;
-export const DEFAULT_BUDGET = { agents: 12, tokens: 400000, wallMinutes: 40 };
+// agents 26 is the minimum that lets the default fixAttempts 5 run with one adversary seat when Codex is down and the Claude fallback runs on every pass (card flow-budget-after-parallel-adversary); a supervisor seat or a fix retry is not covered.
+export const DEFAULT_BUDGET = { agents: 26, tokens: 400000, wallMinutes: 40 };
 
 export function loadPlan(dir, relpath = PLAN_RELPATH) {
   const file = join(dir, relpath);

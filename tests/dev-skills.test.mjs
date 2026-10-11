@@ -63,7 +63,7 @@ describe("the local harness-fix skill (.claude/skills/harness-fix)", () => {
     const fix = readFileSync(FIX_PATH, "utf8");
     // harness-fix is the procedure itself: the model may invoke it, and it names a test file for every module.
     expect(parseFrontmatter(fix)["disable-model-invocation"]).toBeUndefined();
-    for (const t of ["template.test.mjs", "board.test.mjs", "plan.test.mjs", "replan.test.mjs", "land.test.mjs", "hooks-pretool.test.mjs", "hooks-stop-gate.test.mjs", "hooks-stop-gate-runner.test.mjs", "hooks-stop-gate-subagents.test.mjs", "hooks-session.test.mjs", "hooks-stop-gate-records.test.mjs", "proposal.test.ts", "contract.test.ts"]) expect(fix).toContain(t);
+    for (const t of ["template.test.mjs", "board.test.mjs", "plan.test.mjs", "replan.test.mjs", "land.test.mjs", "hooks-pretool.test.mjs", "hooks-stop-gate.test.mjs", "hooks-stop-gate-runner.test.mjs", "hooks-stop-gate-subagents.test.mjs", "hooks-session.test.mjs", "hooks-stop-gate-records.test.mjs", "hooks-stop-gate-ratchet.test.mjs", "hooks-stop-gate-skips.test.mjs", "git-hooks.test.mjs", "git-hooks-docs.test.mjs", "git-hooks-dist.test.mjs", "rehearse.test.mjs", "rehearse-auto.test.mjs", "proposal.test.ts", "contract.test.ts"]) expect(fix).toContain(t);
     for (const rule of [".doug/hooks/scripts", "scriptPath", "pnpm test:unit", "Never `pnpm test`", "flow-board.d.ts", "trailers"]) expect(fix).toContain(rule);
     // Every test file the skill names exists.
     for (const m of fix.matchAll(/`((?:plugins|packages|tests)\/[^`]+\.test\.(?:mjs|ts))`/g)) expect(existsSync(join(repo, m[1])), m[1]).toBe(true);

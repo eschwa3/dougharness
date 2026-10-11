@@ -45,7 +45,9 @@ function project({ config, transcripts = { "sess-a": transcriptText(120000) } } 
   }
   return { dir, claudeDir, slugDir, files };
 }
-const runCli = (args) => spawnSync(process.execPath, [script, ...args], { encoding: "utf8", env: { ...process.env, CLAUDE_PROJECT_DIR: "" } });
+// CLAUDE_CODE_SESSION_ID defaults to empty: inside Claude Code the real one is set, and would make every test read it.
+const runCli = (args, env = {}) =>
+  spawnSync(process.execPath, [script, ...args], { encoding: "utf8", env: { ...process.env, CLAUDE_PROJECT_DIR: "", CLAUDE_CODE_SESSION_ID: "", ...env } });
 
 describe("lib/context.mjs: windowFor and contextReading are the gates' pair", () => {
   it("windowFor agrees with the gates' copy", () => {
@@ -171,5 +173,43 @@ describe("scripts/context.mjs", () => {
     expect(r.status).toBe(1);
     expect(r.stdout).toBe("");
     expect(r.stderr.trim()).not.toBe("");
+  });
+
+  // Card context-reads-reflect-transcript: a bare run after memory.mjs reflect read the reflect session's (newer) transcript.
+  describe("the default session is the lead's own (CLAUDE_CODE_SESSION_ID)", () => {
+    const leadAndReflect = () => {
+      const p = project({
+        transcripts: {
+          "sess-lead": usageLine(140000, "claude-opus-5") + "\n", // 14% of 1000000
+          "sess-reflect": usageLine(138000) + "\n", // 69% of 200000, haiku
+        },
+      });
+      utimesSync(p.files["sess-lead"], new Date("2026-01-01T00:00:00Z"), new Date("2026-01-01T00:00:00Z"));
+      utimesSync(p.files["sess-reflect"], new Date("2026-02-01T00:00:00Z"), new Date("2026-02-01T00:00:00Z"));
+      return p;
+    };
+    it("with the variable set and no --session, reads the lead's transcript, not the newer non-lead one", () => {
+      const p = leadAndReflect();
+      const r = runCli([p.dir, "--claude-dir", p.claudeDir], { CLAUDE_CODE_SESSION_ID: "sess-lead" });
+      expect(r.status, r.stderr).toBe(0);
+      expect(r.stdout).toBe("context: 14% (140000 of 1000000 tokens, claude-opus-5); threshold 60% (autopilot.contextThreshold) -> continue\n");
+    });
+    it("an explicit --session wins over the variable, for an id and for latest", () => {
+      const p = leadAndReflect();
+      const env = { CLAUDE_CODE_SESSION_ID: "sess-lead" };
+      expect(runCli([p.dir, "--session", "sess-reflect", "--claude-dir", p.claudeDir], env).stdout).toContain("context: 69% (138000 of 200000");
+      expect(runCli([p.dir, "--session", "latest", "--claude-dir", p.claudeDir], env).stdout).toContain("context: 69% (138000 of 200000");
+    });
+    it("with the variable empty and no --session, reads the newest transcript", () => {
+      const p = leadAndReflect();
+      expect(runCli([p.dir, "--claude-dir", p.claudeDir], { CLAUDE_CODE_SESSION_ID: "" }).stdout).toContain("context: 69% (138000 of 200000");
+    });
+    it("a variable naming a session with no transcript exits 1 naming it, never falling back to the newest", () => {
+      const p = leadAndReflect();
+      const r = runCli([p.dir, "--claude-dir", p.claudeDir], { CLAUDE_CODE_SESSION_ID: "sess-missing" });
+      expect(r.status).toBe(1);
+      expect(r.stdout).toBe("");
+      expect(r.stderr).toContain("sess-missing");
+    });
   });
 });

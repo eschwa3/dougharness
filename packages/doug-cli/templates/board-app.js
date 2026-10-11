@@ -339,7 +339,8 @@ function app() {
       });
       if (res.status === 200) {
         board = await res.json();
-        say("Saved to " + config.record + ".");
+        const warning = res.headers.get("x-doug-warning");
+        say("Saved to " + config.record + "." + (warning ? " " + warning : ""));
       } else {
         let message = "The move was rejected (" + res.status + ").";
         try { const body = await res.json(); if (body && body.error) message = body.error; } catch (_) {}

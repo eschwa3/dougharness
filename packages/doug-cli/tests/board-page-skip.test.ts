@@ -85,7 +85,7 @@ describe("board page serve skip", () => {
       expect(report.numFailedTests, describeFailures(report, status)).toBe(0);
       const serve = assertionsFor(report, "doug board serve");
       const build = assertionsFor(report, "doug board build");
-      expect(serve.length).toBe(18);
+      expect(serve.length).toBe(23);
       for (const a of serve) {
         expect(a.status).toBe("skipped");
         expect(a.fullName).toContain("EPERM");
@@ -107,7 +107,7 @@ describe("board page serve skip", () => {
       expect(report.numFailedTests, describeFailures(report, status)).toBe(0);
       expect(report.numPendingTests, describeFailures(report, status)).toBe(0);
       const serve = assertionsFor(report, "doug board serve");
-      expect(serve.length).toBe(18);
+      expect(serve.length).toBe(23);
       for (const a of serve) {
         expect(a.status).toBe("passed");
       }

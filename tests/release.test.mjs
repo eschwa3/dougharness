@@ -156,6 +156,167 @@ describe("release check mutations", () => {
     }
   });
 
+  const BIN_CASES = [
+    ["packages/doug-cli/package.json", "doug", "./dist/bin.js"],
+    ["packages/doug-codex/package.json", "codex-review", "./dist/bin.js"],
+    ["packages/doug-cli/package.json", "doug", "dist\\bin.js"],
+    ["packages/doug-codex/package.json", "codex-review", "dist\\bin.js"],
+  ];
+  for (const [manifest, name, value] of BIN_CASES) {
+    it(`flags ${manifest} bin.${name} = ${JSON.stringify(value)} as not npm-normalised`, () => {
+      const root = makeFixtureRoot();
+      try {
+        const pkg = readJson(root, manifest);
+        pkg.bin = { [name]: value };
+        writeJson(root, manifest, pkg);
+
+        const problems = checkRelease(root).filter(
+          (p) => p.includes(manifest) && p.includes(`bin.${name}`),
+        );
+        expect(problems.length).toBeGreaterThan(0);
+        expect(problems.some((p) => p.includes("dist/bin.js"))).toBe(true);
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    });
+  }
+
+  it("flags a string-form bin that npm would normalise", () => {
+    const root = makeFixtureRoot();
+    try {
+      const manifest = "packages/doug-cli/package.json";
+      const pkg = readJson(root, manifest);
+      pkg.bin = "./dist/bin.js";
+      writeJson(root, manifest, pkg);
+
+      const problems = checkRelease(root).filter((p) => p.includes(manifest) && /\bbin\b/.test(p));
+      expect(problems.length).toBeGreaterThan(0);
+      expect(problems.some((p) => p.includes("dist/bin.js"))).toBe(true);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  // Whole bin step (npm 10.9.8 `npm pkg fix`, confirmed per form in a scratch dir): each form
+  // below is changed or removed by npm, so release:check must flag it. Keys/forms, not just values.
+  const BIN_MANIFEST = "packages/doug-cli/package.json";
+  function binProblems(bin, { omit = false } = {}) {
+    const root = makeFixtureRoot();
+    try {
+      const pkg = readJson(root, BIN_MANIFEST);
+      if (omit) delete pkg.bin;
+      else pkg.bin = bin;
+      writeJson(root, BIN_MANIFEST, pkg);
+      return checkRelease(root).filter((p) => p.includes(BIN_MANIFEST));
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }
+
+  // M1: npm rewrites {"pkg": "dist/bin.js"} (renames the command to the package name), even
+  // though the path itself is already clean.
+  it("flags a string-form bin even when its path is already clean", () => {
+    const problems = binProblems("dist/bin.js");
+    expect(problems.length).toBeGreaterThan(0);
+    expect(problems.some((p) => p.includes('"bin"') && /object/i.test(p))).toBe(true);
+  });
+
+  // M2: npm converts an array to {basename: path}.
+  it("flags an array-form bin", () => {
+    const problems = binProblems(["dist/bin.js"]);
+    expect(problems.length).toBeGreaterThan(0);
+    expect(problems.some((p) => p.includes('"bin"') && /array/i.test(p))).toBe(true);
+  });
+
+  // M3: npm deletes an empty bin object.
+  it("flags an empty bin object", () => {
+    const problems = binProblems({});
+    expect(problems.length).toBeGreaterThan(0);
+    expect(problems.some((p) => p.includes('"bin"') && /empty/i.test(p))).toBe(true);
+  });
+
+  // M4: npm deletes an entry whose value is "" (here the key is clean and the value is "").
+  it("flags a bin entry with an empty value", () => {
+    const problems = binProblems({ doug: "" });
+    expect(problems.length).toBeGreaterThan(0);
+    expect(problems.some((p) => p.includes('"bin.doug"') && /empty/i.test(p))).toBe(true);
+  });
+
+  // M5: npm renames 'a/doug' to 'doug' (basename of the key); the value is clean.
+  it("flags a bin key containing a slash", () => {
+    const problems = binProblems({ "a/doug": "dist/bin.js" });
+    expect(problems.length).toBeGreaterThan(0);
+    expect(problems.some((p) => p.includes("bin.a/doug") && p.includes('"doug"'))).toBe(true);
+  });
+
+  it("flags a bin key whose basename is empty", () => {
+    const problems = binProblems({ "": "dist/bin.js" });
+    expect(problems.length).toBeGreaterThan(0);
+    expect(problems.some((p) => p.includes('"bin."'))).toBe(true);
+  });
+
+  // M6: a value that secures to "./..." becomes "" in npm; "./" itself is not "" until that clause.
+  for (const value of ["./", "."]) {
+    it(`flags bin.doug = ${JSON.stringify(value)} (npm removes the entry)`, () => {
+      const problems = binProblems({ doug: value });
+      expect(problems.length).toBeGreaterThan(0);
+      expect(problems.some((p) => p.includes('"bin.doug"') && /empty/i.test(p))).toBe(true);
+    });
+  }
+
+  // M7: the inner rooted join strips "..": npm turns "../x" into "x".
+  it("flags bin.doug = \"../x\" (npm cleans it to \"x\")", () => {
+    const problems = binProblems({ doug: "../x" });
+    expect(problems.some((p) => p.includes('"bin.doug"') && p.includes('"x"'))).toBe(true);
+  });
+
+  // M8: npm deletes an entry with a non-string value.
+  it("flags a non-string bin value and names the field", () => {
+    const problems = binProblems({ doug: 5 });
+    expect(problems.some((p) => p.includes('"bin.doug"') && p.includes("must be a string"))).toBe(
+      true,
+    );
+  });
+
+  // M9: npm ignores bin: null, so it is no problem. (An absent bin is none either.)
+  it("reports no bin problem when bin is null", () => {
+    expect(binProblems(null)).toEqual([]);
+  });
+
+  it("reports no bin problem when bin is absent", () => {
+    expect(binProblems(undefined, { omit: true })).toEqual([]);
+  });
+
+  // M10: a falsy non-null bin is skipped by npm but is not a usable bin; flag it.
+  for (const bin of ["", false, 0]) {
+    it(`flags the falsy bin ${JSON.stringify(bin)} as empty or invalid`, () => {
+      const problems = binProblems(bin);
+      expect(problems.some((p) => p.includes('"bin"') && /empty|invalid/i.test(p))).toBe(true);
+    });
+  }
+
+  it("flags a truthy non-string, non-object bin", () => {
+    const problems = binProblems(5);
+    expect(problems.some((p) => p.includes('"bin"'))).toBe(true);
+  });
+
+  it("reports no bin problem when both packages use dist/bin.js", () => {
+    const root = makeFixtureRoot();
+    try {
+      for (const [manifest, name] of [
+        ["packages/doug-cli/package.json", "doug"],
+        ["packages/doug-codex/package.json", "codex-review"],
+      ]) {
+        const pkg = readJson(root, manifest);
+        pkg.bin = { [name]: "dist/bin.js" };
+        writeJson(root, manifest, pkg);
+      }
+      expect(checkRelease(root)).toEqual([]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it("returns [] for the unmutated fixture copy", () => {
     const root = makeFixtureRoot();
     try {
@@ -340,6 +501,31 @@ describe.skipIf(skipStage)(`release stage and npm pack${skipReason ? ` (skipped:
       });
       expect(runResult.status).toBe(0);
       expect(runResult.stdout).toContain("codex-review");
+    },
+    120000,
+  );
+  it(
+    "npm pkg fix leaves each staged package.json unchanged (publish prints no correction)",
+    () => {
+      expect(stageResult.ok).toBe(true);
+      const env = {
+        ...process.env,
+        npm_config_cache: npmCache,
+        npm_config_update_notifier: "false",
+      };
+      for (const name of ["cli", "codex"]) {
+        const dir = mkdtempSync(join(tmpRoot, `pkgfix-${name}-`));
+        cpSync(join(outDir, name, "package.json"), join(dir, "package.json"));
+        const before = JSON.parse(readFileSync(join(dir, "package.json"), "utf8"));
+        const result = spawnSync("npm", ["pkg", "fix", "--offline"], {
+          cwd: dir,
+          encoding: "utf8",
+          env,
+        });
+        expect(result.status).toBe(0);
+        const after = JSON.parse(readFileSync(join(dir, "package.json"), "utf8"));
+        expect(after).toEqual(before);
+      }
     },
     120000,
   );

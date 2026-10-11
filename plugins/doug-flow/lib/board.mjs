@@ -777,9 +777,24 @@ export function runEntry({ card, report, cost = null, codexCost = null, wallCloc
   return lines.join("\n") + "\n";
 }
 
+// A hand landing's wall judged against the card's p80 budget (card hand-wall-flag). `over` is true only when the wall
+// reads as whole minutes and exceeds the budget; `text` is the Wall budget row's value. Per-seat times are not
+// recorded on the hand track, so the verdict always says so.
+export function handWallVerdict(card, wallClock, table = WALL_BUDGET_MIN) {
+  const m = /^(\d+) min\b/.exec(typeof wallClock === "string" ? wallClock : "");
+  if (!m) return { over: false, text: "not checked (wall not in whole minutes)" };
+  const n = Number(m[1]);
+  const budget = cardBudgetMinutes(card, table);
+  const size = card && (card.size === "S" || card.size === "M" || card.size === "L") ? card.size : "M";
+  const cls = card && card.class;
+  const cell = typeof cls === "string" && Object.prototype.hasOwnProperty.call(table[size], cls) && cls !== "all" ? cls : "all";
+  const over = n > budget;
+  return { over, text: `${over ? "over" : "within"}: ${n} min vs ${budget} min (${size}/${cell}, p80); per-seat times unverified` };
+}
+
 // The live-runs entry for a hand-track card (decision 0005): no workflow report and no levels, so it records what
 // doug-hand can measure: the landing commit, the wall clock, and the gate result, plus an optional note.
-export function handEntry({ card, commit = null, wallClock = null, gate = null, note = null, record = null, date = new Date().toISOString().slice(0, 10), rehearsal = null }) {
+export function handEntry({ card, commit = null, wallClock = null, gate = null, note = null, record = null, date = new Date().toISOString().slice(0, 10), rehearsal = null, table = WALL_BUDGET_MIN }) {
   const lines = [];
   lines.push(`## ${date}, ${card.id}: ${card.title}`);
   lines.push("");
@@ -795,6 +810,7 @@ export function handEntry({ card, commit = null, wallClock = null, gate = null, 
   const shownCommit = rehearsal && commit ? String(commit).slice(0, 7) : commit;
   lines.push(`| Commit | ${shownCommit ? `\`${shownCommit}\`` : "none"} |`);
   lines.push(`| Wall clock | ${wallClock === null ? "not measured" : wallClock} |`);
+  if (!rehearsal) lines.push(`| Wall budget | ${handWallVerdict(card, wallClock, table).text} |`);
   lines.push(`| Gate | ${gate === null ? "not recorded" : gate} |`);
   lines.push("");
   if (note) {

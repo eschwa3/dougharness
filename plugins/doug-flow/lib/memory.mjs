@@ -18,7 +18,7 @@ import { homedir } from "node:os";
 import { request as httpRequest } from "node:http";
 import { request as httpsRequest } from "node:https";
 import { classifyBlocks, adversaryBlocks } from "./board.mjs";
-import { transcriptUsage, priceUsage, projectSlug, CODEX_PRICES, CODEX_DEFAULT_MODEL } from "./cost.mjs";
+import { transcriptUsage, projectSlug, CODEX_PRICES, CODEX_DEFAULT_MODEL } from "./cost.mjs";
 import { MODELS_HEADING } from "./models.mjs";
 
 let DatabaseSync;
@@ -958,18 +958,20 @@ export async function recallLessons(m, query, opts = {}) {
   // stale and drops it, backfilling from the next candidate so k are returned when enough candidates exist,
   // and a pass sets confirmed. Without one (checked: false), candidates are taken as-is — nothing is marked
   // stale or confirmed, since there is nothing trustworthy to check them against.
+  // Every lessons column except the blob, derived from the live schema so a later column cannot drop out.
+  const loadCols = m
+    .prepare("PRAGMA table_info(lessons)")
+    .all()
+    .map((c) => c.name)
+    .filter((n) => n !== "embedding")
+    .join(", ");
+  const loadById = m.prepare(`SELECT ${loadCols}, embedding IS NOT NULL AS has_vec FROM lessons WHERE id = ?`);
   const result = [];
   let idx = 0;
   while (result.length < k && idx < candidates.length) {
     const cand = candidates[idx++];
     // Every column except the blob (and the model/dims toRecallLesson strips anyway); hasVector comes from has_vec.
-    const { has_vec, ...full } = m
-      .prepare(
-        `SELECT id, text, kind, scope, citation, source_agent, source_model, task, card, commit_sha, created, confirmed,
-                helpful, harmful, superseded_by, embedding_model, embedding_dims, stale, embedding IS NOT NULL AS has_vec
-         FROM lessons WHERE id = ?`
-      )
-      .get(cand.lesson.id);
+    const { has_vec, ...full } = loadById.get(cand.lesson.id);
     cand.lesson = lessonRowToObject({ ...full, embedding: has_vec ? true : null });
     if (!checked) {
       result.push(toRecallLesson(cand.lesson, { score: cand.score, sides: cand.sides }));
@@ -1502,14 +1504,25 @@ function reflectionRowToObject(row) {
   };
 }
 
-// Deterministic, no LLM: for each task whose memoryUsed is non-empty, a real block bumps harmful on every used
-// lesson that exists (real wins even when the task also verified), else a first-verified task bumps helpful;
-// neither verified nor real does nothing. An id naming no lesson is reported in `unknown`, never an error.
-// apply:false (a dry run's preview) computes the same result without writing anything.
-function computeReflectCounters(m, blocks, report, { apply }) {
+// Deterministic, no LLM. harmful is an explicit mark (card reflect-harmful-irrelevant-lessons): only an id in
+// `harmfulIds` (the lead's judgement that the lesson misled the work) gets harmful +1, once however often it is
+// named or used; a real block alone bumps nothing. For each task whose memoryUsed is non-empty, a real block earns
+// no helpful (real wins even when the task also verified), else a first-verified task bumps helpful on every used
+// lesson not named harmful; neither verified nor real does nothing. An id naming no lesson is reported in
+// `unknown`, never an error. apply:false (a dry run's preview) computes the same result without writing anything.
+function computeReflectCounters(m, blocks, report, { apply, harmfulIds = [] }) {
   const helpful = [];
   const harmful = [];
   const unknown = [];
+  const named = new Set(harmfulIds);
+  for (const id of named) {
+    if (getLesson(m, id)) {
+      if (apply) m.prepare("UPDATE lessons SET harmful = harmful + 1 WHERE id = ?").run(id);
+      harmful.push(id);
+    } else {
+      unknown.push(id);
+    }
+  }
   for (const level of report.levels || []) {
     for (const task of level.tasks || []) {
       const used = Array.isArray(task.memoryUsed) ? task.memoryUsed : [];
@@ -1517,15 +1530,11 @@ function computeReflectCounters(m, blocks, report, { apply }) {
       const real = blocks.some((b) => b.task === task.id && b.class === "real");
       if (real) {
         for (const id of used) {
-          if (getLesson(m, id)) {
-            if (apply) m.prepare("UPDATE lessons SET harmful = harmful + 1 WHERE id = ?").run(id);
-            harmful.push(id);
-          } else {
-            unknown.push(id);
-          }
+          if (!getLesson(m, id) && !named.has(id)) unknown.push(id);
         }
       } else if (task.verified === true) {
         for (const id of used) {
+          if (named.has(id)) continue;
           if (getLesson(m, id)) {
             if (apply) m.prepare("UPDATE lessons SET helpful = helpful + 1 WHERE id = ?").run(id);
             helpful.push(id);
@@ -1756,7 +1765,7 @@ function computeReflectCost({ dir, claudeDir, sessionId, totalCostUsd }) {
     if (existsSync(file)) {
       try {
         const t = transcriptUsage(file);
-        const usd = t.model ? priceUsage(t.usage, t.model) : null;
+        const usd = t.usd;
         if (usd !== null) return { usd, usdSource: "transcript" };
       } catch {
         // fall through to the envelope's own number
@@ -1785,6 +1794,7 @@ export async function runReflect(m, report, opts = {}) {
     model = null,
     claudeDir,
     dryRun = false,
+    harmful = [],
     propose,
     now = nowIso(),
   } = opts;
@@ -1798,13 +1808,30 @@ export async function runReflect(m, report, opts = {}) {
   // happen before any write, so it is the very first thing after the idempotency check.
   const blocks = classifyBlocks(report, classes);
 
+  // A harmful id must be one a task recalled; refused before any write, naming it and the recalled ids.
+  const harmfulIds = [...new Set(harmful)];
+  if (harmfulIds.length) {
+    const recalled = new Set();
+    for (const level of report.levels || []) {
+      for (const task of level.tasks || []) {
+        if (Array.isArray(task.memoryUsed)) for (const id of task.memoryUsed) recalled.add(id);
+      }
+    }
+    const outside = harmfulIds.filter((id) => !recalled.has(id));
+    if (outside.length) {
+      throw new Error(
+        `--harmful id(s) not in any task's memoryUsed: ${outside.join(", ")}. memoryUsed ids: ${recalled.size ? [...recalled].join(", ") : "(none)"}.`
+      );
+    }
+  }
+
   let counters;
   if (dryRun) {
-    counters = computeReflectCounters(m, blocks, report, { apply: false });
+    counters = computeReflectCounters(m, blocks, report, { apply: false, harmfulIds });
   } else {
     m.exec("BEGIN");
     try {
-      counters = computeReflectCounters(m, blocks, report, { apply: true });
+      counters = computeReflectCounters(m, blocks, report, { apply: true, harmfulIds });
       m.prepare(
         `INSERT INTO reflections (report_hash, recorded, run, card, commit_sha, model, counters, proposed, appended, bumped, rejected, usd, usd_source, session_id)
          VALUES (?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, NULL, NULL, NULL)`
