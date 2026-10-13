@@ -33,6 +33,10 @@ Codex adversary's own cost, priced separately from Claude's `usd` and never fold
 and on a flow row whenever no usage was present, the price is unknown, or a level adversary's cost is shared by
 more than one task (never split, never double-counted).
 
+Schema v9 (card `memory-stop-class`) adds one more column, the same additive shape: `stop_class TEXT`, the typed
+cause of a task's stop (`task.stopClass` in the report, recorded as given, never validated), so stops can be
+counted by cause across runs; null for a report without it, for a hand row, and for every row from before v9.
+
 On the flow track these seven columns are always null today: a flow row is never stamped by `condition
 open`/`record --hand` — wiring that in is a later card (`core-next-hand-report`). `recordOutcomes`'s upsert
 treats the seven columns as one atomic stamp, keyed on whether the *new* row carries a `harness_commit`: when it
@@ -521,6 +525,18 @@ without calling the server when the env var is unset. Keys live only in the envi
 - `openai`: `https://api.openai.com`, key from `OPENAI_API_KEY`.
 - `voyage`: `https://api.voyageai.com`, key from `VOYAGE_API_KEY`.
 - `custom`: no defaults; `provider` and `baseUrl` must be given.
+
+**The `local` preset (bundled model).** `{ "preset": "local" }` alone is the whole config: embeddinggemma q8
+(`onnx-community/embeddinggemma-300m-ONNX`) run in-process at 512 dims (Matryoshka truncation, then
+re-normalization), CPU only. `doug memory setup` offers it only when no embedding server is reachable, on a TTY
+and without `--yes`, as a second yes after the Ollama pointer; a running server is always preferred, and no
+TTY or `--yes` stays keyword-only. The offer names about 470 MB of runtime plus 310 MB of weights and the Gemma
+Terms of Use (https://ai.google.dev/gemma/terms). On yes it installs `@huggingface/transformers` into
+`<cache>/runtime` with the npm CLI (`ONNXRUNTIME_NODE_INSTALL=skip`, so no CUDA download on any platform) and
+downloads the model into `<cache>/models`. The cache is `$DOUG_CACHE_DIR` when set, else `$XDG_CACHE_HOME/doug`,
+else `~/.cache/doug`. The runtime is loaded by dynamic import from there and is never a dependency of Doug's
+packages. After the download, recall runs offline (`allowRemoteModels` false). Setup re-embeds existing lessons
+on the switch; `memory.mjs doctor` reports the cache path, the model file, the dims, and makes a test embed.
 
 **Dimensions rejected.** For an openai-compatible server that is sent `dimensions`: a 400 whose body
 mentions `dimensions` is retried once without it, the vector is truncated and re-normalized to `dims`, and the

@@ -7,6 +7,12 @@ import { makeProject, runHookScript } from "./helpers.mjs";
 // loadState/saveState (the module's own default shape), never a guessed JSON literal.
 import { loadState, saveState } from "../lib/state.mjs";
 import { baseConfig } from "./hooks-fixtures.mjs";
+import { gateLockPath } from "../lib/gate-lock.mjs";
+// card gate-lock-shared: gate.lock lives under the git common dir; seed a holder's lock through the lib path.
+const putLock = (dir, content) => {
+  mkdirSync(dirname(gateLockPath(dir)), { recursive: true });
+  writeFileSync(gateLockPath(dir), content);
+};
 import { mkdtempSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { computeTree, readRecord as readTreeRecord, removeRecord as removeTreeRecord, writeRecord as writeTreeRecord } from "../lib/verified-tree.mjs";
@@ -217,9 +223,9 @@ describe("card stop-gate-read-only-subagent-skip", () => {
     // startup alone under load).
     const dir = makeEditedProject(makeRunsConfig({ stopGate: { commands: ["test:unit"], onlyIfEdited: true, maxBlocks: 3, timeoutMs: 15000, requireEvidence: false } }));
     mkdirSync(join(dir, ".doug/.state"), { recursive: true });
-    const lockPath = join(dir, ".doug/.state/gate.lock");
+    const lockPath = gateLockPath(dir);
     const lockContent = JSON.stringify({ pid: process.pid, session: "someone-else", at: Date.now() });
-    writeFileSync(lockPath, lockContent);
+    putLock(dir, lockContent);
     writeTrace(dir, [start("ag1", "researcher"), pre("ag1", "researcher", "Read"), post("ag1", "researcher", "Read", true)]);
     const started = Date.now();
     const r = runHookScript("stop-gate", { hook_event_name: "SubagentStop", agent_id: "ag1", agent_type: "researcher" }, { dir });
@@ -413,7 +419,7 @@ describe("card stop-gate-skips-orphan-subagent-stops", () => {
     expect(r.json, "orphan skip: a plain allow, no systemMessage or block").toBeNull();
     expect(runsCount(dir), "orphan skip: the verification commands must not run").toBe(0);
     expect(r.stderr, "orphan skip: one stderr line must name the orphan id").toContain("orphan-1");
-    expect(existsSync(join(dir, ".doug/.state/gate.lock")), "orphan skip: must never take gate.lock").toBe(false);
+    expect(existsSync(gateLockPath(dir)), "orphan skip: must never take gate.lock").toBe(false);
     const state = loadState(dir, "test-session");
     expect(state.verified == null, "orphan skip: must not touch state.verified").toBe(true);
     expect(state.deferrals, "orphan skip: must not saveState (R6's in-memory deferrals reset stays unpersisted)").toBe(3);
@@ -1038,7 +1044,7 @@ describe("card stop-gate-defers-while-subagent-in-flight", () => {
       // `at` so it is not stale by age): the 3rd Stop hits the cap, cannot take gate.lock, and waits out
       // stopGate.timeoutMs (1200ms here) before reloading state from disk and taking the lock over itself.
       mkdirSync(join(dir, ".doug/.state"), { recursive: true });
-      writeFileSync(join(dir, ".doug/.state/gate.lock"), JSON.stringify({ pid: process.pid, session: "other-session", at: Date.now() }));
+      putLock(dir, JSON.stringify({ pid: process.pid, session: "other-session", at: Date.now() }));
 
       const r3 = runHookScript("stop-gate", { hook_event_name: "Stop" }, { dir });
       expect(runsCount(dir), "the 3rd consecutive deferred Stop hits the cap, waits out the contended lock, and still runs the commands").toBe(1);
@@ -1524,7 +1530,7 @@ describe("card worktree-agent-gate", () => {
     // restores the verified state and releases the lock partway through, as a concurrent gate's green run would.
     writeFileSync(stateOf(dir), JSON.stringify({ ...JSON.parse(savedState), verified: undefined }));
     removeTreeRecord(wt); // nothing for credit to use: only the post-wait comparison can skip the commands
-    const lockPath = join(dir, ".doug/.state/gate.lock");
+    const lockPath = gateLockPath(dir);
     const holderScript = join(dir, ".doug/.state/holder-w14.mjs");
     writeFileSync(
       holderScript,
@@ -1537,7 +1543,7 @@ describe("card worktree-agent-gate", () => {
       ].join("\n"),
     );
     const holder = spawn(process.execPath, [holderScript], { cwd: dir, stdio: "ignore" });
-    writeFileSync(lockPath, JSON.stringify({ pid: holder.pid, session: "holder-session", at: Date.now() }));
+    putLock(dir, JSON.stringify({ pid: holder.pid, session: "holder-session", at: Date.now() }));
     try {
       agentEdits(dir, "agB", join(wt, "src/a.ts"));
       const started = Date.now();
@@ -1839,4 +1845,184 @@ describe("card worktree-agent-gate", () => {
     for (let i = 0; i < 20 && pids.some((p) => { try { process.kill(p, 0); return true; } catch { return false; } }); i++) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100);
     for (const p of pids) expect(() => process.kill(p, 0), `command process ${p} must not outlive the stop`).toThrow();
   }, 30000);
+});
+
+// card stop-gate-worktree-agent-fingerprint: the tree-unchanged skip must compare like with like. A worktree
+// agent's start record is a fingerprint of the main checkout (the trace hook runs there), its stop fingerprint is
+// of its own worktree, so the two never matched. For a worktree verification dir the agent counts as unchanged
+// only if its start record exists, the worktree HEAD equals the record's HEAD, and the worktree has no changed
+// files. A main-checkout agent keeps the old comparison. These fire the trace hook for real.
+describe("card stop-gate-worktree-agent-fingerprint", () => {
+  const agentType = "researcher";
+  const git = (cwd, ...args) => execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
+  const real = (p) => realpathSync(p);
+
+  // Main checkout dirty from this session's own edit (never in the worktree), one fresh worktree off HEAD.
+  function makeFixture() {
+    const markerDir = mkdtempSync(join(tmpdir(), "doug-wtfp-marker-"));
+    const marker = join(markerDir, "marker.log");
+    const cfg = {
+      ...baseConfig,
+      commands: { test: `${process.execPath} -e "require('fs').appendFileSync('${marker}', process.cwd()+'\\n')"` },
+      stopGate: { commands: ["test"], onlyIfEdited: true, maxBlocks: 3, timeoutMs: 10000, requireEvidence: false },
+      trace: { enabled: true },
+    };
+    const dir = makeProject({ config: cfg, git: true });
+    mkdirSync(join(dir, "src"));
+    writeFileSync(join(dir, "src/a.ts"), "base");
+    git(dir, "add", "-A");
+    git(dir, "commit", "-q", "-m", "base");
+    const wt = join(dir, ".claude/worktrees/wt1");
+    git(dir, "worktree", "add", "-q", wt, "-b", "wt1-branch");
+    writeFileSync(join(dir, "src/a.ts"), "main edited before the agent started");
+    runHookScript("edit-loop", { tool_name: "Edit", tool_input: { file_path: "src/a.ts" } }, { dir });
+    return { dir, wt, marker };
+  }
+
+  const ids = (id, type = agentType) => ({ agent_id: id, agent_type: type });
+  const fireStart = (dir, id, type) => runHookScript("trace", { hook_event_name: "SubagentStart", ...ids(id, type) }, { dir });
+  const fireBash = (dir, id, type) =>
+    runHookScript("trace", { hook_event_name: "PreToolUse", tool_name: "Bash", tool_input: { command: "pwd" }, tool_use_id: "tu1", ...ids(id, type) }, { dir });
+  const stopIn = (dir, id, cwd, extra = {}, type = agentType) =>
+    runHookScript("stop-gate", { hook_event_name: "SubagentStop", cwd, ...ids(id, type), ...extra }, { dir });
+  const cwdsRun = (marker) => (existsSync(marker) ? readFileSync(marker, "utf8").split("\n").filter(Boolean) : []);
+
+  it("WF1 a worktree agent that ran only read-only Bash in a fresh worktree skips verification while the main checkout is dirty", () => {
+    const { dir, wt, marker } = makeFixture();
+    fireStart(dir, "ag1");
+    fireBash(dir, "ag1");
+    const r = stopIn(dir, "ag1", wt);
+    expect(r.json, JSON.stringify(r.json)).toBeNull();
+    expect(cwdsRun(marker), "no verification command may run in any tree").toEqual([]);
+  });
+
+  it("WF2 a worktree agent that edited a file in its worktree via Bash is verified, in the worktree", () => {
+    const { dir, wt, marker } = makeFixture();
+    fireStart(dir, "ag1");
+    fireBash(dir, "ag1");
+    writeFileSync(join(wt, "src/a.ts"), "edited by the agent through the shell");
+    stopIn(dir, "ag1", wt);
+    expect(cwdsRun(marker).map(real)).toEqual([real(wt)]);
+  });
+
+  it("WF2b a worktree agent that created an untracked file in its worktree is verified", () => {
+    const { dir, wt, marker } = makeFixture();
+    fireStart(dir, "ag1");
+    fireBash(dir, "ag1");
+    writeFileSync(join(wt, "src/new.ts"), "created by the agent");
+    stopIn(dir, "ag1", wt);
+    expect(cwdsRun(marker).map(real)).toEqual([real(wt)]);
+  });
+
+  it("WF3 a worktree agent that committed its change in its worktree is verified, in the worktree", () => {
+    const { dir, wt, marker } = makeFixture();
+    fireStart(dir, "ag1");
+    fireBash(dir, "ag1");
+    writeFileSync(join(wt, "src/a.ts"), "committed by the agent");
+    git(wt, "add", "src/a.ts");
+    git(wt, "commit", "-q", "-m", "agent work");
+    stopIn(dir, "ag1", wt);
+    expect(cwdsRun(marker).map(real)).toEqual([real(wt)]);
+  });
+
+  it("WF3b a worktree agent that committed an empty commit (HEAD moved, tree clean) is verified", () => {
+    const { dir, wt, marker } = makeFixture();
+    fireStart(dir, "ag1");
+    fireBash(dir, "ag1");
+    git(wt, "commit", "-q", "--allow-empty", "-m", "moved head");
+    stopIn(dir, "ag1", wt);
+    expect(cwdsRun(marker).map(real)).toEqual([real(wt)]);
+  });
+
+  it("WF4 a worktree agent with no start record is verified, even in a clean worktree", () => {
+    const { dir, wt, marker } = makeFixture();
+    fireBash(dir, "ag1", "coder");
+    stopIn(dir, "ag1", wt, {}, "coder");
+    expect(cwdsRun(marker).map(real)).toEqual([real(wt)]);
+  });
+
+  it("WF5 a worktree agent with a tests_red_by_design claim is not skipped", () => {
+    const { dir, wt, marker } = makeFixture();
+    fireStart(dir, "ag1", "tester");
+    fireBash(dir, "ag1", "tester");
+    stopIn(dir, "ag1", wt, { last_assistant_message: `Red as designed.\n${JSON.stringify({ tests_red_by_design: ["src/a.test.ts"] })}` }, "tester");
+    expect(cwdsRun(marker).map(real)).toEqual([real(wt)]);
+  });
+
+  it("WF6 a main-checkout agent whose tree changed during its life is verified", () => {
+    const { dir, marker } = makeFixture();
+    fireStart(dir, "ag1");
+    fireBash(dir, "ag1");
+    writeFileSync(join(dir, "src/a.ts"), "main edited again during the agent's life");
+    stopIn(dir, "ag1", dir);
+    expect(cwdsRun(marker).map(real)).toEqual([real(dir)]);
+  });
+
+  it("WF7 a main-checkout agent whose tree did not change skips verification", () => {
+    const { dir, marker } = makeFixture();
+    fireStart(dir, "ag1");
+    fireBash(dir, "ag1");
+    const r = stopIn(dir, "ag1", dir);
+    expect(r.json, JSON.stringify(r.json)).toBeNull();
+    expect(cwdsRun(marker)).toEqual([]);
+  });
+  // Remote-default-branch worktrees: origin/HEAD is a ref in the main checkout; the worktree is cut from `base`.
+  function makeRemoteFixture({ originAhead, wtAt }) {
+    const markerDir = mkdtempSync(join(tmpdir(), "doug-wtfp-marker-"));
+    const marker = join(markerDir, "marker.log");
+    const cfg = {
+      ...baseConfig,
+      commands: { test: `${process.execPath} -e "require('fs').appendFileSync('${marker}', process.cwd()+'\\n')"` },
+      stopGate: { commands: ["test"], onlyIfEdited: true, maxBlocks: 3, timeoutMs: 10000, requireEvidence: false },
+      trace: { enabled: true },
+    };
+    const dir = makeProject({ config: cfg, git: true });
+    mkdirSync(join(dir, "src"));
+    writeFileSync(join(dir, "src/a.ts"), "base");
+    git(dir, "add", "-A");
+    git(dir, "commit", "-q", "-m", "base");
+    const c0 = git(dir, "rev-parse", "HEAD");
+    git(dir, "commit", "-q", "--allow-empty", "-m", "second");
+    const c1 = git(dir, "rev-parse", "HEAD");
+    // originAhead: local main stays at c0 and origin/HEAD is c1; otherwise local main is c1 and origin/HEAD is c0.
+    if (originAhead) git(dir, "reset", "-q", "--hard", c0);
+    const origin = originAhead ? c1 : c0;
+    if (wtAt !== "none") {
+      git(dir, "update-ref", "refs/remotes/origin/main", origin);
+      git(dir, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main");
+    }
+    const wt = join(dir, ".claude/worktrees/wt1");
+    git(dir, "worktree", "add", "-q", wt, "-b", "wt1-branch", wtAt === "origin" ? origin : c0);
+    // As in makeFixture: the session edited the main checkout, so onlyIfEdited cannot be what skips the gate.
+    writeFileSync(join(dir, "src/a.ts"), "main edited before the agent started");
+    runHookScript("edit-loop", { tool_name: "Edit", tool_input: { file_path: "src/a.ts" } }, { dir });
+    return { dir, wt, marker };
+  }
+
+  it("WF8 a read-only worktree agent cut from origin/HEAD while local main is one commit ahead skips verification", () => {
+    const { dir, wt, marker } = makeRemoteFixture({ originAhead: false, wtAt: "origin" });
+    fireStart(dir, "ag1");
+    fireBash(dir, "ag1");
+    const r = stopIn(dir, "ag1", wt);
+    expect(r.json, JSON.stringify(r.json)).toBeNull();
+    expect(cwdsRun(marker)).toEqual([]);
+  });
+
+  it("WF8b with no origin/HEAD ref, a clean worktree at an ancestor of the start HEAD skips verification", () => {
+    const { dir, wt, marker } = makeRemoteFixture({ originAhead: false, wtAt: "none" });
+    fireStart(dir, "ag1");
+    fireBash(dir, "ag1");
+    const r = stopIn(dir, "ag1", wt);
+    expect(r.json, JSON.stringify(r.json)).toBeNull();
+    expect(cwdsRun(marker)).toEqual([]);
+  });
+
+  it("WF9 a read-only worktree agent at origin/HEAD while local main is one commit behind it skips verification", () => {
+    const { dir, wt, marker } = makeRemoteFixture({ originAhead: true, wtAt: "origin" });
+    fireStart(dir, "ag1");
+    fireBash(dir, "ag1");
+    const r = stopIn(dir, "ag1", wt);
+    expect(r.json, JSON.stringify(r.json)).toBeNull();
+    expect(cwdsRun(marker)).toEqual([]);
+  });
 });

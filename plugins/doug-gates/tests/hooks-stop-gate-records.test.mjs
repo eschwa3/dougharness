@@ -14,6 +14,12 @@ import { changedFiles } from "../lib/baseline.mjs";
 // loadState/saveState (the module's own default shape), never a guessed JSON literal.
 import { loadState, saveState } from "../lib/state.mjs";
 import { baseConfig } from "./hooks-fixtures.mjs";
+import { gateLockPath } from "../lib/gate-lock.mjs";
+// card gate-lock-shared: gate.lock lives under the git common dir; seed a holder's lock through the lib path.
+const putLock = (dir, content) => {
+  mkdirSync(dirname(gateLockPath(dir)), { recursive: true });
+  writeFileSync(gateLockPath(dir), content);
+};
 // Load-proofing (card gate-docs-skip-unless-named, same mechanism as 7d1c99b): vitest's worker answers its main
 // process over an RPC whose calls time out after 60 s, and this file's cases spawn synchronously (git, hook
 // scripts, the gate's own commands), awaiting only microtasks between tests, so the loop never turned and the
@@ -177,7 +183,7 @@ describe("card stop-gate-block-ledger", () => {
     const holderScript = join(dir, ".doug/.state/holder-ledger.mjs");
     writeFileSync(holderScript, "setTimeout(() => {}, 12000);"); // well past both hookTimeoutSec (3s) and stopGate.timeoutMs (10s)
     const holder = spawn(process.execPath, [holderScript], { cwd: dir, stdio: "ignore" });
-    writeFileSync(join(dir, ".doug/.state/gate.lock"), JSON.stringify({ pid: holder.pid, session: "holder-session", at: Date.now() }));
+    putLock(dir, JSON.stringify({ pid: holder.pid, session: "holder-session", at: Date.now() }));
     try {
       const r = runHookScript("stop-gate", { hook_event_name: "Stop" }, { dir });
       expect(r.json && r.json.decision).toBe("block");
@@ -406,7 +412,7 @@ describe("card stop-gate-block-ledger", () => {
       const holderScript = join(dir, ".doug/.state/holder-item5.mjs");
       writeFileSync(holderScript, "setTimeout(() => {}, 12000);"); // outlives hookTimeoutSec (3s) and timeoutMs (10s)
       const holder = spawn(process.execPath, [holderScript], { cwd: dir, stdio: "ignore" });
-      writeFileSync(join(dir, ".doug/.state/gate.lock"), JSON.stringify({ pid: holder.pid, session: "holder-session", at: Date.now() }));
+      putLock(dir, JSON.stringify({ pid: holder.pid, session: "holder-session", at: Date.now() }));
       try {
         const r = runHookScript("stop-gate", { hook_event_name: "Stop" }, { dir });
         expect(r.json && r.json.decision).toBeUndefined();

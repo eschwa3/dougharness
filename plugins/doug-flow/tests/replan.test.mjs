@@ -6,6 +6,7 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpath
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { retireIntegrationWorktree } from "../lib/worktrees.mjs";
 import { loadPlan, savePlan, validatePlan, renderPlan, specHash, reusePlan, staleReuseErrors, unwrapReport } from "../lib/plan.mjs";
 
 const git = (dir, ...args) => execFileSync("git", args, { cwd: dir, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
@@ -1399,5 +1400,47 @@ describe("plan.mjs replan/done accept a report saved wrapped in the Workflow too
     expect(wrappedRun.status).toBe(1);
     expect(wrappedRun.stderr).toBe(bareRun.stderr);
     expect(loadPlan(wrappedDir).status).toBe("approved");
+  });
+});
+
+// Card parallel-card-queens, brief B3: the integration worktree is per run. retireIntegrationWorktree(dir, path)
+// retires the path it is given, and replan passes the plan's own (integrationWorktreeFor), so one run's replan
+// never removes another run's integration worktree.
+describe("retireIntegrationWorktree takes the integration worktree path (parallel-card-queens B3)", () => {
+  const CUSTOM = ".claude/worktrees/doug-integration-alpha";
+  const withCustom = () => {
+    const dir = realpathSync(gitProject());
+    git(dir, "branch", "doug/alpha", "main");
+    git(dir, "worktree", "add", "-q", join(dir, CUSTOM), "doug/alpha");
+    return dir;
+  };
+
+  it("retires the given path and leaves the default integration worktree alone", () => {
+    const dir = withCustom();
+    const r = retireIntegrationWorktree(dir, CUSTOM);
+    expect(r.removed).toBe(join(dir, CUSTOM));
+    expect(existsSync(join(dir, CUSTOM))).toBe(false);
+    expect(existsSync(join(dir, ".claude/worktrees/doug-integration"))).toBe(true);
+    expect(git(dir, "branch", "--list", "doug/alpha")).toContain("doug/alpha");
+  });
+
+  it("an unregistered path is not an error", () => {
+    const dir = withCustom();
+    expect(retireIntegrationWorktree(dir, ".claude/worktrees/doug-integration-none")).toEqual({ removed: null });
+  });
+
+  it("plan.mjs replan retires the plan's own integration worktree, not the shared one", () => {
+    const dir = withCustom();
+    savePlan(dir, plan({ integrationWorktree: CUSTOM }));
+    report(dir, {
+      a: passedEntry(task("a")),
+      b: { ...passedEntry(task("b")), adversary: { ran: true, blocked: true, verdict: "blocked" } },
+      c: passedEntry(task("c", { dependsOn: ["b"] })),
+    });
+    const r = run(["replan"], dir);
+    expect(r.status).toBe(0);
+    expect(existsSync(join(dir, CUSTOM))).toBe(false);
+    expect(existsSync(join(dir, ".claude/worktrees/doug-integration"))).toBe(true);
+    expect(r.stdout).toContain(`removed integration worktree ${join(dir, CUSTOM)}`);
   });
 });

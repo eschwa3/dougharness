@@ -1,7 +1,7 @@
 // The board library and CLI behind /doug-next: card selection, moves, and run entries. No agents run.
 import { describe, it, expect } from "vitest";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync, existsSync, readdirSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync, existsSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -737,6 +737,21 @@ describe("runEntry and appendRun", () => {
     expect(md).not.toContain("Built by hand through doug-hand");
     expect(md).toContain("| Commit | `47fe70c` |");
     expect(md).not.toContain("47fe70cca7eb3444ae8a382ee14018f3950bfe1c");
+  });
+  it("the rehearsal label comes from the scenario: start ran in an empty git repo, every other scenario on the ts-basic fixture (card rehearsal-record-start-labels)", () => {
+    const hand = (rehearsal) => handEntry({ card: { id: "fix-hours", title: "Fix hours" }, commit: "47fe70cca7eb3444ae8a382ee14018f3950bfe1c", gate: "g", record: ".doug/board.json", date: "2026-10-12", rehearsal });
+    const tail = "(scripts/rehearse.mjs); the commit and gate below are the fixture's, not this repository's.";
+    expect(hand("start")).toContain(`Rehearsal start for card \`fix-hours\` on an empty git repo ${tail}`);
+    expect(hand("start")).not.toContain("ts-basic");
+    for (const s of ["hand", "auto", "start-feature"]) {
+      expect(hand(s)).toContain(`Rehearsal ${s} for card \`fix-hours\` on the ts-basic fixture ${tail}`);
+      expect(hand(s)).not.toContain("empty git repo");
+    }
+  });
+  it("runEntry takes the same scenario-based label (start: empty git repo; flow and swarm: ts-basic fixture)", () => {
+    const entry = (rehearsal) => runEntry({ card: { id: "first", title: "First" }, report, mergeCommit: "abc1234", record: ".doug/board.json", date: "2026-10-12", rehearsal });
+    expect(entry("start")).toContain("Rehearsal start for card `first` on an empty git repo (scripts/rehearse.mjs)");
+    for (const s of ["flow", "swarm"]) expect(entry(s)).toContain(`Rehearsal ${s} for card \`first\` on the ts-basic fixture (scripts/rehearse.mjs)`);
   });
   it("summarizes the two 2026-09-06 standard-agents reports and a green run in three lines", () => {
     const fixture = (name) => JSON.parse(readFileSync(join(here, "fixtures/reports", name), "utf8"));
@@ -1730,7 +1745,7 @@ describe("nextReadyCards and next --batch", () => {
     const two = run(["next", dir, "--batch", "2"], dir);
     expect(two.status, two.stderr).toBe(0);
     expect(JSON.parse(two.stdout).map((c) => c.id)).toEqual(["first", "second"]);
-    expect(two.stderr).toMatch(/^skipping blocked: waiting on later\nwall cap: \d+ min \(size x class table at p80, board\.mjs budgets; no size counts as M\)\n$/);
+    expect(two.stderr).toMatch(/^skipping blocked: waiting on later\nwall cap: \d+ min \(size x class table at p80, board\.mjs budgets; no size counts as M\)\n(?:usd cap: [^\n]*\n)?$/);
     expect(JSON.parse(run(["next", dir, "--batch", "1"], dir).stdout).map((c) => c.id)).toEqual(["first"]);
     const bad = run(["next", dir, "--batch", "x"], dir);
     expect(bad.status).toBe(2);
@@ -1979,7 +1994,8 @@ describe("runSummary reads a batch report's acceptance without cross-card noise"
     writeFileSync(reportPath, JSON.stringify(fixture()));
     const sum = run(["summary", reportPath, "--card", "alpha", "--summary", "Test summary."], dir);
     expect(sum.status, sum.stderr).toBe(0);
-    expect(sum.stdout).toBe("Test summary.\n" + runSummary({ report: filterReportForCard(fixture(), "alpha") }));
+    // Card landing-block-enforced: the three landing-block lines now follow the summary text.
+    expect(sum.stdout.split("\n").slice(0, -4).join("\n") + "\n").toBe("Test summary.\n" + runSummary({ report: filterReportForCard(fixture(), "alpha") }));
   });
 });
 
@@ -2181,7 +2197,7 @@ describe("next --track any (card autopilot)", () => {
     const r = cliRun(["next", dir, "--batch", "3", "--track", "any"], dir);
     expect(r.status, r.stderr).toBe(0);
     expect(JSON.parse(r.stdout).map((c) => c.id)).toEqual(["handa", "first", "handb"]);
-    expect(r.stderr).toMatch(/^skipping blocked: waiting on later\nwall cap: \d+ min \(size x class table at p80, board\.mjs budgets; no size counts as M\)\n$/);
+    expect(r.stderr).toMatch(/^skipping blocked: waiting on later\nwall cap: \d+ min \(size x class table at p80, board\.mjs budgets; no size counts as M\)\n(?:usd cap: [^\n]*\n)?$/);
     const all = cliRun(["next", dir, "--batch", "9", "--track", "any"], dir);
     expect(JSON.parse(all.stdout).map((c) => c.id)).toEqual(["handa", "first", "handb", "second"]);
   });
@@ -2324,7 +2340,8 @@ describe("card landing-one-sentence-summary", () => {
     const lines = rec.stdout.split("\n");
     expect(lines[0]).toBe("Adds the X flag.");
     expect(lines[1]).toMatch(/^Appended a hand-track entry/);
-    expect(rec.stdout.split("Adds the X flag.").length - 1, "printed exactly once").toBe(1);
+    // Card landing-block-enforced: the sentence prints once as the first line and once in the block's Changed line.
+    expect(rec.stdout.split("Adds the X flag.").length - 1, "printed as the first line and in the Changed line").toBe(2);
     expect(liveRuns(dir)).toContain("`first`");
     expect(liveRuns(dir)).not.toContain("Adds the X flag");
   });
@@ -2477,9 +2494,726 @@ describe("board.mjs record --hand prints the Wall budget line only when over (ca
   });
   it("H3 a rehearsal record prints no Wall budget line and writes no row", () => {
     const dir = project();
-    const r = run(["record", "first", "--hand", dir, "--commit", "abc1234", "--wall", `${budget + 50} min`, "--gate", "g", "--rehearsal", "hand", "--summary", "Test summary."], dir);
+    const r = run(["record", "first", "--hand", dir, "--commit", "abc1234", "--wall", `${budget + 50} min`, "--gate", "g", "--rehearsal", "hand", "--rehearsal-outcome", "passed", "--summary", "Test summary."], dir);
     expect(r.status, r.stderr).toBe(0);
     expect(r.stdout).not.toContain("Wall budget");
     expect(readFileSync(join(dir, "docs/live-runs.md"), "utf8")).not.toContain("Wall budget");
+  });
+});
+
+// Card usd-budget-size-class: the autopilot USD cap has the wall cap's shape, a per-card size x class budget at the
+// p80 of measured cost (flow and hand landings), summed over the queue. Names chosen to parallel the wall exports:
+// USD_BUDGET_MIN_N, USD_BUDGET, cardBudgetDollars, usdCapDollars, parseLiveRunCosts, usdBudgetTable.
+describe("usd budget table (card usd-budget-size-class)", () => {
+  const run = (args, dir) => spawnSync(process.execPath, [cli, ...args], { cwd: dir, encoding: "utf8", env: { ...process.env, CLAUDE_PROJECT_DIR: "" } });
+  const FIXTURE = { S: { all: 8, "gate-script": 12.5, docs: 2.5 }, M: { all: 20, code: 24 }, L: { all: 60 } };
+  const card = (id, size, cls) => ({ id, column: "ready", component: "gates", title: id, goal: id, ...(size ? { size } : {}), ...(cls ? { class: cls } : {}) });
+
+  // ids g1..g6 S/gate-script, d1..d3 S/docs (thin), s1..s4 S with no class, m1..m5 M/code, "nosize" (class code, no
+  // size) and "ghost" (not on the board) are skipped. No L samples. All values are exact to the cent.
+  const samplesFixture = () => {
+    const cards = [];
+    const samples = [];
+    const add = (prefix, usds, size, cls) => usds.forEach((u, i) => { cards.push(card(`${prefix}${i + 1}`, size, cls)); samples.push({ id: `${prefix}${i + 1}`, usd: u }); });
+    add("g", [1, 2, 3, 4, 5, 6], "S", "gate-script");
+    add("d", [0.5, 1.5, 2.5], "S", "docs");
+    add("s", [7, 8, 9, 10], "S");
+    add("m", [1, 2, 3, 4, 10], "M", "code");
+    cards.push(card("nosize", undefined, "code"));
+    samples.push({ id: "nosize", usd: 9999 }, { id: "ghost", usd: 9999 });
+    return { cards, samples };
+  };
+  const FALLBACK = { S: { all: 1 }, M: { all: 2 }, L: { all: 77.5 } };
+  const EXPECTED_TABLE = { S: { all: 8, "gate-script": 5 }, M: { all: 10, code: 10 }, L: { all: 77.5 } };
+
+  it("D1 the shipped table: USD_BUDGET_MIN_N is 5; each size has a positive finite all; every value is a positive finite number", () => {
+    expect(lib.USD_BUDGET_MIN_N).toBe(5);
+    expect(Object.keys(lib.USD_BUDGET).sort()).toEqual(["L", "M", "S"]);
+    for (const size of ["S", "M", "L"]) {
+      expect(Number.isFinite(lib.USD_BUDGET[size].all) && lib.USD_BUDGET[size].all > 0, `${size}.all`).toBe(true);
+      for (const [k, v] of Object.entries(lib.USD_BUDGET[size])) expect(Number.isFinite(v) && v > 0, `${size}.${k}`).toBe(true);
+    }
+  });
+
+  it("D2 cardBudgetDollars picks the class cell, else the size's all, counting no or an unknown size as M", () => {
+    const f = (c) => lib.cardBudgetDollars(c, FIXTURE);
+    expect(f({ size: "S", class: "gate-script" })).toBe(12.5);
+    expect(f({ size: "S", class: "docs" })).toBe(2.5);
+    expect(f({ size: "M", class: "code" })).toBe(24);
+    expect(f({ size: "S", class: "code" })).toBe(8);
+    expect(f({ size: "S" })).toBe(8);
+    expect(f({ class: "code" })).toBe(24);
+    expect(f({})).toBe(20);
+    expect(f({ size: "XL" })).toBe(20);
+    expect(f({ size: "L", class: "docs" })).toBe(60);
+  });
+
+  it("D2 cardBudgetDollars defaults to the shipped table", () => {
+    expect(lib.cardBudgetDollars({ size: "L" })).toBe(lib.USD_BUDGET.L.all);
+    expect(lib.cardBudgetDollars({})).toBe(lib.USD_BUDGET.M.all);
+    expect(lib.cardBudgetDollars({ size: "S", class: "gate-script" })).toBe(lib.USD_BUDGET.S["gate-script"] ?? lib.USD_BUDGET.S.all);
+  });
+
+  it("D3 usdCapDollars sums each card's budget and has no floor", () => {
+    const queue = [{ size: "S", class: "gate-script" }, { size: "S", class: "docs" }, { size: "M", class: "code" }];
+    expect(lib.usdCapDollars(queue, FIXTURE)).toBeCloseTo(12.5 + 2.5 + 24, 10);
+    expect(lib.usdCapDollars([], FIXTURE)).toBe(0);
+    expect(lib.usdCapDollars([{ size: "XL" }, {}], FIXTURE)).toBeCloseTo(40, 10);
+    expect(lib.usdCapDollars([{ size: "S", class: "docs" }], FIXTURE)).toBe(2.5);
+  });
+
+  it("D4 parseLiveRunCosts reads the first Cost row of each landing section, flow and hand, skipping not-measured and row-less sections", () => {
+    const text = [
+      "# Live runs",
+      "",
+      "## 2026-10-09, flow-id: A flow run",
+      "",
+      "| Measure | Value |",
+      "|---|---|",
+      "| Cost | $5.09 |",
+      "| Codex adversary | $2.58, not included in Cost |",
+      "| Cost | $99.00 |",
+      "",
+      "## 2026-10-08, batch-id: A batch card",
+      "",
+      "| Cost | $15.47 for this card's tasks |",
+      "| Shared integration agents | $2.00, counted once for the batch here |",
+      "",
+      "## 2026-10-07, hand-id: A hand landing",
+      "",
+      "| Measure | Value |",
+      "|---|---|",
+      "| Outcome | landed |",
+      "| Cost | $3.20 |",
+      "| Wall clock | 12 min |",
+      "",
+      "## 2026-10-06, unmeasured-id: Not measured",
+      "",
+      "| Cost | not measured |",
+      "",
+      "## 2026-10-05, no-cost-id: No cost row",
+      "",
+      "| Wall clock | 12 min |",
+      "",
+      "## 2026-09-01, old-id: Old table",
+      "",
+      "| Attempt | Outcome | Cost | Wall clock |",
+      "|---|---|---|---|",
+      "| 1 | ok | $1 | 45 min |",
+      "",
+      "A heading that is not a landing",
+      "| Cost | $77.00 |",
+    ].join("\n");
+    expect(lib.parseLiveRunCosts(text)).toEqual([{ id: "flow-id", usd: 5.09 }, { id: "batch-id", usd: 15.47 }, { id: "hand-id", usd: 3.2 }]);
+  });
+
+  it("D4 parseLiveRunCosts skips rehearsal entries and sums repeated ids (a card landed in two passes cost the sum)", () => {
+    const sec = (head, prose, cost) => [`## 2026-10-09, ${head}: T`, "", prose, "", "| Measure | Value |", "|---|---|", `| Cost | $${cost} |`, "| Wall clock | 5 min |", ""].join("\n");
+    const text = [
+      sec("real", "Built by hand through doug-hand.", "2.00"),
+      sec("rehearsed", "Rehearsal hand for card `rehearsed` on the ts-basic fixture (scripts/rehearse.mjs); the commit and gate below are the fixture's, not this repository's.", "9.00"),
+      sec("twice", "Built by hand through doug-hand.", "1.50"),
+      sec("twice", "Built by hand through doug-hand.", "2.25"),
+    ].join("\n");
+    expect(lib.parseLiveRunCosts(text)).toEqual([{ id: "real", usd: 2 }, { id: "twice", usd: 3.75 }]);
+  });
+
+  it("WB1 parseLiveRunWalls skips a rehearsal entry (the fixture's run is no landing of the card)", () => {
+    const sec = (head, prose, min) => [`## 2026-10-09, ${head}: T`, "", prose, "", "| Measure | Value |", "|---|---|", `| Wall clock | ${min} min |`, ""].join("\n");
+    const text = [
+      sec("real", "Built by hand through doug-hand.", 40),
+      sec("rehearsed", "Rehearsal hand for card `rehearsed` on the ts-basic fixture (scripts/rehearse.mjs); the commit and gate below are the fixture's, not this repository's.", 3),
+      sec("after", "Built by hand through doug-hand.", 20),
+    ].join("\n");
+    expect(lib.parseLiveRunWalls(text)).toEqual([{ id: "real", minutes: 40 }, { id: "after", minutes: 20 }]);
+  });
+
+  it("WB2 parseLiveRunWalls sums two entries for one id into one sample, kept at the id's first position", () => {
+    const sec = (head, min) => [`## 2026-10-09, ${head}: T`, "", "Built by hand through doug-hand.", "", "| Measure | Value |", "|---|---|", `| Wall clock | ${min} min |`, ""].join("\n");
+    const text = [sec("twice", 30), sec("solo", 10), sec("twice", 25), sec("other", 7)].join("\n");
+    expect(lib.parseLiveRunWalls(text)).toEqual([{ id: "twice", minutes: 55 }, { id: "solo", minutes: 10 }, { id: "other", minutes: 7 }]);
+  });
+
+  it("WB3 parseLiveRunWalls keeps distinct ids as separate samples when a rehearsal and a repeated id sit between them", () => {
+    const sec = (head, prose, min) => [`## 2026-10-09, ${head}: T`, "", prose, "", "| Measure | Value |", "|---|---|", `| Wall clock | ${min} min |`, ""].join("\n");
+    const text = [
+      sec("a", "Built by hand.", 10),
+      sec("b", "Built by hand.", 20),
+      sec("b", "Rehearsal swarm for card `b` on the fixture.", 4),
+      sec("a", "Built by hand.", 5),
+    ].join("\n");
+    expect(lib.parseLiveRunWalls(text)).toEqual([{ id: "a", minutes: 15 }, { id: "b", minutes: 20 }]);
+  });
+
+  it("D5 usdBudgetTable: p80 per size and class (sorted index min(floor(0.8n), n-1)), thin class cells fall back to the size's all, an empty size keeps the fallback, unjoinable and sizeless samples are skipped", () => {
+    const { cards, samples } = samplesFixture();
+    const { table, cells } = lib.usdBudgetTable(samples, { cards }, { fallback: FALLBACK });
+    expect(table).toEqual(EXPECTED_TABLE);
+    expect(table.S.docs).toBeUndefined();
+    expect(table.L.all).toBe(77.5);
+    expect(cells).toContainEqual({ size: "S", cls: "all", n: 13, p80: 8 });
+    expect(cells).toContainEqual({ size: "S", cls: "gate-script", n: 6, p80: 5 });
+    expect(cells).toContainEqual({ size: "S", cls: "docs", n: 3, p80: 2.5 });
+    expect(cells).toContainEqual({ size: "M", cls: "all", n: 5, p80: 10 });
+    expect(cells).toContainEqual({ size: "M", cls: "code", n: 5, p80: 10 });
+    expect(cells).toContainEqual({ size: "L", cls: "all", n: 0, p80: null });
+  });
+
+  it("D5 usdBudgetTable: the shipped minimum is 5 per class cell (4 samples falls back, 5 does not), and minN is settable", () => {
+    const four = [1, 2, 3, 4].map((u, i) => ({ id: `x${i}`, usd: u }));
+    const board4 = { cards: four.map((s) => card(s.id, "S", "docs")) };
+    expect(lib.usdBudgetTable(four, board4, { fallback: FALLBACK }).table.S.docs).toBeUndefined();
+    const five = [...four, { id: "x4", usd: 5 }];
+    const board5 = { cards: five.map((s) => card(s.id, "S", "docs")) };
+    expect(lib.usdBudgetTable(five, board5, { fallback: FALLBACK }).table.S.docs).toBe(5);
+    expect(lib.usdBudgetTable(four, board4, { minN: 3, fallback: FALLBACK }).table.S.docs).toBe(4);
+  });
+
+  it("D5 usdBudgetTable defaults its fallback to the shipped table", () => {
+    const { table } = lib.usdBudgetTable([], { cards: [] });
+    expect(table.S.all).toBe(lib.USD_BUDGET.S.all);
+    expect(table.M.all).toBe(lib.USD_BUDGET.M.all);
+    expect(table.L.all).toBe(lib.USD_BUDGET.L.all);
+  });
+
+  it("D6 handEntry with a cost writes a Cost row in the flow entries' format; without one there is no Cost row at all", () => {
+    const hand = (cost) => handEntry({ card: { id: "c", title: "C", size: "S", class: "code" }, commit: "abc1234", wallClock: "5 min", gate: "g", cost, date: "2026-10-11" });
+    expect(hand(3.2).split("\n")).toContain("| Cost | $3.20 |");
+    expect(hand(12).split("\n")).toContain("| Cost | $12.00 |");
+    for (const none of [undefined, null]) {
+      const md = hand(none);
+      expect(md).not.toMatch(/^\| Cost \|/m);
+      expect(md).not.toContain("$0");
+    }
+    // the new row never reads as the Wall clock row, and parseLiveRunCosts and parseLiveRunWalls both read the entry
+    expect(lib.parseLiveRunWalls(hand(3.2))).toEqual([{ id: "c", minutes: 5 }]);
+    expect(lib.parseLiveRunCosts(hand(3.2))).toEqual([{ id: "c", usd: 3.2 }]);
+    expect(lib.parseLiveRunCosts(hand(null))).toEqual([]);
+  });
+
+  describe("record --hand --cost CLI", () => {
+    const args = (dir) => ["record", "first", "--hand", dir, "--commit", "abc1234", "--wall", "5 min", "--gate", "typecheck 0; unit 1 passed", "--summary", "Test summary."];
+    const liveRuns = (dir) => { const f = join(dir, "docs/live-runs.md"); return existsSync(f) ? readFileSync(f, "utf8") : null; };
+
+    it("D6 --cost 3.2 appends a Cost row, $3.20, to the hand entry", () => {
+      const dir = project();
+      const r = run([...args(dir), "--cost", "3.2"], dir);
+      expect(r.status, r.stderr).toBe(0);
+      expect(liveRuns(dir).split("\n")).toContain("| Cost | $3.20 |");
+      expect(lib.parseLiveRunCosts(liveRuns(dir))).toEqual([{ id: "first", usd: 3.2 }]);
+    });
+
+    it("D6 without --cost the entry has no Cost row and no invented $0", () => {
+      const dir = project();
+      const r = run(args(dir), dir);
+      expect(r.status, r.stderr).toBe(0);
+      expect(liveRuns(dir)).not.toMatch(/^\| Cost \|/m);
+      expect(liveRuns(dir)).not.toContain("$0");
+    });
+
+    it("D6 a non-numeric, negative or empty --cost exits 2 naming --cost (not as an unknown option) and appends nothing", () => {
+      for (const bad of ["abc", "-1", "$3", "3 usd", ""]) {
+        const dir = project();
+        const r = run([...args(dir), "--cost", bad], dir);
+        expect(r.status, `--cost "${bad}"`).toBe(2);
+        expect(r.stderr, `--cost "${bad}"`).toContain("--cost");
+        expect(r.stderr, `--cost "${bad}"`).not.toMatch(/unknown option/i);
+        expect(liveRuns(dir), `--cost "${bad}"`).toBeNull();
+      }
+    });
+
+    it("D6 the hand usage line names --cost", () => {
+      const dir = project();
+      const r = run(["record", "--hand"], dir);
+      expect(r.status).toBe(2);
+      expect(r.stderr).toContain("[--cost <usd>]");
+    });
+  });
+
+  describe("usd cap line and budgets --usd CLI", () => {
+    const LINE = (x) => `usd cap: $${x} (size x class table at p80 of measured cost, board.mjs budgets --usd; no size counts as M)`;
+
+    it("D7 next --batch 3 prints the usd cap on the line right after the wall cap line, summed per card from the table, and keeps stdout the JSON array", () => {
+      const b = board();
+      b.cards = [card("c1", "S", "gate-script"), card("c2", "S", "docs"), card("c3", "M", "code")];
+      const dir = project(b);
+      const r = run(["next", dir, "--batch", "3"], dir);
+      expect(r.status, r.stderr).toBe(0);
+      expect(JSON.parse(r.stdout)).toHaveLength(3);
+      const T = lib.USD_BUDGET;
+      const sum = (T.S["gate-script"] ?? T.S.all) + (T.S.docs ?? T.S.all) + (T.M.code ?? T.M.all);
+      expect(lib.usdCapDollars(b.cards)).toBeCloseTo(sum, 10);
+      expect(r.stderr).toContain(LINE(sum.toFixed(2)) + "\n");
+      const lines = r.stderr.split("\n");
+      const wall = lines.findIndex((l) => l.startsWith("wall cap:"));
+      expect(wall).toBeGreaterThanOrEqual(0);
+      expect(lines[wall + 1]).toBe(LINE(sum.toFixed(2)));
+      expect(r.stdout).not.toContain("usd cap:");
+    });
+
+    it("D7 next --batch 1 prints the usd cap of just the first card, by its class; a card with no size counts as M and no class uses the size's all", () => {
+      const b = board();
+      b.cards = [card("c1", "S", "gate-script"), card("c2", "M", "code")];
+      const dir = project(b);
+      const T = lib.USD_BUDGET;
+      expect(run(["next", dir, "--batch", "1"], dir).stderr).toContain(LINE((T.S["gate-script"] ?? T.S.all).toFixed(2)) + "\n");
+      const b2 = board();
+      b2.cards = [card("n1"), card("n2", "S")];
+      const dir2 = project(b2);
+      const r2 = run(["next", dir2, "--batch", "2"], dir2);
+      expect(r2.stderr).toContain(LINE((T.M.all + T.S.all).toFixed(2)) + "\n");
+    });
+
+    it("D7 plain next prints no usd cap line", () => {
+      const b = board();
+      b.cards = [card("c1", "S", "gate-script")];
+      const dir = project(b);
+      const r = run(["next", dir], dir);
+      expect(r.status, r.stderr).toBe(0);
+      expect(r.stderr).not.toContain("usd cap:");
+    });
+
+    const liveRunsText = (samples) => samples.map((s) => `## 2026-10-09, ${s.id}: Title ${s.id}\n\n| Field | Value |\n|---|---|\n| Cost | $${s.usd.toFixed(2)} |\n| Wall clock | 5 min |\n`).join("\n");
+    const setup = () => {
+      const { cards, samples } = samplesFixture();
+      const b = board();
+      b.cards = cards;
+      const dir = project(b);
+      const from = join(dir, "live-runs.md");
+      writeFileSync(from, "# Live runs\n\n" + liveRunsText(samples.filter((x) => x.id !== "ghost" && x.id !== "nosize")));
+      return { dir, from };
+    };
+    const listing = (dir) => readdirSync(dir, { recursive: true }).sort();
+
+    it("D8 budgets --usd --from prints one line per cell with n and the computed table, and writes no file", () => {
+      const { dir, from } = setup();
+      const before = listing(dir);
+      const boardBefore = readFileSync(boardPath(dir), "utf8");
+      const r = run(["budgets", "--usd", dir, "--from", from], dir);
+      expect(r.status, r.stderr).toBe(0);
+      const lines = r.stdout.trimEnd().split("\n");
+      const L = lib.USD_BUDGET.L.all;
+      expect(lines).toEqual([
+        "S/all n=13 p80 $8.00",
+        "S/docs n=3 p80 $2.50 (fewer than 5; falls back to S/all $8.00)",
+        "S/gate-script n=6 p80 $5.00",
+        "M/all n=5 p80 $10.00",
+        "M/code n=5 p80 $10.00",
+        `L/all n=0 (no landings; keeps the shipped $${L.toFixed(2)})`,
+        "table: " + JSON.stringify({ S: { all: 8, "gate-script": 5 }, M: { all: 10, code: 10 }, L: { all: L } }),
+      ]);
+      expect(listing(dir)).toEqual(before);
+      expect(readFileSync(boardPath(dir), "utf8")).toBe(boardBefore);
+    });
+
+    it("D8 budgets --usd without --from prints the shipped usd table", () => {
+      const { dir } = setup();
+      const r = run(["budgets", "--usd", dir], dir);
+      expect(r.status, r.stderr).toBe(0);
+      expect(r.stdout.trimEnd()).toBe("table: " + JSON.stringify(lib.USD_BUDGET));
+    });
+
+    it("D8 budgets without --usd still prints the wall table, unchanged", () => {
+      const { dir } = setup();
+      const r = run(["budgets", dir], dir);
+      expect(r.status, r.stderr).toBe(0);
+      expect(r.stdout.trimEnd()).toBe("table: " + JSON.stringify(lib.WALL_BUDGET_MIN));
+    });
+
+    it("D8 budgets --usd --from a missing file exits 2", () => {
+      const { dir } = setup();
+      const r = run(["budgets", "--usd", dir, "--from", join(dir, "nope.md")], dir);
+      expect(r.status).toBe(2);
+      expect(r.stderr.length).toBeGreaterThan(0);
+    });
+  });
+});
+
+// Card landing-block-enforced: record and summary print one three-line landing block (Changed / Outcome /
+// Learned) as their last three stdout lines, capped at 100 words, and leave it under .doug/.state/reports/<id>/
+// for the Stop gate to check against the lead's final message.
+describe("landing block (card landing-block-enforced)", () => {
+  // Round 2 reason: F5 makes the marker's content CLAUDE_CODE_SESSION_ID, so the round 1 tests that expect an empty marker must not inherit it.
+  const run = (args, dir) => spawnSync(process.execPath, [cli, ...args], { cwd: dir, encoding: "utf8", env: { ...process.env, CLAUDE_PROJECT_DIR: "", CLAUDE_CODE_SESSION_ID: "" } });
+  const lastThree = (stdout) => stdout.replace(/\n+$/, "").split("\n").slice(-3);
+  const words = (lines) => lines.join("\n").split(/\s+/).filter(Boolean).length;
+  const stateDir = (dir, id) => join(dir, ".doug/.state/reports", id);
+  const handArgs = (dir, extra = []) => ["record", "first", "--hand", dir, "--commit", "abc1234", "--wall", "5 min", "--gate", "typecheck 0; unit 1 passed", "--summary", "Test summary.", ...extra];
+  const okReport = { plan: "First", integrationBranch: "doug/x", ok: true, levels: [{ index: 0, tasks: [{ id: "a", implemented: true, verified: true, reviewed: true }], integration: { ok: true, acceptance: [{ text: "pnpm test:unit", ok: true }, { text: "pnpm typecheck", ok: true }] } }] };
+  const stoppedReport = { ...okReport, ok: false };
+
+  it("B1: the hand form prints the exact three-line block last, with the Outcome line between Changed and Learned", () => {
+    const dir = project();
+    const rec = run(handArgs(dir, ["--cost", "1.4", "--note", "The parser needed a flag set."]), dir);
+    expect(rec.status, rec.stderr).toBe(0);
+    expect(lastThree(rec.stdout)).toEqual([
+      "Changed: Test summary.",
+      "Outcome: landed first at abc1234, 5 min, typecheck 0; unit 1 passed, $1.40",
+      "Learned: The parser needed a flag set.",
+    ]);
+  });
+  it("B1: the workflow form prints the block with the acceptance count as its gate, landed when the report is ok and stopped when not", () => {
+    const dir = project();
+    const ok = join(dir, "ok.json");
+    writeFileSync(ok, JSON.stringify(okReport));
+    const rec = run(["record", "first", ok, dir, "--wall", "2 min", "--commit", "abc1234", "--summary", "Test summary.", "--note", "Nothing surprising in the loop."], dir);
+    expect(rec.status, rec.stderr).toBe(0);
+    expect(lastThree(rec.stdout)).toEqual([
+      "Changed: Test summary.",
+      "Outcome: landed first at abc1234, 2 min, acceptance 2/2",
+      "Learned: Nothing surprising in the loop.",
+    ]);
+    const bad = join(dir, "bad.json");
+    writeFileSync(bad, JSON.stringify(stoppedReport));
+    // Round 2 reason: F2 reprints a saved block, so the stopped summary needs a project where record saved none.
+    const dir2 = project();
+    const sum = run(["summary", bad, "--wall", "2 min", "--commit", "abc1234", "--card", "first", "--summary", "Test summary."], dir2);
+    expect(sum.status, sum.stderr).toBe(0);
+    expect(lastThree(sum.stdout)[1]).toMatch(/^Outcome: stopped first at abc1234, 2 min, acceptance 2\/2/);
+  });
+  it("B1: the cost renders with two decimals and a Codex cost follows it as ' + Codex $<x>'; neither appears without the flag", () => {
+    const dir = project();
+    const file = join(dir, "r.json");
+    writeFileSync(file, JSON.stringify(okReport));
+    const base = ["record", "first", file, dir, "--wall", "2 min", "--commit", "abc1234", "--summary", "Test summary."];
+    const withBoth = run([...base, "--cost", "1.4", "--codex-cost", "2.5"], dir);
+    expect(withBoth.status, withBoth.stderr).toBe(0);
+    expect(lastThree(withBoth.stdout)[1]).toBe("Outcome: landed first at abc1234, 2 min, acceptance 2/2, $1.40 + Codex $2.50");
+    const dir2 = project();
+    const file2 = join(dir2, "r.json");
+    writeFileSync(file2, JSON.stringify(okReport));
+    const bare = run(["record", "first", file2, dir2, "--wall", "2 min", "--commit", "abc1234", "--summary", "Test summary."], dir2);
+    expect(bare.status, bare.stderr).toBe(0);
+    expect(lastThree(bare.stdout)[1]).toBe("Outcome: landed first at abc1234, 2 min, acceptance 2/2");
+    const handCost = run(handArgs(dir2, ["--cost", "0.5"]), dir2);
+    expect(handCost.status, handCost.stderr).toBe(0);
+    expect(lastThree(handCost.stdout)[1]).toBe("Outcome: landed first at abc1234, 5 min, typecheck 0; unit 1 passed, $0.50");
+  });
+  it("B5: without --note the Learned line reads 'nothing new', never a guess from the reviewer or reflect", () => {
+    const dir = project();
+    const rec = run(handArgs(dir), dir);
+    expect(rec.status, rec.stderr).toBe(0);
+    expect(lastThree(rec.stdout)[2]).toBe("Learned: nothing new");
+    const file = join(dir, "r.json");
+    writeFileSync(file, JSON.stringify(okReport));
+    const sum = run(["summary", file, "--wall", "2 min", "--commit", "abc1234", "--card", "first", "--summary", "Test summary.", dir], dir);
+    expect(sum.status, sum.stderr).toBe(0);
+    expect(lastThree(sum.stdout)[2]).toBe("Learned: nothing new");
+  });
+  it("record and summary write the block and an empty pending marker under .doug/.state/reports/<id>/", () => {
+    const dir = project();
+    const rec = run(handArgs(dir, ["--note", "A note."]), dir);
+    expect(rec.status, rec.stderr).toBe(0);
+    expect(readFileSync(join(stateDir(dir, "first"), "landing-block.txt"), "utf8").trimEnd().split("\n")).toEqual(lastThree(rec.stdout));
+    expect(readFileSync(join(stateDir(dir, "first"), "landing-block.pending"), "utf8")).toBe("");
+    const file = join(dir, "r.json");
+    writeFileSync(file, JSON.stringify(okReport));
+    const sum = run(["summary", file, "--wall", "2 min", "--commit", "def5678", "--card", "second", "--summary", "Second summary.", dir], dir);
+    expect(sum.status, sum.stderr).toBe(0);
+    expect(readFileSync(join(stateDir(dir, "second"), "landing-block.txt"), "utf8").trimEnd().split("\n")).toEqual(lastThree(sum.stdout));
+    expect(existsSync(join(stateDir(dir, "second"), "landing-block.pending"))).toBe(true);
+  });
+  it("B4: a batch summary --card prints that card's own block, one per invocation", () => {
+    const dir = project();
+    const batch = {
+      plan: "2 cards: alpha, beta",
+      integrationBranch: "doug/a1-b1",
+      ok: true,
+      levels: [{ index: 0, tasks: [
+        { id: "a1", card: "alpha", implemented: true, verified: true, reviewed: true },
+        { id: "b1", card: "beta", implemented: true, verified: true, reviewed: true },
+      ], integration: { ok: true } }],
+    };
+    const file = join(dir, "batch.json");
+    writeFileSync(file, JSON.stringify(batch));
+    const a = run(["summary", file, "--wall", "9 min", "--commit", "aaa1111", "--card", "alpha", "--summary", "Alpha changed.", dir], dir);
+    const b = run(["summary", file, "--wall", "9 min", "--commit", "bbb2222", "--card", "beta", "--summary", "Beta changed.", dir], dir);
+    expect(a.status, a.stderr).toBe(0);
+    expect(b.status, b.stderr).toBe(0);
+    expect(lastThree(a.stdout)[0]).toBe("Changed: Alpha changed.");
+    expect(lastThree(a.stdout)[1]).toMatch(/^Outcome: landed alpha at aaa1111, 9 min/);
+    expect(lastThree(b.stdout)[0]).toBe("Changed: Beta changed.");
+    expect(lastThree(b.stdout)[1]).toMatch(/^Outcome: landed beta at bbb2222, 9 min/);
+    expect(existsSync(join(stateDir(dir, "alpha"), "landing-block.txt"))).toBe(true);
+    expect(existsSync(join(stateDir(dir, "beta"), "landing-block.txt"))).toBe(true);
+  });
+  it("B2: a block of exactly 100 words (labels included) is accepted and one of 101 is refused with exit 1 and the message on stderr", () => {
+    const probeDir = project();
+    const probe = run(handArgs(probeDir), probeDir);
+    expect(probe.status, probe.stderr).toBe(0);
+    const base = words(lastThree(probe.stdout)); // the block with the two-word summary "Test summary."
+    const summaryWords = 2;
+    const pad = (n) => ["--summary", `${"w ".repeat(n - 1)}w`];
+    const attempt = (total) => {
+      const dir = project();
+      const args = ["record", "first", "--hand", dir, "--commit", "abc1234", "--wall", "5 min", "--gate", "typecheck 0; unit 1 passed", ...pad(total - (base - summaryWords))];
+      return { dir, res: run(args, dir) };
+    };
+    const at100 = attempt(100);
+    expect(at100.res.status, at100.res.stderr).toBe(0);
+    expect(words(lastThree(at100.res.stdout))).toBe(100);
+    const at101 = attempt(101);
+    expect(at101.res.status).toBe(1);
+    expect(at101.res.stderr).toContain("landing block is 101 words; the limit is 100. Shorten --summary or --note.");
+  });
+  it("B2: a long --note alone is refused the same way, on the workflow form and on summary", () => {
+    const dir = project();
+    const note = "word ".repeat(120).trim();
+    const file = join(dir, "r.json");
+    writeFileSync(file, JSON.stringify(okReport));
+    const rec = run(["record", "first", file, dir, "--wall", "2 min", "--commit", "abc1234", "--summary", "Test summary.", "--note", note], dir);
+    expect(rec.status).toBe(1);
+    expect(rec.stderr).toMatch(/landing block is \d+ words; the limit is 100\. Shorten --summary or --note\./);
+    const sum = run(["summary", file, "--wall", "2 min", "--commit", "abc1234", "--card", "first", "--summary", "Test summary.", "--note", note, dir], dir);
+    expect(sum.status).toBe(1);
+    expect(sum.stderr).toMatch(/landing block is \d+ words; the limit is 100\. Shorten --summary or --note\./);
+  });
+  it("B3: a refused block writes nothing: no live-runs entry, no block file, no pending marker, on both record forms", () => {
+    const dir = project();
+    const long = "w ".repeat(120).trim();
+    const hand = run(["record", "first", "--hand", dir, "--commit", "abc1234", "--wall", "5 min", "--gate", "g", "--summary", "Test summary.", "--note", long], dir);
+    expect(hand.status).toBe(1);
+    const file = join(dir, "r.json");
+    writeFileSync(file, JSON.stringify(okReport));
+    const flow = run(["record", "first", file, dir, "--wall", "2 min", "--commit", "abc1234", "--summary", "Test summary.", "--note", long], dir);
+    expect(flow.status).toBe(1);
+    expect(existsSync(join(dir, "docs/live-runs.md"))).toBe(false);
+    expect(existsSync(join(stateDir(dir, "first"), "landing-block.txt"))).toBe(false);
+    expect(existsSync(join(stateDir(dir, "first"), "landing-block.pending"))).toBe(false);
+  });
+  it("B6: move <id> done re-arms the pending marker when a block file exists, and never creates a block or a marker without one", () => {
+    const dir = project();
+    const rec = run(handArgs(dir), dir);
+    expect(rec.status, rec.stderr).toBe(0);
+    const pending = join(stateDir(dir, "first"), "landing-block.pending");
+    expect(existsSync(pending), "record leaves the pending marker").toBe(true);
+    rmSync(pending);
+    const mv = run(["move", "first", "done", dir], dir);
+    expect(mv.status, mv.stderr).toBe(0);
+    expect(existsSync(pending)).toBe(true);
+    expect(readFileSync(pending, "utf8")).toBe("");
+
+    const bare = project();
+    const mv2 = run(["move", "second", "done", bare], bare);
+    expect(mv2.status, mv2.stderr).toBe(0);
+    expect(existsSync(join(stateDir(bare, "second"), "landing-block.pending"))).toBe(false);
+    expect(existsSync(join(stateDir(bare, "second"), "landing-block.txt"))).toBe(false);
+  });
+  it("B6: moving a card to a column other than done leaves a deleted pending marker deleted", () => {
+    const dir = project();
+    expect(run(handArgs(dir), dir).status).toBe(0);
+    const pending = join(stateDir(dir, "first"), "landing-block.pending");
+    expect(existsSync(pending), "record leaves the pending marker").toBe(true);
+    rmSync(pending);
+    const mv = run(["move", "first", "backlog", dir], dir);
+    expect(mv.status, mv.stderr).toBe(0);
+    expect(existsSync(pending)).toBe(false);
+  });
+
+  // Round 2 (briefs/4-round2.md).
+  const runAs = (args, dir, session) => {
+    const env = { ...process.env, CLAUDE_PROJECT_DIR: "" };
+    if (session === undefined) delete env.CLAUDE_CODE_SESSION_ID;
+    else env.CLAUDE_CODE_SESSION_ID = session;
+    return spawnSync(process.execPath, [cli, ...args], { cwd: dir, encoding: "utf8", env });
+  };
+  const blockText = (dir, id) => readFileSync(join(stateDir(dir, id), "landing-block.txt"), "utf8");
+  const pendingPath = (dir, id) => join(stateDir(dir, id), "landing-block.pending");
+
+  it("F2: summary --card prints the block record saved, verbatim, even when summary is given no --cost or --note, and leaves the file byte for byte", () => {
+    const dir = project();
+    const file = join(dir, "r.json");
+    writeFileSync(file, JSON.stringify(okReport));
+    const rec = run(["record", "first", file, dir, "--wall", "2 min", "--commit", "abc1234", "--summary", "Test summary.", "--cost", "1", "--note", "Learned X."], dir);
+    expect(rec.status, rec.stderr).toBe(0);
+    expect(lastThree(rec.stdout)).toEqual([
+      "Changed: Test summary.",
+      "Outcome: landed first at abc1234, 2 min, acceptance 2/2, $1.00",
+      "Learned: Learned X.",
+    ]);
+    const before = blockText(dir, "first");
+    rmSync(pendingPath(dir, "first"));
+    const sum = run(["summary", file, "--wall", "9 min", "--commit", "zzz9999", "--card", "first", "--summary", "A different sentence.", dir], dir);
+    expect(sum.status, sum.stderr).toBe(0);
+    expect(lastThree(sum.stdout), "summary prints the saved block, not a recomputed one").toEqual(lastThree(rec.stdout));
+    expect(blockText(dir, "first"), "summary --card never rewrites the file").toBe(before);
+    expect(existsSync(pendingPath(dir, "first")), "summary re-arms the pending marker").toBe(true);
+  });
+  it("F2: with no saved block, summary --card still computes one (with its own --cost) and saves it", () => {
+    const dir = project();
+    const file = join(dir, "r.json");
+    writeFileSync(file, JSON.stringify(okReport));
+    expect(existsSync(join(stateDir(dir, "first"), "landing-block.txt"))).toBe(false);
+    const sum = run(["summary", file, "--wall", "2 min", "--commit", "abc1234", "--card", "first", "--summary", "Test summary.", "--cost", "2", dir], dir);
+    expect(sum.status, sum.stderr).toBe(0);
+    expect(lastThree(sum.stdout)[1]).toBe("Outcome: landed first at abc1234, 2 min, acceptance 2/2, $2.00");
+    expect(blockText(dir, "first").trimEnd().split("\n")).toEqual(lastThree(sum.stdout));
+  });
+  it("F2: record always computes and overwrites the saved block", () => {
+    const dir = project();
+    expect(run(handArgs(dir, ["--note", "First note."]), dir).status).toBe(0);
+    expect(blockText(dir, "first")).toContain("Learned: First note.");
+    const again = run(handArgs(dir, ["--note", "Second note."]), dir);
+    expect(again.status, again.stderr).toBe(0);
+    expect(blockText(dir, "first")).toContain("Learned: Second note.");
+    expect(blockText(dir, "first")).not.toContain("First note.");
+  });
+
+  it("F4a: the workflow form of record prints 'Outcome: stopped ...' when the report is not ok, and 'landed' when it is", () => {
+    const dir = project();
+    const bad = join(dir, "bad.json");
+    writeFileSync(bad, JSON.stringify(stoppedReport));
+    const rec = run(["record", "first", bad, dir, "--wall", "2 min", "--commit", "abc1234", "--summary", "Test summary."], dir);
+    expect(rec.status, rec.stderr).toBe(0);
+    expect(lastThree(rec.stdout)[1]).toBe("Outcome: stopped first at abc1234, 2 min, acceptance 2/2");
+    expect(blockText(dir, "first")).toContain("Outcome: stopped first");
+  });
+
+  it("F5b: record writes the pending marker with the session id from CLAUDE_CODE_SESSION_ID, in both forms", () => {
+    const dir = project();
+    expect(runAs(handArgs(dir), dir, "sess-a").status).toBe(0);
+    expect(readFileSync(pendingPath(dir, "first"), "utf8")).toBe("sess-a");
+    const file = join(dir, "r.json");
+    writeFileSync(file, JSON.stringify(okReport));
+    const rec = runAs(["record", "first", file, dir, "--wall", "2 min", "--commit", "abc1234", "--summary", "Test summary."], dir, "sess-b");
+    expect(rec.status, rec.stderr).toBe(0);
+    expect(readFileSync(pendingPath(dir, "first"), "utf8")).toBe("sess-b");
+  });
+  it("F5b: summary --card (computing and re-arming) and move done write the marker with the session id", () => {
+    const dir = project();
+    const file = join(dir, "r.json");
+    writeFileSync(file, JSON.stringify(okReport));
+    const sum = runAs(["summary", file, "--wall", "2 min", "--commit", "abc1234", "--card", "second", "--summary", "Second.", dir], dir, "sess-c");
+    expect(sum.status, sum.stderr).toBe(0);
+    expect(readFileSync(pendingPath(dir, "second"), "utf8")).toBe("sess-c");
+    rmSync(pendingPath(dir, "second"));
+    const again = runAs(["summary", file, "--wall", "2 min", "--commit", "abc1234", "--card", "second", "--summary", "Second.", dir], dir, "sess-d");
+    expect(again.status, again.stderr).toBe(0);
+    expect(readFileSync(pendingPath(dir, "second"), "utf8"), "re-arm from the saved block writes the current session").toBe("sess-d");
+    expect(runAs(handArgs(dir), dir, "sess-e").status).toBe(0);
+    rmSync(pendingPath(dir, "first"));
+    const mv = runAs(["move", "first", "done", dir], dir, "sess-f");
+    expect(mv.status, mv.stderr).toBe(0);
+    expect(readFileSync(pendingPath(dir, "first"), "utf8")).toBe("sess-f");
+  });
+  it("F5b: with CLAUDE_CODE_SESSION_ID unset the marker is empty", () => {
+    const dir = project();
+    expect(runAs(handArgs(dir), dir, undefined).status).toBe(0);
+    expect(readFileSync(pendingPath(dir, "first"), "utf8")).toBe("");
+    rmSync(pendingPath(dir, "first"));
+    expect(runAs(["move", "first", "done", dir], dir, undefined).status).toBe(0);
+    expect(readFileSync(pendingPath(dir, "first"), "utf8")).toBe("");
+  });
+});
+
+// Card rehearsal-failure-not-landed: a rehearsal entry's Outcome says "rehearsal <scenario> passed|failed", never
+// "landed", and a rehearsal record is no landing: it writes no block files, so the Stop gate demands nothing.
+describe("rehearsal records are not landings (card rehearsal-failure-not-landed)", () => {
+  const run = (args, dir) => spawnSync(process.execPath, [cli, ...args], { cwd: dir, encoding: "utf8", env: { ...process.env, CLAUDE_PROJECT_DIR: "", CLAUDE_CODE_SESSION_ID: "" } });
+  const stateDir = (dir, id) => join(dir, ".doug/.state/reports", id);
+  const handArgs = (dir, extra = []) => ["record", "first", "--hand", dir, "--commit", "abc1234", "--wall", "6.3 min", "--gate", "not observed", "--summary", "Test summary.", ...extra];
+  const reportFile = (dir) => {
+    const f = join(dir, "r.json");
+    writeFileSync(f, JSON.stringify({ plan: "First", integrationBranch: "none", ok: false, stoppedAtLevel: 0, levels: [] }));
+    return f;
+  };
+  const outcomeLine = (stdout) => stdout.split("\n").find((l) => l.startsWith("Outcome:"));
+
+  it("R1 the hand form's printed Outcome line starts 'Outcome: rehearsal hand failed' and says neither landed nor stopped", () => {
+    const dir = project();
+    const r = run(handArgs(dir, ["--rehearsal", "hand", "--rehearsal-outcome", "failed"]), dir);
+    expect(r.status, r.stderr).toBe(0);
+    const line = outcomeLine(r.stdout);
+    expect(line.startsWith("Outcome: rehearsal hand failed")).toBe(true);
+    expect(line).not.toContain("landed");
+    expect(line).not.toContain("stopped");
+  });
+  it("R1 the report form's printed Outcome line reads 'rehearsal flow passed' even for a report that is not ok, with neither landed nor stopped", () => {
+    const dir = project();
+    const r = run(["record", "first", reportFile(dir), dir, "--wall", "2 min", "--commit", "abc1234", "--summary", "Test summary.", "--rehearsal", "flow", "--rehearsal-outcome", "passed"], dir);
+    expect(r.status, r.stderr).toBe(0);
+    const line = outcomeLine(r.stdout);
+    expect(line.startsWith("Outcome: rehearsal flow passed")).toBe(true);
+    expect(line).not.toContain("landed");
+    expect(line).not.toContain("stopped");
+  });
+  it("R2 a rehearsal record writes neither landing-block.txt nor landing-block.pending, on both forms", () => {
+    const hand = project();
+    expect(run(handArgs(hand, ["--rehearsal", "hand", "--rehearsal-outcome", "failed"]), hand).status).toBe(0);
+    expect(existsSync(join(stateDir(hand, "first"), "landing-block.txt"))).toBe(false);
+    expect(existsSync(join(stateDir(hand, "first"), "landing-block.pending"))).toBe(false);
+    const flow = project();
+    expect(run(["record", "first", reportFile(flow), flow, "--summary", "Test summary.", "--rehearsal", "flow", "--rehearsal-outcome", "failed"], flow).status).toBe(0);
+    expect(existsSync(join(stateDir(flow, "first"), "landing-block.txt"))).toBe(false);
+    expect(existsSync(join(stateDir(flow, "first"), "landing-block.pending"))).toBe(false);
+  });
+  it("R2 a following move <id> done arms nothing from a rehearsal record", () => {
+    const dir = project();
+    expect(run(handArgs(dir, ["--rehearsal", "hand", "--rehearsal-outcome", "failed"]), dir).status).toBe(0);
+    const mv = run(["move", "first", "done", dir], dir);
+    expect(mv.status, mv.stderr).toBe(0);
+    expect(existsSync(join(stateDir(dir, "first"), "landing-block.txt"))).toBe(false);
+    expect(existsSync(join(stateDir(dir, "first"), "landing-block.pending"))).toBe(false);
+  });
+  it("R2 a rehearsal record leaves an existing real landing block and marker untouched", () => {
+    const dir = project();
+    expect(run(handArgs(dir, ["--note", "Real landing."]), dir).status).toBe(0);
+    const txt = join(stateDir(dir, "first"), "landing-block.txt");
+    const before = readFileSync(txt, "utf8");
+    rmSync(join(stateDir(dir, "first"), "landing-block.pending"));
+    expect(run(handArgs(dir, ["--rehearsal", "hand", "--rehearsal-outcome", "failed"]), dir).status).toBe(0);
+    expect(readFileSync(txt, "utf8")).toBe(before);
+    expect(existsSync(join(stateDir(dir, "first"), "landing-block.pending"))).toBe(false);
+  });
+  it("R3 --rehearsal without --rehearsal-outcome, or with another value, exits 2 naming the flag and writes nothing, on both forms", () => {
+    for (const extra of [["--rehearsal", "hand"], ["--rehearsal", "hand", "--rehearsal-outcome", "landed"]]) {
+      const hand = project();
+      const h = run(handArgs(hand, extra), hand);
+      expect(h.status, h.stdout).toBe(2);
+      expect(h.stderr).toContain("--rehearsal-outcome");
+      expect(existsSync(join(hand, "docs/live-runs.md"))).toBe(false);
+      expect(existsSync(stateDir(hand, "first"))).toBe(false);
+      const flow = project();
+      const f = run(["record", "first", reportFile(flow), flow, "--summary", "Test summary.", ...extra.map((e) => (e === "hand" ? "flow" : e))], flow);
+      expect(f.status, f.stdout).toBe(2);
+      expect(f.stderr).toContain("--rehearsal-outcome");
+      expect(existsSync(join(flow, "docs/live-runs.md"))).toBe(false);
+      expect(existsSync(stateDir(flow, "first"))).toBe(false);
+    }
+  });
+  it("R3 --rehearsal-outcome without --rehearsal exits 2 and writes nothing, on both forms", () => {
+    const hand = project();
+    const h = run(handArgs(hand, ["--rehearsal-outcome", "passed"]), hand);
+    expect(h.status, h.stdout).toBe(2);
+    expect(existsSync(join(hand, "docs/live-runs.md"))).toBe(false);
+    expect(existsSync(stateDir(hand, "first"))).toBe(false);
+    const flow = project();
+    const f = run(["record", "first", reportFile(flow), flow, "--summary", "Test summary.", "--rehearsal-outcome", "passed"], flow);
+    expect(f.status, f.stdout).toBe(2);
+    expect(existsSync(join(flow, "docs/live-runs.md"))).toBe(false);
+    expect(existsSync(stateDir(flow, "first"))).toBe(false);
+  });
+  it("R4 the live-runs entry's Outcome row reads 'rehearsal <scenario> <outcome>' through the CLI, never landed, on both forms", () => {
+    const hand = project();
+    expect(run(handArgs(hand, ["--rehearsal", "hand", "--rehearsal-outcome", "failed"]), hand).status).toBe(0);
+    const handText = readFileSync(join(hand, "docs/live-runs.md"), "utf8");
+    expect(handText).toContain("| Outcome | rehearsal hand failed |");
+    expect(handText).not.toContain("| Outcome | landed |");
+    const flow = project();
+    expect(run(["record", "first", reportFile(flow), flow, "--summary", "Test summary.", "--rehearsal", "flow", "--rehearsal-outcome", "passed"], flow).status).toBe(0);
+    const flowText = readFileSync(join(flow, "docs/live-runs.md"), "utf8");
+    expect(flowText).toContain("| Outcome | rehearsal flow passed |");
+    expect(flowText).not.toContain("| Outcome | green |");
+  });
+  it("R4 handEntry and runEntry take rehearsalOutcome: the Outcome row reads 'rehearsal <scenario> <outcome>', and a commit does not make it 'landed'", () => {
+    const hand = handEntry({ card: { id: "fix-hours", title: "Fix hours" }, commit: "47fe70cca7eb3444ae8a382ee14018f3950bfe1c", gate: "g", record: ".doug/board.json", date: "2026-10-13", rehearsal: "hand", rehearsalOutcome: "failed" });
+    expect(hand).toContain("| Outcome | rehearsal hand failed |");
+    expect(hand).not.toContain("| Outcome | landed |");
+    const rep = { ok: true, plan: "P", integrationBranch: "doug/x", levels: [] };
+    const runE = runEntry({ card: { id: "first", title: "First" }, report: rep, mergeCommit: "abc1234", record: ".doug/board.json", date: "2026-10-13", rehearsal: "swarm", rehearsalOutcome: "failed" });
+    expect(runE).toContain("| Outcome | rehearsal swarm failed |");
+    expect(runE).not.toContain("| Outcome | green |");
+    // A real entry is unchanged.
+    expect(handEntry({ card: { id: "x", title: "X" }, commit: "abc1234", date: "2026-10-13" })).toContain("| Outcome | landed |");
   });
 });

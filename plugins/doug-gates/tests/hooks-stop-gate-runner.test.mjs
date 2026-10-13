@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { writeFileSync, mkdirSync, readFileSync, existsSync, mkdtempSync, rmSync } from "node:fs";
 import { execFileSync, spawn } from "node:child_process";
-import { join } from "node:path";
+import { join, dirname } from "node:path";
 import { tmpdir } from "node:os";
 import { makeProject, runHookScript, scriptsDir } from "./helpers.mjs";
 // card stop-gate-process-storm: runCommand is exercised directly (case 1), the same way the proposal-ledger
@@ -9,6 +9,19 @@ import { makeProject, runHookScript, scriptsDir } from "./helpers.mjs";
 // card gates-runner-no-color: commandEnv is exercised directly (T1) the same way runCommand is above.
 import { runCommand, commandEnv } from "../lib/run.mjs";
 import { baseConfig } from "./hooks-fixtures.mjs";
+// card gate-lock-shared: gate.lock lives under the git common dir, so tests resolve it through the lib and
+// create its parent before seeding a holder's lock.
+import { gateLockPath } from "../lib/gate-lock.mjs";
+const putLock = (dir, content) => {
+  mkdirSync(dirname(gateLockPath(dir)), { recursive: true });
+  writeFileSync(gateLockPath(dir), content);
+};
+// A config that needs the lock's absolute path (a command that copies or rewrites it) is built from the dir:
+// write it into a freshly initialised repo once the dir exists.
+const writeConfigFor = (dir, config) => {
+  mkdirSync(join(dir, ".doug"), { recursive: true });
+  writeFileSync(join(dir, ".doug/config.json"), JSON.stringify(typeof config === "function" ? config(dir) : config));
+};
 
 // card stop-gate-process-storm, case 1: runCommand's own group-kill-on-timeout, tested directly against
 // lib/run.mjs rather than through the stop-gate script (the script only ever calls it with a real command).
@@ -201,7 +214,6 @@ describe("gate runner env (card gates-runner-no-color)", () => {
 describe("stop-gate process storm (card stop-gate-process-storm)", () => {
   const runsLogRelpath = ".doug/.state/runs.log";
   const lockSeenRelpath = ".doug/.state/lock-seen.json";
-  const lockRelpath = ".doug/.state/gate.lock";
 
   // Counts verification runs: each run appends one "x" byte.
   const makeRunsConfig = (timeoutMs) => ({
@@ -212,21 +224,22 @@ describe("stop-gate process storm (card stop-gate-process-storm)", () => {
   });
   // Copies whatever gate.lock looks like while the command runs, so the test can inspect it afterward
   // (gate.lock itself is normally gone again by the time the hook process exits and stdout is read back).
-  const makeLockSeenConfig = (timeoutMs) => ({
+  const makeLockSeenConfig = (timeoutMs) => (dir) => ({
     ...baseConfig,
-    commands: { "test:unit": `${process.execPath} -e "require('fs').copyFileSync('${lockRelpath}','${lockSeenRelpath}')"` },
+    commands: { "test:unit": `${process.execPath} -e "require('fs').copyFileSync('${gateLockPath(dir)}','${lockSeenRelpath}')"` },
     stopGate: { commands: ["test:unit"], onlyIfEdited: true, maxBlocks: 3, timeoutMs, requireEvidence: false },
     trace: { enabled: true },
   });
 
   const runsLogPath = (dir) => join(dir, runsLogRelpath);
   const runsCount = (dir) => (existsSync(runsLogPath(dir)) ? readFileSync(runsLogPath(dir), "utf8").length : 0);
-  const lockPath = (dir) => join(dir, lockRelpath);
+  const lockPath = (dir) => gateLockPath(dir);
 
   // Base project for cases 2/2b/2c: a git repo, a base commit, then one file edited and dirtied — the shape
   // every "still dirty, still edited" sub-case below builds on.
   function makeEditedProject(config) {
-    const dir = makeProject({ config, git: true });
+    const dir = makeProject({ config: typeof config === "function" ? null : config, git: true });
+    if (typeof config === "function") writeConfigFor(dir, config);
     mkdirSync(join(dir, "src"));
     writeFileSync(join(dir, "src/a.ts"), "base");
     execFileSync("git", ["add", "-A"], { cwd: dir });
@@ -418,7 +431,7 @@ describe("stop-gate process storm (card stop-gate-process-storm)", () => {
     });
   });
 
-  describe("case 3: only one gate runs the commands at a time per project, via .doug/.state/gate.lock", () => {
+  describe("case 3: only one gate runs the commands at a time per project, via gate.lock (shared under the git common dir)", () => {
     it("3a: holds gate.lock ({pid, session, at}) while its commands run, and removes it when they finish", () => {
       const dir = makeEditedProject(makeLockSeenConfig(10000));
       runHookScript("stop-gate", { hook_event_name: "Stop" }, { dir });
@@ -443,7 +456,7 @@ describe("stop-gate process storm (card stop-gate-process-storm)", () => {
         free = true;
       }
       expect(free, "the chosen pid must actually be free for this test to mean anything").toBe(true);
-      writeFileSync(lockPath(dir), JSON.stringify({ pid: deadPid, session: "someone-else", at: Date.now() }));
+      putLock(dir, JSON.stringify({ pid: deadPid, session: "someone-else", at: Date.now() }));
       const started = Date.now();
       runHookScript("stop-gate", { hook_event_name: "Stop" }, { dir });
       const elapsed = Date.now() - started;
@@ -485,7 +498,7 @@ describe("stop-gate process storm (card stop-gate-process-storm)", () => {
         ].join("\n"),
       );
       const holder = spawn(process.execPath, [holderScript], { cwd: dir, stdio: "ignore" });
-      writeFileSync(lockPath(dir), JSON.stringify({ pid: holder.pid, session: "holder-session", at: Date.now() }));
+      putLock(dir, JSON.stringify({ pid: holder.pid, session: "holder-session", at: Date.now() }));
 
       try {
         const started = Date.now();
@@ -509,7 +522,7 @@ describe("stop-gate process storm (card stop-gate-process-storm)", () => {
       const holderScript = join(dir, ".doug/.state/holder-long.mjs");
       writeFileSync(holderScript, "setTimeout(() => {}, 15000);"); // outlives the gate's own 1000ms timeout by far
       const holder = spawn(process.execPath, [holderScript], { cwd: dir, stdio: "ignore" });
-      writeFileSync(lockPath(dir), JSON.stringify({ pid: holder.pid, session: "holder-session", at: Date.now() }));
+      putLock(dir, JSON.stringify({ pid: holder.pid, session: "holder-session", at: Date.now() }));
       try {
         const started = Date.now();
         runHookScript("stop-gate", { hook_event_name: "Stop" }, { dir });
@@ -541,7 +554,7 @@ describe("stop-gate process storm (card stop-gate-process-storm)", () => {
       it(`a garbage lock (${label}) is stale and taken over immediately, not waited out for the timeout`, () => {
         const dir = makeEditedProject(makeRunsConfig(15000));
         mkdirSync(join(dir, ".doug/.state"), { recursive: true });
-        writeFileSync(lockPath(dir), lockContent);
+        putLock(dir, lockContent);
         const started = Date.now();
         runHookScript("stop-gate", { hook_event_name: "Stop" }, { dir });
         const elapsed = Date.now() - started;
@@ -566,7 +579,7 @@ describe("stop-gate process storm (card stop-gate-process-storm)", () => {
       const holderScript = join(dir, ".doug/.state/holder-scale.mjs");
       writeFileSync(holderScript, "setTimeout(() => {}, 3000);"); // outlives even the scaled (600 x 2) bound
       const holder = spawn(process.execPath, [holderScript], { cwd: dir, stdio: "ignore" });
-      writeFileSync(lockPath(dir), JSON.stringify({ pid: holder.pid, session: "holder-session", at: Date.now() }));
+      putLock(dir, JSON.stringify({ pid: holder.pid, session: "holder-session", at: Date.now() }));
       try {
         const started = Date.now();
         const r = runHookScript("stop-gate", { hook_event_name: "Stop" }, { dir });
@@ -616,7 +629,7 @@ describe("stop-gate process storm (card stop-gate-process-storm)", () => {
 // reaches the same protectedPaths throw on the SubagentStop reviewer-skip path (lockOwned never set true, the
 // same probe there also confirms the live holder's lock file is left byte-for-byte unchanged).
 describe("card stop-gate-lock-release-on-throw", () => {
-  const lockPath = (dir) => join(dir, ".doug/.state/gate.lock");
+  const lockPath = (dir) => gateLockPath(dir);
 
   // Same dirty-project shape as makeEditedProject above (this describe sits outside that one's scope), plus
   // whatever config the case needs.
@@ -671,7 +684,7 @@ describe("card stop-gate-lock-release-on-throw", () => {
     writeFileSync(holderScript, "setTimeout(() => {}, 15000);");
     const holder = spawn(process.execPath, [holderScript], { cwd: dir, stdio: "ignore" });
     const lockContent = JSON.stringify({ pid: holder.pid, session: "holder-session", at: Date.now() });
-    writeFileSync(lockPath(dir), lockContent);
+    putLock(dir, lockContent);
     try {
       const r = runHookScript("stop-gate", { hook_event_name: "SubagentStop", agent_id: "ag1", agent_type: "reviewer" }, { dir });
       expect(r.status).toBe(0);
@@ -697,14 +710,14 @@ describe("card stop-gate-lock-release-on-throw", () => {
 // releaseLock() out of allowReleasing/blockStopReleasing/systemMessageReleasing also left the whole file
 // green). Tests only, no production change.
 describe("card stop-gate-lock-release-pins", () => {
-  const lockRelpath = ".doug/.state/gate.lock";
   const lockWrittenRelpath = ".doug/.state/lock-written.json";
-  const lockPath = (dir) => join(dir, lockRelpath);
+  const lockPath = (dir) => gateLockPath(dir);
 
   // Same dirty-project shape used by the neighboring "card stop-gate-lock-release-on-throw" describe (that
   // describe's own makeDirtyProject is out of scope here).
   function makeDirtyProject(config) {
-    const dir = makeProject({ config, git: true });
+    const dir = makeProject({ config: typeof config === "function" ? null : config, git: true });
+    if (typeof config === "function") writeConfigFor(dir, config);
     mkdirSync(join(dir, "src"));
     writeFileSync(join(dir, "src/a.ts"), "base");
     execFileSync("git", ["add", "-A"], { cwd: dir });
@@ -725,17 +738,17 @@ describe("card stop-gate-lock-release-pins", () => {
       // A real, live pid this test does not own but can prove is alive and can clean up.
       holder = spawn(process.execPath, ["-e", "setTimeout(() => {}, 30000)"], { stdio: "ignore" });
       const foreignPid = holder.pid;
-      const command =
+      const command = (d) =>
         `${process.execPath} -e "const fs=require('fs'); ` +
         `const c=JSON.stringify({pid:${foreignPid},session:'foreign-session',at:Date.now()}); ` +
-        `fs.writeFileSync('${lockRelpath}', c); ` +
-        `fs.copyFileSync('${lockRelpath}','${lockWrittenRelpath}'); ` +
+        `fs.writeFileSync('${gateLockPath(d)}', c); ` +
+        `fs.copyFileSync('${gateLockPath(d)}','${lockWrittenRelpath}'); ` +
         `process.exit(1)"`;
-      const dir = makeDirtyProject({
+      const dir = makeDirtyProject((d) => ({
         ...baseConfig,
-        commands: { test: command },
+        commands: { test: command(d) },
         stopGate: { commands: ["test"], onlyIfEdited: true, maxBlocks: 3, timeoutMs: 10000, requireEvidence: false },
-      });
+      }));
       const r = runHookScript("stop-gate", { hook_event_name: "Stop" }, { dir });
       expect(r.json && r.json.decision, "a failing verification command must still block the stop").toBe("block");
       expect(existsSync(lockPath(dir)), "gate.lock must still exist: it was overwritten by a live foreign pid, not this gate's own").toBe(true);
@@ -875,10 +888,9 @@ describe("card stop-gate-lock-release-pins", () => {
 // Fixture `hookTimeoutSec` values are small (2) so these stay fast to run once the mechanism exists.
 describe("card stop-gate-budget-under-hook-timeout", () => {
   const runsLogRelpath = ".doug/.state/runs.log";
-  const lockRelpath = ".doug/.state/gate.lock";
   const runsLogPath = (dir) => join(dir, runsLogRelpath);
   const runsCount = (dir) => (existsSync(runsLogPath(dir)) ? readFileSync(runsLogPath(dir), "utf8").length : 0);
-  const lockPath = (dir) => join(dir, lockRelpath);
+  const lockPath = (dir) => gateLockPath(dir);
   const appendCommand = (relpath) => `${process.execPath} -e "require('fs').appendFileSync('${relpath}','x')"`;
   const sleepCommand = (ms) => `${process.execPath} -e "setTimeout(() => {}, ${ms})"`;
 
@@ -917,7 +929,7 @@ describe("card stop-gate-budget-under-hook-timeout", () => {
       trace: { enabled: true },
     });
     const holder = spawnHolder(dir, 12000); // outlives both the hook-timeout budget and stopGate.timeoutMs's old scaled bound
-    writeFileSync(lockPath(dir), JSON.stringify({ pid: holder.pid, session: "holder-session", at: Date.now() }));
+    putLock(dir, JSON.stringify({ pid: holder.pid, session: "holder-session", at: Date.now() }));
     try {
       const started = Date.now();
       const r = runHookScript("stop-gate", { hook_event_name: "Stop" }, { dir });
@@ -941,6 +953,40 @@ describe("card stop-gate-budget-under-hook-timeout", () => {
     }
   });
 
+  // card gate-lock-shared: the lock is shared by every worktree of the repo, so a gate in worktree B waits on
+  // (here: is refused by) a lock a live holder took through the main checkout.
+  it("B1w: a live lock held via the main checkout makes a Stop gate in a sibling worktree wait out its budget and refuse", () => {
+    const dir = makeEditedProject({
+      ...baseConfig,
+      commands: { "test:unit": appendCommand(runsLogRelpath) },
+      stopGate: { commands: ["test:unit"], onlyIfEdited: true, maxBlocks: 3, timeoutMs: 10000, hookTimeoutSec: 3, requireEvidence: false },
+      trace: { enabled: true },
+    });
+    const wt = join(mkdtempSync(join(tmpdir(), "doug-wt-")), "wt");
+    execFileSync("git", ["worktree", "add", "-q", "-b", "wt-branch", wt], { cwd: dir });
+    writeFileSync(join(wt, "src/a.ts"), "edited in the worktree");
+    runHookScript("edit-loop", { tool_name: "Edit", tool_input: { file_path: "src/a.ts" } }, { dir: wt });
+    expect(gateLockPath(wt), "the worktree must resolve the main checkout's lock path").toBe(gateLockPath(dir));
+    const holder = spawnHolder(dir, 12000);
+    putLock(dir, JSON.stringify({ pid: holder.pid, session: "holder-session", at: Date.now() }));
+    try {
+      const started = Date.now();
+      const r = runHookScript("stop-gate", { hook_event_name: "Stop" }, { dir: wt });
+      const elapsed = Date.now() - started;
+      expect(elapsed, "the worktree's gate must be cut off under the hook budget").toBeLessThan(4000);
+      expect(r.json && r.json.decision, "a worktree gate facing a live lock held via another worktree must refuse, not run its own suite").toBe("block");
+      expect(r.json.reason, "the refusal must name the session holding the shared lock").toContain("holder-session");
+      expect(runsCount(wt), "the worktree's gate must not run its commands while the shared lock is live").toBe(0);
+      expect(existsSync(lockPath(dir)), "the holder's lock must be left in place").toBe(true);
+    } finally {
+      try {
+        process.kill(holder.pid, "SIGKILL");
+      } catch {
+        // already exited
+      }
+    }
+  });
+
   it("B2: a live lock older than the hook-timeout budget is stale by age and is taken over at once, not waited on", () => {
     const dir = makeEditedProject({
       ...baseConfig,
@@ -949,7 +995,7 @@ describe("card stop-gate-budget-under-hook-timeout", () => {
       trace: { enabled: true },
     });
     const holder = spawnHolder(dir, 25000); // pid stays live throughout; only its lock's age must make it stale
-    writeFileSync(lockPath(dir), JSON.stringify({ pid: holder.pid, session: "holder-session", at: Date.now() - 60_000 }));
+    putLock(dir, JSON.stringify({ pid: holder.pid, session: "holder-session", at: Date.now() - 60_000 }));
     try {
       const started = Date.now();
       runHookScript("stop-gate", { hook_event_name: "Stop" }, { dir });
@@ -1062,7 +1108,7 @@ describe("card stop-gate-budget-under-hook-timeout", () => {
         stopGate: { commands: ["test:unit"], onlyIfEdited: true, maxBlocks: 3, timeoutMs: 10000, hookTimeoutSec: 3, requireEvidence: false },
       });
       const holder = spawnHolder(dir, 12000);
-      writeFileSync(lockPath(dir), JSON.stringify({ pid: holder.pid, session: "holder-session", ...lockExtra }));
+      putLock(dir, JSON.stringify({ pid: holder.pid, session: "holder-session", ...lockExtra }));
       try {
         const started = Date.now();
         const r = runHookScript("stop-gate", { hook_event_name: "Stop" }, { dir });
@@ -1100,11 +1146,11 @@ describe("card stop-gate-budget-under-hook-timeout", () => {
       const dir = makeEditedProject({ ...baseConfig, commands: { "test:unit": appendCommand(runsLogRelpath) }, stopGate: { ...commonStopGate, maxBlocks: 3 } });
       const holder = spawnHolder(dir, 20000);
       try {
-        writeFileSync(lockPath(dir), JSON.stringify({ pid: holder.pid, session: "holder-session", at: Date.now() }));
+        putLock(dir, JSON.stringify({ pid: holder.pid, session: "holder-session", at: Date.now() }));
         const r1 = runHookScript("stop-gate", { hook_event_name: "Stop" }, { dir });
         expect(r1.json && r1.json.decision).toBe("block");
         expect(r1.json.reason).toContain("(1/3)");
-        writeFileSync(lockPath(dir), JSON.stringify({ pid: holder.pid, session: "holder-session", at: Date.now() }));
+        putLock(dir, JSON.stringify({ pid: holder.pid, session: "holder-session", at: Date.now() }));
         const r2 = runHookScript("stop-gate", { hook_event_name: "Stop" }, { dir });
         expect(r2.json && r2.json.decision).toBe("block");
         expect(r2.json.reason).toContain("(2/3)");
@@ -1122,10 +1168,10 @@ describe("card stop-gate-budget-under-hook-timeout", () => {
       const dir = makeEditedProject({ ...baseConfig, commands: { "test:unit": appendCommand(runsLogRelpath) }, stopGate: { ...commonStopGate, maxBlocks: 1 } });
       const holder = spawnHolder(dir, 20000);
       try {
-        writeFileSync(lockPath(dir), JSON.stringify({ pid: holder.pid, session: "holder-session", at: Date.now() }));
+        putLock(dir, JSON.stringify({ pid: holder.pid, session: "holder-session", at: Date.now() }));
         const r1 = runHookScript("stop-gate", { hook_event_name: "Stop" }, { dir });
         expect(r1.json && r1.json.decision).toBe("block");
-        writeFileSync(lockPath(dir), JSON.stringify({ pid: holder.pid, session: "holder-session", at: Date.now() }));
+        putLock(dir, JSON.stringify({ pid: holder.pid, session: "holder-session", at: Date.now() }));
         const r2 = runHookScript("stop-gate", { hook_event_name: "Stop" }, { dir });
         expect(r2.json && r2.json.decision, "the second refusal must stand down, not block again").toBeUndefined();
         expect(r2.json.systemMessage).toContain("standing down");
@@ -1165,10 +1211,9 @@ describe("card stop-gate-budget-under-hook-timeout", () => {
 // goes stale by age partway through it: it must be taken over once it ages out, not refused.
 describe("card stop-gate-timeout-normalise", () => {
   const runsLogRelpath = ".doug/.state/runs.log";
-  const lockRelpath = ".doug/.state/gate.lock";
   const runsLogPath = (dir) => join(dir, runsLogRelpath);
   const runsCount = (dir) => (existsSync(runsLogPath(dir)) ? readFileSync(runsLogPath(dir), "utf8").length : 0);
-  const lockPath = (dir) => join(dir, lockRelpath);
+  const lockPath = (dir) => gateLockPath(dir);
   const appendCommand = (relpath) => `${process.execPath} -e "require('fs').appendFileSync('${relpath}','x')"`;
   const sleepCommand = (ms) => `${process.execPath} -e "setTimeout(() => {}, ${ms})"`;
 
@@ -1229,7 +1274,7 @@ describe("card stop-gate-timeout-normalise", () => {
     // gate start (marginMs 300). at: now - 2000 is fresh at the start (2000 < 3000) but ages past 3000 about 1s
     // into the wait — well before the 2700ms refusal deadline — so a correct gate takes it over mid-wait.
     const holder = spawnHolder(dir, 12000);
-    writeFileSync(lockPath(dir), JSON.stringify({ pid: holder.pid, session: "holder-session", at: Date.now() - 2000 }));
+    putLock(dir, JSON.stringify({ pid: holder.pid, session: "holder-session", at: Date.now() - 2000 }));
     try {
       const r = runHookScript("stop-gate", { hook_event_name: "Stop" }, { dir });
       const refused = !!(r.json && r.json.reason && r.json.reason.includes("ran out while waiting"));

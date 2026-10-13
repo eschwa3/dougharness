@@ -83,6 +83,9 @@ describe("workflow template", () => {
       for (const m of text.matchAll(/subagent_type: "([^"]+)"/g)) {
         const t = m[1];
         if (builtins.includes(t)) continue;
+        // Card doug-start-skill (ADR 0012): /doug-start spawns the project's own architect, which `doug init` generates
+        // into .claude/agents (the plugin ships no architect), so this one skill names it bare on purpose.
+        if (skill === "doug-start" && t === "architect") continue;
         expect(t.startsWith("doug-flow:"), `${skill}: ${t}`).toBe(true);
         expect(agentFiles, `${skill}: ${t}`).toContain(t.slice("doug-flow:".length));
       }
@@ -4586,11 +4589,13 @@ describe("fix loop", () => {
     ];
     const getEnforce = () => new Function(fnSlice("function enforceIntegrationAcceptance(") + "\nreturn enforceIntegrationAcceptance;")();
     const integratePromptOf = (plan, integrationBranch = "doug/integration") => {
+      const cstart = source.indexOf("const INTEGRATION_WORKTREE");
+      const constLine = source.slice(cstart, source.indexOf("\n", cstart) + 1);
       const start = source.indexOf("function integratePrompt(");
       const slice = source.slice(start, source.indexOf("\n}\n", start) + 3);
       return new Function(
         "plan", "integrationBranch", "acceptanceEntries", "shellQuote",
-        CONSTS + slice + "\nreturn integratePrompt;",
+        CONSTS + constLine + slice + "\nreturn integratePrompt;",
       )(plan, integrationBranch, entries, new Function(fnSlice("function shellQuote(") + "\nreturn shellQuote;")());
     };
     const oneResult = { impl: { branch: "doug/task-a", worktreePath: "/wt/a" } };
@@ -4629,6 +4634,46 @@ describe("fix loop", () => {
       expect(text).toContain("--record-dir .");
       expect(text).toContain("--command 'pnpm test:unit'");
       expect(text).toContain("--credit-dir '/wt/a'");
+    });
+
+    // Card parallel-card-queens, brief B3 (W01): the integration worktree path follows plan.integrationWorktree.
+    // The constant line is evaluated with the plan, so the test pins the production expression, not a copy of it.
+    const integratePromptWithConst = (plan) => {
+      const cstart = source.indexOf("const INTEGRATION_WORKTREE");
+      const constLine = source.slice(cstart, source.indexOf("\n", cstart) + 1);
+      const start = source.indexOf("function integratePrompt(");
+      const slice = source.slice(start, source.indexOf("\n}\n", start) + 3);
+      return new Function(
+        "plan", "integrationBranch", "acceptanceEntries", "shellQuote",
+        CONSTS + constLine + slice + "\nreturn integratePrompt;",
+      )(plan, "doug/integration", entries, new Function(fnSlice("function shellQuote(") + "\nreturn shellQuote;")());
+    };
+    const W01_DEFAULT = ".claude/worktrees/doug-integration";
+    const W01_OWN = ".claude/worktrees/doug-integration-alpha";
+    const w01Plan = (extra = {}) => ({ title: "P", install: null, verify: ["pnpm test:unit"], acceptance: [], ...extra });
+
+    it("W01: every integrate-prompt use of the integration worktree follows plan.integrationWorktree, first and later levels", () => {
+      const own = integratePromptWithConst(w01Plan({ integrationWorktree: W01_OWN }));
+      for (const [first, last, keep] of [[true, true, false], [false, false, false], [false, true, true]]) {
+        const text = own(0, [oneResult], "main", last, keep, first);
+        expect(text).toContain(W01_OWN);
+        expect(text.replaceAll(W01_OWN, "")).not.toContain(W01_DEFAULT);
+      }
+      const first = own(0, [oneResult], "main", true, false, true);
+      expect(first).toContain(`git worktree add -B doug/integration ${W01_OWN} main`);
+      expect(first).toContain(`--cwd ${W01_OWN}`);
+    });
+
+    it("W01: with no plan.integrationWorktree the prompt keeps the default path", () => {
+      const text = integratePromptWithConst(w01Plan())(0, [oneResult], "main", true, false, true);
+      expect(text).toContain(`git worktree add -B doug/integration ${W01_DEFAULT} main`);
+      expect(text).toContain(`--cwd ${W01_DEFAULT}`);
+      expect(text).not.toContain("doug-integration-");
+    });
+
+    it("W01: the default path literal appears once in the workflow, in the constant every other use goes through", () => {
+      expect(source.split(W01_DEFAULT).length - 1).toBe(1);
+      expect(source).toMatch(/const INTEGRATION_WORKTREE = [^\n]*plan\.integrationWorktree/);
     });
 
     it("S1: INTEGRATE_SCHEMA carries the verifier's acceptance item shape, still not required", () => {
@@ -6037,9 +6082,9 @@ describe("plugin layout", () => {
     expect(commands[0]).toContain("${CLAUDE_PLUGIN_ROOT}/scripts/session-recall.mjs");
     expect(existsSync(join(root, "scripts/session-recall.mjs"))).toBe(true);
   });
-  it("ships the eight agents with valid frontmatter and read-only verifier, reviewer, researcher and both adversaries", () => {
+  it("ships the eleven agents with valid frontmatter and read-only verifier, reviewer, researcher, spec-writer and both adversaries", () => {
     const names = readdirSync(join(root, "agents")).sort();
-    expect(names).toEqual(["adversary-claude.md", "adversary.md", "implementer.md", "lead.md", "planner.md", "researcher.md", "reviewer.md", "verifier.md"]);
+    expect(names).toEqual(["adversary-claude.md", "adversary.md", "coder.md", "implementer.md", "lead.md", "planner.md", "researcher.md", "reviewer.md", "spec-writer.md", "tester.md", "verifier.md"]);
     for (const f of names) {
       const fm = parseFrontmatter(readFileSync(join(root, "agents", f), "utf8"));
       expect(fm, f).not.toBeNull();
@@ -6091,6 +6136,22 @@ describe("plugin layout", () => {
       expect(fm.disallowedTools, f).toContain("Agent");
     }
   });
+  it("(card parallel-card-queens, D5) the tester and coder agents carry the generated rules, deny Agent, and name no model", () => {
+    // D5 adds doug-flow:tester and doug-flow:coder for the card loop's seats, modelled on doug init's generated agents.
+    const tester = readFileSync(join(root, "agents/tester.md"), "utf8");
+    const coder = readFileSync(join(root, "agents/coder.md"), "utf8");
+    expect(tester).toContain("Edit only test files.");
+    expect(tester).toContain("tests_red_by_design");
+    expect(coder).toContain("When a test contradicts the brief or the card's goal, do not change production code to fit the test; stop and report the conflict, quoting both, so the lead can send it back to the tester.");
+    expect(coder).toContain("Run the gate with `node .doug/hooks/scripts/verify.mjs`, not the raw commands; do not claim done until it passed in this session.");
+    for (const [f, text] of [["tester.md", tester], ["coder.md", coder]]) {
+      const fm = parseFrontmatter(text);
+      expect(fm.model, f).toBe("inherit");
+      expect(fm.disallowedTools, f).toContain("Agent");
+      expect(fm.memory, f).toBe("none");
+      expect(text, f).not.toMatch(/\b(opus|sonnet|haiku)\b/i);
+    }
+  });
   it("tells the planner an acceptance command never repeats a verify command (card flow-suite-dedupe)", () => {
     expect(readFileSync(join(root, "agents/planner.md"), "utf8")).toContain("never repeats a verify command");
   });
@@ -6133,9 +6194,9 @@ describe("plugin layout", () => {
     const next = readFileSync(join(root, "skills/doug-next/SKILL.md"), "utf8");
     expect(next).toContain("any task whose implementer is not on the implement row");
   });
-  it("ships eleven skills (doug-hand, not core-next); the user alone invokes approve, implement, next, and doug-swarm, and doug-hand is model-invocable so /doug-next can route to it", () => {
+  it("ships twelve skills (doug-hand, not core-next; doug-start, card doug-start-skill); the user alone invokes approve, implement, next, and doug-swarm, and doug-hand is model-invocable so /doug-next can route to it", () => {
     const skills = readdirSync(join(root, "skills")).sort();
-    expect(skills).toEqual(["doug-approve", "doug-decide", "doug-hand", "doug-implement", "doug-learn", "doug-next", "doug-plan", "doug-swarm", "research", "run-report", "swarm-launch"]);
+    expect(skills).toEqual(["doug-approve", "doug-decide", "doug-hand", "doug-implement", "doug-learn", "doug-next", "doug-plan", "doug-start", "doug-swarm", "research", "run-report", "swarm-launch"]);
     // The harness-fix skill is Doug-only and lives in .claude/skills (card op-harness-fix-local), not in the plugin.
     expect(existsSync(join(root, "skills/harness-fix"))).toBe(false);
     for (const s of skills) {
@@ -7731,24 +7792,29 @@ describe("card autopilot: doug-next and doug-hand skill text", () => {
   const pinned = {
     "the queue sentence": "`/doug-next --auto [n]` takes the first n runnable Ready cards of either track in board order (`board.mjs next --batch <n> --track any`).",
     "the swarm branch": "A hand card whose goal asks for a swarm follows doug-hand's 2b swarm branch, with the queue approval standing for its plan approval.",
-    "unlimited: the fixed queue with n, the Ready re-read without it (S1)": "With n, the queue is fixed at the approval. Without n, autopilot is unlimited: before each card it re-reads Ready with `board.mjs next --track any` and takes the next runnable Ready card in board order.",
+    // Card parallel-card-queens: "before each card ... board.mjs next" cannot hold with queens running; autopilot.mjs pick re-reads Ready.
+    "unlimited: the fixed queue with n, the Ready re-read without it (S1)": "With n, the queue is fixed at the approval. Without n, autopilot is unlimited: whenever a slot is free it re-reads Ready with `autopilot.mjs pick` and takes the next runnable Ready cards in board order.",
     "unlimited: Ready only, promoted cards picked up (S2)": "It never takes a Backlog card: follow-ups still go to Backlog, and a card the user promotes to Ready during the run is picked up.",
     "unlimited: the approval shows the runnable Ready cards (S3)": "Unlimited autopilot shows the runnable Ready cards at the approval, and the approval covers every card it later takes from Ready.",
-    "unlimited: no card cap, USD $40, wall cap grows by size (S4)": "Unlimited autopilot has no card cap: its USD cap defaults to $40, and its wall cap grows as each card is taken, by that card's budget from the same size x class table (`board.mjs budgets` prints it); only the totals are checked between cards.",
-    "unlimited: the budget refresh sentence": "When the measured walls drift, the lead reruns `board.mjs budgets --from docs/live-runs.md`, which recomputes the table and prints each cell's n, and replaces the table in the `board.mjs` source with the printed one.",
+    "unlimited: no card cap, wall and USD caps grow by size (S4)": "Unlimited autopilot has no card cap: its wall cap and its USD cap grow as each card is taken, by that card's budget from the same size x class tables (`board.mjs budgets` and `board.mjs budgets --usd` print them); only the totals are checked on every queen notification.",
+    "unlimited: the budget refresh sentence": "When the measured walls or costs drift, the lead reruns `board.mjs budgets --from docs/live-runs.md` and `board.mjs budgets --usd --from docs/live-runs.md`, which recompute the tables and print each cell's n, and replaces each table in the `board.mjs` source with the printed one.",
     "the ending-conditions intro": "It ends with the summary below, one condition per line:",
     "ends: Ready has no runnable card": "It ends when Ready has no runnable card, under unlimited autopilot.",
-    "ends: the user says stop": "It ends when the user says stop: the current card is finished or left In flow.",
-    "ends: context at the threshold": 'It ends when the lead\'s context is at or above autopilot.contextThreshold in .doug/config.json (default 60): between cards the lead runs `node "${CLAUDE_PLUGIN_ROOT}/scripts/context.mjs"`, which prints the context percentage of the lead\'s own session transcript, and treats a run that prints no reading as at the threshold.',
+    // Card parallel-card-queens: n cards run at once, so a stop finishes several in-flight cards, not one current card.
+    "ends: the user says stop": "It ends when the user says stop: the in-flight cards are finished or left In flow.",
+    "ends: context at the threshold": 'It ends when the lead\'s context is at or above autopilot.contextThreshold in .doug/config.json (default 60): on every queen notification the lead runs `node "${CLAUDE_PLUGIN_ROOT}/scripts/context.mjs"`, which prints the context percentage of the lead\'s own session transcript, and treats a run that prints no reading as at the threshold.',
     "ends: the anchor handoff": "Before that summary it refreshes the anchor handoff: a `## Autopilot handoff` section in .doug/anchor.md naming the landed cards, any card left In flow, and that a new session resumes with /doug-next --auto.",
-    "the default caps": "The caps default to the queue's length in cards, the wall cap that board.mjs next --batch prints (the sum of each card's budget from the size x class wall budget table in board.mjs, at the p80 of measured landings: a size/class cell with fewer than 5 landings falls back to its size's all-class figure, a card with no class uses its size's all-class figure, and a card with no size counts as M), and $40, and the user may change them at the approval.",
+    "the default caps": "The caps default to the queue's length in cards, the wall cap that board.mjs next --batch prints (the sum of each card's budget from the size x class wall budget table in board.mjs, at the p80 of measured landings: a size/class cell with fewer than 5 landings falls back to its size's all-class figure, a card with no class uses its size's all-class figure, and a card with no size counts as M), and the usd cap it prints beside it (the sum of each card's budget from the size x class usd budget table in board.mjs, at the p80 of measured cost over flow and hand landings, with the same fallbacks), and the user may change them at the approval.",
+    "the usd cap has no fixed default or floor": "The USD cap has no fixed default and no floor: it is the sum of the per-card budgets, and the user may raise it at the approval.",
     "the skipped gates' actions still happen": "Under autopilot a card still gets everything the skipped gates' Start or Approve branches do: a hand card gets doug-hand step 2's class, move to flow, and condition open, and the wall clock is noted when the card starts; a flow card gets section 1's move and section 3's Approve steps.",
     "the queue is shown once with caps": "It shows the queue once, each card's id, size, track, and class, with the caps: cards, wall clock, and USD.",
     "the single approval": "Autopilot asks one approval, for the whole queue, and no other gate: no start gate, no shape question, and no continue gate.",
     "the queue approval stands for plan approval": "The queue approval stands for each flow-track card's plan approval: the lead puts plan.mjs show in the chat and runs plan.mjs approve itself.",
     "by hand unless swarm": "A card runs by hand unless its goal asks for a swarm.",
     "follow-ups filed without a question": "Follow-ups are filed to Backlog as section 6 says, without a question.",
-    "cost measured between cards": "Between cards the lead measures the session's cost with cost.mjs --session latest and checks every cap.",
+    // Card parallel-card-queens: "between cards" no longer exists; main measures on every queen notification, and
+    // --session <id> because concurrent sessions break --session latest.
+    "cost measured on every queen notification": "On every queen notification the lead measures the session's cost with cost.mjs --session <id> and checks every cap.",
     "stop: design decision": "It stops and asks when a card needs a design decision its goal does not answer.",
     "stop: gate red twice": "It stops and asks when the gate is red twice on one card.",
     "stop: hook blocks": "It stops and asks when a hook blocks a step.",
@@ -7757,8 +7823,10 @@ describe("card autopilot: doug-next and doug-hand skill text", () => {
     "stop: workflow run pauses at a human gate, on either track": "It stops and asks when a workflow run pauses at a human gate, on either track.",
     "stop: unpriced transcript": "It stops and asks when cost.mjs reports an unpriced transcript, because the USD cap cannot be checked.",
     "stop: workflow run report not ok, on either track": "It stops and asks when a workflow run's report is not ok, on either track.",
-    "resume after the answer": "It waits for the answer, then resumes the queue at the card it stopped on.",
-    "the single closing summary": "It ends with one summary: each landed card's commit, wall clock, and gate line; each stopped card and why; each edge case taken conservatively; and the follow-ups filed.",
+    // Card parallel-card-queens: asking no longer pauses the queue; the other queens keep running while main waits.
+    "resume after the answer": "It waits for the answer, then resumes the queue at the card it stopped on; the other queens keep running while main waits.",
+    "stop: a card queen's run stops": "It stops and asks when a card queen's run stops; the other cards keep running.",
+    "the single closing summary": "It ends with one summary: each landed card's commit, wall clock, gate line, and recap; each stopped card and why; each edge case taken conservatively; and the follow-ups filed.",
   };
   for (const [name, sentence] of Object.entries(pinned)) {
     it(`doug-next's Autopilot section pins ${name}`, () => {
@@ -7800,6 +7868,10 @@ describe("card autopilot: doug-next and doug-hand skill text", () => {
   });
   it("doug-next's Autopilot section says each card still runs its track unchanged and how each track's steps are skipped", () => {
     const auto = autoSection(nextText());
+    // Card parallel-card-queens: the queens replace main's own run, so a hand card runs card-queen and a flow card runs
+    // doug-implement per card.
+    expect(auto).toContain("A hand card runs card-queen, whose queen follows doug-hand from step 3");
+    expect(auto).toContain("A flow card runs doug-implement per card, following sections 2 to 6 above");
     expect(auto).toContain("research when needed, tester, coder, reviewer, mutations, gate, commit, record, Done; a lean-lane card has no tester and no mutation list)");
     expect(auto).toContain("doug-hand from step 3");
     expect(auto).toMatch(/steps? 2/);
@@ -7827,7 +7899,64 @@ describe("card autopilot: doug-next and doug-hand skill text", () => {
     if (!existsSync(p)) return; // absent from the public snapshot
     const text = readFileSync(p, "utf8");
     expect(text).not.toContain("all three scenarios");
-    expect(text).toContain("all four scenarios");
+    // Card doug-start-skill: the page counts six scenarios now (start and start-feature were added).
+    expect(text).not.toContain("all four scenarios");
+    // Card parallel-card-queens B13 (changed pin, stated reason: the parallel scenario makes it seven).
+    expect(text).not.toContain("all six scenarios");
+    expect(text).toContain("all seven scenarios");
+  });
+});
+
+// Card parallel-card-queens (brief B12): the "Parallel cards" paragraph of the Autopilot section, one pin per sentence,
+// section-scoped, and the section 4 background-result sentence.
+describe("card parallel-card-queens: doug-next Parallel cards paragraph", () => {
+  const nextText = () => readFileSync(join(root, "skills/doug-next/SKILL.md"), "utf8");
+  const sliceFrom = (text, head) => {
+    const i = text.indexOf(head);
+    if (i < 0) return "";
+    const rest = text.slice(i + 5);
+    const j = rest.search(/\n## /);
+    return j < 0 ? text.slice(i) : text.slice(i, i + 5 + j);
+  };
+  const A = "${CLAUDE_PLUGIN_ROOT}";
+  const sentences = {
+    "the pick, disjoint, up to workers.max": 'Main picks with `node "' + A + '/scripts/autopilot.mjs" pick` up to workers.max cards that are disjoint: for hand cards, goals that name no common path and components that differ; for flow cards, plans whose owned files do not overlap.',
+    "one planner per needsPlan card": "Flow cards in `needsPlan` get one `doug-flow:planner` each, all in one message, on the plan row, each writing `.doug/plans/<id>.json` and validating it with `plan.mjs validate --card <id>`.",
+    "set card, integrationBranch, integrationWorktree": "For each planned card main runs `plan.mjs set card <id> --card <id>`, `plan.mjs set integrationBranch doug/<id> --card <id>`, and `plan.mjs set integrationWorktree .claude/worktrees/doug-integration-<id> --card <id>`,",
+    "show, approve, then pick again": "puts `plan.mjs show --card <id>` in the chat, and runs `plan.mjs approve --card <id>`, because the queue approval stands for it; then main picks again.",
+    "step 2 class, move, condition open": "A flow card gets section 1's move and a hand card gets doug-hand step 2's class, move, and condition open, before its launch.",
+    "the flow queen": 'A flow queen is `Workflow({ name: "doug-flow:doug-implement", args: <plan.mjs json --card <id>> })`;',
+    "the hand queen": 'a hand queen is `Workflow({ scriptPath: "' + A + '/workflows/card-queen.js", args })` with args `{ card, options, models, repoRoot, worktreePath }`, the worktreePath being `<repoRoot>/.claude/worktrees/card-<id>`.',
+    "launch: queen-args, the Workflow call, launched": 'To launch a queen, main runs `node "' + A + '/scripts/autopilot.mjs" queen-args <id> --kind <flow|hand>`, which writes `.doug/.state/reports/<id>/queen-args.json` and prints its path; then the Workflow call with that file\'s JSON as args; then `autopilot.mjs launched <id> --run <wf_id> --kind <flow|hand> --worktree <abs> --args-file <path>`, the flow worktree being `<repoRoot>/<the plan\'s integrationWorktree>`, because that value is relative.',
+    "launches in one message, main never briefs": "Main starts all the Workflow calls in one message, and it never briefs, builds, or reviews a queen card.",
+    "reports arrive in the task-notification": "Each queen's report arrives in that run's task-notification `<result>`, not in the Workflow tool's return, and main pipes it through `autopilot.mjs report --run <wf_id> --file .doug/.state/briefs/<id>-result.json`, the queen's result saved there, which prints land, resume, or ask.",
+    "the report's answer maps to land, resume, ask": "Land means the landing steps below; resume relaunches the queen with `resumeFromRunId` and the saved `queen-args.json`, then runs `autopilot.mjs resumed <id> --run <new wf_id>`, once, and a second resume is ask; ask stops that card and asks the user.",
+    "land one card at a time": "Main lands one card at a time: a flow card with `plan.mjs done --card <id>` then `plan.mjs land --card <id>`, a hand card with `plan.mjs land-card <id> --branch card/<id> --worktree <abs>`.",
+    "after each landing": "After each landing main runs `board.mjs move`, the run-report skill with `cost.mjs <wf_id> --report <per-card report path>`, which is `.doug/.state/reports/<id>/last-report.json` for a flow card and `.doug/.state/reports/<id>/card-report.json` for a hand card, and `autopilot.mjs lock-wait <id> --ms <n>`, where n is the `lockWaitMs` line that `plan.mjs land` or `land-card` printed, and the landing commit carries the card's plan `.doug/plans/<id>.json`.",
+    "a resume never replans": "A resume never replans.",
+    "ask while the others run": "When a queen's run needs the user, main asks while the other queens keep running.",
+    "a cap launches no new queen": "A cap reached launches no new queen and lets the in-flight ones finish.",
+    "manual mode prompts per launch": 'In manual or accept-edits mode every queen launch prompts, and the Workflow allow rule or "Yes, and don\'t ask again" runs n queens unattended (docs/research/parallel-cards-research.md section 4).',
+    "swarm and decision cards run alone": "A card tagged swarm (or `swarm: true`, or whose goal says to run it as a swarm) and a decision card run alone, as today, after the in-flight queens finish; `/doug-next <id>` by hand is unchanged.",
+  };
+  for (const [name, sentence] of Object.entries(sentences)) {
+    it(`the Autopilot section pins ${name}`, () => {
+      expect(sliceFrom(nextText(), "## Autopilot (--auto)"), `missing from the Autopilot section: ${sentence}`).toContain(sentence);
+    });
+  }
+  it("the sentences sit in the paragraph in the brief's order", () => {
+    const auto = sliceFrom(nextText(), "## Autopilot (--auto)");
+    let prev = auto.indexOf("Parallel cards: up to `workers.max` cards (default 3)");
+    expect(prev, "paragraph opener").toBeGreaterThanOrEqual(0);
+    for (const [name, sentence] of Object.entries(sentences)) {
+      const at = auto.indexOf(sentence);
+      expect(at, name).toBeGreaterThan(prev);
+      prev = at;
+    }
+  });
+  it("section 4 says a background run's result arrives in its task-notification", () => {
+    const s = sliceFrom(nextText(), "## 4. Implement");
+    expect(s).toContain("A background run's result arrives in its task-notification `<result>`.");
   });
 });
 
@@ -7855,7 +7984,9 @@ describe("card autopilot-edge-case-not-decision: doug-next Autopilot section", (
     const auto = autoSection(nextText());
     const stop = auto.indexOf(stopLine);
     const at = auto.indexOf(edge);
-    const resume = auto.indexOf("It waits for the answer, then resumes the queue at the card it stopped on.");
+    // Card parallel-card-queens: the resume sentence now ends "; the other queens keep running while main waits"; the
+    // anchor is its unchanged first half.
+    const resume = auto.indexOf("It waits for the answer, then resumes the queue at the card it stopped on");
     expect(stop, "stop line missing").toBeGreaterThanOrEqual(0);
     expect(at, "edge-case sentence missing from the Autopilot section").toBeGreaterThanOrEqual(0);
     expect(resume, "resume sentence missing").toBeGreaterThanOrEqual(0);
@@ -7900,7 +8031,7 @@ describe("card user-card-mid-autopilot", () => {
 
 describe("card user-card-mini-adr", () => {
   const body = (n) =>
-    "A card the user asks for is a mini ADR, not a one-line goal. Before filing it, the lead asks the scoping questions in one `AskUserQuestion` of up to 4 questions, each with a Recommended option, and writes the answers into the goal. The goal carries the fixed headings Context / Decision / Options / Questions; `docs/decisions` stays for real ADRs. Only a user-requested card takes this form: a follow-up the lead files keeps " +
+    "A card the user asks for is a mini ADR, not a one-line goal. Before filing it, the lead asks the scoping questions in one `AskUserQuestion` of up to 4 questions, and writes the answers into the goal. The goal carries the fixed headings Context / Decision / Options / Questions; `docs/decisions` stays for real ADRs. Only a user-requested card takes this form: a follow-up the lead files keeps " +
     n +
     "'s lighter form, so autopilot follow-ups stay question-free.";
   const cases = [
@@ -7933,7 +8064,6 @@ describe("card user-card-mini-adr", () => {
       for (const p of [
         "Context / Decision / Options / Questions",
         "one `AskUserQuestion` of up to 4 questions",
-        "each with a Recommended option",
       ]) expect(s, `missing: ${p}`).toContain(p);
     });
     it(`${c.skill}: the follow-up lighter form is unchanged`, () => {
@@ -7945,6 +8075,21 @@ describe("card user-card-mini-adr", () => {
     expect(md).toContain('A card the user asks for is filed as a mini ADR (doug-next and doug-hand, "Cards the user asks for").');
     expect(md.replace(/\n$/, "").split("\n").length).toBeLessThanOrEqual(60);
   });
+});
+
+describe("card user-card-quote-request", () => {
+  const R = "The goal opens with the user's request quoted verbatim under Context, and each Decision line is marked (user answer) or (lead, not asked).";
+  for (const skill of ["doug-next", "doug-hand"]) {
+    it(`${skill}: the section pins the quote-and-provenance rule once, after the mini-ADR text`, () => {
+      const t = readFileSync(join(root, "skills", skill, "SKILL.md"), "utf8");
+      const i = t.indexOf("## Cards the user asks for");
+      const j = t.indexOf("\n## ", i + 1);
+      const s = j < 0 ? t.slice(i) : t.slice(i, j);
+      expect(s.split(R).length - 1).toBe(1);
+      expect(t.split(R).length - 1).toBe(1);
+      expect(s.indexOf(R)).toBeGreaterThan(s.indexOf("stay question-free."));
+    });
+  }
 });
 
 describe("card board-doc-class-row: docs/board.md's field table has a class row", () => {
@@ -8118,6 +8263,16 @@ describe("card memory-every-session: hand landing reflects", () => {
   });
 });
 
+describe("card reflect-review-key-text: the --review key form", () => {
+  const PHRASE = "`R<n>` or `<card>/R<n>`";
+  it("doug-hand and run-report name both --review key forms", () => {
+    for (const name of ["doug-hand", "run-report"]) {
+      const text = readFileSync(join(root, "skills", name, "SKILL.md"), "utf8");
+      expect(text, name).toContain(PHRASE);
+    }
+  });
+});
+
 describe("card landing-one-sentence-summary: skill sentences", () => {
   const skill = (name) => readFileSync(join(root, "skills", name, "SKILL.md"), "utf8");
   const once = (text, sentence) => text.split(sentence).length - 1;
@@ -8146,6 +8301,8 @@ describe("card landing-one-sentence-summary: skill sentences", () => {
         const parts = line.split(/(?=board\.mjs"? (?:record|summary) )/).slice(1);
         for (const part of parts) {
           if (!/^board\.mjs" (record|summary) /.test(part) && !/^board\.mjs (record|summary) <?/.test(part)) continue;
+          // Round 2 reason: the F3 pin names the commands in prose (`board.mjs record` ..., `board.mjs summary --card`); those are not examples.
+          if (/^board\.mjs (record|summary)( --card)?`/.test(part)) continue;
           seen++;
           const segment = part.replace(/^board\.mjs"? /, "").split(/board\.mjs/)[0];
           expect(segment, `${name}: ${part.slice(0, 80)}`).toContain("--summary");
@@ -8153,5 +8310,435 @@ describe("card landing-one-sentence-summary: skill sentences", () => {
       }
     }
     expect(seen, "the examples are found").toBeGreaterThanOrEqual(6);
+  });
+});
+
+// Card doug-start-skill (ADR 0012): /doug-start is one skill with two modes. Every sentence pinned below is quoted from
+// ADR 0012 (docs/decisions/0012-doug-start-one-skill-for-a-new-project-and-for-a-feature.md) except the ones marked
+// "assumed wording", which the coder must reproduce verbatim.
+describe("card doug-start-skill: /doug-start, its two modes, and the spec-writer agent", () => {
+  const skillText = () => readFileSync(join(root, "skills/doug-start/SKILL.md"), "utf8");
+  // The text of one "## <title>" section, up to the next "## " heading.
+  const section = (text, title) => {
+    const parts = text.split(/^## /m).slice(1);
+    const hit = parts.find((p) => p.startsWith(title));
+    expect(hit, `a "## ${title}" section`).toBeDefined();
+    return hit;
+  };
+  // The "### N. <Phase>" subsections of a mode section, keyed by phase name.
+  const phases = (sectionText) => {
+    const out = {};
+    for (const part of sectionText.split(/^### /m).slice(1)) {
+      const m = /^\d\.\s+([A-Za-z ]+?)(?:\s*\(.*\))?\s*$/m.exec(part.split("\n")[0]);
+      expect(m, `phase heading "### ${part.split("\n")[0]}" has the form "N. Name"`).not.toBeNull();
+      out[m[1]] = part;
+    }
+    return out;
+  };
+  const project = () => section(skillText(), "Project mode");
+  const feature = () => section(skillText(), "Feature mode");
+
+  it("the skill exists with frontmatter name doug-start, a description, and AskUserQuestion, Agent, and `doug board` allowed", () => {
+    expect(existsSync(join(root, "skills/doug-start/SKILL.md"))).toBe(true);
+    const fm = parseFrontmatter(skillText());
+    expect(fm.name).toBe("doug-start");
+    expect(fm.description.length).toBeGreaterThan(40);
+    expect(fm["allowed-tools"]).toContain("AskUserQuestion");
+    expect(fm["allowed-tools"]).toContain("Agent");
+    expect(fm["allowed-tools"]).toContain("Bash(doug board *)");
+  });
+
+  it("project mode lists its four phases in order, each with its file: Idea, Architecture, Walking skeleton, Scope", () => {
+    const p = phases(project());
+    expect(Object.keys(p)).toEqual(["Idea", "Architecture", "Walking skeleton", "Scope"]);
+    expect(p["Idea"]).toContain("`docs/product/idea.md`");
+    expect(p["Idea"]).toContain("problem, users, success, non-goals");
+    expect(p["Architecture"]).toContain("`docs/product/architecture.md`");
+    expect(p["Architecture"]).toContain("`docs/decisions/0001-stack.md`");
+    expect(p["Scope"]).toContain("`docs/product/scope.md`");
+  });
+
+  it("feature mode lists its phases under docs/specs/<card-id>/: Specification, optional Pseudocode, Architecture, Refinement, Completion", () => {
+    const f = feature();
+    expect(f).toContain("`docs/specs/<card-id>/`");
+    const p = phases(f);
+    expect(Object.keys(p)).toEqual(["Specification", "Pseudocode", "Architecture", "Refinement", "Completion"]);
+    expect(p["Specification"]).toContain("`spec.md`");
+    expect(p["Pseudocode"]).toContain("`pseudocode.md`");
+    expect(p["Pseudocode"]).toMatch(/\boptional\b/i);
+    expect(p["Architecture"]).toContain("`architecture.md`");
+    expect(p["Architecture"]).toContain("modules, files, interfaces, the test for each");
+    expect(p["Refinement"]).toContain('subagent_type: "doug-flow:planner"');
+    expect(p["Refinement"]).toContain("whose tasks own the files `architecture.md` names");
+    expect(p["Refinement"]).toContain("`/doug-approve`");
+    expect(p["Completion"]).toContain("`/doug-implement`");
+  });
+
+  it("every phase that writes a file stops at an AskUserQuestion gate (7 in project and feature mode together: 4 + 3 before Completion)", () => {
+    const pp = phases(project());
+    for (const [name, text] of Object.entries(pp)) expect(text, `project phase ${name}`).toContain("AskUserQuestion");
+    const fp = phases(feature());
+    for (const name of ["Specification", "Pseudocode", "Architecture", "Refinement"]) expect(fp[name], `feature phase ${name}`).toContain("AskUserQuestion");
+    // A gate sentence per phase, not one passing mention: the skill states the stop rule once for all phases.
+    expect(skillText()).toContain("Each phase writes one committed file and stops at a human gate (AskUserQuestion).");
+  });
+
+  it("a rerun of a phase shows the diff and asks, never overwriting silently", () => {
+    expect(skillText()).toContain("A rerun of a phase shows the diff and asks; it never overwrites silently.");
+  });
+
+  it("the walking skeleton comes before any feature card and `doug init` re-runs after it so stopGate.commands are detected", () => {
+    const skeleton = phases(project())["Walking skeleton"];
+    expect(skeleton).toContain("Mandatory: no feature card starts before it, because until then the gates check nothing.");
+    expect(skeleton).toContain("then `doug init` re-runs so `stopGate.commands` are detected");
+    expect(skeleton).toContain("built tester, then coder, then reviewer");
+    const order = Object.keys(phases(project()));
+    expect(order.indexOf("Walking skeleton")).toBeLessThan(order.indexOf("Scope"));
+  });
+
+  it("mode and resume come from disk with no state file", () => {
+    expect(skillText()).toContain(
+      "Mode and resume are derived from disk, with no state file: a card id or goal argument picks feature mode; no argument and no `docs/product/idea.md` picks project mode; a run resumes at the first missing phase file.",
+    );
+  });
+
+  it("Scope writes cards with `doug board add` (never a script editing the record) and puts at most 7 in Ready", () => {
+    const scope = phases(project())["Scope"];
+    expect(scope).toContain("doug board add");
+    // assumed wording
+    expect(scope).toContain("Cards are written with `doug board add`, never by a script editing `.doug/board.json`.");
+    expect(scope).toContain("at most 7 to Ready for v1 and the rest to Backlog");
+  });
+
+  it("the spec-writer agent is read-only: no Write, Edit, MultiEdit, NotebookEdit, or Agent in its tools, and they are disallowed", () => {
+    const text = readFileSync(join(root, "agents/spec-writer.md"), "utf8");
+    const fm = parseFrontmatter(text);
+    expect(fm).not.toBeNull();
+    expect(fm.name).toBe("spec-writer");
+    expect(fm.description.length).toBeGreaterThan(40);
+    expect(fm.tools).toBeDefined();
+    const tools = fm.tools.split(",").map((t) => t.trim());
+    for (const t of ["Read", "Grep", "Glob"]) expect(tools).toContain(t);
+    for (const t of ["Write", "Edit", "MultiEdit", "NotebookEdit", "Agent"]) expect(tools, t).not.toContain(t);
+    for (const t of ["Write", "Edit", "NotebookEdit", "Agent"]) expect(fm.disallowedTools, t).toContain(t);
+  });
+
+  it("the skill uses spec-writer in both modes and the architect agent shape for Architecture in both", () => {
+    const pp = phases(project());
+    const fp = phases(feature());
+    expect(pp["Idea"]).toContain('subagent_type: "doug-flow:spec-writer"');
+    expect(fp["Specification"]).toContain('subagent_type: "doug-flow:spec-writer"');
+    expect(pp["Architecture"]).toContain("architect");
+    expect(fp["Architecture"]).toContain("architect");
+    expect(pp["Architecture"]).toContain('subagent_type: "doug-flow:researcher"');
+  });
+});
+
+// Card doug-start-skill, review round 1: Scope is drafted by the spec-writer, the walking skeleton has a disk marker,
+// and a bare argument in an empty repo is not silently read as a feature goal. Sentences below are the coder's wording.
+describe("card doug-start-skill review: scope drafting, the skeleton marker, and mode ambiguity", () => {
+  const skillText = () => readFileSync(join(root, "skills/doug-start/SKILL.md"), "utf8");
+  const phase = (modeTitle, name) => {
+    const mode = skillText().split(/^## /m).slice(1).find((p) => p.startsWith(modeTitle));
+    const hit = mode.split(/^### /m).slice(1).find((p) => new RegExp(`^\\d\\.\\s+${name}\\b`).test(p));
+    expect(hit, `${modeTitle} phase ${name}`).toBeDefined();
+    return hit;
+  };
+
+  it("Scope spawns the spec-writer for scope.md and the card list (id, title, goal, size, class, column); the lead only runs `doug board add` for approved cards", () => {
+    const scope = phase("Project mode", "Scope");
+    expect(scope).toContain('subagent_type: "doug-flow:spec-writer"');
+    expect(scope).toContain("id, title, goal, size, class, column");
+    expect(scope).toContain("The lead never drafts the scope; it writes the returned `scope.md` and runs `doug board add` only for each card the user approved.");
+  });
+  it("the spec-writer's description covers scope", () => {
+    const fm = parseFrontmatter(readFileSync(join(root, "agents/spec-writer.md"), "utf8"));
+    expect(fm.description).toMatch(/\bscope\b/i);
+  });
+
+  it("the walking skeleton is done when the `walking-skeleton` card is Done and stopGate.commands is non-empty, and resume reads that marker", () => {
+    const skeleton = phase("Project mode", "Walking skeleton");
+    expect(skeleton).toContain("`doug board move walking-skeleton done`");
+    const marker = "The Walking skeleton writes no phase file; it is done when the `walking-skeleton` card is in Done on the board and `stopGate.commands` in `.doug/config.json` is non-empty, and a run resumes at it until both hold.";
+    expect(skillText()).toContain(marker);
+    expect(skeleton.indexOf("`doug board move walking-skeleton done`")).toBeGreaterThan(skeleton.indexOf("then `doug init` re-runs so `stopGate.commands` are detected"));
+  });
+
+  it("only committed phase files count: an uncommitted one is still waiting at its gate, and the skeleton moves to Done only on approval", () => {
+    expect(skillText()).toContain("Only a committed phase file counts as done: a phase file that exists but is uncommitted means that phase is still waiting at its gate, so the next run re-asks that gate, showing the file, and does not move on.");
+    const skeleton = phase("Project mode", "Walking skeleton");
+    expect(skeleton).toContain("On approve, run `doug board move walking-skeleton done` and commit.");
+    expect(skeleton.indexOf("On approve, run `doug board move walking-skeleton done`")).toBeGreaterThan(skeleton.indexOf("AskUserQuestion"));
+  });
+  it("an argument that is not a board card id, in a repo with no idea.md, is ambiguous: ask project or feature unless the conversation states the mode", () => {
+    expect(skillText()).toContain(
+      "An argument that is not a card id on the board, in a repo with no `docs/product/idea.md`, is ambiguous (an idea or a goal): ask at an AskUserQuestion gate (project / feature) unless the conversation already says `project mode` or `feature mode`.",
+    );
+  });
+
+  it("the lead calls AskUserQuestion at every gate even in a session that looks non-interactive, and stops at a denied call", () => {
+    expect(skillText()).toContain(
+      "At every gate the lead calls AskUserQuestion, even when the session looks non-interactive; a denied or unanswered call ends the phase there, and the lead does nothing past it",
+    );
+  });
+  it("the stack ADR goes through the proposal path: memory.mjs decision propose, then learn.mjs apply on approve, never a direct Write of docs/decisions", () => {
+    const arch = phase("Project mode", "Architecture");
+    expect(arch).toContain('memory.mjs" decision propose --title "Stack" --file');
+    expect(arch).toContain('learn.mjs" apply <proposal-file>');
+    expect(arch).toContain("`docs/decisions/` is proposal-only, so the lead never Writes it directly.");
+    expect(arch).toContain("`docs/decisions/0001-stack.md`");
+    const tools = parseFrontmatter(skillText())["allowed-tools"];
+    expect(tools).toContain("Bash(node *memory.mjs *)");
+    expect(tools).toContain("Bash(node *learn.mjs *)");
+  });
+  it("Refinement sets the plan's card with plan.mjs set card", () => {
+    expect(phase("Feature mode", "Refinement")).toContain('plan.mjs" set card <card-id>');
+  });
+});
+
+// Card usd-budget-size-class: the autopilot USD cap is the sum of per-card budgets from a size x class table, not a
+// fixed $40, and a hand landing's cost is measured and recorded so the table can use hand rows.
+describe("card usd-budget-size-class: skill text", () => {
+  const nextText = () => readFileSync(join(root, "skills/doug-next/SKILL.md"), "utf8");
+  const auto = () => {
+    const t = nextText();
+    const i = t.indexOf("## Autopilot (--auto)");
+    const rest = t.slice(i + 5);
+    const j = rest.search(/\n## /);
+    return j < 0 ? t.slice(i) : t.slice(i, i + 5 + j);
+  };
+  const handSection = () => {
+    const r = readFileSync(join(root, "skills/run-report/SKILL.md"), "utf8");
+    return r.slice(r.indexOf("## A hand-track landing"), r.indexOf("## Then"));
+  };
+  const step = (h, needle) => h.split("\n").find((l) => l.includes(needle)) ?? "";
+
+  it("K1: doug-next no longer defaults the USD cap to $40 anywhere", () => {
+    expect(nextText()).not.toContain("$40");
+    expect(nextText()).not.toContain("USD cap defaults to");
+  });
+  it("K2: the autopilot section names the usd cap board.mjs next --batch prints and the usd table's budgets command", () => {
+    const a = auto();
+    expect(a).toContain("the usd cap it prints beside it");
+    expect(a).toContain("size x class usd budget table in board.mjs");
+    expect(a).toContain("`board.mjs budgets --usd`");
+    expect(a).toContain("at the p80 of measured cost over flow and hand landings");
+  });
+  it("K3: the unlimited sentence grows the USD cap per card", () => {
+    expect(auto()).toContain("its wall cap and its USD cap grow as each card is taken");
+  });
+  it("K4: run-report's hand form measures the cost with cost.mjs --session <id> --since <openedAt> and never estimates one", () => {
+    const h = handSection();
+    expect(h).toContain('scripts/cost.mjs" --session <session> --since <openedAt>');
+    expect(h).toContain("`<session>` is `CLAUDE_CODE_SESSION_ID`");
+    expect(h).toContain("openedAt");
+    expect(h).toContain("never estimate");
+  });
+  it("K5: run-report's hand form passes --cost <usd> to both board.mjs record --hand and memory.mjs record --hand, leaving it out when nothing was measured", () => {
+    const h = handSection();
+    expect(step(h, 'board.mjs" record <id> --hand')).toContain("--cost <usd>");
+    expect(step(h, 'memory.mjs" record <id> --hand')).toContain("--cost <usd>");
+    expect(h).toMatch(/leav(?:e|ing) `?--cost`? out when/);
+  });
+  it("K6: the hand form no longer says the USD column is always null", () => {
+    expect(handSection()).not.toContain("tokens, USD, the report itself) are null");
+  });
+});
+
+// Card landing-block-enforced: the three landing skills name the landing block (the three lines record and
+// summary print last: Changed / Outcome / Learned), say the final message carries it verbatim, and say the Stop
+// gate checks it. The prose was already there once and was skipped, so each skill gets its own pin.
+describe("landing block in the skills (card landing-block-enforced)", () => {
+  const skill = (name) => readFileSync(join(root, "skills", name, "SKILL.md"), "utf8").replace(/\s+/g, " ");
+  const pinned = (text, label) => {
+    expect(text, label).toContain("landing block");
+    expect(text, label).toContain("Changed");
+    expect(text, label).toContain("Outcome");
+    expect(text, label).toContain("Learned");
+    expect(text, label).toMatch(/verbatim/);
+    expect(text, label).toMatch(/Stop gate/);
+  };
+  it("T1: run-report names the landing block in its hand form and its workflow form", () => {
+    const raw = readFileSync(join(root, "skills/run-report/SKILL.md"), "utf8");
+    const hand = raw.slice(raw.indexOf("## A hand-track landing"), raw.indexOf("## Then")).replace(/\s+/g, " ");
+    const flow = raw.slice(raw.indexOf("## A workflow run (flow track)"), raw.indexOf("## A batch (several cards in one plan)")).replace(/\s+/g, " ");
+    pinned(hand, "run-report hand form");
+    pinned(flow, "run-report workflow form");
+  });
+  it("T1: doug-hand step 4 names the landing block", () => {
+    const text = skill("doug-hand");
+    const from = text.indexOf("landing block");
+    expect(from, "doug-hand names the landing block").toBeGreaterThan(-1);
+    pinned(text.slice(Math.max(0, from - 600), from + 900), "doug-hand");
+  });
+  it("T1: doug-next names the landing block in its landing section", () => {
+    const text = skill("doug-next");
+    const from = text.indexOf("landing block");
+    expect(from, "doug-next names the landing block").toBeGreaterThan(-1);
+    pinned(text.slice(Math.max(0, from - 600), from + 900), "doug-next");
+  });
+
+  // Round 2, F3 (briefs/4-round2.md): who prints the block, and the batch form.
+  const PRINTED_BY = "printed by `board.mjs record` (both forms) and by `board.mjs summary --card`";
+  const PLAIN_SUMMARY = "plain `summary` (no `--card`) prints no block";
+  const BATCH_SENTENCE = "each card's landing block (one per card) goes in the final message verbatim";
+  it("F3: each skill says the block is printed by record (both forms) and summary --card, and that plain summary prints none", () => {
+    const raw = readFileSync(join(root, "skills/run-report/SKILL.md"), "utf8");
+    const hand = raw.slice(raw.indexOf("## A hand-track landing"), raw.indexOf("## Then")).replace(/\s+/g, " ");
+    const flow = raw.slice(raw.indexOf("## A workflow run (flow track)"), raw.indexOf("## A batch (several cards in one plan)")).replace(/\s+/g, " ");
+    for (const [label, text] of [["run-report hand form", hand], ["run-report workflow form", flow]]) {
+      expect(text, label).toContain(PRINTED_BY);
+      expect(text, label).toContain(PLAIN_SUMMARY);
+      expect(text, label).not.toContain("the last three lines `record` and `summary` print");
+    }
+    for (const name of ["doug-hand", "doug-next"]) {
+      const text = skill(name);
+      const from = text.indexOf("landing block");
+      const near = text.slice(Math.max(0, from - 600), from + 900);
+      expect(near, name).toContain(PRINTED_BY);
+      expect(near, name).toContain(PLAIN_SUMMARY);
+      expect(near, name).not.toContain("the last three lines `record` and `summary` print");
+    }
+  });
+  it("F3: run-report's batch section says each card's block goes in the final message verbatim", () => {
+    const raw = readFileSync(join(root, "skills/run-report/SKILL.md"), "utf8");
+    const batch = raw.slice(raw.indexOf("## A batch (several cards in one plan)"), raw.indexOf("## A hand-track landing")).replace(/\s+/g, " ");
+    expect(batch).toContain(BATCH_SENTENCE);
+  });
+  it("F3: doug-next's batch landing paragraph says each card's block goes in the final message verbatim", () => {
+    const text = skill("doug-next");
+    const from = text.indexOf("Batch: every card of the batch moves to Done");
+    expect(from, "doug-next's batch landing paragraph exists").toBeGreaterThan(-1);
+    expect(text.slice(from, from + 1500)).toContain(BATCH_SENTENCE);
+  });
+});
+
+// Card autopilot-live-queue: the doug-next autopilot section names every writer call (the state file the pane and the
+// board's panel read), each in the form `scripts/autopilot.mjs" <subcommand>`, and says how to open the pane.
+describe("doug-next autopilot state-file writer calls", () => {
+  const next = readFileSync(join(root, "skills/doug-next/SKILL.md"), "utf8");
+  const start = next.indexOf("## Autopilot (--auto)");
+  const section = next.slice(start);
+  it("names the writer script and the state file in the autopilot section", () => {
+    expect(start).toBeGreaterThan(-1);
+    expect(section).toContain(".doug/.state/autopilot.json");
+    expect(section).toContain('scripts/autopilot.mjs"');
+  });
+  for (const sub of ["start", "add", "card", "step", "land", "stop", "filed", "caps", "end"]) {
+    it(`names the ${sub} call (T1)`, () => {
+      expect(section).toMatch(new RegExp('scripts/autopilot\\.mjs" ' + sub + "\\b"));
+    });
+  }
+  it("names all seven step values for the step call", () => {
+    for (const step of ["research", "tester", "coder", "reviewer", "gate", "commit", "record"]) expect(section).toContain("`" + step + "`");
+  });
+  it("says how to open the pane", () => {
+    expect(section).toMatch(/\bpane\b/i);
+  });
+});
+
+describe("card user-card-riskiest-question", () => {
+  const R =
+    'One question names the broadest word in the user\'s request and offers its readings. An option is marked Recommended only when its description cites the fact it rests on, checked before asking; an option resting on an unchecked fact says (unverified) and is not Recommended, and a question with no checked option has no Recommended. When the user asked for research, "Let the research decide" is the Recommended option.';
+  for (const skill of ["doug-next", "doug-hand"]) {
+    const t = readFileSync(join(root, "skills", skill, "SKILL.md"), "utf8");
+    const i = t.indexOf("## Cards the user asks for");
+    const j = t.indexOf("\n## ", i + 1);
+    const s = j < 0 ? t.slice(i) : t.slice(i, j);
+    it(`${skill}: the section pins the riskiest-question rule once, after the quote rule`, () => {
+      expect(s.split(R).length - 1).toBe(1);
+      expect(t.split(R).length - 1).toBe(1);
+      expect(s.indexOf(R)).toBeGreaterThan(s.indexOf("(lead, not asked)."));
+    });
+    it(`${skill}: no longer requires a Recommended option on every question`, () => {
+      expect(t).not.toContain("each with a Recommended option");
+    });
+  }
+});
+
+describe("card closing-summary-recap: per-card recap", () => {
+  const skill = (name) => readFileSync(join(root, "skills", name, "SKILL.md"), "utf8");
+  const once = (text, sentence) => text.split(sentence).length - 1;
+  const section = (text, title) => {
+    const hit = text.split(/^## /m).slice(1).find((p) => p.startsWith(title));
+    return hit ?? "";
+  };
+  const RECAP = "After the landing block, the lead prints the card's recap, a few lines in plain words: what the task was, what the outcome was, any other important facts (a follow-up worth filing, an edge case taken conservatively, a cost or wall-clock surprise), and, for a new feature, how to use it.";
+  const BATCH_RECAP = "In a batch, each card's recap follows that card's landing block.";
+  const AUTO = "It ends with one summary: each landed card's commit, wall clock, gate line, and recap; each stopped card and why; each edge case taken conservatively; and the follow-ups filed.";
+  const OLD_AUTO = "It ends with one summary: each landed card's commit, wall clock, and gate line; each stopped card and why; each edge case taken conservatively; and the follow-ups filed.";
+
+  it("doug-hand step 4 carries the recap and the batch recap, once each in the file", () => {
+    const t = skill("doug-hand");
+    const sec = section(t, "4. Record and land");
+    expect(once(sec, RECAP), "RECAP in step 4").toBe(1);
+    expect(once(sec, BATCH_RECAP), "BATCH_RECAP in step 4").toBe(1);
+    expect(once(t, RECAP)).toBe(1);
+    expect(once(t, BATCH_RECAP)).toBe(1);
+  });
+  it("doug-next step 5 carries the recap and the batch recap, once each in the file", () => {
+    const t = skill("doug-next");
+    const sec = section(t, "5. Land");
+    expect(once(sec, RECAP), "RECAP in step 5").toBe(1);
+    expect(once(sec, BATCH_RECAP), "BATCH_RECAP in step 5").toBe(1);
+    expect(once(t, RECAP)).toBe(1);
+    expect(once(t, BATCH_RECAP)).toBe(1);
+  });
+  it("doug-next's autopilot closing summary lists each landed card's recap, and the old sentence is gone", () => {
+    const t = skill("doug-next");
+    expect(once(section(t, "Autopilot (--auto)"), AUTO)).toBe(1);
+    expect(once(t, AUTO)).toBe(1);
+    expect(t).not.toContain(OLD_AUTO);
+  });
+  it("doug-swarm's landing paragraph carries the recap once", () => {
+    const t = skill("doug-swarm");
+    expect(once(section(t, "5. Land and record"), RECAP), "RECAP in the landing").toBe(1);
+    expect(once(t, RECAP)).toBe(1);
+  });
+});
+
+describe("card hand-shape-swarm-criterion: 2b swarm recommendation", () => {
+  const CRITERION = "Recommend a swarm only when the goal asks for two or more independent deliverables: separate pieces of work, each with its own test file, where none uses a function, type, or file another one adds (the 2026-09-19 split probe's four report commands, docs/live-runs.md); otherwise recommend by hand. Say in the question, in one clause, which side of this rule the card is on. The recommendation is the lead's reading of the goal, not a default.";
+  const t = readFileSync(join(root, "skills/doug-hand/SKILL.md"), "utf8");
+  const i = t.indexOf("## 2b. Shape: by hand, or a swarm");
+  const j = t.indexOf("\n## ", i + 1);
+  const sec = t.slice(i, j);
+  it("2b carries the criterion once, and the file once", () => {
+    expect(sec.split(CRITERION).length - 1).toBe(1);
+    expect(t.split(CRITERION).length - 1).toBe(1);
+  });
+  it("the criterion comes after the Batch paragraph and before the swarm-or-by-hand question", () => {
+    const c = sec.indexOf(CRITERION);
+    expect(c).toBeGreaterThan(sec.indexOf("Batch: a batch runs only as a swarm"));
+    expect(c).toBeLessThan(sec.indexOf("Otherwise, for one card, ask with `AskUserQuestion`: run it as a swarm, or by hand."));
+  });
+});
+
+describe("card doug-start-l-card-offer: L-card feature-mode offer", () => {
+  const skill = (name) => readFileSync(join(root, "skills", name, "SKILL.md"), "utf8");
+  const once = (text, sentence) => text.split(sentence).length - 1;
+  const NEXT_OFFER = "A size L card with no `docs/specs/<card-id>/spec.md` is offered feature mode first (ADR 0012): before the planner, ask with `AskUserQuestion` whether to run `/doug-start <id>` (specification, optional pseudocode, architecture, refinement) or plan now; `/doug-start <id>` ends this loop and the card stays In flow. S and M cards go straight to the plan, and any card can still run `/doug-start <id>` on request. Under autopilot the offer is not asked and the card goes straight to the plan.";
+  const HAND_OFFER = "A size L card with no `docs/specs/<card-id>/spec.md` is offered feature mode first (ADR 0012): after Start and before 2b, ask with `AskUserQuestion` whether to run `/doug-start <id>` (specification, optional pseudocode, architecture, refinement) or build now; `/doug-start <id>` ends this loop and the card stays In flow. S and M cards go straight on, and any card can still run `/doug-start <id>` on request. Under autopilot the offer is not asked and the card goes straight on.";
+
+  it("doug-next carries the offer once, inside section 2 between the draft paragraph and the research paragraph", () => {
+    const t = skill("doug-next");
+    expect(once(t, NEXT_OFFER)).toBe(1);
+    const i = t.indexOf("## 2. Plan");
+    const j = t.indexOf("\n## ", i + 1);
+    const sec = t.slice(i, j);
+    const o = sec.indexOf(NEXT_OFFER);
+    expect(o).toBeGreaterThan(sec.indexOf("If `.doug/plan.json` is already a draft"));
+    expect(o).toBeLessThan(sec.indexOf("If the card's goal depends on a fact outside the repository"));
+  });
+
+  it("doug-hand carries the offer once, inside section 2, before 2b", () => {
+    const t = skill("doug-hand");
+    expect(once(t, HAND_OFFER)).toBe(1);
+    const i = t.indexOf("## 2. Human gate: start");
+    const j = t.indexOf("## 2b. Shape: by hand, or a swarm");
+    expect(i).toBeGreaterThan(-1);
+    const o = t.indexOf(HAND_OFFER);
+    expect(o).toBeGreaterThan(i);
+    expect(o).toBeLessThan(j);
   });
 });

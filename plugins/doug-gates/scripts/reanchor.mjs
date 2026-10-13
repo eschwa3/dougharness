@@ -19,7 +19,7 @@ import { join } from "node:path";
 import { runHook, allow, addContext, systemMessage } from "../lib/io.mjs";
 import { loadConfig, projectDir } from "../lib/config.mjs";
 import { loadState, saveState } from "../lib/state.mjs";
-import { gitHead, mergeSnapshot, readDecisions, readPlanSummary, snapshotSection, splitSnapshot } from "../lib/anchor.mjs";
+import { gitHead, mergeSnapshot, readDecisions, readPlanSummary, readPlanSummaries, snapshotSection, splitSnapshot } from "../lib/anchor.mjs";
 
 runHook("reanchor", async (input) => {
   const dir = projectDir(input);
@@ -30,6 +30,7 @@ runHook("reanchor", async (input) => {
     const state = loadState(dir, input.session_id);
     const section = snapshotSection({
       plan: readPlanSummary(dir),
+      plans: readPlanSummaries(dir),
       decisions: readDecisions(dir),
       state,
       now: new Date(),

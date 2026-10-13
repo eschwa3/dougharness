@@ -73,11 +73,11 @@
 // Fails closed exactly like subagentsInFlight: with trace.enabled false, or the trace file missing or
 // unreadable, there is no evidence either way, so the gate runs as today.
 
-import { existsSync, mkdirSync, readFileSync, realpathSync, statSync, writeFileSync, unlinkSync, openSync, closeSync, readSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, statSync, writeFileSync, unlinkSync, openSync, closeSync, readSync } from "node:fs";
 import { execFileSync, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { join, dirname, isAbsolute, relative, resolve, sep } from "node:path";
-import { runHook, allow, blockStop, systemMessage } from "../lib/io.mjs";
+import { runHook, allow as allowRaw, blockStop, systemMessage as systemMessageRaw } from "../lib/io.mjs";
 import { loadConfig, projectDir } from "../lib/config.mjs";
 import { loadState, saveState } from "../lib/state.mjs";
 import { matchAny } from "../lib/glob.mjs";
@@ -88,7 +88,7 @@ import { verificationEvidence, describeMissingEvidence } from "../lib/evidence.m
 import { changedFiles, captureBaseline, sinceBaseline, headAt, committedSince, walkProposalPathFiles, fileIdentity, treeFingerprint, sameTree, readAgentStart, readTurnStart, turnTreeStatus, onlyNoTestPathsChanged, movedSinceVerified } from "../lib/baseline.mjs";
 import { tracePath, readTrace, traceLine, appendTrace, agentLabel } from "../lib/trace.mjs";
 import { isAppliedContent } from "../lib/proposals.mjs";
-import { gitHead, mergeSnapshot, readDecisions, readPlanSummary, snapshotSection } from "../lib/anchor.mjs";
+import { gitHead, mergeSnapshot, readDecisions, readPlanSummary, readPlanSummaries, snapshotSection } from "../lib/anchor.mjs";
 import { contextReading, recordAgentContext } from "../lib/agent-context.mjs";
 import { parseTotals, readSummaries, sumTotals, compareTotals, deltaTotals, waiverCovers } from "../lib/test-totals.mjs";
 import { failingTestFilesFrom, nonTestTscPathsFrom, classifyFinalBlock, appendBlockLine } from "../lib/block-ledger.mjs";
@@ -492,7 +492,24 @@ function agentMadeNoChanges(dir, cfg, sessionId, subagent) {
 // readAgentStart) and it equals the current one (same HEAD, same dirty set, same identities), and the agent's
 // final message carries no tests_red_by_design claim, and its trace shows no successful Edit-type call. Catches read-only agents that run Bash, which
 // agentMadeNoChanges counts as a change. No record, no git, any failure -> false (run the gate).
-function treeUnchangedSinceStart(dir, cfg, sessionId, subagent, input, currentFingerprint) {
+// card stop-gate-worktree-agent-fingerprint: the start record is a fingerprint of the main checkout (the trace
+// hook runs there), so for a worktree verification dir it is compared like with like instead: unchanged only if
+// the record exists, every verification dir has no changed files, and every one's HEAD carries no commit of its
+// own: it equals or is an ancestor of the record's HEAD, or of the main checkout's refs/remotes/origin/HEAD (Claude
+// Code branches a fresh isolation worktree from the remote default branch, which local main may be ahead of or
+// behind). Any git failure reads as changed. A verification set that mixes a worktree with `dir` reads as
+// changed. A main-checkout agent keeps the fingerprint comparison.
+function isAncestorIn(dir, a, b) {
+  try {
+    if (!/^[0-9a-f]{7,64}$/.test(String(a)) || !/^[0-9a-f]{7,64}$/.test(String(b))) return false;
+    execFileSync("git", ["merge-base", "--is-ancestor", a, b], { cwd: dir, stdio: "ignore", timeout: 5000 });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function treeUnchangedSinceStart(dir, cfg, sessionId, subagent, input, currentFingerprint, vdir = dir, forced = null) {
   try {
     if (!subagent || !currentFingerprint) return false;
     if (redByDesignClaim(input.last_assistant_message) ?? redByDesignClaim(lastHandbackMessage(input.agent_transcript_path))) return false;
@@ -503,6 +520,24 @@ function treeUnchangedSinceStart(dir, cfg, sessionId, subagent, input, currentFi
       if (existsSync(file) && readTrace(file).some((l) => l.agent === subagent.id && l.event === "PostToolUse" && CHANGE_TOOLS.has(l.tool) && l.ok !== false)) return false;
     }
     const start = readAgentStart(dir, sessionId, subagent.id);
+    if (vdir !== dir) {
+      if (!start || typeof start !== "object" || !start.head) return false;
+      const dirs = forced ? [vdir] : verifyDirs(dir, cfg, sessionId, input, subagent);
+      if (!dirs.includes(vdir) || dirs.includes(dir)) return false;
+      let remoteHead;
+      try {
+        remoteHead = execFileSync("git", ["rev-parse", "--verify", "-q", "refs/remotes/origin/HEAD^{commit}"], { cwd: dir, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], timeout: 5000 }).trim() || null;
+      } catch {
+        remoteHead = null;
+      }
+      return dirs.every((d) => {
+        const h = headAt(d);
+        if (!h) return false;
+        if (!isAncestorIn(dir, h, start.head) && !(remoteHead && isAncestorIn(dir, h, remoteHead))) return false;
+        const c = changedFiles(d);
+        return Array.isArray(c) && c.length === 0;
+      });
+    }
     return sameTree(start, currentFingerprint);
   } catch {
     return false;
@@ -721,6 +756,7 @@ function contextNotice(dir, cfg, state, sessionId, boundary) {
     const anchorFile = join(dir, ".doug/anchor.md");
     const section = snapshotSection({
       plan: readPlanSummary(dir),
+      plans: readPlanSummaries(dir),
       decisions: readDecisions(dir),
       state,
       now: new Date(),
@@ -1008,10 +1044,99 @@ function normalizedDeferrals(state) {
   return typeof d === "number" && Number.isFinite(d) && d >= 0 ? Math.floor(d) : 0;
 }
 
+// Card landing-block-enforced: board.mjs record/summary leave .doug/.state/reports/<id>/landing-block.txt and an
+// empty landing-block.pending (move <id> done re-arms it). A main Stop that would otherwise allow checks each
+// pending block against the lead's final message and blocks, once, until every line of it is there verbatim. The
+// marker is deleted the first time it is checked, so the block happens at most once per landing. Every exit that
+// lets a main Stop end plainly goes through allow() below. The systemMessage exits (the block-cap and turn-budget
+// stand-downs, the deferral notice, the repeat-deferral exit) return their text unchanged and never block (card
+// landing-block-shown-on-deferral): systemMessage() below first sweeps quietly, deleting a marker whose lines are
+// all in the final message and leaving any other, so a block printed on a deferral stop is not demanded again at
+// a later plain stop. A red gate (blockStop) keeps its own reason. A marker holds the session that landed (empty =
+// any); another session's marker is left untouched. Fails open: any throw, an unreadable block
+// file, or a final message that is not a string allows with one stderr line.
+let landingInput = null;
+// The pending markers this session owns, as [id, root] pairs; null when there is no reports directory.
+function ownedLandingMarkers(input) {
+  const root = join(projectDir(input), ".doug/.state/reports");
+  if (!existsSync(root)) return { root, pending: [] };
+  const mine = (id) => {
+    try {
+      const owner = readFileSync(join(root, id, "landing-block.pending"), "utf8").trim();
+      return owner === "" || owner === input.session_id;
+    } catch {
+      return false;
+    }
+  };
+  return { root, pending: readdirSync(root).filter((id) => existsSync(join(root, id, "landing-block.pending")) && mine(id)).sort() };
+}
+function landingBlockLines(root, id) {
+  return readFileSync(join(root, id, "landing-block.txt"), "utf8").split("\n").map((l) => l.trim()).filter(Boolean);
+}
+function landingBlockReason(input) {
+  try {
+    const { root, pending } = ownedLandingMarkers(input);
+    if (!pending.length) return null;
+    const message = input.last_assistant_message;
+    if (typeof message !== "string") {
+      // The markers stay, so a later Stop with a readable final message still checks them.
+      process.stderr.write("[doug] landing-block check skipped: the final message is unreadable\n");
+      return null;
+    }
+    const missing = [];
+    for (const id of pending) {
+      const marker = join(root, id, "landing-block.pending");
+      try {
+        const lines = landingBlockLines(root, id);
+        if (lines.length && !lines.every((l) => message.includes(l))) missing.push({ id, lines });
+      } catch (e) {
+        process.stderr.write(`[doug] landing-block check skipped: ${id}: ${e && e.message ? e.message : String(e)}\n`);
+      }
+      try {
+        unlinkSync(marker);
+      } catch {}
+    }
+    if (!missing.length) return null;
+    return missing.map((m) => `Landing block missing from your final message for ${m.id}. Paste these lines verbatim:\n${m.lines.join("\n")}`).join("\n\n");
+  } catch (e) {
+    process.stderr.write(`[doug] landing-block check skipped: ${e && e.message ? e.message : String(e)}\n`);
+    return null;
+  }
+}
+// Quiet sweep for the systemMessage exits: delete each owned marker whose lines are all in the final message,
+// keep the rest. Never blocks, never changes the exit's text.
+function sweepLandingMarkers(input) {
+  try {
+    const message = input.last_assistant_message;
+    if (typeof message !== "string") return;
+    const { root, pending } = ownedLandingMarkers(input);
+    for (const id of pending) {
+      try {
+        const lines = landingBlockLines(root, id);
+        if (lines.length && lines.every((l) => message.includes(l))) unlinkSync(join(root, id, "landing-block.pending"));
+      } catch (e) {
+        process.stderr.write(`[doug] landing-block check skipped: ${id}: ${e && e.message ? e.message : String(e)}\n`);
+      }
+    }
+  } catch (e) {
+    process.stderr.write(`[doug] landing-block check skipped: ${e && e.message ? e.message : String(e)}\n`);
+  }
+}
+function systemMessage(message) {
+  if (landingInput) sweepLandingMarkers(landingInput);
+  return systemMessageRaw(message);
+}
+function allow() {
+  const reason = landingInput ? landingBlockReason(landingInput) : null;
+  if (reason) return blockStop(reason);
+  return allowRaw();
+}
+
 const READ_ONLY_LINE = "[doug] Read-only turn: verification skipped; the working tree holds unverified changes from other agents.";
 
 runHook("stop-gate", async (input) => {
-  if (input.stop_hook_active) return allow();
+  if (input.stop_hook_active) return allowRaw();
+  if (input.hook_event_name !== "SubagentStop") landingInput = input;
   const dir = projectDir(input);
   const cfg = loadConfig(dir);
   let state = loadState(dir, input.session_id);
@@ -1394,8 +1519,8 @@ runHook("stop-gate", async (input) => {
     // Draft and rejected plans are not contracts yet, so they are ignored.
     let scope = null;
     if (Array.isArray(changed) && cfg.stopGate.planScope !== false) {
-      const { plan, reason, error } = loadScopePlan(dir);
-      if (reason === "unreadable") process.stderr.write(`[doug] ${PLAN_RELPATH} is unreadable (${error}); scope not checked\n`);
+      const { plan, reason, error, file } = loadScopePlan(dir);
+      if (reason === "unreadable") process.stderr.write(`[doug] ${file || PLAN_RELPATH} is unreadable (${error}); scope not checked\n`);
       if (plan) {
         const violations = scopeViolations(changed, plan, { ignore: cfg.stopGate.ignoreChangedPaths || [] });
         scope = { plan: plan.title, status: plan.status, outOfScope: violations.map((v) => v.file) };
@@ -1449,7 +1574,10 @@ runHook("stop-gate", async (input) => {
         state.deferrals = n;
         state.lastDeferral = { ids, fingerprint: currentFingerprint };
         saveState(dir, input.session_id, state);
-        if (repeat) return allow();
+        if (repeat) {
+          if (landingInput) sweepLandingMarkers(landingInput);
+          return allowRaw();
+        }
         return systemMessage(
           `[doug] Verification deferred: waits for ${names} to stop; the full gate runs at the first Stop after they stop.`,
         );
@@ -1498,7 +1626,7 @@ runHook("stop-gate", async (input) => {
   };
   const skipReason = subagent && agentMadeNoChanges(dir, cfg, input.session_id, subagent)
     ? "no-agent-changes"
-    : subagent && treeUnchangedSinceStart(dir, cfg, input.session_id, subagent, input, currentFingerprint)
+    : subagent && treeUnchangedSinceStart(dir, cfg, input.session_id, subagent, input, currentFingerprint, vdir, forced)
       ? "tree-unchanged"
       : readOnlyTurn
         ? "read-only-turn"
@@ -1588,7 +1716,7 @@ runHook("stop-gate", async (input) => {
 
   // card stop-gate-process-storm, case 3: only one gate runs the verification commands at a time per
   // project (the 2026-09-16 process storm: four concurrent SubagentStops each ran the full suite, each
-  // 300s timeout orphaning ten vitest workers). A gate holds .doug/.state/gate.lock while its commands run;
+  // 300s timeout orphaning ten vitest workers). A gate holds gate.lock (gateLockPath: under the git common dir) while its commands run;
   // a second gate that finds a live lock waits for it, bounded by stopGate.timeoutMs, then reloads state and
   // reapplies the skip above — the holder's own green run may have just recorded the very `verified` tree
   // this gate needs, letting it skip instead of also running the full suite.

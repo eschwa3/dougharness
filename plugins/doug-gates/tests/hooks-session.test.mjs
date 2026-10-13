@@ -178,6 +178,34 @@ describe("reanchor on PreCompact (card precompact-anchor)", () => {
     expect(sessionStart).toContain("Compaction snapshot (doug");
     expect(sessionStart.indexOf("Compaction snapshot (doug")).toBeLessThan(sessionStart.indexOf("My own notes stay"));
   });
+  it("S04 with no .doug/plan.json, the snapshot prints one Plan block per active per-card plan and skips landed ones (card parallel-card-queens)", () => {
+    const dir = makeProject({ config: baseConfig });
+    mkdirSync(join(dir, ".doug/plans"), { recursive: true });
+    writeFileSync(join(dir, ".doug/plans/a.json"), JSON.stringify({ version: 1, title: "Card A", status: "approved", card: "card-a", tasks: [{ id: "ta", files: ["src/a.ts"] }] }));
+    writeFileSync(join(dir, ".doug/plans/b.json"), JSON.stringify({ version: 1, title: "Card B", status: "approved", card: "card-b", tasks: [{ id: "tb", files: ["src/b.ts", "tests/b.test.ts"] }] }));
+    writeFileSync(join(dir, ".doug/plans/old.json"), JSON.stringify({ version: 1, title: "Card Old", status: "done", card: "card-old", landed: { at: "2026-09-04T16:00:00.000Z", mergeCommit: "abc1234" }, tasks: [{ id: "to", files: ["src/old.ts"] }] }));
+    writeFileSync(join(dir, ".doug/plans/bad.json"), "{ nope");
+    const r = runHookScript("reanchor", { hook_event_name: "PreCompact" }, { dir });
+    expect(r.status).toBe(0);
+    const anchor = readFileSync(join(dir, ".doug/anchor.md"), "utf8");
+    expect(anchor).toContain("Plan: Card A [approved] (card card-a)");
+    expect(anchor).toContain("- ta owns src/a.ts");
+    expect(anchor).toContain("Plan: Card B [approved] (card card-b)");
+    expect(anchor).toContain("- tb owns src/b.ts, tests/b.test.ts");
+    expect(anchor).not.toContain("Card Old");
+    expect(anchor).not.toContain("Plan: none");
+  });
+  it("S04b a corrupt per-card file sorted ahead of good ones is skipped; the good ones still print (fix pass)", () => {
+    const dir = makeProject({ config: baseConfig });
+    mkdirSync(join(dir, ".doug/plans"), { recursive: true });
+    writeFileSync(join(dir, ".doug/plans/0-bad.json"), "{ nope");
+    writeFileSync(join(dir, ".doug/plans/a.json"), JSON.stringify({ version: 1, title: "Card A", status: "approved", card: "card-a", tasks: [{ id: "ta", files: ["src/a.ts"] }] }));
+    writeFileSync(join(dir, ".doug/plans/b.json"), JSON.stringify({ version: 1, title: "Card B", status: "approved", card: "card-b", tasks: [{ id: "tb", files: ["src/b.ts"] }] }));
+    runHookScript("reanchor", { hook_event_name: "PreCompact" }, { dir });
+    const anchor = readFileSync(join(dir, ".doug/anchor.md"), "utf8");
+    expect(anchor).toContain("Plan: Card A [approved] (card card-a)");
+    expect(anchor).toContain("Plan: Card B [approved] (card card-b)");
+  });
   it("creates the anchor when there is none and says so when there is no plan or decisions", () => {
     const dir = makeProject({ config: baseConfig });
     runHookScript("reanchor", { hook_event_name: "PreCompact" }, { dir });

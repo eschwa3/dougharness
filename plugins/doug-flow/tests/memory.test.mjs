@@ -64,12 +64,12 @@ describe("openMemory", () => {
     m = openMemory(dir);
     expect(existsSync(memoryPath(dir))).toBe(true);
     expect(memoryPath(dir).endsWith(MEMORY_DB_RELPATH)).toBe(true);
-    expect(m.prepare("PRAGMA user_version").get().user_version).toBe(8);
+    expect(m.prepare("PRAGMA user_version").get().user_version).toBe(9);
     addLesson(m, { text: "keep the gate green", kind: "pattern", source: { agent: "worker" } });
     m.close();
 
     m = openMemory(dir);
-    expect(m.prepare("PRAGMA user_version").get().user_version).toBe(8);
+    expect(m.prepare("PRAGMA user_version").get().user_version).toBe(9);
     const rows = listLessons(m);
     expect(rows).toHaveLength(1);
     expect(rows[0].text).toBe("keep the gate green");
@@ -107,11 +107,19 @@ describe("openMemory", () => {
     }
   });
 
-  it("M1 (card run-report-codex-cost): a fresh store is at user_version 8 with a codex_usd column on outcomes", () => {
+  it("M1 (card run-report-codex-cost): a fresh store is at user_version 9 with a codex_usd column on outcomes", () => {
     m = openMemory(dir);
-    expect(m.prepare("PRAGMA user_version").get().user_version).toBe(8);
+    expect(m.prepare("PRAGMA user_version").get().user_version).toBe(9);
     const cols = m.prepare("PRAGMA table_info(outcomes)").all().map((c) => c.name);
     expect(cols).toContain("codex_usd");
+  });
+
+  it("S7 (card memory-stop-class): a fresh store is at user_version 9 with a nullable stop_class column on outcomes", () => {
+    m = openMemory(dir);
+    expect(m.prepare("PRAGMA user_version").get().user_version).toBe(9);
+    const col = m.prepare("PRAGMA table_info(outcomes)").all().find((c) => c.name === "stop_class");
+    expect(col).toBeTruthy();
+    expect(col.notnull).toBe(0);
   });
 });
 
@@ -121,11 +129,11 @@ describe("openMemory: a store from a future schema version", () => {
     mkdirSync(dirname(file), { recursive: true });
     const raw = new DatabaseSync(file);
     raw.exec("CREATE TABLE outcomes (id INTEGER PRIMARY KEY);");
-    raw.exec("PRAGMA user_version = 9");
+    raw.exec("PRAGMA user_version = 10");
     raw.close();
 
-    expect(() => openMemory(dir)).toThrow(/user_version 9/);
-    expect(() => openMemory(dir)).toThrow(/understands up to version 8/);
+    expect(() => openMemory(dir)).toThrow(/user_version 10/);
+    expect(() => openMemory(dir)).toThrow(/understands up to version 9/);
   });
 });
 
@@ -154,7 +162,7 @@ describe("inspectMemory (read-only)", () => {
     expect(listing(dir)).toEqual([]);
   });
 
-  it("a seeded store reports user_version 8, the max, and quick_check ok, leaving mtime, size and the directory listing unchanged", () => {
+  it("a seeded store reports user_version 9, the max, and quick_check ok, leaving mtime, size and the directory listing unchanged", () => {
     m = openMemory(dir);
     addLesson(m, { text: "keep the gate green", kind: "pattern", source: { agent: "worker" } });
     m.close();
@@ -163,7 +171,7 @@ describe("inspectMemory (read-only)", () => {
     const before = statSync(file);
     const listed = listing(dir);
     const r = inspectMemory(dir);
-    expect(r).toMatchObject({ file, exists: true, userVersion: 8, maxUserVersion: 8, quickCheck: "ok", error: null });
+    expect(r).toMatchObject({ file, exists: true, userVersion: 9, maxUserVersion: 9, quickCheck: "ok", error: null });
     const after = statSync(file);
     expect(after.mtimeMs).toBe(before.mtimeMs);
     expect(after.size).toBe(before.size);
@@ -180,7 +188,7 @@ describe("inspectMemory (read-only)", () => {
       const r = inspectMemory(dir);
       expect(r.error).toBeNull();
       expect(r.quickCheck).toBe("ok");
-      expect(r.userVersion).toBe(8);
+      expect(r.userVersion).toBe(9);
     } finally {
       chmodSync(file, 0o644);
     }
@@ -193,7 +201,7 @@ describe("inspectMemory (read-only)", () => {
     mkdirSync(srcDir, { recursive: true });
     const live = new DatabaseSync(join(srcDir, "memory.db"));
     try {
-      live.exec("PRAGMA journal_mode=WAL; CREATE TABLE t(x); PRAGMA user_version = 8;");
+      live.exec("PRAGMA journal_mode=WAL; CREATE TABLE t(x); PRAGMA user_version = 9;");
       live.exec("INSERT INTO t VALUES (1)");
       const file = memoryPath(dir);
       mkdirSync(dirname(file), { recursive: true });
@@ -202,7 +210,7 @@ describe("inspectMemory (read-only)", () => {
       const before = readFileSync(file);
       const r = inspectMemory(dir);
       expect(r.error).toBeNull();
-      expect(r.userVersion).toBe(8);
+      expect(r.userVersion).toBe(9);
       expect(Buffer.compare(readFileSync(file), before)).toBe(0);
       expect(existsSync(`${file}-wal`)).toBe(true);
     } finally {
@@ -222,19 +230,19 @@ describe("inspectMemory (read-only)", () => {
     expect(typeof r.error === "string" || (r.quickCheck !== null && r.quickCheck !== "ok")).toBe(true);
   });
 
-  it("a store from a future schema (user_version 9) reports userVersion 9 above maxUserVersion 8, unmigrated", () => {
+  it("a store from a future schema (user_version 10) reports userVersion 10 above maxUserVersion 9, unmigrated", () => {
     const file = memoryPath(dir);
     mkdirSync(dirname(file), { recursive: true });
     const raw = new DatabaseSync(file);
     raw.exec("CREATE TABLE outcomes (id INTEGER PRIMARY KEY);");
-    raw.exec("PRAGMA user_version = 9");
+    raw.exec("PRAGMA user_version = 10");
     raw.close();
     const r = inspectMemory(dir);
-    expect(r.userVersion).toBe(9);
-    expect(r.maxUserVersion).toBe(8);
+    expect(r.userVersion).toBe(10);
+    expect(r.maxUserVersion).toBe(9);
     expect(r.error).toBeNull();
     const check = new DatabaseSync(file);
-    expect(check.prepare("PRAGMA user_version").get().user_version).toBe(9);
+    expect(check.prepare("PRAGMA user_version").get().user_version).toBe(10);
     check.close();
   });
 
@@ -374,7 +382,7 @@ describe("openMemory: v1 to v6 migration", () => {
     raw.close();
 
     m = openMemory(dir);
-    expect(m.prepare("PRAGMA user_version").get().user_version).toBe(8);
+    expect(m.prepare("PRAGMA user_version").get().user_version).toBe(9);
     const rows = listOutcomes(m);
     expect(rows).toHaveLength(1);
     const row = rows[0];
@@ -389,6 +397,10 @@ describe("openMemory: v1 to v6 migration", () => {
     expect(row.gate).toBeNull();
     expect(row.note).toBeNull();
     expect(row.partial).toBeNull();
+    // S8 (card memory-stop-class): the v1 rebuild chain reaches v9 with exactly one nullable stop_class column.
+    const cols = m.prepare("PRAGMA table_info(outcomes)").all().map((c) => c.name);
+    expect(cols.filter((c) => c === "stop_class")).toHaveLength(1);
+    expect(row.stop_class).toBeNull();
   });
 });
 
@@ -440,7 +452,7 @@ describe("openMemory: v2 to v6 migration", () => {
     raw.close();
 
     m = openMemory(dir);
-    expect(m.prepare("PRAGMA user_version").get().user_version).toBe(8);
+    expect(m.prepare("PRAGMA user_version").get().user_version).toBe(9);
     const rows = listLessons(m);
     expect(rows).toHaveLength(1);
     expect(rows[0].id).toBe("v2lesson1");
@@ -475,7 +487,7 @@ describe("openMemory: v3 to v6 migration", () => {
     m.close();
 
     m = openMemory(dir);
-    expect(m.prepare("PRAGMA user_version").get().user_version).toBe(8);
+    expect(m.prepare("PRAGMA user_version").get().user_version).toBe(9);
     expect(listLessons(m).map((r) => r.id)).toEqual([lesson.id]);
     expect(listOutcomes(m)).toHaveLength(2);
     expect(searchLessons(m, "gate").map((r) => r.id)).toEqual([lesson.id]);
@@ -512,7 +524,7 @@ describe("openMemory: v4 to v6 migration", () => {
     m.close();
 
     m = openMemory(dir);
-    expect(m.prepare("PRAGMA user_version").get().user_version).toBe(8);
+    expect(m.prepare("PRAGMA user_version").get().user_version).toBe(9);
     expect(listLessons(m).map((r) => r.id)).toEqual([lesson.id]);
     const outcomeRowsAfter = listOutcomes(m);
     expect(outcomeRowsAfter).toHaveLength(2);
@@ -538,7 +550,7 @@ describe("openMemory: v5 to v6 migration (card semantic-index)", () => {
     m.close();
 
     m = openMemory(dir);
-    expect(m.prepare("PRAGMA user_version").get().user_version).toBe(8);
+    expect(m.prepare("PRAGMA user_version").get().user_version).toBe(9);
     expect(listLessons(m).map((r) => r.id)).toEqual([lesson.id]);
     expect(listOutcomes(m)).toHaveLength(2);
     for (const table of ["code_files", "code_chunks", "code_index_builds"]) {
@@ -607,7 +619,7 @@ describe("openMemory: v6 to v7 migration (card outcomes-condition-columns)", () 
     m.close();
 
     m = openMemory(dir);
-    expect(m.prepare("PRAGMA user_version").get().user_version).toBe(8);
+    expect(m.prepare("PRAGMA user_version").get().user_version).toBe(9);
     expect(listLessons(m).map((r) => r.id)).toEqual([lesson.id]);
     const after = listOutcomes(m);
     expect(after).toHaveLength(2);
@@ -643,7 +655,7 @@ describe("openMemory: v7 to v8 migration (card run-report-codex-cost)", () => {
     m.close();
 
     m = openMemory(dir);
-    expect(m.prepare("PRAGMA user_version").get().user_version).toBe(8);
+    expect(m.prepare("PRAGMA user_version").get().user_version).toBe(9);
     expect(listLessons(m).map((r) => r.id)).toEqual([lesson.id]);
     const after = listOutcomes(m);
     expect(after).toHaveLength(2);
@@ -652,6 +664,105 @@ describe("openMemory: v7 to v8 migration (card run-report-codex-cost)", () => {
     expect(cols).toContain("codex_usd");
     // add-only triggers on lessons survive.
     expect(() => m.exec(`DELETE FROM lessons WHERE id = '${lesson.id}'`)).toThrow(/add-only/);
+  });
+});
+
+describe("openMemory: v8 to v9 migration (card memory-stop-class)", () => {
+  it("S1/S2/S3: adds a nullable stop_class column, bumps user_version to 9, and leaves old rows null with every other column, lessons, and triggers intact", () => {
+    // Build a real store with rows from the real recorder, then downgrade it to v8 (drop stop_class,
+    // roll user_version back) so this test needs only a store that openMemory (v8) would have produced.
+    m = openMemory(dir);
+    const lesson = addLesson(m, { text: "keep the gate green", kind: "pattern", source: { agent: "worker" } });
+    const report = {
+      levels: [{ index: 0, tasks: [
+        { id: "a", implemented: true, verified: false, reviewed: false, stopReason: "implementer blocked on the sandbox" },
+        { id: "b", implemented: true, verified: true, reviewed: true },
+      ] }],
+    };
+    recordOutcomes(m, outcomeRows(report, { run: "wf_s1", reportHash: "99999999999999999999999999999999", now: "2026-10-01T00:00:00.000Z" }));
+    const before = listOutcomes(m, { run: "wf_s1" });
+    expect(before).toHaveLength(2);
+    if (m.prepare("PRAGMA table_info(outcomes)").all().some((c) => c.name === "stop_class")) {
+      m.exec("ALTER TABLE outcomes DROP COLUMN stop_class;");
+    }
+    m.exec("PRAGMA user_version = 8;");
+    m.close();
+
+    const v8 = new DatabaseSync(memoryPath(dir));
+    expect(v8.prepare("PRAGMA table_info(outcomes)").all().map((c) => c.name)).not.toContain("stop_class");
+    expect(v8.prepare("PRAGMA user_version").get().user_version).toBe(8);
+    v8.close();
+
+    m = openMemory(dir);
+    expect(m.prepare("PRAGMA user_version").get().user_version).toBe(9);
+    const cols = m.prepare("PRAGMA table_info(outcomes)").all().map((c) => c.name);
+    expect(cols.filter((c) => c === "stop_class")).toHaveLength(1);
+    expect(listLessons(m).map((r) => r.id)).toEqual([lesson.id]);
+    const after = listOutcomes(m, { run: "wf_s1" });
+    expect(after).toHaveLength(2);
+    for (const row of after) {
+      expect(row.stop_class).toBeNull();
+      const old = before.find((r) => r.task === row.task);
+      const { stop_class: _drop, ...rest } = row;
+      const { stop_class: _drop2, ...oldRest } = old;
+      expect(rest).toEqual(oldRest);
+    }
+    expect(after.find((r) => r.task === "a").stop_reason).toBe("implementer blocked on the sandbox");
+    // the migrated store accepts a stop_class on a new row.
+    recordOutcomes(m, outcomeRows(
+      { levels: [{ index: 0, tasks: [{ id: "c", implemented: false, verified: false, reviewed: false, stopReason: "r", stopClass: "environment" }] }] },
+      { run: "wf_s1b", reportHash: "88888888888888888888888888888888", now: "2026-10-02T00:00:00.000Z" }
+    ));
+    expect(listOutcomes(m, { run: "wf_s1b" })[0].stop_class).toBe("environment");
+    expect(() => m.exec(`DELETE FROM lessons WHERE id = '${lesson.id}'`)).toThrow(/add-only/);
+  });
+});
+
+describe("outcomeRows: stop_class (card memory-stop-class)", () => {
+  it("S4: a report with stopClass records that string, distinct from stopReason, through recordOutcomes/listOutcomes", () => {
+    m = openMemory(dir);
+    const report = {
+      levels: [{ index: 0, tasks: [
+        { id: "x", implemented: false, verified: false, reviewed: false, stopReason: "free text reason", stopClass: "spec-contradiction" },
+        { id: "y", implemented: false, verified: false, reviewed: false, stopReason: "other text", stopClass: "some-unlisted-class" },
+      ] }],
+    };
+    const rows = outcomeRows(report, { run: "wf_s4", reportHash: "77777777777777777777777777777777", now: "2026-10-01T00:00:00.000Z" });
+    expect(rows.find((r) => r.task === "x").stop_class).toBe("spec-contradiction");
+    recordOutcomes(m, rows);
+    const stored = listOutcomes(m, { run: "wf_s4" });
+    const x = stored.find((r) => r.task === "x");
+    expect(x.stop_class).toBe("spec-contradiction");
+    expect(x.stop_reason).toBe("free text reason");
+    expect(stored.find((r) => r.task === "y").stop_class).toBe("some-unlisted-class");
+  });
+
+  it("S5: a report without stopClass records null, not an empty string, in the row and in the store", () => {
+    m = openMemory(dir);
+    const report = {
+      levels: [{ index: 0, tasks: [
+        { id: "old1", implemented: false, verified: false, reviewed: false, stopReason: "legacy reason" },
+        { id: "old2", implemented: true, verified: true, reviewed: true },
+      ] }],
+    };
+    const rows = outcomeRows(report, { run: "wf_s5", reportHash: "66666666666666666666666666666667", now: "2026-10-01T00:00:00.000Z" });
+    for (const r of rows) {
+      expect(r).toHaveProperty("stop_class");
+      expect(r.stop_class).toBeNull();
+    }
+    recordOutcomes(m, rows);
+    for (const r of listOutcomes(m, { run: "wf_s5" })) expect(r.stop_class).toBeNull();
+    const raw = m.prepare("SELECT COUNT(*) AS n FROM outcomes WHERE stop_class IS NOT NULL").get();
+    expect(raw.n).toBe(0);
+  });
+
+  it("S6: a hand-track row leaves stop_class null in the row and in the store", () => {
+    m = openMemory(dir);
+    const row = handOutcomeRow({ card: "c-s6", commit: "sha6", now: "2026-10-01T00:00:00.000Z" });
+    expect(row).toHaveProperty("stop_class");
+    expect(row.stop_class).toBeNull();
+    recordOutcomes(m, [row]);
+    expect(listOutcomes(m, { track: "hand" })[0].stop_class).toBeNull();
   });
 });
 
@@ -1049,6 +1160,13 @@ describe("handOutcomeRow", () => {
   it("M5 (card run-report-codex-cost): a hand-track row leaves codex_usd null", () => {
     const row = handOutcomeRow({ card: "c1", commit: "sha1" });
     expect(row.codex_usd).toBeNull();
+  });
+
+  it("U1 (card usd-budget-size-class): cost fills the usd column; without it usd stays null, never 0", () => {
+    expect(handOutcomeRow({ card: "c1", commit: "sha1", cost: 3.21 }).usd).toBe(3.21);
+    expect(handOutcomeRow({ card: "c1", commit: "sha1", cost: 0.5 }).usd).toBe(0.5);
+    expect(handOutcomeRow({ card: "c1", commit: "sha1" }).usd).toBeNull();
+    expect(handOutcomeRow({ card: "c1", commit: "sha1", cost: null }).usd).toBeNull();
   });
 
   it("leaves the seven condition columns null and backfilled 0 when no condition is given (card outcomes-condition-columns)", () => {

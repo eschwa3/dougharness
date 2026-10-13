@@ -45,6 +45,15 @@ details{margin-top:6px}summary{font-size:12px;color:var(--accent);cursor:pointer
 .move{margin-top:8px;display:flex;gap:6px;align-items:center}.move select{font-size:12px;padding:3px 6px}
 .ro .card{cursor:default}.ro .move{display:none}
 footer{padding:0 24px 24px;font-size:12px;color:var(--ink-soft)}
+#autopilot{margin:14px 24px 0;padding:10px 14px;background:var(--surface);border:1px solid var(--rule-strong)}
+#autopilot[hidden]{display:none}
+#autopilot h2{font-family:"IBM Plex Mono",Menlo,monospace;font-size:12px;letter-spacing:.06em;text-transform:uppercase;font-weight:500;margin:0 0 6px}
+#autopilot ul{list-style:none;margin:4px 0;padding:0;font-size:13px}
+#autopilot li{display:flex;gap:8px;flex-wrap:wrap;align-items:baseline}
+#autopilot .st{font-family:"IBM Plex Mono",Menlo,monospace;font-size:11px;text-transform:uppercase;color:var(--ink-soft);min-width:5.5em}
+#autopilot .st.running{color:var(--accent);font-weight:600}
+#autopilot .st.stopped,#autopilot .st.interrupted{color:var(--c-decision)}
+#autopilot .caps,#autopilot .filed{font-size:12px;color:var(--ink-soft);margin-top:4px}
 @media (max-width:720px){.board{grid-auto-columns:minmax(85vw,1fr)}}
 `;
 
@@ -163,6 +172,12 @@ function connectLive(opts) {
       if (source !== es) return;
       opts.onBoard(JSON.parse(e.data));
     });
+    es.addEventListener("autopilot", (e) => {
+      if (source !== es || !opts.onAutopilot) return;
+      let view = null;
+      try { view = JSON.parse(e.data); } catch (_) {}
+      opts.onAutopilot(view);
+    });
   }
   open();
 
@@ -246,6 +261,33 @@ function cardMatches(card, filters) {
   return true;
 }
 
+// The autopilot panel's inner HTML for a view from GET /api/autopilot (lib/autopilot-view.mjs autopilotView);
+// "" for no view, which leaves the panel hidden.
+function autopilotHtml(view) {
+  if (!view || typeof view !== "object") return "";
+  const cards = Array.isArray(view.cards) ? view.cards : [];
+  const filed = Array.isArray(view.filed) ? view.filed : [];
+  const caps = view.caps || {};
+  const items = cards.map((c) => {
+    const shape = [c.size, c.class].filter(Boolean).join("/");
+    return `<li><span class="st ${esc(c.state)}">${esc(c.state)}</span><code>${esc(c.id)}</code>${c.title ? `<span>${esc(c.title)}</span>` : ""}${shape ? `<span class="meta">${esc(shape)}</span>` : ""}${c.detail ? `<span class="meta">${esc(c.detail)}</span>` : ""}</li>`;
+  }).join("");
+  const filedHtml = filed.length
+    ? `<div class="filed">filed: ${filed.map((f) => `<code>${esc(f.id)}</code> (${esc(f.kind)}${f.from ? " from " + esc(f.from) : ""}) ${esc(f.position || "")}`).join("; ")}</div>`
+    : "";
+  return `<h2>${esc(view.header || "Autopilot")}</h2><ul>${items}</ul><div class="caps">usd ${esc(caps.usd || "")} · wall ${esc(caps.wall || "")} · context ${esc(caps.context || "")}</div>${filedHtml}`;
+}
+
+// Shows a view in the #autopilot container, or hides the container for none.
+function applyAutopilot(view, doc) {
+  doc = doc !== undefined ? doc : (typeof document !== "undefined" ? document : null);
+  const el = doc && doc.getElementById("autopilot");
+  if (!el) return;
+  const html = autopilotHtml(view);
+  el.innerHTML = html;
+  el.hidden = html === "";
+}
+
 // The complete document for a given board state; `doug board serve` renders it from the record on
 // every request.
 function renderDoc(board, appSource, config) {
@@ -265,6 +307,7 @@ ${tagFilter ? tagFilter + "\n" : ""}<span class="status" id="filter-note"></span
 <span class="status" id="status"></span>
 </div>
 </header>
+<section id="autopilot" aria-label="Autopilot" hidden></section>
 <main class="board" id="board">
 ${board.columns.map((col) => columnHtml(col, board.cards, board.columns)).join("\n")}
 </main>
@@ -509,6 +552,8 @@ function app() {
       readOnly = false;
       document.body.classList.remove("ro");
       say("");
+      // The autopilot panel: the run's view now, then live over the same event stream.
+      fetch("/api/autopilot").then((r) => (r && r.status === 200 ? r.json() : null)).then((view) => applyAutopilot(view)).catch(() => {});
       // Once served, follow the record live: another writer's move (or this tab's own, echoed
       // back) re-renders in place, or reloads when the columns or filters themselves changed.
       connectLive({
@@ -516,6 +561,7 @@ function app() {
         url: "/api/events",
         setTimeout: window.setTimeout.bind(window),
         clearTimeout: window.clearTimeout.bind(window),
+        onAutopilot: (view) => applyAutopilot(view),
         onBoard: (next) => {
           const updated = applyLiveBoard(board, next, config);
           if (updated) {

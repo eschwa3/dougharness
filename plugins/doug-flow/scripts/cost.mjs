@@ -6,6 +6,8 @@
 //   cost.mjs <run-id> [dir] [--json] [--claude-dir <path>]
 //     <run-id>            the Workflow run id (wf_...)
 //     [dir]               the project directory whose ~/.claude/projects slug is searched first (default cwd)
+//     --since <iso>, --until <iso>  with --session: price only the assistant messages whose timestamp is in the
+//                         window (card usd-budget-size-class: a hand landing's cost, openedAt to the landing)
 //     --json              print the full result as JSON instead of the text tables
 //     --by-card           a batch run (the plan at [dir] lists `cards`): add the per-card table, each card's tasks'
 //                         agents summed for that card and the shared integration agents listed once (`byCard` in --json)
@@ -19,7 +21,7 @@
 import { readFileSync } from "node:fs";
 import { resolve, join } from "node:path";
 import { costRun, costSession, renderSession, renderCost, costByCard, renderCostByCard } from "../lib/cost.mjs";
-import { loadPlan, REPORT_RELPATH, unwrapReport } from "../lib/plan.mjs";
+import { planFor, REPORT_RELPATH, unwrapReport } from "../lib/plan.mjs";
 
 const argv = process.argv.slice(2);
 const FLAGS = new Set(["json", "by-card"]);
@@ -43,6 +45,17 @@ if (opts.session === "") {
   process.stderr.write("usage: cost.mjs --session <id|latest> [dir] [--json] [--claude-dir <path>]\n");
   process.exit(2);
 }
+const USAGE_SESSION = "usage: cost.mjs --session <id|latest> [dir] [--since <iso>] [--until <iso>] [--json] [--claude-dir <path>]\n";
+const window = {};
+for (const flag of ["since", "until"]) {
+  if (opts[flag] === undefined) continue;
+  const at = opts[flag] === "" ? NaN : Date.parse(opts[flag]);
+  if (opts.session === undefined || Number.isNaN(at)) {
+    process.stderr.write(`${USAGE_SESSION}--${flag} takes an ISO date with --session, got ${JSON.stringify(opts[flag])}.\n`);
+    process.exit(2);
+  }
+  window[flag] = at;
+}
 if (!runId && opts.session === undefined) {
   process.stderr.write("usage: cost.mjs <run-id> [dir] [--json] [--claude-dir <path>]\n");
   process.exit(2);
@@ -50,7 +63,7 @@ if (!runId && opts.session === undefined) {
 try {
   const projectDir = resolve(process.env.CLAUDE_PROJECT_DIR || dirArg || process.cwd());
   if (opts.session !== undefined) {
-    const result = costSession({ session: opts.session, projectDir, claudeDir: opts["claude-dir"] ? resolve(opts["claude-dir"]) : undefined });
+    const result = costSession({ session: opts.session, projectDir, claudeDir: opts["claude-dir"] ? resolve(opts["claude-dir"]) : undefined, since: window.since ?? null, until: window.until ?? null });
     process.stdout.write(opts.json ? JSON.stringify(result, null, 2) + "\n" : renderSession(result));
     process.exit(0);
   }
@@ -69,7 +82,7 @@ try {
     }
   }
   const result = costRun({ runId, projectDir, claudeDir: opts["claude-dir"] ? resolve(opts["claude-dir"]) : undefined, report, reportPath });
-  const byCard = opts["by-card"] ? costByCard(result, loadPlan(projectDir)) : null;
+  const byCard = opts["by-card"] ? costByCard(result, planFor(projectDir, opts.card)) : null;
   if (opts.json) process.stdout.write(JSON.stringify(byCard ? { ...result, byCard } : result, null, 2) + "\n");
   else process.stdout.write(renderCost(result) + (byCard ? "\n" + renderCostByCard(byCard) : ""));
 } catch (err) {

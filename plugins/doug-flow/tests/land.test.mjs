@@ -1,13 +1,13 @@
 // plan.mjs land on real temp repos: refuses on every precondition, lands with a merge commit otherwise.
 import { describe, it, expect } from "vitest";
 import { execFileSync, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import * as landLib from "../lib/land.mjs";
 import { landPlan, INTEGRATION_WORKTREE, trailerCommits, commandEnv } from "../lib/land.mjs";
-import { integrationBranchFor, loadPlan, savePlan } from "../lib/plan.mjs";
+import { integrationBranchFor, loadPlan, planPathFor, savePlan } from "../lib/plan.mjs";
 import { syncHooks } from "../../../scripts/sync-hooks.mjs";
 import { readRecord, writeRecord, computeTree, RECORD_RELPATH } from "../../doug-gates/lib/verified-tree.mjs";
 
@@ -379,6 +379,8 @@ describe("plan.mjs land", () => {
     const ok = spawnSync(process.execPath, [planCli, "land", dir], { encoding: "utf8", env: { ...process.env, CLAUDE_PROJECT_DIR: "" } });
     expect(ok.status, ok.stderr).toBe(0);
     expect(ok.stdout).toContain(`Landed ${branch} into main as`);
+    // Card parallel-card-queens: main feeds this number to autopilot.mjs lock-wait, as land-card's line does.
+    expect(ok.stdout).toMatch(/^lockWaitMs \d+$/m);
     const again = spawnSync(process.execPath, [planCli, "land", dir], { encoding: "utf8", env: { ...process.env, CLAUDE_PROJECT_DIR: "" } });
     expect(again.status).toBe(1);
     expect(again.stderr).toContain("Refusing to land: plan was already landed");
@@ -534,5 +536,189 @@ describe("vendoredVerifySpawnTimeoutMs (card verify-lock-wait-bound)", () => {
     expect(landLib.vendoredVerifySpawnTimeoutMs(600000, 2)).toBe(2460000);
     expect(landLib.vendoredVerifySpawnTimeoutMs(1000, 1)).toBe(62000);
     expect(landLib.vendoredVerifySpawnTimeoutMs(1000, 3)).toBe(66000);
+  });
+});
+
+// Card parallel-card-queens B5 (design 1.D, with R1): landing a flow card when main has moved. rebase: rebase the
+// integration branch onto base (abort and refuse on a conflict), verify and acceptance on the rebased tree, then the
+// --no-ff merge. ownOnly: remove only this plan's own worktrees. A per-plan integration worktree path. lockWaitMs.
+describe("landPlan on a moved base (card parallel-card-queens B5)", () => {
+  const CUSTOM_WT = ".claude/worktrees/doug-integration-greet";
+  const markerDir = () => mkdtempSync(join(tmpdir(), "doug-land-b5-"));
+  // main has README; the branch adds src/greet.js (optionally in a worktree at wtPath); then main moves with `mainChange`.
+  function movedRepo({ wtPath = null, mainChange = { "main-new.txt": "from main\n" }, p = plan() } = {}) {
+    const dir = mkdtempSync(join(tmpdir(), "doug-land-b5-"));
+    git(dir, "init", "-q", "-b", "main");
+    git(dir, "config", "user.email", "t@example.com");
+    git(dir, "config", "user.name", "t");
+    writeFileSync(join(dir, "README.md"), "# fx\n");
+    writeFileSync(join(dir, ".gitignore"), ".doug/.state/\n.claude/worktrees/\n");
+    git(dir, "add", "-A");
+    git(dir, "commit", "-q", "-m", "base");
+    const branch = integrationBranchFor(p);
+    let wt = dir;
+    if (wtPath) {
+      mkdirSync(join(dir, ".claude/worktrees"), { recursive: true });
+      git(dir, "worktree", "add", "-q", "-B", branch, wtPath, "main");
+      wt = join(dir, wtPath);
+    } else {
+      git(dir, "checkout", "-q", "-b", branch);
+    }
+    mkdirSync(join(wt, "src"), { recursive: true });
+    writeFileSync(join(wt, "src/greet.js"), "module.exports = (n) => `hi ${n}`;\n");
+    git(wt, "add", "-A");
+    git(wt, "commit", "-q", "-m", "greet");
+    if (!wtPath) git(dir, "checkout", "-q", "main");
+    for (const [f, text] of Object.entries(mainChange)) {
+      mkdirSync(dirname(join(dir, f)), { recursive: true });
+      writeFileSync(join(dir, f), text);
+    }
+    git(dir, "add", "-A");
+    git(dir, "commit", "-q", "-m", "main moved");
+    const saved = { ...p, ...(wtPath ? { integrationWorktree: wtPath } : {}) };
+    savePlan(dir, saved);
+    return { dir, branch, wt, plan: saved };
+  }
+
+  for (const [label, wtPath] of [["L09: in the plan's integration worktree", CUSTOM_WT], ["L09b: with no integration worktree (a temporary one)", null]]) {
+    it(`${label}: main moved, disjoint files: the branch is rebased, verify runs on the rebased tree, the merge tree equals the verified tree`, () => {
+      const markers = markerDir();
+      const treeMarker = join(markers, "tree.marker");
+      const p = plan({ verify: [`test -f main-new.txt && test -f src/greet.js && git rev-parse 'HEAD^{tree}' > ${treeMarker}`], acceptance: [{ text: "main file visible", command: "test -f main-new.txt" }] });
+      const { dir, branch } = movedRepo({ wtPath, p });
+      const mainTip = git(dir, "rev-parse", "main");
+      const r = landPlan(dir, loadPlan(dir), { rebase: true });
+      expect(r.ok, r.reason).toBe(true);
+      expect(r.acceptance[0].ok).toBe(true);
+      // the integration branch now sits on main's old tip; the merge commit's second parent descends from it
+      expect(git(dir, "rev-parse", "HEAD^2^")).toBe(mainTip);
+      expect(git(dir, "rev-parse", "HEAD^1")).toBe(mainTip);
+      const verified = readFileSync(treeMarker, "utf8").trim();
+      expect(verified).toBe(git(dir, "rev-parse", "HEAD^{tree}")); // what verify saw is what main now holds
+      expect(verified).toBe(git(dir, "rev-parse", `${branch}^{tree}`));
+      expect(existsSync(join(dir, "main-new.txt")) && existsSync(join(dir, "src/greet.js"))).toBe(true);
+      expect(git(dir, "status", "--porcelain", "--untracked-files=no")).toBe("");
+    });
+  }
+
+  it("L09c: without rebase (the default) a moved base is merged as before: the branch is not rebased", () => {
+    const { dir, branch } = movedRepo({ p: plan({ verify: [], acceptance: [] }) });
+    const tipBefore = git(dir, "rev-parse", branch);
+    const r = landPlan(dir, loadPlan(dir));
+    expect(r.ok, r.reason).toBe(true);
+    expect(git(dir, "rev-parse", "HEAD^2")).toBe(tipBefore);
+  });
+
+  it("L09d: rebase set but base already an ancestor of the branch: no rebase, the branch tip is unchanged", () => {
+    const { dir, branch } = repo(plan({ verify: [], acceptance: [] }));
+    const tipBefore = git(dir, "rev-parse", branch);
+    const r = landPlan(dir, loadPlan(dir), { rebase: true });
+    expect(r.ok, r.reason).toBe(true);
+    expect(git(dir, "rev-parse", "HEAD^2")).toBe(tipBefore);
+  });
+
+  for (const [label, wtPath] of [["with the integration worktree", CUSTOM_WT], ["with a temporary worktree", null]]) {
+    it(`L10 ${label}: a rebase conflict is aborted and refused as rebase-conflict naming the files; main and the branch are unchanged`, () => {
+      const markers = markerDir();
+      const ran = join(markers, "verify.marker");
+      const p = plan({ verify: [`echo x > ${ran}`], acceptance: [] });
+      const { dir, branch, wt } = movedRepo({ wtPath, mainChange: { "src/greet.js": "module.exports = () => 'conflicting';\n" }, p });
+      const mainTip = git(dir, "rev-parse", "main");
+      const branchTip = git(dir, "rev-parse", branch);
+      const r = landPlan(dir, loadPlan(dir), { rebase: true });
+      expect(r.ok).toBe(false);
+      expect(r.reason).toMatch(/rebase-conflict: .*src\/greet\.js/);
+      expect(existsSync(ran), "verify must not run after a conflict").toBe(false);
+      expect(git(dir, "rev-parse", "main")).toBe(mainTip);
+      expect(git(dir, "rev-parse", branch)).toBe(branchTip);
+      expect(loadPlan(dir).landed).toBeUndefined();
+      expect(git(dir, "status", "--porcelain", "--untracked-files=no")).toBe("");
+      if (wtPath) {
+        // the worktree is not left mid-rebase
+        expect(git(wt, "status")).not.toContain("rebase in progress");
+        expect(git(wt, "symbolic-ref", "--short", "HEAD")).toBe(branch);
+        expect(git(wt, "status", "--porcelain")).toBe("");
+      } else {
+        expect(git(dir, "worktree", "list").split("\n")).toHaveLength(1);
+      }
+    });
+  }
+
+  it("L11: ownOnly keeps a sibling card's clean worktree and removes this plan's own task and integration worktrees; without ownOnly the sibling goes (the hazard)", () => {
+    const setup = () => {
+      const r = movedRepo({ wtPath: CUSTOM_WT, p: plan({ verify: [], acceptance: [] }) });
+      const mainTip = git(r.dir, "rev-parse", "main");
+      git(r.dir, "worktree", "add", "-q", "-b", "doug/sibling", ".claude/worktrees/sibling", mainTip); // setup done, no commit yet
+      git(r.dir, "worktree", "add", "-q", "-b", "doug/task-greet", ".claude/worktrees/task-greet", mainTip);
+      return r;
+    };
+    const own = setup();
+    const r1 = landPlan(own.dir, loadPlan(own.dir), { rebase: true, ownOnly: true });
+    expect(r1.ok, r1.reason).toBe(true);
+    expect(existsSync(join(own.dir, ".claude/worktrees/sibling")), "sibling worktree kept").toBe(true);
+    expect(existsSync(join(own.dir, ".claude/worktrees/task-greet")), "own task worktree removed").toBe(false);
+    expect(existsSync(join(own.dir, CUSTOM_WT)), "own integration worktree removed").toBe(false);
+    expect(git(own.dir, "worktree", "list")).toContain(".claude/worktrees/sibling");
+
+    const all = setup();
+    const r2 = landPlan(all.dir, loadPlan(all.dir), { rebase: true });
+    expect(r2.ok, r2.reason).toBe(true);
+    expect(existsSync(join(all.dir, ".claude/worktrees/sibling")), "without ownOnly the merged sibling is swept").toBe(false);
+  });
+
+  it("L12: land verifies in the plan's own integration worktree (plan.integrationWorktree), not the shared default", () => {
+    const markers = markerDir();
+    const cwdMarker = join(markers, "cwd.marker");
+    const p = plan({ verify: [`pwd -P > ${cwdMarker}`], acceptance: [] });
+    const { dir, wt } = movedRepo({ wtPath: CUSTOM_WT, p });
+    const wtReal = realpathSync(wt);
+    const r = landPlan(dir, loadPlan(dir), { rebase: true });
+    expect(r.ok, r.reason).toBe(true);
+    expect(readFileSync(cwdMarker, "utf8").trim()).toBe(wtReal);
+    expect(existsSync(wt), "removed after the merge").toBe(false);
+    expect(r.worktrees.removed.some((x) => x.endsWith("doug-integration-greet"))).toBe(true);
+  });
+
+  it("L13: lockWaitMs from the vendored verify.mjs --json is carried into the result", () => {
+    const p = plan({ verify: ["true"], acceptance: [] });
+    const { dir } = movedRepo({ p });
+    mkdirSync(join(dir, ".doug/hooks/scripts"), { recursive: true });
+    writeFileSync(
+      join(dir, ".doug/hooks/scripts/verify.mjs"),
+      `const a = process.argv; const cmds = a.flatMap((x, i) => (x === "--command" ? [a[i + 1]] : []));
+console.log(JSON.stringify({ ok: true, credited: null, results: cmds.map((c) => ({ command: c, ok: true, status: 0, durationMs: 1, outputTail: "" })), lockWaitMs: 1234 }));\n`,
+    );
+    git(dir, "add", "-A");
+    git(dir, "commit", "-q", "-m", "stub verify");
+    const r = landPlan(dir, loadPlan(dir), { rebase: true });
+    expect(r.ok, r.reason).toBe(true);
+    expect(r.lockWaitMs).toBe(1234);
+  });
+
+  it("L14: plan.mjs land --card rebases, keeps a sibling worktree, and saves landed into .doug/plans/<id>.json, not .doug/plan.json", () => {
+    const p = plan({ verify: ["test -f main-new.txt"], acceptance: [] });
+    const { dir, plan: saved } = movedRepo({ wtPath: CUSTOM_WT, p });
+    rmSync(join(dir, ".doug/plan.json"), { force: true });
+    savePlan(dir, saved, planPathFor("greet"));
+    git(dir, "worktree", "add", "-q", "-b", "doug/sibling", ".claude/worktrees/sibling", "main");
+    const mainTip = git(dir, "rev-parse", "main");
+    const run = spawnSync(process.execPath, [planCli, "land", "--card", "greet", dir], { encoding: "utf8", env: { ...process.env, CLAUDE_PROJECT_DIR: "" } });
+    expect(run.status, run.stderr).toBe(0);
+    expect(git(dir, "rev-parse", "HEAD^2^")).toBe(mainTip); // rebased
+    expect(existsSync(join(dir, ".claude/worktrees/sibling"))).toBe(true); // ownOnly
+    expect(existsSync(join(dir, ".doug/plan.json")), "the single plan file is not written").toBe(false);
+    const landed = loadPlan(dir, planPathFor("greet")).landed;
+    expect(landed).toMatchObject({ base: "main", mergeCommit: git(dir, "rev-parse", "--short", "HEAD") });
+  });
+
+  it("L15: plan.mjs land without --card is unchanged: no rebase, a sibling worktree merged into base is swept, landed in .doug/plan.json", () => {
+    const { dir, branch } = movedRepo({ p: plan({ verify: [], acceptance: [] }) });
+    const tipBefore = git(dir, "rev-parse", branch);
+    git(dir, "worktree", "add", "-q", "-b", "doug/sibling", ".claude/worktrees/sibling", "main");
+    const run = spawnSync(process.execPath, [planCli, "land", dir], { encoding: "utf8", env: { ...process.env, CLAUDE_PROJECT_DIR: "" } });
+    expect(run.status, run.stderr).toBe(0);
+    expect(git(dir, "rev-parse", "HEAD^2")).toBe(tipBefore);
+    expect(existsSync(join(dir, ".claude/worktrees/sibling"))).toBe(false);
+    expect(loadPlan(dir).landed).toBeDefined();
   });
 });

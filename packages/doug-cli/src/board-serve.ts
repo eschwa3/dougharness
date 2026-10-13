@@ -4,7 +4,8 @@
 // nothing and reports nothing anywhere.
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { watch as fsWatch, watchFile, unwatchFile, type FSWatcher } from "node:fs";
-import { basename, dirname } from "node:path";
+import { basename, dirname, join } from "node:path";
+import { autopilotView, readAutopilot, AUTOPILOT_FILE } from "@dougharness/flow/lib/autopilot-view.mjs";
 import { boardPath, findCard, loadBoard, moveCard, readyCapWarning, reorderCard, saveBoard } from "@dougharness/flow/lib/board.mjs";
 import { buildBoardPage } from "./board-page.js";
 
@@ -23,15 +24,25 @@ export interface BoardServer {
 interface EventClient {
   res: ServerResponse;
   lastSent: string | null;
+  lastAutopilot: string;
 }
 
-// Watches the directory of the board record (it is replaced by rename, so a file-inode watch would
+// The autopilot panel's view as the page receives it: the JSON of autopilotView, or "null" with no run, a file that
+// does not parse, or any failure reading it. Never throws.
+function autopilotJson(dir: string): string {
+  try {
+    return JSON.stringify(autopilotView(readAutopilot(dir), new Date()));
+  } catch {
+    return "null";
+  }
+}
+
+// Watches the directory of a record file (it is replaced by rename, so a file-inode watch would
 // miss the change) and calls onChange, debounced, whenever the record's own basename is touched.
 // Also polls the record file alongside fs.watch, because fs.watch can drop a change under load; a
 // repeated trigger is harmless since onRecordChange skips a board the client already has. When
 // fs.watch is unavailable or errors, the poll carries on alone.
-function watchRecord(dir: string, mode: "fs" | "poll", onChange: () => void): { stop(): void } {
-  const record = boardPath(dir);
+function watchRecord(record: string, mode: "fs" | "poll", onChange: () => void): { stop(): void } {
   const recordDir = dirname(record);
   const recordName = basename(record);
   let debounce: ReturnType<typeof setTimeout> | null = null;
@@ -220,13 +231,18 @@ function handleEvents(dir: string, clients: Set<EventClient>, req: IncomingMessa
     "cache-control": "no-store",
     connection: "keep-alive",
   });
-  const client: EventClient = { res, lastSent: null };
+  const client: EventClient = { res, lastSent: null, lastAutopilot: "null" };
   try {
     const serialized = JSON.stringify(loadBoard(dir));
     client.lastSent = serialized;
     res.write(`event: board\ndata: ${serialized}\n\n`);
   } catch {
     // A record that fails to load sends nothing; the client still gets later changes.
+  }
+  const autopilot = autopilotJson(dir);
+  if (autopilot !== "null") {
+    client.lastAutopilot = autopilot;
+    res.write(`event: autopilot\ndata: ${autopilot}\n\n`);
   }
   clients.add(client);
   req.on("close", () => {
@@ -254,6 +270,10 @@ async function handle(dir: string, clients: Set<EventClient>, req: IncomingMessa
     } catch (err) {
       sendError(res, 500, messageOf(err));
     }
+    return;
+  }
+  if (req.method === "GET" && path === "/api/autopilot") {
+    send(res, 200, "application/json; charset=utf-8", autopilotJson(dir));
     return;
   }
   if (req.method === "PUT" && path.startsWith(CARDS_PREFIX)) {
@@ -294,7 +314,19 @@ export function startBoardServer(dir: string, opts: { port: number; watch?: "fs"
         client.res.write(`event: board\ndata: ${serialized}\n\n`);
       }
     };
-    const watcher = watchRecord(dir, opts.watch ?? "fs", onRecordChange);
+    const onAutopilotChange = (): void => {
+      const serialized = autopilotJson(dir);
+      for (const client of clients) {
+        if (client.lastAutopilot === serialized) continue;
+        client.lastAutopilot = serialized;
+        client.res.write(`event: autopilot\ndata: ${serialized}\n\n`);
+      }
+    };
+    const watcher = watchRecord(boardPath(dir), opts.watch ?? "fs", onRecordChange);
+    const autopilotWatcher = watchRecord(join(dir, AUTOPILOT_FILE), opts.watch ?? "fs", onAutopilotChange);
+    // A run that stops writing goes inactive with no file change; re-evaluate so an open page does not keep it running.
+    const inactiveTimer = setInterval(onAutopilotChange, 60_000);
+    inactiveTimer.unref();
     const onError = (err: Error): void => reject(err);
     server.once("error", onError);
     server.listen(opts.port, HOST, () => {
@@ -307,6 +339,8 @@ export function startBoardServer(dir: string, opts: { port: number; watch?: "fs"
         close: () =>
           new Promise<void>((done) => {
             watcher.stop();
+            autopilotWatcher.stop();
+            clearInterval(inactiveTimer);
             for (const client of clients) client.res.end();
             clients.clear();
             server.close(() => done());

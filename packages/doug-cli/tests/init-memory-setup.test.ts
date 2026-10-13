@@ -140,7 +140,21 @@ function memoryEmbeddings(dir: string): unknown {
   return (JSON.parse(readFileSync(file, "utf8")) as { memory?: { embeddings?: unknown } }).memory?.embeddings;
 }
 
+// Safe defaults: a temp cacheDir and an installLocal stub that records calls, so a regression that installs on an
+// empty answer cannot run the real npm install into ~/.cache/doug. A test that passes its own deps keeps them.
+const installs: string[] = [];
+
 function baseOpts(dir: string, overrides: Partial<InitOptions>): InitOptions {
+  const cacheDir = mkdtempSync(join(tmpdir(), "doug-init-memory-cache-"));
+  dirs.push(cacheDir);
+  const memorySetup = {
+    cacheDir,
+    installLocal: async (c: string) => {
+      installs.push(c);
+      return { ok: true };
+    },
+    ...overrides.memorySetup,
+  };
   return {
     dir,
     yes: false,
@@ -152,6 +166,7 @@ function baseOpts(dir: string, overrides: Partial<InitOptions>): InitOptions {
     // 'y' to the apply confirmation, Enter to every later prompt.
     ask: async (q: string) => (q.startsWith("Apply") ? "y" : ""),
     ...overrides,
+    memorySetup,
   };
 }
 
@@ -175,6 +190,7 @@ async function initClean(opts: InitOptions): Promise<number> {
 }
 
 afterEach(async () => {
+  installs.length = 0;
   for (const s of servers.splice(0)) await new Promise<void>((r) => s.close(() => r()));
   for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
 });
@@ -222,6 +238,7 @@ describe.skipIf(listenDenied !== "")("doug init semantic memory step", () => {
     const code = await initClean(baseOpts(dir, { memorySetup: { endpoints: [{ id: "fake", label: "Fake", url, hint: "x" }] } }));
     expect(code).toBe(0);
     expect(memoryEmbeddings(dir)).toBeUndefined();
+    expect(installs).toEqual([]);
   });
 
   it("--yes: returns 0 and makes zero requests", async () => {

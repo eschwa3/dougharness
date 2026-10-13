@@ -98,3 +98,107 @@ describe("loadScopePlan", () => {
     expect(loadScopePlan(dir).reason).toBe("unreadable");
   });
 });
+
+// card parallel-card-queens (B7): per-card plans tracked at .doug/plans/<id>.json.
+describe("loadScopePlan with per-card plans (.doug/plans/*.json)", () => {
+  const card = (id, files, extra = {}) => ({ version: 1, title: `Card ${id}`, goal: "g", status: "approved", card: id, acceptance: ["a"], verify: [], tasks: [{ id: `${id}-t`, title: "t", spec: "s", files }], ...extra });
+  const put = (dir, name, body) => {
+    mkdirSync(join(dir, ".doug/plans"), { recursive: true });
+    writeFileSync(join(dir, ".doug/plans", name), typeof body === "string" ? body : JSON.stringify(body));
+  };
+
+  it("allows .doug/plans/** without a plan owning it", () => {
+    expect(scopeViolations([".doug/plans/a.json", ".doug/plans/sub/b.json"], plan)).toEqual([]);
+  });
+
+  it("S01 with no .doug/plan.json, unions every approved per-card plan into one scope", () => {
+    const dir = makeProject();
+    put(dir, "a.json", card("a", ["src/a.ts"]));
+    put(dir, "b.json", card("b", ["src/b.ts"], { status: "done" }));
+    const { plan: merged, reason } = loadScopePlan(dir);
+    expect(reason).toBeNull();
+    expect(merged.status).toMatch(/^(approved|done)$/);
+    expect(typeof merged.title).toBe("string");
+    expect(planScope(merged)).toEqual(["src/a.ts", "src/b.ts"]);
+    expect(scopeViolations(["src/a.ts", "src/b.ts", "src/c.ts"], merged).map((v) => v.file)).toEqual(["src/c.ts"]);
+  });
+
+  it("S01 a per-card plan whose status is not enforced adds nothing", () => {
+    const dir = makeProject();
+    put(dir, "a.json", card("a", ["src/a.ts"]));
+    put(dir, "d.json", card("d", ["src/d.ts"], { status: "draft" }));
+    expect(planScope(loadScopePlan(dir).plan)).toEqual(["src/a.ts"]);
+  });
+
+  it("S02 a landed per-card plan is ignored", () => {
+    const dir = makeProject();
+    put(dir, "a.json", card("a", ["src/a.ts"]));
+    put(dir, "old.json", card("old", ["src/old.ts"], { status: "done", landed: { at: "2026-09-04T16:00:00.000Z", mergeCommit: "abc1234" } }));
+    expect(planScope(loadScopePlan(dir).plan)).toEqual(["src/a.ts"]);
+    // only landed plans: nothing holds scope
+    const dir2 = makeProject();
+    put(dir2, "old.json", card("old", ["src/old.ts"], { status: "done", landed: { at: "2026-09-04T16:00:00.000Z", mergeCommit: "abc1234" } }));
+    expect(loadScopePlan(dir2).plan).toBeNull();
+  });
+
+  it("an enforced .doug/plan.json keeps its own scope; per-card plans are not unioned into it", () => {
+    const dir = makeProject();
+    mkdirSync(join(dir, ".doug"), { recursive: true });
+    writeFileSync(join(dir, ".doug/plan.json"), JSON.stringify(plan));
+    put(dir, "a.json", card("a", ["src/a.ts"]));
+    expect(planScope(loadScopePlan(dir).plan)).toEqual(planScope(plan));
+  });
+
+  it("a non-enforced .doug/plan.json falls through to the per-card plans", () => {
+    const dir = makeProject();
+    mkdirSync(join(dir, ".doug"), { recursive: true });
+    writeFileSync(join(dir, ".doug/plan.json"), JSON.stringify({ ...plan, status: "draft" }));
+    put(dir, "a.json", card("a", ["src/a.ts"]));
+    expect(planScope(loadScopePlan(dir).plan)).toEqual(["src/a.ts"]);
+  });
+
+  it("S03 an unreadable per-card file never throws and is reported as unreadable", () => {
+    const dir = makeProject();
+    put(dir, "bad.json", "{ nope");
+    let out;
+    expect(() => {
+      out = loadScopePlan(dir);
+    }).not.toThrow();
+    expect(out.plan).toBeNull();
+    expect(out.reason).toBe("unreadable");
+  });
+
+  it("S03 a readable per-card plan next to an unreadable one still does not throw", () => {
+    const dir = makeProject();
+    put(dir, "a.json", card("a", ["src/a.ts"]));
+    put(dir, "bad.json", "{ nope");
+    expect(() => loadScopePlan(dir)).not.toThrow();
+  });
+
+  it("S03b (fix pass) a valid per-card plan next to a corrupt one fails open: unreadable, naming the corrupt file, no scope", () => {
+    const dir = makeProject();
+    put(dir, "a.json", card("a", ["src/a.ts"]));
+    put(dir, "b.json", "{ nope");
+    const out = loadScopePlan(dir);
+    expect(out.plan).toBeNull();
+    expect(out.reason).toBe("unreadable");
+    expect(out.file).toBe(".doug/plans/b.json");
+  });
+
+  it("an unreadable .doug/plan.json names itself as the file", () => {
+    const dir = makeProject();
+    mkdirSync(join(dir, ".doug"), { recursive: true });
+    writeFileSync(join(dir, ".doug/plan.json"), "nope");
+    expect(loadScopePlan(dir).file).toBe(".doug/plan.json");
+  });
+
+  it("describeViolations names the per-card source when the scope is a union", () => {
+    const dir = makeProject();
+    put(dir, "a.json", card("a", ["src/a.ts"]));
+    put(dir, "b.json", card("b", ["src/b.ts"]));
+    const merged = loadScopePlan(dir).plan;
+    const text = describeViolations(scopeViolations(["src/c.ts"], merged), merged);
+    expect(text).toContain("per-card plans a, b");
+    expect(text).not.toContain("(.doug/plan.json)");
+  });
+});

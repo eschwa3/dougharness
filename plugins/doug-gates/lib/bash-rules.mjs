@@ -13,8 +13,8 @@ const PM_INSTALL_VERBS = {
 // "|"/"&"/"|&"/newline, and the body of every unquoted-or-double-quoted "$(...)" or backtick substitution
 // really executes, so its pieces are split out too, recursively (research Q1.5; design decided by the lead,
 // point 3). Falls back to today's quote-blind split - checking MORE than a real shell would, never less - when
-// the scanner hits an unterminated quote or substitution (a heredoc body looks the same to it, and heredocs are
-// out of scope - point 4) or throws for any other reason (a hook reader must never throw - CLAUDE.md Gotchas).
+// the scanner hits an unterminated quote or substitution (a heredoc body looks the same to it; only the
+// package-manager rule strips heredoc bodies - stripHeredocBodies, card bash-rules-heredoc-body) or throws for any other reason (a hook reader must never throw - CLAUDE.md Gotchas).
 // A bare "&" (backgrounds the command before it, redirection forms excepted) and bash's "|&" (a pipe connector,
 // treated the same as a bare "|") joined this set in review round 5 (third review) - see scanTop's comment.
 const ALL_SEPS = new Set(["&&", "||", ";", "|", "&", "|&", "\n"]);
@@ -155,8 +155,8 @@ function words(cmd) {
 // itself sits inside (a stack, not a boolean: scanParenBody below starts its own body scan fresh in the "top"
 // state). "$((...))" is read as a substitution too (its body is "(...)" verbatim) - over-checking is fine.
 //
-// Known limits, stated as limits, not bugs: a word-initial "#" comment and a heredoc body are not recognised
-// (over-report only, never under-report - research Q1.7); zsh's RC_QUOTES, bash 5.x, and dash's lack of
+// Known limits, stated as limits, not bugs: a word-initial "#" comment and a heredoc body are not recognised by this scanner
+// (the package-manager rule alone strips heredoc bodies first - stripHeredocBodies; over-report only, never under-report - research Q1.7); zsh's RC_QUOTES, bash 5.x, and dash's lack of
 // $'...' are unverified or divergent, and the bash/zsh reading is the one this scanner takes; a "(...)" subshell
 // or "{ ...; }" group is not unwrapped (unchanged from today).
 //
@@ -1060,7 +1060,7 @@ function pipeStages(group) {
 // group's stages at "|" or "|&" (pipeStages above) - and, design point 5, recursion into every substitution
 // body's own groups too, so a curl|sh chain hidden inside a "$(...)" or backtick is still caught. Because
 // scanTop finds a substitution wherever it sits - inside an ordinary quoted argument or inside what looks like
-// inert text such as a heredoc body (heredocs carry no state of their own here, a known limit) - a "$(... curl
+// inert text such as a heredoc body (this check keeps no heredoc state, a known limit) - a "$(... curl
 // ... | sh)" written inside either is still denied even where a real shell would just treat it as literal
 // text: an over-denial on the safe side, not a miss. Falls back to the old quote-blind group split (unchanged -
 // review round 5 did not extend this fallback regex to "&"/"|&", see the coder's report) on an unterminated
@@ -1485,6 +1485,184 @@ export function commandForms(cmd, depth = 0) {
   }
 }
 
+// Card bash-rules-heredoc-body: the body of a heredoc (<<WORD, <<'WORD', <<"WORD", <<-WORD, up to the terminator
+// line) is data fed to a command's stdin, not commands, so the package-manager rule must not match prose inside
+// it (a research note quoting the npm CLI). stripHeredocBodies returns the command with those bodies removed;
+// evaluateBash feeds it to the package-manager rule ONLY - every other rule still sees the original text
+// (checks more, never less). Its own small quote-aware walk (not scanTop: a body with an apostrophe would
+// leave scanTop in an unterminated quote and send it to the quote-blind fallback). A body is kept, i.e. still
+// checked, when: its terminator line never appears (unterminated); ANY pipeline stage anywhere in the whole
+// command is a shell or source/"." (a shell reading the heredoc runs it as a script), or any group ends in a
+// trailing "|" (the receiving stage is on a later line): then nothing is stripped; or the delimiter is unquoted
+// and the body holds "$(" or a backtick (an unquoted heredoc expands substitutions, which run).
+// Known limits (accepted, not caught): a heredoc written to a file later run (cat > s.sh <<EOF ... bash s.sh),
+// xargs ... sh -c, tee >(sh), while read l; do $l; done <<EOF, ssh/docker exec (remote). "<<<" is a
+// here-string, not a heredoc; an operator inside a quote, a substitution, or a word-initial "#" comment is not
+// one either. Never throws: any error returns the command unchanged (today's behaviour).
+function heredocReadsAsScript(stage) {
+  // Compared on the raw stage and on the stage with quotes and backslashes removed ("sh", s\h): conservative.
+  for (const text of [stage, stage.replace(/["'\\]/g, "")]) {
+    if (matchesShellStage(text)) return true;
+    const r = resolveVerb(words(text), 0);
+    const verb = r.w[r.i];
+    if (verb === "source" || verb === ".") return true;
+  }
+  return false;
+}
+
+// Whole-command rule (round 2): ANY pipeline stage anywhere in the command that reads as a shell script consumer,
+// or any group ending in a trailing "|", keeps every body. A per-operator or per-group relation misses a heredoc
+// inside a compound (if/for/while/case/subshell/brace group) whose closing keyword is piped to a shell.
+function commandHasShellConsumer(str) {
+  const cut = cutOnSeparators(str, GROUP_SEPS);
+  const groups = cut ? cut.pieces : str.split(/\s*(?:&&|\|\||;)\s*|\n/).map((s) => s.trim()).filter(Boolean);
+  for (const group of groups) {
+    if (/\|&?\s*$/.test(group)) return true; // the receiving stage is on a later line: unknown, so conservative
+    if (pipeStages(group).some((st) => heredocReadsAsScript(st))) return true;
+  }
+  return false;
+}
+
+export function stripHeredocBodies(command) {
+  const str = String(command);
+  try {
+    if (!str.includes("<<")) return str;
+    if (commandHasShellConsumer(str)) return str;
+    const removals = [];
+    let pending = [];
+    let state = "top";
+    let i = 0;
+    while (i < str.length) {
+      const c = str[i];
+      if (state === "squote") { if (c === "'") state = "top"; i += 1; continue; }
+      if (state === "dquote") {
+        if (c === "\\" && isDquoteEscapable(str[i + 1])) { i += 2; continue; }
+        if (c === '"') { state = "top"; i += 1; continue; }
+        if (c === "$" && str[i + 1] === "(") {
+          const close = scanParenBody(str, i + 1);
+          if (close < 0) return str;
+          i = close + 1;
+          continue;
+        }
+        if (c === "`") {
+          const close = scanBacktickBody(str, i);
+          if (close < 0) return str;
+          i = close + 1;
+          continue;
+        }
+        i += 1;
+        continue;
+      }
+      if (state === "ansic") {
+        if (c === "\\") { i += 2; continue; }
+        if (c === "'") state = "top";
+        i += 1;
+        continue;
+      }
+      // top
+      if (c === "\\") { i += 2; continue; }
+      if (c === "'") { state = "squote"; i += 1; continue; }
+      if (c === '"') { state = "dquote"; i += 1; continue; }
+      if (c === "$" && str[i + 1] === "'") { state = "ansic"; i += 2; continue; }
+      if (c === "$" && str[i + 1] === '"') { state = "dquote"; i += 2; continue; }
+      if (c === "$" && str[i + 1] === "(") {
+        const close = scanParenBody(str, i + 1);
+        if (close < 0) return str;
+        i = close + 1;
+        continue;
+      }
+      if (c === "`") {
+        const close = scanBacktickBody(str, i);
+        if (close < 0) return str;
+        i = close + 1;
+        continue;
+      }
+      if (c === "#" && (i === 0 || /[\s;&|()]/.test(str[i - 1]))) {
+        while (i < str.length && str[i] !== "\n") i += 1;
+        continue;
+      }
+      if (c === "<" && str[i + 1] === "<") {
+        if (str[i + 2] === "<") { i += 3; continue; } // here-string
+        let j = i + 2;
+        const dash = str[j] === "-";
+        if (dash) j += 1;
+        while (str[j] === " " || str[j] === "\t") j += 1;
+        let word = "";
+        let quoted = false;
+        let dollarQuoted = false;
+        while (j < str.length && !/[\s;&|<>()]/.test(str[j])) {
+          const ch = str[j];
+          if (ch === "\\") { quoted = true; word += str[j + 1] ?? ""; j += 2; continue; }
+          if (ch === "$" && (str[j + 1] === "'" || str[j + 1] === '"')) { dollarQuoted = true; j += 1; continue; }
+          if (ch === "'" || ch === '"') {
+            const close = str.indexOf(ch, j + 1);
+            if (close < 0) return str;
+            quoted = true;
+            word += str.slice(j + 1, close);
+            j = close + 1;
+            continue;
+          }
+          word += ch;
+          j += 1;
+        }
+        if (word) pending.push({ word, dash, quoted, shellFed: dollarQuoted || word[0] === "$" });
+        i = Math.max(j, i + 2);
+        continue;
+      }
+      const sep =
+        (c === "&" && str[i + 1] === "&") || (c === "|" && str[i + 1] === "|") ? 2
+          : c === ";" ? 1
+            : c === "&" && str[i + 1] !== ">" && str[i - 1] !== ">" && str[i - 1] !== "<" && str[i - 1] !== "|" ? 1
+              : 0;
+      if (sep) {
+        i += sep;
+        continue;
+      }
+      if (c === "\n") {
+        const ops = pending;
+        pending = [];
+        let pos = i + 1;
+        let lastEnd = -1;
+        for (const op of ops) {
+          const bodyStart = pos;
+          let found = -1;
+          while (pos <= str.length) {
+            const nl = str.indexOf("\n", pos);
+            const lineEnd = nl < 0 ? str.length : nl;
+            const line = str.slice(pos, lineEnd);
+            if ((op.dash ? line.replace(/^\t+/, "") : line) === op.word) { found = lineEnd; break; }
+            if (lineEnd >= str.length) break;
+            pos = lineEnd + 1;
+          }
+          if (found < 0) return removals.length ? applyRemovals(str, removals) : str; // unterminated: stop here
+          const body = str.slice(bodyStart, found);
+          const expands = !op.quoted && /\$\(|`/.test(body);
+          if (!op.shellFed && !expands) removals.push([bodyStart, found]);
+          lastEnd = found;
+          pos = found + 1;
+        }
+        if (lastEnd >= 0) { i = lastEnd; continue; }
+        i += 1;
+        continue;
+      }
+      i += 1;
+    }
+    return removals.length ? applyRemovals(str, removals) : str;
+  } catch {
+    return str;
+  }
+}
+
+function applyRemovals(str, removals) {
+  let out = "";
+  let at = 0;
+  for (const [a, b] of removals) {
+    out += str.slice(at, a);
+    at = b;
+  }
+  return out + str.slice(at);
+}
+
 export function checkPackageManager(cmd, expected) {
   if (!expected) return null;
   const m = /^(npm|pnpm|yarn|bun)\s*(.*)$/.exec(cmd);
@@ -1506,6 +1684,8 @@ export function evaluateBash(command, { config, currentBranch }) {
     const pipeReason = checkPipeToShell(command);
     if (pipeReason) reasons.push(pipeReason);
   }
+  const pmCommand = config.bash.packageManagerGuard ? stripHeredocBodies(command) : command;
+  const pmSeparate = pmCommand !== command;
   for (const cmd of splitCommands(command)) {
     // Card bash-rules-prefixed-commands: run the five per-command checks (each anchored on the start of the
     // string it's given) on every form commandForms resolves for this split command - cmd itself, a prefix
@@ -1521,8 +1701,18 @@ export function evaluateBash(command, { config, currentBranch }) {
         checks.push(checkResetHardOnProtected(form, config.bash.denyForcePushTo, currentBranch));
       }
       if (config.bash.denyDestructive) checks.push(checkDestructive(form));
-      if (config.bash.packageManagerGuard) checks.push(checkPackageManager(form, config.packageManager));
+      if (config.bash.packageManagerGuard && !pmSeparate) checks.push(checkPackageManager(form, config.packageManager));
       for (const r of checks) if (r && !reasons.includes(r)) reasons.push(r);
+    }
+  }
+  // Card bash-rules-heredoc-body: with a data heredoc body present, the package-manager rule reads the command
+  // with those bodies stripped (stripHeredocBodies); the other rules above already ran on the original text.
+  if (pmSeparate) {
+    for (const cmd of splitCommands(pmCommand)) {
+      for (const form of commandForms(cmd)) {
+        const r = checkPackageManager(form, config.packageManager);
+        if (r && !reasons.includes(r)) reasons.push(r);
+      }
     }
   }
   return reasons;

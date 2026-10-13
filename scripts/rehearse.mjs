@@ -5,7 +5,7 @@
 // settles the deterministic side without a new top-level suite. It lives in root scripts/ because it depends on
 // this checkout (evals fixtures, the CLI build); it loads the shipped plugin via --plugin-dir.
 //
-//   rehearse.mjs [flow|swarm|hand|auto|all] --card <id> --spend [dir]
+//   rehearse.mjs [flow|swarm|hand|auto|parallel|start|start-feature|all] --card <id> --spend [dir]
 //     no arguments             print the estimate table and exit 2; nothing is spawned
 //     a scenario, no --spend   print that scenario's per-stage estimate and exit 2; nothing is spawned
 //     --spend, no --card       exit 2 ("--card <id> names the card this rehearsal records under"); nothing is spawned
@@ -30,7 +30,7 @@
 import { readFileSync, rmSync } from "node:fs";
 import { resolve } from "node:path";
 import { loadBoard, findCard, adversaryBlocks } from "../plugins/doug-flow/lib/board.mjs";
-import { parseArgs, estimateLines, SCENARIOS, scenarioTotal, runScenario, recordRunOutcome, recordHandOutcome, rehearsalNote, extractGateLine, archiveEvidence } from "./rehearse-lib.mjs";
+import { parseArgs, estimateLines, SCENARIOS, scenarioTotal, runScenario, recordRunOutcome, recordHandOutcome, rehearsalNote, rehearsalGate, archiveEvidence, recordsAsHand } from "./rehearse-lib.mjs";
 
 function fail(msg, code = 2) {
   process.stderr.write(msg + "\n");
@@ -46,7 +46,7 @@ const opts = parseArgs(process.argv.slice(2));
 
 if (!opts.scenario) {
   printEstimates(null);
-  process.stdout.write("\nusage: rehearse.mjs [flow|swarm|hand|auto|all] --card <id> --spend [dir]\n");
+  process.stdout.write("\nusage: rehearse.mjs [flow|swarm|hand|auto|parallel|start|start-feature|all] --card <id> --spend [dir]\n");
   process.exit(2);
 }
 if (opts.scenario !== "all" && !SCENARIOS.includes(opts.scenario)) fail(`unknown scenario "${opts.scenario}"; scenarios are ${SCENARIOS.join(", ")}, all`, 2);
@@ -104,10 +104,10 @@ for (const scenario of scenarios) {
 
   try {
     let recorded;
-    if (scenario === "hand" || scenario === "auto") {
-      recorded = recordHandOutcome(dir, opts.card, { commit: result.commit, wallClock: result.wallClock, gate: extractGateLine(result.fixtureDir) || "not observed", note, rehearsal: scenario });
+    if (recordsAsHand(scenario)) {
+      recorded = recordHandOutcome(dir, opts.card, { commit: result.commit, wallClock: result.wallClock, gate: rehearsalGate(result, result.fixtureDir), note, rehearsal: scenario, outcome: result.outcome === "passed" ? "passed" : "failed" });
     } else {
-      recorded = recordRunOutcome(dir, opts.card, { reportFile: result.reportFile, wallClock: result.wallClock, cost: result.totalCost, mergeCommit: result.commit, note, rehearsal: scenario });
+      recorded = recordRunOutcome(dir, opts.card, { reportFile: result.reportFile, wallClock: result.wallClock, cost: result.totalCost, mergeCommit: result.commit, note, rehearsal: scenario, outcome: result.outcome === "passed" ? "passed" : "failed" });
       if (!result.reportSynthesized) {
         const report = JSON.parse(readFileSync(result.reportFile, "utf8"));
         const blocks = adversaryBlocks(report);

@@ -9,6 +9,13 @@ import { isModelName, EFFORTS } from "./models.mjs";
 
 export const PLAN_RELPATH = ".doug/plan.json";
 export const REPORT_RELPATH = ".doug/.state/last-report.json";
+// Per-card plans (card parallel-card-queens): a card run as its own queen keeps its plan at the tracked
+// .doug/plans/<id>.json and its report at .doug/.state/reports/<id>/last-report.json.
+export const PLANS_RELPATH = ".doug/plans";
+export const REPORTS_RELPATH = ".doug/.state/reports";
+export const DEFAULT_INTEGRATION_WORKTREE = ".claude/worktrees/doug-integration";
+export const planPathFor = (card) => `${PLANS_RELPATH}/${card}.json`;
+export const reportPathFor = (card) => `${REPORTS_RELPATH}/${card}/last-report.json`;
 // One draft per card of a batch (card parallel-cards): the planner for card <id> writes .doug/.state/drafts/<id>.json
 // and `plan.mjs merge` joins them into the plan file.
 export const DRAFTS_RELPATH = ".doug/.state/drafts";
@@ -55,8 +62,24 @@ export function draftPath(card) {
   return `${DRAFTS_RELPATH}/${card}.json`;
 }
 
-export function savePlan(dir, plan) {
-  const file = join(dir, PLAN_RELPATH);
+// The plan a card's commands read: its per-card plan when one exists; else the single .doug/plan.json, but only
+// when no card is given or that plan is this card's (plan.card equals it, or plan.cards includes it), so a stale
+// plan for another card is never read. Null otherwise, and when neither exists.
+export function planFor(dir, card) {
+  const hasCard = typeof card === "string" && card !== "";
+  if (hasCard && existsSync(join(dir, planPathFor(card)))) return loadPlan(dir, planPathFor(card));
+  const plan = loadPlan(dir);
+  if (!plan || !hasCard) return plan;
+  return plan.card === card || (Array.isArray(plan.cards) && plan.cards.includes(card)) ? plan : null;
+}
+
+// The plan's integration worktree: its own when set (a per-card run), else the fixed shared path.
+export function integrationWorktreeFor(plan) {
+  return (plan && plan.integrationWorktree) || DEFAULT_INTEGRATION_WORKTREE;
+}
+
+export function savePlan(dir, plan, relpath = PLAN_RELPATH) {
+  const file = join(dir, relpath);
   mkdirSync(dirname(file), { recursive: true });
   const tmp = file + "." + process.pid + ".tmp";
   writeFileSync(tmp, JSON.stringify(plan, null, 2) + "\n");
@@ -76,8 +99,8 @@ export function withSpecHashes(plan) {
   return { ...plan, tasks: plan.tasks.map((t) => ({ ...t, specHash: specHash(t) })) };
 }
 
-export function loadReport(dir) {
-  const file = join(dir, REPORT_RELPATH);
+export function loadReport(dir, relpath = REPORT_RELPATH) {
+  const file = join(dir, relpath);
   if (!existsSync(file)) return null;
   try {
     return unwrapReport(JSON.parse(readFileSync(file, "utf8")));
@@ -396,6 +419,11 @@ export function validatePlan(plan) {
     });
   }
   if (!Array.isArray(plan.verify) || !plan.verify.every((v) => typeof v === "string" && v.trim())) errors.push("verify must be an array of command strings");
+  if (plan.integrationWorktree !== undefined) {
+    const w = plan.integrationWorktree;
+    const under = typeof w === "string" && w.startsWith(".claude/worktrees/") && w.length > ".claude/worktrees/".length && !w.split("/").includes("..");
+    if (!under) errors.push("integrationWorktree must be a path under .claude/worktrees/ (the gate only recognises worktrees there)");
+  }
   if (plan.card !== undefined && (typeof plan.card !== "string" || !plan.card.trim())) errors.push("card must be a non-empty string when present");
   // A batch (several cards in one plan) lists its cards; every task then names the card it belongs to.
   let cards = null;

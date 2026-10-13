@@ -1665,3 +1665,363 @@ describe("local-provider-no-key: lookalike hosts, non-local 401, wrong key", () 
     }
   });
 });
+
+// Card memory-bundled-embedding: the `local` preset, a bundled in-process model. The transformers module is
+// a stub (no install, no network): the tokenizer records the texts and options it got, the model returns
+// 768-dim rows that are not unit length, and env.cacheDir/allowRemoteModels are read as they were when
+// from_pretrained ran.
+import * as embeddingsLib from "../lib/embeddings.mjs";
+
+const QUERY_PREFIX = "task: search result | query: ";
+const DOC_PREFIX = "title: none | text: ";
+const LOCAL_ID = "onnx-community/embeddinggemma-300m-ONNX";
+
+function localRow(i, n = 768) {
+  return Array.from({ length: n }, (_, j) => ((j % 7) + 1) * (i + 1));
+}
+
+function normalised512(row) {
+  const head = row.slice(0, 512);
+  const norm = Math.sqrt(head.reduce((s, x) => s + x * x, 0));
+  return head.map((x) => x / norm);
+}
+
+function stubTransformers({ rowLen = 768, failModel = null } = {}) {
+  const calls = { tokenizerLoads: [], modelLoads: [], tokenized: [], modelCalls: 0 };
+  const env = { allowLocalModels: "untouched-sentinel" };
+  const mod = {
+    env,
+    AutoTokenizer: {
+      from_pretrained: async (id, opts) => {
+        calls.tokenizerLoads.push({ id, opts, cacheDir: env.cacheDir, allowRemoteModels: env.allowRemoteModels });
+        const tok = (texts, options) => {
+          calls.tokenized.push({ texts: [...texts], options });
+          return { texts: [...texts] };
+        };
+        return tok;
+      },
+    },
+    AutoModel: {
+      from_pretrained: async (id, opts) => {
+        calls.modelLoads.push({ id, opts, cacheDir: env.cacheDir, allowRemoteModels: env.allowRemoteModels });
+        if (failModel) throw new Error(failModel);
+        return async (inputs) => {
+          calls.modelCalls++;
+          const rows = inputs.texts.map((_, i) => localRow(i, rowLen));
+          return { sentence_embedding: { tolist: () => rows } };
+        };
+      },
+    },
+  };
+  return { mod, calls, env, load: async () => mod };
+}
+
+function localCfg() {
+  return { embeddings: { preset: "local", provider: "local", model: LOCAL_ID, dims: 512 } };
+}
+
+describe("memory-bundled-embedding: local preset config", () => {
+  it("L-cfg: { preset: local } alone resolves to the local provider at 512 dims", () => {
+    writeConfig({ preset: "local" });
+    expect(readMemoryConfig(dir)).toEqual({
+      embeddings: { preset: "local", provider: "local", model: LOCAL_ID, dims: 512, baseUrl: undefined, apiKeyEnv: undefined },
+    });
+  });
+
+  it("L-cfg: a local config naming another model or other dims is invalid (keyword-only, stderr line)", () => {
+    for (const extra of [{ model: "other-model" }, { dims: 256 }]) {
+      writeConfig({ preset: "local", ...extra });
+      const orig = process.stderr.write;
+      let err = "";
+      process.stderr.write = (s) => ((err += s), true);
+      try {
+        expect(readMemoryConfig(dir)).toEqual({ embeddings: null });
+      } finally {
+        process.stderr.write = orig;
+      }
+      expect(err.length).toBeGreaterThan(0);
+    }
+  });
+
+  it("L-consts: model id, dtype, runtime package, and both prefixes are pinned", () => {
+    expect(embeddingsLib.LOCAL_MODEL_ID).toBe(LOCAL_ID);
+    expect(embeddingsLib.LOCAL_DTYPE).toBe("q8");
+    expect(embeddingsLib.LOCAL_RUNTIME_PACKAGE).toBe("@huggingface/transformers@4.3.1");
+    expect(embeddingsLib.LOCAL_QUERY_PREFIX).toBe(QUERY_PREFIX);
+    expect(embeddingsLib.LOCAL_DOCUMENT_PREFIX).toBe(DOC_PREFIX);
+  });
+});
+
+describe("memory-bundled-embedding: localCacheDir and localPaths", () => {
+  it("L-cache: DOUG_CACHE_DIR wins when set and non-empty", () => {
+    expect(embeddingsLib.localCacheDir({ DOUG_CACHE_DIR: "/x/y", XDG_CACHE_HOME: "/xdg" }, "/home/u")).toBe("/x/y");
+  });
+
+  it("L-cache: an empty DOUG_CACHE_DIR falls through to XDG_CACHE_HOME/doug, then home/.cache/doug", () => {
+    expect(embeddingsLib.localCacheDir({ DOUG_CACHE_DIR: "", XDG_CACHE_HOME: "/xdg" }, "/home/u")).toBe(join("/xdg", "doug"));
+    expect(embeddingsLib.localCacheDir({}, "/home/u")).toBe(join("/home/u", ".cache", "doug"));
+  });
+
+  it("L-paths: layout of runtime, models, and the q8 model file", () => {
+    expect(embeddingsLib.localPaths("/c")).toEqual({
+      cacheDir: "/c",
+      runtimeDir: join("/c", "runtime"),
+      modelsDir: join("/c", "models"),
+      modelFile: join("/c", "models", "onnx-community", "embeddinggemma-300m-ONNX", "onnx", "model_quantized.onnx"),
+    });
+  });
+});
+
+describe("memory-bundled-embedding: createProvider local", () => {
+  it("L-M1/L-M2: a query is prefixed with the query prefix, a document with the document prefix (default is document)", async () => {
+    const s = stubTransformers();
+    const p = embeddingsLib.createProvider(localCfg(), { loadTransformers: s.load, cacheDir: dir });
+    expect(p.name).toBe("local");
+    expect(p.model).toBe(LOCAL_ID);
+    expect(p.dims).toBe(512);
+    await p.embed(["alpha", "beta"], { inputType: "query" });
+    await p.embed(["gamma"], { inputType: "document" });
+    await p.embed(["delta"]);
+    expect(s.calls.tokenized.map((c) => c.texts)).toEqual([
+      [QUERY_PREFIX + "alpha", QUERY_PREFIX + "beta"],
+      [DOC_PREFIX + "gamma"],
+      [DOC_PREFIX + "delta"],
+    ]);
+  });
+
+  it("L-tok: the tokenizer is called with padding and truncation", async () => {
+    const s = stubTransformers();
+    const p = embeddingsLib.createProvider(localCfg(), { loadTransformers: s.load, cacheDir: dir });
+    await p.embed(["a"]);
+    expect(s.calls.tokenized[0].options).toEqual({ padding: true, truncation: true });
+  });
+
+  it("L-M3: 768-dim rows come back truncated to 512 dims", async () => {
+    const s = stubTransformers();
+    const p = embeddingsLib.createProvider(localCfg(), { loadTransformers: s.load, cacheDir: dir });
+    const r = await p.embed(["a", "b"]);
+    expect(r.ok).toBe(true);
+    expect(r.vectors).toHaveLength(2);
+    for (const v of r.vectors) expect(v).toHaveLength(512);
+  });
+
+  it("L-M4: truncated vectors are L2-re-normalized (unit norm, and equal to the normalized first 512 values)", async () => {
+    const s = stubTransformers();
+    const p = embeddingsLib.createProvider(localCfg(), { loadTransformers: s.load, cacheDir: dir });
+    const r = await p.embed(["a", "b"]);
+    r.vectors.forEach((v, i) => {
+      const norm = Math.sqrt(v.reduce((x, y) => x + y * y, 0));
+      expect(norm).toBeCloseTo(1, 6);
+      const want = normalised512(localRow(i));
+      v.forEach((x, j) => expect(x).toBeCloseTo(want[j], 6));
+    });
+  });
+
+  it("L-M5: recall runs offline: allowRemoteModels is false when the model loads; allowRemote:true flips it", async () => {
+    const s = stubTransformers();
+    await embeddingsLib.createProvider(localCfg(), { loadTransformers: s.load, cacheDir: dir }).embed(["a"]);
+    expect(s.calls.modelLoads[0].allowRemoteModels).toBe(false);
+    expect(s.calls.tokenizerLoads[0].allowRemoteModels).toBe(false);
+    const s2 = stubTransformers();
+    await embeddingsLib.createProvider(localCfg(), { loadTransformers: s2.load, cacheDir: dir, allowRemote: true }).embed(["a"]);
+    expect(s2.calls.modelLoads[0].allowRemoteModels).toBe(true);
+    expect(s2.calls.tokenizerLoads[0].allowRemoteModels).toBe(true);
+  });
+
+  it("L-M6: env.cacheDir is the models dir under the cache dir when the tokenizer and model load; allowLocalModels is left alone", async () => {
+    const s = stubTransformers();
+    await embeddingsLib.createProvider(localCfg(), { loadTransformers: s.load, cacheDir: dir }).embed(["a"]);
+    const modelsDir = join(dir, "models");
+    expect(s.calls.tokenizerLoads[0].cacheDir).toBe(modelsDir);
+    expect(s.calls.modelLoads[0].cacheDir).toBe(modelsDir);
+    expect(s.env.allowLocalModels).toBe("untouched-sentinel");
+  });
+
+  it("L-M7: the model loads with the q8 dtype and the model id; the tokenizer with the same id", async () => {
+    const s = stubTransformers();
+    await embeddingsLib.createProvider(localCfg(), { loadTransformers: s.load, cacheDir: dir }).embed(["a"]);
+    expect(s.calls.modelLoads[0].id).toBe(LOCAL_ID);
+    expect(s.calls.modelLoads[0].opts).toEqual({ dtype: "q8" });
+    expect(s.calls.tokenizerLoads[0].id).toBe(LOCAL_ID);
+  });
+
+  it("L-lazy: nothing loads until the first embed, and the model loads once across embeds", async () => {
+    const s = stubTransformers();
+    let loads = 0;
+    const p = embeddingsLib.createProvider(localCfg(), { loadTransformers: async () => (loads++, s.mod), cacheDir: dir });
+    expect(loads).toBe(0);
+    expect(s.calls.modelLoads).toHaveLength(0);
+    await p.embed(["a"]);
+    await p.embed(["b"]);
+    expect(s.calls.modelLoads).toHaveLength(1);
+    expect(s.calls.tokenizerLoads).toHaveLength(1);
+  });
+
+  it("L-batch: 150 texts go through the model in batches of 100 and 50", async () => {
+    const s = stubTransformers();
+    const p = embeddingsLib.createProvider(localCfg(), { loadTransformers: s.load, cacheDir: dir });
+    const r = await p.embed(Array.from({ length: 150 }, (_, i) => `t${i}`));
+    expect(r.ok).toBe(true);
+    expect(r.vectors).toHaveLength(150);
+    expect(s.calls.tokenized.map((c) => c.texts.length)).toEqual([100, 50]);
+  });
+
+  it("L-short: a row shorter than 512 is a wrong-dims failure", async () => {
+    const s = stubTransformers({ rowLen: 300 });
+    const r = await embeddingsLib.createProvider(localCfg(), { loadTransformers: s.load, cacheDir: dir }).embed(["a"]);
+    expect(r).toEqual({ ok: false, reason: "wrong dims: got 300, expected 512" });
+  });
+
+  it("L-M8: an import failure returns ok:false naming the runtime dir, never throws", async () => {
+    const p = embeddingsLib.createProvider(localCfg(), {
+      loadTransformers: async () => {
+        throw new Error("Cannot find package");
+      },
+      cacheDir: dir,
+    });
+    const r = await p.embed(["a"]);
+    expect(r).toEqual({ ok: false, reason: `local embedding runtime not installed at ${join(dir, "runtime")}: run doug memory setup` });
+  });
+
+  it("L-M8: the default loader with no runtime installed under the cache dir reports the same missing-runtime reason", async () => {
+    const r = await embeddingsLib.createProvider(localCfg(), { cacheDir: dir }).embed(["a"]);
+    expect(r.ok).toBe(false);
+    expect(r.reason).toBe(`local embedding runtime not installed at ${join(dir, "runtime")}: run doug memory setup`);
+  });
+
+  it("L-err: a model load error returns ok:false with the 'local embedding failed' reason", async () => {
+    const s = stubTransformers({ failModel: "boom: no model file" });
+    const r = await embeddingsLib.createProvider(localCfg(), { loadTransformers: s.load, cacheDir: dir }).embed(["a"]);
+    expect(r).toEqual({ ok: false, reason: "local embedding failed: boom: no model file" });
+  });
+});
+
+describe("memory-bundled-embedding: probeProvider and doctorReport local", () => {
+  function putModelFile() {
+    const f = embeddingsLib.localPaths(dir).modelFile;
+    mkdirSync(dirname(f), { recursive: true });
+    writeFileSync(f, "x");
+    return f;
+  }
+
+  it("L-probe: with the model file present it makes one test embed of one document and reports ok", async () => {
+    const f = putModelFile();
+    const s = stubTransformers();
+    const probe = await probeProvider(localCfg(), { loadTransformers: s.load, cacheDir: dir });
+    expect(probe).toMatchObject({ reachable: true, kind: "local", cacheDir: dir, modelFile: f, modelPresent: true, embedOk: true });
+    expect(s.calls.tokenized).toHaveLength(1);
+    expect(s.calls.tokenized[0].texts).toHaveLength(1);
+    expect(s.calls.tokenized[0].texts[0].startsWith(DOC_PREFIX)).toBe(true);
+  });
+
+  it("L-probe: with the model file missing no embed is made and modelPresent is false", async () => {
+    const s = stubTransformers();
+    const probe = await probeProvider(localCfg(), { loadTransformers: s.load, cacheDir: dir });
+    expect(probe.kind).toBe("local");
+    expect(probe.modelPresent).toBe(false);
+    expect(probe.reachable).toBe(false);
+    expect(s.calls.tokenized).toHaveLength(0);
+  });
+
+  it("L-probe: a failing embed is reachable:false, embedOk:false with the reason", async () => {
+    putModelFile();
+    const s = stubTransformers({ failModel: "bad onnx" });
+    const probe = await probeProvider(localCfg(), { loadTransformers: s.load, cacheDir: dir });
+    expect(probe.reachable).toBe(false);
+    expect(probe.embedOk).toBe(false);
+    expect(probe.reason).toBe("local embedding failed: bad onnx");
+  });
+
+  it("L-M17: doctorReport (present model) names the config, the Cache and Model file lines, Dims, and Test embed: ok", async () => {
+    const f = putModelFile();
+    const s = stubTransformers();
+    const probe = await probeProvider(localCfg(), { loadTransformers: s.load, cacheDir: dir });
+    const text = doctorReport(localCfg(), probe, "darwin");
+    expect(text).toContain(`local ${LOCAL_ID}/512`);
+    expect(text).toContain(`Cache: ${dir}`);
+    expect(text).toContain(`Model file: ${f} (present)`);
+    expect(text).toContain("Dims: 512");
+    expect(text).toContain("Test embed: ok");
+    expect(text).not.toContain("Run doug memory setup to install it.");
+  });
+
+  it("L-M17: doctorReport (missing model) says (missing) and points at doug memory setup", async () => {
+    const s = stubTransformers();
+    const probe = await probeProvider(localCfg(), { loadTransformers: s.load, cacheDir: dir });
+    const text = doctorReport(localCfg(), probe, "darwin");
+    expect(text).toContain(`Cache: ${dir}`);
+    expect(text).toContain(`Model file: ${embeddingsLib.localPaths(dir).modelFile} (missing)`);
+    expect(text).toContain("Run doug memory setup to install it.");
+  });
+
+  it("L-doctor-fail: doctorReport prints 'Test embed failed: <reason>' when the embed failed", async () => {
+    putModelFile();
+    const s = stubTransformers({ failModel: "bad onnx" });
+    const probe = await probeProvider(localCfg(), { loadTransformers: s.load, cacheDir: dir });
+    expect(doctorReport(localCfg(), probe, "darwin")).toContain("Test embed failed: local embedding failed: bad onnx");
+  });
+});
+
+describe("memory-bundled-embedding: installLocalRuntime", () => {
+  function fakeSpawn(code, { error = null } = {}) {
+    const rec = { calls: [] };
+    const impl = (command, args, options) => {
+      rec.calls.push({ command, args, options });
+      const handlers = {};
+      const child = { on: (ev, fn) => ((handlers[ev] = fn), child) };
+      setImmediate(() => (error ? handlers.error?.(error) : handlers.close?.(code)));
+      return child;
+    };
+    return { rec, impl };
+  }
+
+  it("L-M9: runs npm install --prefix <runtimeDir> with the pinned package and ONNXRUNTIME_NODE_INSTALL=skip, stdio inherited", async () => {
+    const f = fakeSpawn(0);
+    const r = await embeddingsLib.installLocalRuntime({ cacheDir: dir, spawnImpl: f.impl, platform: "darwin" });
+    expect(r.ok).toBe(true);
+    expect(f.rec.calls).toHaveLength(1);
+    const c = f.rec.calls[0];
+    expect(c.command).toBe("npm");
+    expect(c.args).toEqual(["install", "--prefix", join(dir, "runtime"), "--no-audit", "--no-fund", "@huggingface/transformers@4.3.1"]);
+    expect(c.options.env.ONNXRUNTIME_NODE_INSTALL).toBe("skip");
+    expect(c.options.stdio).toBe("inherit");
+    expect(existsSync(join(dir, "runtime"))).toBe(true);
+  });
+
+  it("L-win: npm.cmd on win32", async () => {
+    const f = fakeSpawn(0);
+    await embeddingsLib.installLocalRuntime({ cacheDir: dir, spawnImpl: f.impl, platform: "win32" });
+    expect(f.rec.calls[0].command).toBe("npm.cmd");
+  });
+
+  it("L-inst-fail: a non-zero exit or a spawn error is ok:false with a reason, never a throw", async () => {
+    const bad = await embeddingsLib.installLocalRuntime({ cacheDir: dir, spawnImpl: fakeSpawn(1).impl, platform: "darwin" });
+    expect(bad.ok).toBe(false);
+    expect(typeof bad.reason).toBe("string");
+    expect(bad.reason.length).toBeGreaterThan(0);
+    const err = await embeddingsLib.installLocalRuntime({ cacheDir: dir, spawnImpl: fakeSpawn(0, { error: new Error("ENOENT npm") }).impl, platform: "darwin" });
+    expect(err.ok).toBe(false);
+    expect(err.reason).toContain("ENOENT npm");
+  });
+});
+
+describe("memory-bundled-embedding: downloadLocalModel", () => {
+  it("L-dl: embeds one document with remote models allowed, into the models dir, and returns ok", async () => {
+    const s = stubTransformers();
+    const r = await embeddingsLib.downloadLocalModel({ cacheDir: dir, loadTransformers: s.load });
+    expect(r.ok).toBe(true);
+    expect(s.calls.modelLoads[0].allowRemoteModels).toBe(true);
+    expect(s.calls.tokenizerLoads[0].allowRemoteModels).toBe(true);
+    expect(s.calls.modelLoads[0].cacheDir).toBe(join(dir, "models"));
+    expect(s.calls.modelLoads[0].opts).toEqual({ dtype: "q8" });
+    expect(s.calls.tokenized).toHaveLength(1);
+    expect(s.calls.tokenized[0].texts).toHaveLength(1);
+    expect(s.calls.tokenized[0].texts[0].startsWith(DOC_PREFIX)).toBe(true);
+  });
+
+  it("L-dl: a load failure comes back as ok:false with the reason", async () => {
+    const s = stubTransformers({ failModel: "network down" });
+    const r = await embeddingsLib.downloadLocalModel({ cacheDir: dir, loadTransformers: s.load });
+    expect(r).toEqual({ ok: false, reason: "local embedding failed: network down" });
+  });
+});

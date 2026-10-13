@@ -2,7 +2,7 @@
 // the files its tasks own is the only thing a session may change.
 // Pure functions plus one reader; the stop gate decides, this file only computes.
 
-import { readFileSync, existsSync } from "node:fs";
+import { readFileSync, existsSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { globToRegExp, matchAny, normalizePath } from "./glob.mjs";
 
@@ -10,18 +10,56 @@ export const PLAN_RELPATH = ".doug/plan.json";
 export const ENFORCED_STATUSES = ["approved", "done"];
 // The flow's own files change during a run and are never out of scope. Per-session hook state too.
 // board.json moves uncommitted with the live board server; it lands in the card's landing commit.
-export const ALWAYS_ALLOWED = [".doug/plan.json", ".doug/anchor.md", ".doug/.state/**", ".doug/board.json"];
+export const ALWAYS_ALLOWED = [".doug/plan.json", ".doug/plans/**", ".doug/anchor.md", ".doug/.state/**", ".doug/board.json"];
 
 // Returns { plan, reason }. plan is set only when the file exists, parses, has tasks, and is in an
 // enforced status; reason says why not otherwise ("no-plan", "unreadable", "status:draft", "invalid").
 export function loadScopePlan(dir) {
+  const single = loadSinglePlan(dir);
+  if (single.plan) return single;
+  // card parallel-card-queens: with no enforced .doug/plan.json, the enforced, not-landed per-card plans
+  // under .doug/plans/ hold scope together.
+  const cards = loadCardPlans(dir);
+  if (cards.plan || cards.reason === "unreadable") return cards;
+  return single;
+}
+
+// Union of every approved/done, not-landed .doug/plans/*.json. Never throws: an unreadable file is skipped,
+// and reported as reason "unreadable" only when it leaves no plan holding scope.
+function loadCardPlans(dir) {
+  let names = [];
+  try {
+    names = readdirSync(join(dir, ".doug/plans")).filter((f) => f.endsWith(".json")).sort();
+  } catch {
+    return { plan: null, reason: "no-plan" };
+  }
+  const plans = [];
+  for (const name of names) {
+    try {
+      const p = JSON.parse(readFileSync(join(dir, ".doug/plans", name), "utf8"));
+      if (!p || typeof p !== "object" || !Array.isArray(p.tasks)) continue;
+      if (!ENFORCED_STATUSES.includes(p.status) || p.landed) continue;
+      plans.push(p);
+    } catch (err) {
+      // fail open: any unreadable per-card file means the union is unknown, so scope is not checked
+      return { plan: null, reason: "unreadable", error: String(err && err.message), file: `.doug/plans/${name}` };
+    }
+  }
+  if (!plans.length) return { plan: null, reason: "no-plan" };
+  const status = plans.some((p) => p.status === "approved") ? "approved" : "done";
+  const cards = plans.map((p) => p.card || p.title || "?");
+  const title = `per-card plans (${cards.join(", ")})`;
+  return { plan: { version: 1, title, status, perCard: cards, tasks: plans.flatMap((p) => p.tasks) }, reason: null };
+}
+
+function loadSinglePlan(dir) {
   const file = join(dir, PLAN_RELPATH);
   if (!existsSync(file)) return { plan: null, reason: "no-plan" };
   let plan;
   try {
     plan = JSON.parse(readFileSync(file, "utf8"));
   } catch (err) {
-    return { plan: null, reason: "unreadable", error: String(err.message) };
+    return { plan: null, reason: "unreadable", error: String(err.message), file: PLAN_RELPATH };
   }
   if (!plan || typeof plan !== "object" || !Array.isArray(plan.tasks)) return { plan: null, reason: "invalid" };
   if (!ENFORCED_STATUSES.includes(plan.status)) return { plan: null, reason: `status:${plan.status}` };
@@ -104,7 +142,8 @@ export function scopeViolations(changed, plan, { ignore = [] } = {}) {
 }
 
 export function describeViolations(violations, plan) {
-  const lines = [`Files changed outside the ${plan.status} plan "${plan.title}" (${PLAN_RELPATH}):`];
+  const source = Array.isArray(plan.perCard) ? `per-card plans ${plan.perCard.join(", ")} (.doug/plans/)` : `plan "${plan.title}" (${PLAN_RELPATH})`;
+  const lines = [`Files changed outside the ${plan.status} ${source}:`];
   for (const v of violations) {
     const near = v.nearest.length ? `nearest task${v.nearest.length > 1 ? "s" : ""}: ${v.nearest.map((n) => `${n.id} (owns ${n.via})`).join(", ")}` : "no task owns anything near it";
     lines.push(`  ${v.file}  ${near}`);

@@ -142,6 +142,7 @@ declare module "@dougharness/flow/lib/board.mjs" {
     taskIds?: string[];
     note?: string | null;
     rehearsal?: string | null;
+    rehearsalOutcome?: string | null;
   }): string;
   export function handEntry(args: {
     card: BoardCard;
@@ -152,7 +153,9 @@ declare module "@dougharness/flow/lib/board.mjs" {
     record?: string | null;
     date?: string;
     rehearsal?: string | null;
+    rehearsalOutcome?: string | null;
     table?: Record<string, Record<string, number>>;
+    cost?: number | null;
   }): string;
   export function handWallVerdict(card: BoardCard, wallClock?: string | null, table?: Record<string, Record<string, number>>): { over: boolean; text: string };
   export function runSummary(args: { report: RunReport; cost?: number | null; codexCost?: number | null; wallClock?: string | null; wall?: RunWall | null; mergeCommit?: string | null }): string;
@@ -183,8 +186,16 @@ declare module "@dougharness/flow/lib/embeddings.mjs" {
   export function readMemoryConfig(dir: string): { embeddings: EmbeddingsConfig | null };
   export function loadSanityPairs(file: string): SanityPairs;
   export function checkEmbeddingSanity(provider: EmbeddingProvider, pairs: SanityPairs): Promise<{ ok: boolean; reason: string | null; [key: string]: unknown }>;
-  export function createProvider(cfg: { embeddings: EmbeddingsConfig | null }, opts?: { fetch?: typeof fetch; timeoutMs?: number }): EmbeddingProvider;
-  export function probeProvider(cfg: { embeddings: EmbeddingsConfig | null }, opts?: { fetch?: typeof fetch; timeoutMs?: number }): Promise<Record<string, unknown>>;
+  export interface LocalProviderOpts {
+    cacheDir?: string;
+    loadTransformers?: () => Promise<unknown>;
+    allowRemote?: boolean;
+  }
+  export function createProvider(cfg: { embeddings: EmbeddingsConfig | null }, opts?: { fetch?: typeof fetch; timeoutMs?: number } & LocalProviderOpts): EmbeddingProvider;
+  export function probeProvider(cfg: { embeddings: EmbeddingsConfig | null }, opts?: { fetch?: typeof fetch; timeoutMs?: number } & LocalProviderOpts): Promise<Record<string, unknown>>;
+  export function localCacheDir(env?: Record<string, string | undefined>, home?: string): string;
+  export function installLocalRuntime(opts?: { cacheDir?: string; spawnImpl?: unknown; platform?: string }): Promise<{ ok: boolean; reason?: string }>;
+  export function downloadLocalModel(opts?: { cacheDir?: string; loadTransformers?: () => Promise<unknown> }): Promise<{ ok: boolean; reason?: string }>;
   export function doctorReport(cfg: { embeddings: EmbeddingsConfig | null }, probe: Record<string, unknown>, platform?: string): string;
 }
 
@@ -227,6 +238,22 @@ declare module "@dougharness/flow/lib/plan.mjs" {
     tasks: PlanTask[];
     [key: string]: unknown;
   }
+  export const PLAN_RELPATH: string;
+  export const PLANS_RELPATH: string;
+  export const REPORTS_RELPATH: string;
+  export function planPathFor(card: string): string;
+  export function reportPathFor(card: string): string;
   export function loadPlan(dir: string, relpath?: string): Plan | null;
+  export function planFor(dir: string, card?: string): Plan | null;
+  export function savePlan(dir: string, plan: Plan, relpath?: string): void;
+  export function loadReport(dir: string, relpath?: string): unknown;
+  export function integrationWorktreeFor(plan: Plan | null | undefined): string;
   export function unwrapReport<T = unknown>(obj: T): T;
+}
+
+// Keep in step with plugins/doug-flow/lib/autopilot-view.mjs (card autopilot-live-queue).
+declare module "@dougharness/flow/lib/autopilot-view.mjs" {
+  export const AUTOPILOT_FILE: string;
+  export function readAutopilot(dir: string): Record<string, unknown> | null;
+  export function autopilotView(state: Record<string, unknown> | null, now?: Date | number): unknown;
 }

@@ -1641,7 +1641,7 @@ function buildDocument(html: string): any {
 // renderBoardPage() output, so the connectLive wiring and the live-update wiring are both exercised
 // exactly as a browser would exercise them, not through a hand-rolled fake.
 describe("app() against real renderBoardPage() markup", () => {
-  async function setUp() {
+  async function setUp(autopilot: unknown = null) {
     const dir = fresh();
     await twoCardBoard(dir);
     const board = readBoard(dir);
@@ -1670,6 +1670,7 @@ describe("app() against real renderBoardPage() markup", () => {
     (globalThis as any).window = { EventSource: Recording, setTimeout: fakeSetTimeout, clearTimeout: () => {} };
     (globalThis as any).fetch = async (url: string) => {
       if (url === "/api/board") return { status: 200, json: async () => board };
+      if (url === "/api/autopilot") return { status: 200, json: async () => autopilot };
       throw new Error("unexpected fetch " + url);
     };
     (globalThis as any).location = { reload: () => void (reloaded = true) };
@@ -1683,7 +1684,7 @@ describe("app() against real renderBoardPage() markup", () => {
     // Flush the fetch("/api/board").then().then() chain (pure promises: one macrotask tick drains
     // every pending microtask first).
     await new Promise((r) => setTimeout(r, 0));
-    return { dir, board, instances, pending, restore, reloaded: () => reloaded };
+    return { dir, board, doc, instances, pending, restore, reloaded: () => reloaded };
   }
 
   it("reconnects after a dropped connection instead of throwing (regression for the missing setTimeout)", async () => {
@@ -1709,4 +1710,244 @@ describe("app() against real renderBoardPage() markup", () => {
       restore();
     }
   });
+});
+
+// Card autopilot-live-queue: the served board's autopilot panel. The server answers GET /api/autopilot with the view
+// (lib/autopilot-view.mjs autopilotView) or null, pushes an `autopilot` event on /api/events when the state file
+// changes, and the page renders the view into the always-present #autopilot container (hidden when empty).
+const AP_NOW = Date.now();
+function apState(over: Record<string, unknown> = {}) {
+  return {
+    version: 1,
+    status: "running",
+    startedAt: new Date(AP_NOW - 600000).toISOString(),
+    updatedAt: new Date().toISOString(),
+    endedAt: null,
+    caps: { usd: 96.78, wallMin: 1054, contextPct: 60 },
+    used: { usd: 12.5, wallMin: 80, contextPct: 21, checkedAt: new Date().toISOString() },
+    cards: [
+      { id: "one", title: "First card", size: "M", class: "code", state: "running", step: "coder", stepStartedAt: new Date(AP_NOW - 60000).toISOString() },
+      { id: "two", title: "Second card", size: "S", class: "docs", state: "queued" },
+    ],
+    filed: [{ id: "fu-card", kind: "follow-up", from: "one", position: "backlog bottom" }],
+    ...over,
+  };
+}
+function writeAp(dir: string, content: unknown) {
+  mkdirSync(join(dir, ".doug/.state"), { recursive: true });
+  writeFileSync(join(dir, ".doug/.state/autopilot.json"), typeof content === "string" ? content : JSON.stringify(content));
+}
+
+describe.skipIf(listenDenied !== "")(`doug board serve autopilot${listenDenied ? ` (${listenDenied})` : ""}`, () => {
+  it("GET /api/autopilot serves the view for a state file", async () => {
+    const dir = fresh();
+    await twoCardBoard(dir);
+    writeAp(dir, apState());
+    const server = await startBoardServer(dir, { port: 0 });
+    try {
+      const res = await fetch(server.url + "api/autopilot");
+      expect(res.status).toBe(200);
+      expect(res.headers.get("content-type")).toContain("application/json");
+      const view = (await res.json()) as { mode: string; cards: Array<{ id: string; state: string }>; caps: { usd: string }; current: { id: string; step: string } };
+      expect(view.mode).toBe("running");
+      expect(view.cards.map((c) => c.id)).toEqual(["one", "two"]);
+      expect(view.current).toMatchObject({ id: "one", step: "coder" });
+      expect(view.caps.usd).toBe("$12.50 / $96.78");
+    } finally {
+      await server.close();
+    }
+  });
+
+  it("GET /api/autopilot is null with no file", async () => {
+    const dir = fresh();
+    await twoCardBoard(dir);
+    const server = await startBoardServer(dir, { port: 0 });
+    try {
+      const res = await fetch(server.url + "api/autopilot");
+      expect(res.status).toBe(200);
+      expect(await res.json()).toBeNull();
+    } finally {
+      await server.close();
+    }
+  });
+
+  it("GET /api/autopilot is null, not a server error, for a garbage file (P1)", async () => {
+    const dir = fresh();
+    await twoCardBoard(dir);
+    const server = await startBoardServer(dir, { port: 0 });
+    try {
+      for (const bad of ["{ not json", "[]", JSON.stringify(apState({ version: 9 }))]) {
+        writeAp(dir, bad);
+        const res = await fetch(server.url + "api/autopilot");
+        expect(res.status).toBe(200);
+        expect(await res.json()).toBeNull();
+      }
+    } finally {
+      await server.close();
+    }
+  });
+
+  it(
+    "pushes an autopilot event over /api/events when the state file changes",
+    async () => {
+      const dir = fresh();
+      await twoCardBoard(dir);
+      const server = await startBoardServer(dir, { port: 0, watch: "poll" });
+      try {
+        const res = await fetch(server.url + "api/events");
+        const state = eventReaderFor(res);
+        const first = await readEvents(state, 1);
+        expect(first[0].event).toBe("board");
+        writeAp(dir, apState());
+        let got: { event: string; data: string } | undefined;
+        for (let i = 0; i < 5 && !got; i++) got = (await readEvents(state, 1, 6000)).find((e) => e.event === "autopilot");
+        expect(got).toBeDefined();
+        const view = JSON.parse((got as { data: string }).data) as { mode: string; cards: Array<{ id: string }> };
+        expect(view.mode).toBe("running");
+        expect(view.cards.map((c) => c.id)).toEqual(["one", "two"]);
+      } finally {
+        await server.close();
+      }
+    },
+    60000,
+  );
+});
+
+describe("autopilot panel in the page", () => {
+  const view = {
+    mode: "running",
+    header: "Autopilot running since 10:00",
+    cards: [
+      { id: "one", title: "First card", size: "M", class: "code", state: "running", detail: "coder since 10:05" },
+      { id: "two", title: "Second card", size: "S", class: "docs", state: "queued", detail: "" },
+      { id: "three", title: "Third card", size: "S", class: "docs", state: "landed", detail: "abc1234" },
+    ],
+    current: { id: "one", step: "coder", since: "10:05" },
+    caps: { usd: "$12.50 / $96.78", wall: "80 / 1054 min", context: "21% / 60%" },
+    filed: [{ id: "fu-card", kind: "follow-up", from: "one", position: "backlog bottom" }],
+  };
+  const panelOf = (doc: any) => doc.getElementById("autopilot");
+  const showing = (el: any) => el !== null && !el.hidden && el.innerHTML.trim() !== "";
+
+  it("the served markup always carries the #autopilot container, hidden", async () => {
+    const dir = fresh();
+    await twoCardBoard(dir);
+    const html = renderBoardPage(readBoard(dir), { mode: "local", record: ".doug/board.json" });
+    expect(html).toMatch(/id="autopilot"[^>]*hidden|hidden[^>]*id="autopilot"/);
+  });
+
+  it("renders the view: header, each card with state and detail, caps, filed", async () => {
+    const { doc, restore } = await setUpPanel(view);
+    try {
+      const el = panelOf(doc);
+      expect(showing(el)).toBe(true);
+      const html = el.innerHTML as string;
+      expect(html).toContain("Autopilot");
+      for (const id of ["one", "two", "three"]) expect(html).toContain(id);
+      expect(html).toContain("coder since 10:05");
+      expect(html).toContain("abc1234");
+      expect(html).toContain("$12.50 / $96.78");
+      expect(html).toContain("80 / 1054 min");
+      expect(html).toContain("21% / 60%");
+      expect(html).toContain("fu-card");
+      expect(html).toContain("backlog bottom");
+    } finally {
+      restore();
+    }
+  });
+
+  it("renders no panel for a null view (P2)", async () => {
+    const { doc, restore } = await setUpPanel(null);
+    try {
+      const el = panelOf(doc);
+      expect(el === null || el.hidden || el.innerHTML.trim() === "").toBe(true);
+    } finally {
+      restore();
+    }
+  });
+
+  it("an autopilot event shows the panel, and a null event removes it (P2)", async () => {
+    const { doc, instances, restore } = await setUpPanel(null);
+    try {
+      instances[0].fire("autopilot", { data: JSON.stringify(view) });
+      expect(showing(panelOf(doc))).toBe(true);
+      expect(panelOf(doc).innerHTML).toContain("coder since 10:05");
+      instances[0].fire("autopilot", { data: "null" });
+      const el = panelOf(doc);
+      expect(el === null || el.hidden || el.innerHTML.trim() === "").toBe(true);
+    } finally {
+      restore();
+    }
+  });
+});
+
+// app() against the real page markup with a given /api/autopilot answer; mirrors the setUp in the app() describe.
+async function setUpPanel(autopilot: unknown) {
+  const dir = fresh();
+  await twoCardBoard(dir);
+  const board = readBoard(dir);
+  const doc = buildDocument(renderBoardPage(board, { mode: "local", record: ".doug/board.json" }));
+  const instances: FakeEventSource[] = [];
+  class Recording extends FakeEventSource {
+    constructor(url: string) {
+      super(url);
+      instances.push(this);
+    }
+  }
+  const saved = { document: (globalThis as any).document, window: (globalThis as any).window, fetch: (globalThis as any).fetch, location: (globalThis as any).location };
+  (globalThis as any).document = doc;
+  (globalThis as any).window = { EventSource: Recording, setTimeout: () => 1, clearTimeout: () => {} };
+  (globalThis as any).fetch = async (url: string) => {
+    if (url === "/api/board") return { status: 200, json: async () => board };
+    if (url === "/api/autopilot") return { status: 200, json: async () => autopilot };
+    throw new Error("unexpected fetch " + url);
+  };
+  (globalThis as any).location = { reload: () => {} };
+  const restore = () => {
+    (globalThis as any).document = saved.document;
+    (globalThis as any).window = saved.window;
+    (globalThis as any).fetch = saved.fetch;
+    (globalThis as any).location = saved.location;
+  };
+  app();
+  await new Promise((r) => setTimeout(r, 0));
+  return { doc, instances, restore };
+}
+
+// Round 2, F2: the panel escapes every state-file string. Passes against today's autopilotHtml; it guards each esc()
+// call (mutation F2a: drop one escape and that field's case fails). Not named "doug board serve", so the skip count
+// in board-page-skip.test.ts is unaffected.
+describe("autopilot panel escaping (F2)", () => {
+  const HOSTILE = `<img src=x onerror=alert(1)>"`;
+  const base = () => ({
+    mode: "running",
+    header: "Autopilot running since 10:00",
+    cards: [{ id: "one", title: "First card", size: "M", class: "code", state: "stopped", detail: "gate red" }],
+    current: null,
+    caps: { usd: "$1.00 / $2.00", wall: "1 / 2 min", context: "1% / 2%" },
+    filed: [{ id: "fu-card", kind: "follow-up", from: "one", position: "backlog bottom" }],
+  });
+  const cases: Record<string, (v: any) => void> = {
+    "card title (F2)": (v) => (v.cards[0].title = HOSTILE),
+    "stop reason detail (F2)": (v) => (v.cards[0].detail = HOSTILE),
+    "card id (F2)": (v) => (v.cards[0].id = HOSTILE),
+    "filed id (F2)": (v) => (v.filed[0].id = HOSTILE),
+    "filed position (F2)": (v) => (v.filed[0].position = HOSTILE),
+    "filed from (F2)": (v) => (v.filed[0].from = HOSTILE),
+    "header (F2)": (v) => (v.header = HOSTILE),
+  };
+  for (const [name, hostile] of Object.entries(cases)) {
+    it(`escapes a hostile ${name}`, async () => {
+      const view = base();
+      hostile(view);
+      const { doc, restore } = await setUpPanel(view);
+      try {
+        const html = doc.getElementById("autopilot").innerHTML as string;
+        expect(html).toContain("&lt;img");
+        expect(html).not.toContain("<img");
+      } finally {
+        restore();
+      }
+    });
+  }
 });
