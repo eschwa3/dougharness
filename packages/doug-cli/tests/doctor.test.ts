@@ -597,13 +597,13 @@ describe("check memory", () => {
     expect(c.code).toBe(1);
   });
 
-  it("fail on a store newer than this CLI understands (user_version 9), with the install fix", async () => {
+  it("fail on a store newer than this CLI understands (user_version 10), with the install fix", async () => {
     const dir = project();
     seedMemory(dir);
     const { DatabaseSync } = createRequire(import.meta.url)("node:sqlite");
     const file = join(dir, ".doug", ".state", "memory", "memory.db");
     const db = new DatabaseSync(file);
-    db.exec("PRAGMA user_version = 9");
+    db.exec("PRAGMA user_version = 10");
     db.close();
     const c = await check(dir, "memory");
     expect(c.status).toBe("fail");

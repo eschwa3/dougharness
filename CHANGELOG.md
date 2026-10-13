@@ -1,5 +1,25 @@
 # Changelog
 
+## 1.2.0
+
+- Parallel cards (ADR 0015): `/doug-next --auto` runs disjoint cards at once in one session, a Workflow queen per card; a hand card's queen runs the host-neutral card loop, a flow card's queen runs doug-implement on its own per-card plan (`plan.mjs --card`).
+- Cards land one at a time: `plan.mjs land-card` for hand cards, and a flow card landing on a moved main rebases, gates the rebased tree, then merges.
+- `gate.lock` lives in the git common dir, shared by every worktree; `verify.mjs` and `land` report how long they waited on it.
+- Each doug-implement run gets its own integration worktree.
+- Plugin agents `doug-flow:tester` and `doug-flow:coder`.
+- `/doug-start`: a project mode (Idea, Architecture, Walking skeleton, Scope) and a feature mode (Specification, Pseudocode, Architecture, Refinement), each phase behind a human gate; `/doug-next` and `doug-hand` offer it for an L card with no spec, and `doug init` names it in an empty repo.
+- The autopilot queue shows live in a Claude Code pane that opens when a run starts, and on the served board.
+- Autopilot's USD cap comes from a measured size x class table; hand landings record their cost.
+- Every card landing and the autopilot close print a per-card recap; the landing block (Changed / Outcome / Learned) is enforced by the Stop gate.
+- `doug memory setup` offers a bundled embedding model when no server runs.
+- The outcome log records each task's stop class (schema v9).
+- User-asked cards quote the request and mark where each decision came from; scoping questions target the broadest word.
+- `doug-hand` says when the lead should recommend a swarm.
+- The wall budget table skips rehearsal entries and sums a card's repeated entries; rehearsal records say "rehearsal <scenario> passed|failed", never landed.
+- Stop gate fixes: per-card plans are read; a shown landing block is consumed on a deferral or stand-down; ledger rows re-derive onto parents of in-session commits; the SubagentStop read-only skip compares a worktree agent with its own base.
+- `bash-rules`: the pnpm-only rule ignores package-manager words in heredoc data.
+- `reflect --hand` accepts `R<n>` or `<card>/R<n>`.
+
 ## 1.1.1
 
 - Every landing starts with a one-sentence summary: `board.mjs record` and `summary`, and `doug board record` and `summary`, require `--summary "<one sentence>"` and print it first; the docs show the flag on every form.

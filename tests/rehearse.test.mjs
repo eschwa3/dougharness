@@ -770,7 +770,7 @@ describe("recording always goes through the board.mjs CLI (review #3)", () => {
 
   it("passes --rehearsal <scenario> through: the entry reads as a rehearsal, not a landing of the card (item rehearsal-first-live-findings #3)", async () => {
     const tempRepo = tempRepoWithCard();
-    await inLib("recordHandOutcome", tempRepo, "fix-hours", { commit: "47fe70cca7eb3444ae8a382ee14018f3950bfe1c", wallClock: "3 min", gate: "unit 5 passed", rehearsal: "hand" });
+    await inLib("recordHandOutcome", tempRepo, "fix-hours", { commit: "47fe70cca7eb3444ae8a382ee14018f3950bfe1c", wallClock: "3 min", gate: "unit 5 passed", rehearsal: "hand", outcome: "passed" });
     const handText = readFileSync(join(tempRepo, "docs/live-runs.md"), "utf8");
     expect(handText).toContain("Rehearsal hand for card `fix-hours` on the ts-basic fixture");
     expect(handText).not.toContain("Built by hand through doug-hand");
@@ -779,11 +779,36 @@ describe("recording always goes through the board.mjs CLI (review #3)", () => {
     const tempRepo2 = tempRepoWithCard();
     const reportFile = join(tempRepo2, "report.json");
     writeFileSync(reportFile, JSON.stringify({ ok: false, stoppedAtLevel: 0, plan: "P", integrationBranch: "none", levels: [] }));
-    await inLib("recordRunOutcome", tempRepo2, "fix-hours", { reportFile, wallClock: "1 min", mergeCommit: "47fe70cca7eb3444ae8a382ee14018f3950bfe1c", rehearsal: "flow" });
+    await inLib("recordRunOutcome", tempRepo2, "fix-hours", { reportFile, wallClock: "1 min", mergeCommit: "47fe70cca7eb3444ae8a382ee14018f3950bfe1c", rehearsal: "flow", outcome: "passed" });
     const runText = readFileSync(join(tempRepo2, "docs/live-runs.md"), "utf8");
     expect(runText).toContain("Rehearsal flow for card `fix-hours` on the ts-basic fixture");
     expect(runText).not.toContain("Ran through /doug-next");
     expect(runText).toContain("| Landed as | `47fe70c` |");
+  });
+
+  it("a failed hand rehearsal records 'rehearsal hand failed', never 'landed', in the entry and the printed block (card rehearsal-failure-not-landed)", async () => {
+    const tempRepo = tempRepoWithCard();
+    const out = await inLib("recordHandOutcome", tempRepo, "fix-hours", { commit: "47fe70cca7eb3444ae8a382ee14018f3950bfe1c", wallClock: "6.3 min", gate: "not observed", rehearsal: "hand", outcome: "failed" });
+    const outcomeLine = out.split("\n").find((l) => l.startsWith("Outcome:"));
+    expect(outcomeLine.startsWith("Outcome: rehearsal hand failed")).toBe(true);
+    expect(outcomeLine).not.toContain("landed");
+    const text = readFileSync(join(tempRepo, "docs/live-runs.md"), "utf8");
+    expect(text).toContain("| Outcome | rehearsal hand failed |");
+    expect(text).not.toContain("| Outcome | landed |");
+    expect(existsSync(join(tempRepo, ".doug/.state/reports/fix-hours/landing-block.txt"))).toBe(false);
+    expect(existsSync(join(tempRepo, ".doug/.state/reports/fix-hours/landing-block.pending"))).toBe(false);
+  });
+
+  it("a failed flow rehearsal records 'rehearsal flow failed' through recordRunOutcome", async () => {
+    const tempRepo = tempRepoWithCard();
+    const reportFile = join(tempRepo, "report.json");
+    writeFileSync(reportFile, JSON.stringify({ ok: false, stoppedAtLevel: 0, plan: "P", integrationBranch: "none", levels: [] }));
+    const out = await inLib("recordRunOutcome", tempRepo, "fix-hours", { reportFile, wallClock: "1 min", rehearsal: "flow", outcome: "failed" });
+    expect(out.split("\n").find((l) => l.startsWith("Outcome:")).startsWith("Outcome: rehearsal flow failed")).toBe(true);
+    const text = readFileSync(join(tempRepo, "docs/live-runs.md"), "utf8");
+    expect(text).toContain("| Outcome | rehearsal flow failed |");
+    expect(text).not.toContain("| Outcome | landed");
+    expect(text).not.toContain("Outcome: landed");
   });
 });
 
@@ -907,7 +932,8 @@ describe("T1 (R1): requireWorkers reads a task's swarm record before falling bac
 
 describe("T2 (R2): the prepared fixture's card carries a class (hand, flow, and swarm fixtures)", () => {
   it.skipIf(!existsSync(CLI))("prepareFixture gives fix-hours class \"code\" on every scenario", async () => {
-    for (const scenario of SCENARIOS) {
+    // Card doug-start-skill: `start` is an empty repo with no card at all.
+    for (const scenario of SCENARIOS.filter((s) => s !== "start")) {
       const { dir } = await inLib("prepareFixture", { scenario, tempPrefix: TEST_PREFIX });
       tempDirs.push(dir);
       const board = JSON.parse(readFileSync(join(dir, ".doug/board.json"), "utf8"));
@@ -1000,10 +1026,11 @@ describe("T4 (R3): the hand build prompt stops before step 5 (follow-up cards), 
 });
 
 describe("T5 (R4): ESTIMATES sources cite a measured rehearsal from docs/live-runs.md", () => {
-  it("every ESTIMATES[*].source names a 2026-09- date and a $ figure; the hand source no longer says no hand landing records a cost", () => {
+  it("every ESTIMATES[*].source names a 2026-09- or 2026-10- date and a $ figure; the hand source no longer says no hand landing records a cost", () => {
+    // Card doug-start-skill: the start scenarios were measured on 2026-10-11, so the date may be 2026-09- or 2026-10-.
     for (const s of SCENARIOS) {
       const source = ESTIMATES[s].source;
-      expect(source, `${s} source`).toMatch(/2026-09-\d{2}/);
+      expect(source, `${s} source`).toMatch(/2026-(09|10)-\d{2}/);
       expect(source, `${s} source`).toMatch(/\$\d/);
     }
     expect(ESTIMATES.hand.source).not.toContain("no hand landing records a cost");

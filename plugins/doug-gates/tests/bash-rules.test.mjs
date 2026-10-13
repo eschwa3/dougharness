@@ -2244,3 +2244,115 @@ describe("card bash-rules-env-splice-quadratic", () => {
     expect(outcome.verdict).toBe(BLOCK);
   }, 15000);
 });
+
+describe("card bash-rules-heredoc-body", () => {
+  const PM = "This project uses pnpm";
+  const run = (c) => evaluateBash(c, { config: cfg, currentBranch: "feature" });
+  const pmDenied = (c) => run(c).some((r) => r.includes(PM));
+
+  it("(a) a quoted heredoc body naming npm install is data", () => {
+    const c = "cat > .doug/.state/research/x.md <<'EOF'\n# Note\nThe npm CLI:\nnpm install --prefix /tmp/x pkg (unverified).\nEOF";
+    expect(run(c)).toEqual([]);
+  });
+
+  it("(b) an unquoted heredoc body naming npm install is data", () => {
+    expect(run("cat > notes.md <<EOF\nrun this:\nnpm install to set up\nEOF")).toEqual([]);
+  });
+
+  it("(c) <<- with a tab-indented terminator ends the body", () => {
+    expect(run("cat <<-EOF > notes.md\n\tnpm install x\n\tEOF")).toEqual([]);
+  });
+
+  it("(d) npm install on a line after the terminator is denied", () => {
+    expect(pmDenied("cat > notes.md <<'EOF'\nprose\nEOF\nnpm install x")).toBe(true);
+  });
+
+  // Today the package-manager rule denies this (checkPipeToShell does not); the coder keeps a deny from either.
+  it("(e) a heredoc piped to a shell is still denied", () => {
+    expect(pmDenied("cat <<EOF | sh\nnpm install x\nEOF")).toBe(true);
+  });
+
+  it("(f) a heredoc fed to bash or sh as its script is denied", () => {
+    expect(pmDenied("bash <<EOF\nnpm install x\nEOF")).toBe(true);
+    expect(pmDenied("sh <<'EOF'\nnpm i x\nEOF")).toBe(true);
+  });
+
+  it("(g) an unterminated heredoc gets no data exemption", () => {
+    expect(pmDenied("cat <<EOF\nnpm install x")).toBe(true);
+  });
+
+  it("(h) two heredocs on one line are both data; a command after the operator is not", () => {
+    expect(run("cat <<A <<B\nnpm install a\nA\nnpm install b\nB")).toEqual([]);
+    expect(pmDenied("cat <<EOF && npm install x\nbody\nEOF")).toBe(true);
+  });
+
+  it("(i) << inside quotes is not a heredoc", () => {
+    expect(pmDenied("echo '<<EOF'\nnpm install x")).toBe(true);
+  });
+  // Fix pass (reviewer round 1): each of these ran the package-manager line in a real shell and was denied before the card.
+  it("a heredoc inside a group, subshell, or function body piped to a shell is denied", () => {
+    expect(pmDenied("(cat <<EOF\nnpm install x\nEOF\n) | sh")).toBe(true);
+    expect(pmDenied("{ cat <<EOF\nnpm install x\nEOF\n} | sh")).toBe(true);
+    expect(pmDenied("f() { cat <<EOF\nnpm install x\nEOF\n}; f | sh")).toBe(true);
+  });
+
+  it("a quoted or escaped shell verb as the pipe stage is denied", () => {
+    expect(pmDenied('cat <<EOF | "sh"\nnpm install x\nEOF')).toBe(true);
+    expect(pmDenied("cat <<EOF | s\\h\nnpm install x\nEOF")).toBe(true);
+  });
+
+  it("an ANSI-C quoted delimiter and an arithmetic << keep the body checked", () => {
+    expect(pmDenied("cat <<$'EOF'\nnpm install x\nEOF")).toBe(true);
+    expect(pmDenied("((x=1<<2))\nnpm install y")).toBe(true);
+  });
+
+  it("a trailing | with the shell on the next line is denied", () => {
+    expect(pmDenied("cat <<EOF |\nsh\nnpm install x\nEOF")).toBe(true);
+  });
+
+  it("source /dev/stdin reading a heredoc is denied", () => {
+    expect(pmDenied("source /dev/stdin <<EOF\nnpm install x\nEOF")).toBe(true);
+  });
+
+  it("an unquoted body with $(...) is denied; the same body under <<'EOF' is data", () => {
+    expect(pmDenied("cat <<EOF\n$(npm install x)\nEOF")).toBe(true);
+    expect(run("cat <<'EOF'\n$(npm install x)\nEOF")).toEqual([]);
+  });
+
+  it("a # comment holding << is not a heredoc", () => {
+    expect(pmDenied("echo x # cat <<EOF\nnpm install x\nEOF")).toBe(true);
+  });
+
+  it("other rules still see the heredoc body (force push in a body is denied, as before the card)", () => {
+    expect(run("cat <<'EOF'\ngit push --force origin main\nEOF").length).toBeGreaterThan(0);
+  });
+
+  // Fix pass 2 (reviewer round 2): whole-command rule - any shell consumer anywhere keeps every body.
+  it("a heredoc in an if compound piped to a shell is denied", () => {
+    expect(pmDenied("if true; then cat <<EOF\nnpm install x\nEOF\nfi | sh")).toBe(true);
+  });
+
+  it("a heredoc in a for compound piped to a shell is denied", () => {
+    expect(pmDenied("for i in 1; do cat <<EOF\nnpm install x\nEOF\ndone | sh")).toBe(true);
+  });
+
+  it("a heredoc in a while compound piped to a shell is denied", () => {
+    expect(pmDenied("while true; do cat <<EOF\nnpm install x\nEOF\nbreak; done | sh")).toBe(true);
+  });
+
+  it("a heredoc in a case compound piped to a shell is denied", () => {
+    expect(pmDenied("case a in a) cat <<EOF\nnpm install x\nEOF\n;; esac | sh")).toBe(true);
+  });
+
+  it("a case-pattern ) in a subshell piped to a shell is denied", () => {
+    expect(pmDenied("(case a in a) cat <<EOF\nnpm install x\nEOF\n;; esac) | sh")).toBe(true);
+  });
+
+  it("a ) inside ${...} in a subshell piped to a shell is denied", () => {
+    expect(pmDenied("( echo ${x:-)} >/dev/null; cat <<EOF\nnpm install x\nEOF\n) | sh")).toBe(true);
+  });
+
+  it("a } argument in a brace group piped to a shell is denied", () => {
+    expect(pmDenied("{ echo } >/dev/null; cat <<EOF\nnpm install x\nEOF\n} | sh")).toBe(true);
+  });
+});

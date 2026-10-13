@@ -36,7 +36,7 @@ Invoke the `swarm-launch` skill: it checks the plan is approved with swarm on an
 
 ## 5. Land and record
 
-`/doug-next` step 5 verbatim: `plan.mjs done`, `plan.mjs land`, the card's move to Done with the merge commit, the `run-report` skill (its cost table lists every worker by label), and one commit for the record and the log. The landing's first chat line is the one-sentence summary `run-report` prints. A goal without a card lands the same way and skips the board steps; its run entry is not written, since the log is per card.
+`/doug-next` step 5 verbatim: `plan.mjs done`, `plan.mjs land`, the card's move to Done with the merge commit, the `run-report` skill (its cost table lists every worker by label), and one commit for the record and the log. The landing's first chat line is the one-sentence summary `run-report` prints. A goal without a card lands the same way and skips the board steps; its run entry is not written, since the log is per card. After the landing block, the lead prints the card's recap, a few lines in plain words: what the task was, what the outcome was, any other important facts (a follow-up worth filing, an edge case taken conservatively, a cost or wall-clock surprise), and, for a new feature, how to use it.
 
 ## 6. Follow-up cards
 

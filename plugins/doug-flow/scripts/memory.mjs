@@ -8,7 +8,7 @@
 //                                                 run+task); with --run, per-task tokens and USD come from the
 //                                                 same local transcripts lib/cost.mjs reads (null, with a note on
 //                                                 stderr, when the run's journal cannot be found)
-//   memory.mjs record <card-id> --hand [dir] --commit <sha> [--wall <text>] [--gate <text>] [--note <text>] [--json]
+//   memory.mjs record <card-id> --hand [dir] --commit <sha> [--wall <text>] [--gate <text>] [--note <text>] [--cost <usd>] [--json]
 //                                                 record a hand-track landing (card id, commit, wall clock, gate
 //                                                 line, note; nothing else is invented) as one outcomes row keyed
 //                                                 hand:<commit> (upsert on the same commit); --commit is required;
@@ -98,7 +98,7 @@
 //                                                 prints what would happen. Cost is measured from the same local
 //                                                 transcripts cost.mjs reads, falling back to the CLI's own
 //                                                 cost estimate. Needs Node >=22.16 (node:sqlite).
-//   memory.mjs reflect --hand <card-id> [dir] --commit <sha> [--rounds <n>] [--review "R1=<class>[: <reason>]"]...
+//   memory.mjs reflect --hand <card-id> [dir] --commit <sha> [--rounds <n>] [--review "<R<n> or <card-id>/R<n>>=<class>[: <reason>]"]...
 //                       [--harmful <id>]... [--note <text>] [--claude-bin <path>] [--model <name>] [--max-usd <n>] [--dry-run] [--json]
 //                                                 (card memory-every-session) the same pass for a hand landing:
 //                                                 assembles .doug/.state/reports/<card-id>/hand-report.json from
@@ -190,7 +190,7 @@ import { resolve, join, dirname } from "node:path";
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { parseAdversaryClasses, loadBoard, findCard } from "../lib/board.mjs";
-import { loadPlan, unwrapReport } from "../lib/plan.mjs";
+import { planFor, unwrapReport } from "../lib/plan.mjs";
 import { costRun } from "../lib/cost.mjs";
 import { loadModels } from "../lib/models.mjs";
 import {
@@ -508,7 +508,7 @@ try {
     case "record": {
       if (opts.hand) {
         const handUsage =
-          'usage: memory.mjs record <card-id> --hand [dir] --commit <sha> [--wall <text>] [--gate <text>] [--note <text>] [--json]';
+          'usage: memory.mjs record <card-id> --hand [dir] --commit <sha> [--wall <text>] [--gate <text>] [--note <text>] [--cost <usd>] [--json]';
         const [id, ...extra] = rest;
         if (!id || !opts.commit) fail(handUsage, 2);
         if (id.endsWith(".json") || existsSync(resolve(id))) {
@@ -517,6 +517,7 @@ try {
         if (opts.run !== undefined || opts.adversary !== undefined || opts["claude-dir"] !== undefined || extra.length > 1) {
           fail(handUsage, 2);
         }
+        if (opts.cost !== undefined && !/^\d+(\.\d+)?$/.test(opts.cost)) fail(`${handUsage}\n--cost takes a non-negative number of dollars, got ${JSON.stringify(opts.cost)}.`, 2);
         const dir = dirFrom(rest, 1);
         // condition.json (card outcomes-condition-columns): read when `condition open` wrote one before the
         // brief; a stamp missing entirely (the common case until core-next-hand-report wires this in) is not a
@@ -531,7 +532,7 @@ try {
           }
         }
         const { openMemory, recordOutcomes, handOutcomeRow } = await import("../lib/memory.mjs");
-        const row = handOutcomeRow({ card: id, commit: opts.commit, wallClock: textOrNull(opts.wall), gate: textOrNull(opts.gate), note: textOrNull(opts.note), condition });
+        const row = handOutcomeRow({ card: id, commit: opts.commit, wallClock: textOrNull(opts.wall), gate: textOrNull(opts.gate), note: textOrNull(opts.note), condition, cost: opts.cost !== undefined ? Number(opts.cost) : null });
         const m = openMemory(dir);
         let result;
         try {
@@ -580,7 +581,7 @@ try {
       }
       const reportHash = createHash("sha256").update(reportText).digest("hex");
       const classes = parseAdversaryClasses(opts.adversary || []);
-      const plan = loadPlan(dir);
+      const plan = planFor(dir, opts.card);
       const run = opts.run || null;
       const runLabel = run || `report:${reportHash.slice(0, 12)}`;
       let cost = null;
@@ -624,7 +625,7 @@ try {
       let handCard = null;
       if (opts.hand) {
         const handUsage =
-          'usage: memory.mjs reflect --hand <card-id> [dir] --commit <sha> [--rounds <n>] [--review "R1=<real|marginal|false>[: <reason>]"]... [--harmful <id>]... [--note <text>] [--claude-bin <path>] [--model <name>] [--max-usd <n>] [--dry-run] [--json]';
+          'usage: memory.mjs reflect --hand <card-id> [dir] --commit <sha> [--rounds <n>] [--review "<R<n> or <card-id>/R<n>>=<real|marginal|false>[: <reason>]"]... [--harmful <id>]... [--note <text>] [--claude-bin <path>] [--model <name>] [--max-usd <n>] [--dry-run] [--json]';
         const [id] = rest;
         if (!id || !opts.commit) fail(handUsage, 2);
         handCard = id;
@@ -635,7 +636,17 @@ try {
           if (!Number.isInteger(rounds) || rounds < 1) fail(`${handUsage}\n--rounds must be a positive integer, got ${JSON.stringify(opts.rounds)}.`, 2);
         }
         try {
-          classes = parseAdversaryClasses(opts.review || []);
+          const byKey = new Map();
+          for (const c of parseAdversaryClasses(opts.review || [])) {
+            let key = c.id;
+            const escaped = id.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+            if (/^R\d+$/.test(key)) key = `${id}/${key}`;
+            else if (!new RegExp(`^${escaped}/R\\d+$`).test(key)) throw new Error(`--review key ${JSON.stringify(c.id)} must be R<n> or ${id}/R<n>`);
+            const prev = byKey.get(key);
+            if (prev && prev.class !== c.class) throw new Error(`--review names ${key} twice with different classes (${prev.class}, ${c.class})`);
+            if (!prev) byKey.set(key, { ...c, id: key });
+          }
+          classes = [...byKey.values()];
         } catch (err) {
           fail(`${handUsage}\n${err.message}`, 2);
         }
@@ -698,7 +709,7 @@ try {
         classes = parseAdversaryClasses(opts.adversary || []);
       }
       const reportHash = createHash("sha256").update(reportText).digest("hex");
-      const plan = loadPlan(dir);
+      const plan = planFor(dir, opts.card);
       const models = loadModels(dir);
       const model = textOrNull(opts.model) || (models.tiers.cheap && models.tiers.cheap.model) || "haiku";
       let maxUsd = 0.5;

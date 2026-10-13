@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, writeFileSync, utimesSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, utimesSync, appendFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -733,5 +733,96 @@ describe("card cost-price-haiku-5-5", () => {
     expect(parsed.total.usd).toBeCloseTo(0.018, 10);
     const r = runOf1(msgs.map(([id, model, u]) => lineOf(id, model, u)).join(""));
     expect(r.agents[0].usd).toBeCloseTo(0.018, 10);
+  });
+});
+
+// Card usd-budget-size-class: `cost.mjs --session <id> --since <iso> [--until <iso>]` prices only the assistant
+// messages whose timestamp falls in the window, over the lead transcript and every subagent transcript under it.
+// This is how a hand landing's cost is measured, from the card's condition openedAt to the landing.
+describe("session cost window (card usd-budget-size-class)", () => {
+  const msg = (id, ts, usage) => JSON.stringify({ type: "assistant", timestamp: ts, message: { id, model: "claude-opus-5", usage } }) + "\n";
+  const sessProject = "/tmp/winproj";
+  const build = () => {
+    const claudeDir = mkdtempSync(join(tmpdir(), "doug-cost-win-"));
+    const proj = join(claudeDir, "projects", "-tmp-winproj");
+    const wf = join(proj, "sess-w", "subagents", "workflows", "wf_w");
+    mkdirSync(wf, { recursive: true });
+    // lead: three $5 messages (1M input each) at 10:00, 11:00, 12:00
+    writeFileSync(join(proj, "sess-w.jsonl"),
+      msg("l1", "2026-10-11T10:00:00.000Z", { input_tokens: 1_000_000, output_tokens: 0 }) +
+      msg("l2", "2026-10-11T11:00:00.000Z", { input_tokens: 1_000_000, output_tokens: 0 }) +
+      msg("l3", "2026-10-11T12:00:00.000Z", { input_tokens: 1_000_000, output_tokens: 0 }));
+    // plain subagent: two $2.50 messages (100k output) at 10:30 and 11:30
+    writeFileSync(join(proj, "sess-w", "subagents", "agent-a.jsonl"),
+      msg("a1", "2026-10-11T10:30:00.000Z", { input_tokens: 0, output_tokens: 100_000 }) +
+      msg("a2", "2026-10-11T11:30:00.000Z", { input_tokens: 0, output_tokens: 100_000 }));
+    // workflow subagent: one $5 message (200k output) at 11:15
+    writeFileSync(join(wf, "agent-b.jsonl"), msg("b1", "2026-10-11T11:15:00.000Z", { input_tokens: 0, output_tokens: 200_000 }));
+    writeFileSync(join(wf, "journal.jsonl"), JSON.stringify({ type: "started", key: "k", agentId: "b" }) + "\n");
+    return claudeDir;
+  };
+  const usd = (args) => {
+    const r = run(["--session", "sess-w", sessProject, "--claude-dir", build(), "--json", ...args]);
+    expect(r.status, r.stderr).toBe(0);
+    return JSON.parse(r.stdout).total.usd;
+  };
+
+  it("W1: no window prices every message ($25 = 15 lead + 5 plain subagent + 5 workflow agent)", () => {
+    expect(usd([])).toBeCloseTo(25, 6);
+  });
+  it("W2: --since and --until keep only messages inside the window, across the lead, plain subagent and workflow agent transcripts", () => {
+    // 10:45 to 11:45: lead 11:00 ($5) + subagent 11:30 ($2.50) + workflow 11:15 ($5)
+    expect(usd(["--since", "2026-10-11T10:45:00Z", "--until", "2026-10-11T11:45:00Z"])).toBeCloseTo(12.5, 6);
+  });
+  it("W3: --since alone excludes earlier messages and keeps everything after", () => {
+    // after 11:20: lead 12:00 ($5) + subagent 11:30 ($2.50); the workflow message at 11:15 is out
+    expect(usd(["--since", "2026-10-11T11:20:00Z"])).toBeCloseTo(7.5, 6);
+  });
+  it("W4: --until alone excludes later messages", () => {
+    // before 10:45: lead 10:00 ($5) + subagent 10:30 ($2.50)
+    expect(usd(["--until", "2026-10-11T10:45:00Z"])).toBeCloseTo(7.5, 6);
+  });
+  it("W5: a window holding no message prices $0 and still exits 0", () => {
+    expect(usd(["--since", "2027-01-01T00:00:00Z"])).toBe(0);
+  });
+  it("W6: the text output's session total line carries the windowed figure", () => {
+    const r = run(["--session", "sess-w", sessProject, "--claude-dir", build(), "--since", "2026-10-11T11:20:00Z"]);
+    expect(r.status, r.stderr).toBe(0);
+    expect(r.stdout).toMatch(/session total[^\n]*\$7\.50/i);
+  });
+  it("W7: a bad ISO date in --since or --until exits non-zero with a usage message and prints no total", () => {
+    for (const flag of ["--since", "--until"]) {
+      const r = run(["--session", "sess-w", sessProject, "--claude-dir", build(), flag, "not-a-date"]);
+      expect(r.status, flag).not.toBe(0);
+      expect(r.stderr, flag).toMatch(/usage/i);
+      expect(r.stderr, flag).toContain(flag);
+      expect(r.stdout, flag).toBe("");
+    }
+  });
+  it("W8: --since with an empty value exits non-zero with the usage message", () => {
+    const r = run(["--session", "sess-w", sessProject, "--claude-dir", build(), "--since"]);
+    expect(r.status).not.toBe(0);
+    expect(r.stderr).toMatch(/usage/i);
+  });
+  it("W9: the window is inclusive at both ends (a message exactly at --since or --until is priced)", () => {
+    // lead 11:00 ($5) exactly on both bounds
+    expect(usd(["--since", "2026-10-11T11:00:00.000Z", "--until", "2026-10-11T11:00:00.000Z"])).toBeCloseTo(5, 6);
+  });
+  it("W10: a line with no timestamp is kept when a window is set (conservative for a budget)", () => {
+    const claudeDir = build();
+    const f = join(claudeDir, "projects", "-tmp-winproj", "sess-w.jsonl");
+    appendFileSync(f, JSON.stringify({ type: "assistant", message: { id: "nots", model: "claude-opus-5", usage: { input_tokens: 1_000_000, output_tokens: 0 } } }) + "\n");
+    const r = run(["--session", "sess-w", sessProject, "--claude-dir", claudeDir, "--json", "--since", "2026-10-11T11:20:00Z"]);
+    expect(r.status, r.stderr).toBe(0);
+    expect(JSON.parse(r.stdout).total.usd).toBeCloseTo(12.5, 6);
+  });
+  it("W11: the transcript count counts only transcripts with messages in the window, and the text says so", () => {
+    const claudeDir = build();
+    const r = run(["--session", "sess-w", sessProject, "--claude-dir", claudeDir, "--json", "--since", "2026-10-11T11:50:00Z"]);
+    expect(JSON.parse(r.stdout).files).toBe(1);
+    const t = run(["--session", "sess-w", sessProject, "--claude-dir", claudeDir, "--since", "2026-10-11T11:50:00Z"]);
+    expect(t.stdout).toMatch(/1 transcript in window/);
+    const all = run(["--session", "sess-w", sessProject, "--claude-dir", claudeDir]);
+    expect(all.stdout).toMatch(/Session sess-w: 4 transcripts\./);
   });
 });

@@ -93,8 +93,9 @@ plugins and the CLI of the same release.
 
 ## Start a new project
 
-The manual recipe for a new project, as it works today. `/doug-start` will
-automate it later.
+The manual recipe for a new project. `/doug-start` automates it: with no
+argument in an empty repo it walks the same phases (idea, architecture, walking
+skeleton, scope), one committed file and one gate each.
 
 1. Create the repository and its package manager file: `git init`, then for
    example `pnpm init`.

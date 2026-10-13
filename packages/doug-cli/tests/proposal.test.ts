@@ -984,7 +984,7 @@ describe("buildProposal: generated project skills", () => {
 
 // Card init-greenfield: an empty repo gets the tester, a greenfield line, and a CLAUDE.md re-run line.
 const GREENFIELD_LINE =
-  'Empty repository: start with a walking skeleton (https://github.com/eschwa3/dougharness/blob/main/docs/getting-started.md#starting-from-an-empty-repository, "Starting from an empty repository"), then re-run doug init so the gates detect its commands. /doug-start will automate this (ADR 0012).';
+  'Empty repository: run /doug-start in Claude Code to start from an idea, or follow the manual recipe (https://github.com/eschwa3/dougharness/blob/main/docs/getting-started.md#starting-from-an-empty-repository, "Starting from an empty repository") and then re-run doug init so the gates detect its commands.';
 
 const GREENFIELD_URL =
   "https://github.com/eschwa3/dougharness/blob/main/docs/getting-started.md#starting-from-an-empty-repository";
@@ -1036,6 +1036,8 @@ describe("greenfield init (card init-greenfield)", () => {
     const out = await dryRunOutput(dir);
     expect(out).toContain(GREENFIELD_LINE);
     expect(out).toContain(GREENFIELD_URL);
+    expect(out).toContain("/doug-start");
+    expect(out).not.toContain("will automate");
     expect(out).toContain(".claude/agents/tester.md");
     expect(out.indexOf(GREENFIELD_LINE)).toBeLessThan(out.indexOf("Proposed changes"));
   });

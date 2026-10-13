@@ -697,6 +697,135 @@ describe("memory.mjs reflect --hand", () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  // card reflect-review-key-text: --review takes `R<n>` or `<card>/R<n>`; both are recorded as `<card>/R<n>`.
+  const ledgerIds = (dir) => {
+    const hr = JSON.parse(readFileSync(join(reportsDir(dir), "hand-report.json"), "utf8"));
+    return hr.levels[0].tasks[0].ledger.map((e) => e.id);
+  };
+
+  it("review key: the shorthand R1 is accepted and recorded as c1/R1", () => {
+    const dir = tempDir();
+    try {
+      setup(dir);
+      const res = reflect(dir, claudeOk(dir, []), ["--review", "R1=real: shorthand"]);
+      expect(res.status, res.stderr).toBe(0);
+      expect(ledgerIds(dir)).toEqual(["c1/R1"]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("review key: the full c1/R1 still works and is recorded as c1/R1", () => {
+    const dir = tempDir();
+    try {
+      setup(dir);
+      const res = reflect(dir, claudeOk(dir, []), ["--review", "c1/R1=real: full"]);
+      expect(res.status, res.stderr).toBe(0);
+      expect(ledgerIds(dir)).toEqual(["c1/R1"]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("review key: R1 and c1/R1 together name one finding (no 'no adversary block named' error, one ledger entry); R1 and R2 stay two", () => {
+    const dir = tempDir();
+    try {
+      setup(dir);
+      const res = reflect(dir, claudeOk(dir, []), ["--review", "R1=real: a", "--review", "c1/R1=real: b"]);
+      expect(res.status, res.stderr).toBe(0);
+      expect(res.stderr).not.toContain("no adversary block named");
+      expect(ledgerIds(dir)).toEqual(["c1/R1"]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+    const dir2 = tempDir();
+    try {
+      setup(dir2);
+      const res = reflect(dir2, claudeOk(dir2, []), ["--review", "R1=real: a", "--review", "R2=marginal: b"]);
+      expect(res.status, res.stderr).toBe(0);
+      expect(ledgerIds(dir2).sort()).toEqual(["c1/R1", "c1/R2"]);
+    } finally {
+      rmSync(dir2, { recursive: true, force: true });
+    }
+  });
+
+  it("review key: another card's full key exits 2 naming both accepted forms", () => {
+    const dir = tempDir();
+    try {
+      setup(dir);
+      const res = reflect(dir, claudeOk(dir, []), ["--review", "other/R1=real: x"]);
+      expect(res.status).toBe(2);
+      expect(res.stderr).toContain("R<n> or c1/R<n>");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("review key: a suffix after the card prefix (c1/R1/x) exits 2", () => {
+    const dir = tempDir();
+    try {
+      setup(dir);
+      const res = reflect(dir, claudeOk(dir, []), ["--review", "c1/R1/x=real: x"]);
+      expect(res.status).toBe(2);
+      expect(res.stderr).toContain("R<n> or c1/R<n>");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("review key: the same finding twice with different classes exits 2", () => {
+    const dir = tempDir();
+    try {
+      setup(dir);
+      const res = reflect(dir, claudeOk(dir, []), ["--review", "R1=real: a", "--review", "c1/R1=false: b"]);
+      expect(res.status).toBe(2);
+      expect(res.stderr).toContain("twice with different classes");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("review key: the reflect prompt lists a hand block once as report:c1/R1", () => {
+    const dir = tempDir();
+    try {
+      setup(dir);
+      const promptFile = join(dir, "prompt.txt");
+      const res = reflect(dir, claudeOk(dir, [], promptFile), ["--review", "R1=real: a"]);
+      expect(res.status, res.stderr).toBe(0);
+      const prompt = readFileSync(promptFile, "utf8");
+      expect(prompt).toContain("report:c1/R1 class=real");
+      expect(prompt).not.toContain("report:c1/c1/R1");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("review key: --review does not change which lessons count helpful (real, marginal, false, either key form)", () => {
+    const withoutDir = tempDir();
+    let baseline;
+    try {
+      const L1 = setup(withoutDir);
+      const res = reflect(withoutDir, claudeOk(withoutDir, []), ["--json"]);
+      expect(res.status, res.stderr).toBe(0);
+      baseline = JSON.parse(res.stdout).counters.helpful;
+      expect(baseline).toEqual([L1]);
+    } finally {
+      rmSync(withoutDir, { recursive: true, force: true });
+    }
+    for (const review of ["R1=real: x", "c1/R1=real: x", "R1=marginal: x", "R1=false: x"]) {
+      const dir = tempDir();
+      try {
+        const L1 = setup(dir);
+        const res = reflect(dir, claudeOk(dir, []), ["--json", "--review", review]);
+        expect(res.status, `${review}: ${res.stderr}`).toBe(0);
+        expect(JSON.parse(res.stdout).counters.helpful, review).toEqual(baseline);
+        expect(helpfulOf(dir, L1), review).toBe(1);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    }
+  });
 });
 
 describe("memory.mjs record", () => {
@@ -900,6 +1029,23 @@ describe("memory.mjs record", () => {
     expect(res.status).toBe(1);
     expect(res.stderr).toContain("nope.json");
     rmSync(dir, { recursive: true, force: true });
+  });
+});
+
+// Card parallel-card-queens, brief B2 fix pass: a stale .doug/plan.json for another card is not read for this card.
+describe("memory.mjs record --card with a stale single plan", () => {
+  const plan = (card) => ({ version: 1, title: "T", goal: "g", status: "approved", acceptance: ["a"], verify: ["true"], card, tasks: [{ id: "agents-generator", title: "t", spec: "s", files: ["src/owned.ts"] }] });
+  const recordRow = (planCard) => {
+    const dir = tempDir();
+    mkdirSync(join(dir, ".doug"), { recursive: true });
+    writeFileSync(join(dir, ".doug/plan.json"), JSON.stringify(plan(planCard)));
+    const r = run(["record", fixtureReport, dir, "--run", "wf_7092b963-6a5", "--claude-dir", fixtureClaude, "--card", "standard-agents"], dir);
+    expect(r.status, r.stderr).toBe(0);
+    return JSON.parse(run(["outcomes", dir, "--json"], dir).stdout)[0];
+  };
+  it("does not attach the stale plan's owned files to another card's outcome, and does for its own card", () => {
+    expect(recordRow("other-card").files).toBeNull();
+    expect(recordRow("standard-agents").files).toEqual(["src/owned.ts"]);
   });
 });
 
@@ -3232,5 +3378,58 @@ describe("memory.mjs brief-lessons", () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe("memory.mjs record --hand --cost (card usd-budget-size-class)", () => {
+  const base = (dir) => ["record", "hand-track-outcomes", "--hand", dir, "--commit", "abc1234def5", "--wall", "34 min", "--gate", "gate text"];
+  const rows = (dir) => JSON.parse(run(["outcomes", dir, "--json"], dir).stdout);
+
+  it("C1: --cost <usd> fills the outcome row's usd column and leaves the other workflow-only columns null", () => {
+    const dir = tempDir();
+    const res = run([...base(dir), "--cost", "3.21"], dir);
+    expect(res.status, res.stderr).toBe(0);
+    const [row] = rows(dir);
+    expect(row.usd).toBe(3.21);
+    expect(row.tokens).toBeNull();
+    expect(row.codex_usd).toBeNull();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("C2: without --cost usd stays null, not 0", () => {
+    const dir = tempDir();
+    expect(run(base(dir), dir).status).toBe(0);
+    expect(rows(dir)[0].usd).toBeNull();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("C3: re-recording the same commit with --cost updates the row's usd", () => {
+    const dir = tempDir();
+    expect(run(base(dir), dir).status).toBe(0);
+    const again = run([...base(dir), "--cost", "4.5"], dir);
+    expect(again.status, again.stderr).toBe(0);
+    expect(rows(dir)).toHaveLength(1);
+    expect(rows(dir)[0].usd).toBe(4.5);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("C4: a non-numeric or negative --cost is refused with exit 2 naming --cost, and records nothing", () => {
+    for (const bad of ["abc", "-1", "$3", ""]) {
+      const dir = tempDir();
+      const res = run([...base(dir), "--cost", bad], dir);
+      expect(res.status, `--cost "${bad}"`).toBe(2);
+      expect(res.stderr, `--cost "${bad}"`).toContain("--cost");
+      expect(res.stderr, `--cost "${bad}"`).not.toMatch(/unknown option/i);
+      expect(rows(dir), `--cost "${bad}"`).toHaveLength(0);
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("C5: the hand usage line names --cost", () => {
+    const dir = tempDir();
+    const res = run(["record", "--hand", dir], dir);
+    expect(res.status).toBe(2);
+    expect(res.stderr).toContain("[--cost <usd>]");
+    rmSync(dir, { recursive: true, force: true });
   });
 });

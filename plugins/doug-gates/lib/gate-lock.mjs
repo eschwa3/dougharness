@@ -1,15 +1,45 @@
 // The gate.lock helpers shared by the Stop gate (scripts/stop-gate.mjs) and verify.mjs (card
 // verify-takes-gate-lock). Moved verbatim from stop-gate.mjs; the Stop gate's behaviour is unchanged.
 
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { accessSync, constants, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { dirname, join, resolve } from "node:path";
 
 // Single-runner lock (card stop-gate-process-storm, goal 3): only one gate runs the verification commands
 // at a time per project, so concurrent SubagentStops share one suite instead of each starting its own (the
-// 2026-09-16 process storm). `.doug/.state/gate.lock` holds `{ pid, session, at }` while a gate's commands
-// run.
+// 2026-09-16 process storm). gate.lock holds `{ pid, session, at }` while a gate's commands run. Card
+// gate-lock-shared (ADR 0015): it lives at `<git common dir>/doug/gate.lock`, a path every worktree of the
+// repo shares, so gates in parallel worktrees queue instead of running full suites concurrently. It falls
+// back to the per-checkout `.doug/.state/gate.lock` when git is unavailable, `dir` is not in a repo, or the
+// common dir is not writable; resolution never throws.
 const GATE_LOCK_RELPATH = ".doug/.state/gate.lock";
+// Memoized per dir for the life of the process (a fallback result too): one gate run must see one path,
+// or a poll that fell back under load would read no lock and take over a live holder's shared lock.
+const lockPathMemo = new Map();
 export function gateLockPath(dir) {
+  if (lockPathMemo.has(dir)) return lockPathMemo.get(dir);
+  const p = resolveGateLockPath(dir);
+  lockPathMemo.set(dir, p);
+  return p;
+}
+function resolveGateLockPath(dir) {
+  try {
+    const out = execFileSync("git", ["rev-parse", "--path-format=absolute", "--git-common-dir"], {
+      cwd: dir,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+      timeout: 5000,
+    }).trim();
+    if (out) {
+      const common = resolve(dir, out);
+      const lockDir = join(common, "doug");
+      accessSync(common, constants.W_OK);
+      if (existsSync(lockDir)) accessSync(lockDir, constants.W_OK);
+      return join(lockDir, "gate.lock");
+    }
+  } catch {
+    // fall through to the per-checkout path
+  }
   return join(dir, GATE_LOCK_RELPATH);
 }
 
@@ -43,8 +73,9 @@ export function pidIsLive(pid) {
 // Creates gate.lock exclusively (throws EEXIST when one is already there, or any other fs error). The
 // caller decides what a failure means.
 export function writeGateLock(dir, sessionId) {
-  mkdirSync(join(dir, ".doug/.state"), { recursive: true });
-  writeFileSync(gateLockPath(dir), JSON.stringify({ pid: process.pid, session: sessionId, at: Date.now() }), { flag: "wx" });
+  const p = gateLockPath(dir);
+  mkdirSync(dirname(p), { recursive: true });
+  writeFileSync(p, JSON.stringify({ pid: process.pid, session: sessionId, at: Date.now() }), { flag: "wx" });
 }
 
 // Overwrites gate.lock with this gate's own pid/session, whether it was stale (a dead pid) or its holder
@@ -53,8 +84,9 @@ export function writeGateLock(dir, sessionId) {
 // does not hold).
 export function takeOverGateLock(dir, sessionId) {
   try {
-    mkdirSync(join(dir, ".doug/.state"), { recursive: true });
-    writeFileSync(gateLockPath(dir), JSON.stringify({ pid: process.pid, session: sessionId, at: Date.now() }));
+    const p = gateLockPath(dir);
+    mkdirSync(dirname(p), { recursive: true });
+    writeFileSync(p, JSON.stringify({ pid: process.pid, session: sessionId, at: Date.now() }));
   } catch {
     // best-effort takeover only
   }

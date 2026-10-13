@@ -24,10 +24,14 @@ Under a card, the tester writes or extends the test before the change, in the fi
 | `scripts/plan.mjs set`, `plan.mjs merge` (several cards in one plan) and `--file`, config defaults for install and adversary | `plugins/doug-flow/tests/plan-set.test.mjs` |
 | `lib/plan.mjs` specHash, reusePlan, `plan.mjs replan` | `plugins/doug-flow/tests/replan.test.mjs` |
 | `plugins/doug-flow/lib/land.mjs`, `plan.mjs land`, worktree pruning | `plugins/doug-flow/tests/land.test.mjs` |
+| `plugins/doug-flow/lib/card-land.mjs`, `plan.mjs land-card` (landing a hand card: rebase, gate, fast-forward; card parallel-card-queens) | `plugins/doug-flow/tests/card-land.test.mjs` |
 | `plugins/doug-flow/lib/worktrees.mjs` (worktree removal, used by `land.mjs`; branch retirement, used by `scripts/plan.mjs`) | `plugins/doug-flow/tests/land.test.mjs` (removal), `plugins/doug-flow/tests/replan.test.mjs` (retirement) |
 | `plugins/doug-flow/lib/models.mjs` (the CLAUDE.md Models table) | `plugins/doug-flow/tests/models.test.mjs` |
+| `plugins/doug-flow/lib/card-loop.mjs` (the hand card loop as a host-neutral contract: `next(state, handBack)`, seat briefs and hand-back schemas; card card-loop-contract), the "Card seats" section of `docs/worker-contract.md` | `plugins/doug-flow/tests/card-loop.test.mjs` |
+| `plugins/doug-flow/lib/coordinator.mjs` (the parallel-card coordinator: workers.max, goal paths, card disjointness, the pick, queen notifications, the land queue, caps; card parallel-card-queens) | `plugins/doug-flow/tests/coordinator.test.mjs` |
 | `plugins/doug-flow/lib/cost.mjs`, `scripts/cost.mjs` (a run's cost from local transcripts; the price table) | `plugins/doug-flow/tests/cost.test.mjs` |
 | `plugins/doug-flow/lib/context.mjs`, `scripts/context.mjs` (the lead's context percentage from its session transcript, `autopilot.contextThreshold`; card autopilot-unlimited) | `plugins/doug-flow/tests/context.test.mjs` |
+| `plugins/doug-flow/lib/autopilot-core.mjs`, `lib/autopilot-view.mjs`, `scripts/autopilot.mjs` (the autopilot state file: its writer, the pure view shared by the live pane `hooks/register.tsx` and the board page; card autopilot-live-queue), `packages/doug-cli/src/board-serve.ts`'s `/api/autopilot` | `plugins/doug-flow/tests/autopilot.test.mjs`, `packages/doug-cli/tests/board-page.test.ts` |
 | `plugins/doug-flow/lib/embeddings.mjs` (the embedding provider layer: openai-compatible and voyage adapters, probeProvider, doctorReport) | `plugins/doug-flow/tests/embeddings.test.mjs` |
 | `plugins/doug-flow/lib/code-index.mjs` (the opt-in semantic code index: file listing, chunking, incremental build, status, search) | `plugins/doug-flow/tests/code-index.test.mjs` |
 | `plugins/doug-flow/lib/learn.mjs`, `scripts/learn.mjs` (deterministic proposals from outcomes/lessons signals and the run trace; card learn-signals) | `plugins/doug-flow/tests/learn.test.mjs` |

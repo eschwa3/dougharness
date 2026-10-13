@@ -84,7 +84,7 @@ function taskShape(task) {
 function adversaryRequired(task) {
   return !!adversary && taskShape(task) !== 'S'
 }
-const INTEGRATION_WORKTREE = '.claude/worktrees/doug-integration'
+const INTEGRATION_WORKTREE = plan.integrationWorktree || '.claude/worktrees/doug-integration'
 
 // What an adversarial reviewer may call a blocker. The same text is in the two adversary agent files and in
 // codex-review's own prompt; change all four together.
@@ -1432,14 +1432,14 @@ function integratePrompt(levelIndex, results, baseBranch, isLastLevel, keepWorkt
     `They are local branches of this repository (each was made in its own worktree); no fetch is needed.`,
     ``,
     `Steps:`,
-    `1. From the repository root, find or create the integration worktree at .claude/worktrees/doug-integration:`,
+    `1. From the repository root, find or create the integration worktree at ${INTEGRATION_WORKTREE}:`,
     ...(firstIntegration
       ? [
-        `   this is the run's first integration; the worktree may be a leftover of an earlier run and is never reused as is: if it exists, git worktree remove --force .claude/worktrees/doug-integration (then git worktree prune).`,
-        `   In every case create it fresh: git worktree add -B ${integrationBranch} .claude/worktrees/doug-integration ${baseBranch}`,
+        `   this is the run's first integration; the worktree may be a leftover of an earlier run and is never reused as is: if it exists, git worktree remove --force ${INTEGRATION_WORKTREE} (then git worktree prune).`,
+        `   In every case create it fresh: git worktree add -B ${integrationBranch} ${INTEGRATION_WORKTREE} ${baseBranch}`,
       ]
       : [
-        `   if it does not exist: git worktree add -B ${integrationBranch} .claude/worktrees/doug-integration ${baseBranch}`,
+        `   if it does not exist: git worktree add -B ${integrationBranch} ${INTEGRATION_WORKTREE} ${baseBranch}`,
         `   if it exists (a previous level made it): use it as is; it already has ${integrationBranch} checked out.`,
       ]),
     `   Do every following git and verify command inside that worktree (git -C or cd into it).`,
@@ -1449,7 +1449,7 @@ function integratePrompt(levelIndex, results, baseBranch, isLastLevel, keepWorkt
     ...(plan.verify.length
       ? [
         `   When .doug/hooks/scripts/verify.mjs exists, run them from the repository root (not inside the worktree) as one command, so a tree already verified is credited instead of re-run:`,
-        `   node .doug/hooks/scripts/verify.mjs --json --by integrate --cwd .claude/worktrees/doug-integration --record-dir . ${worktrees.map(w => `--credit-dir ${shellQuote(w)}`).join(' ')} ${plan.verify.map(v => `--command ${shellQuote(v)}`).join(' ')}`,
+        `   node .doug/hooks/scripts/verify.mjs --json --by integrate --cwd ${INTEGRATION_WORKTREE} --record-dir . ${worktrees.map(w => `--credit-dir ${shellQuote(w)}`).join(' ')} ${plan.verify.map(v => `--command ${shellQuote(v)}`).join(' ')}`,
         `   Copy each entry of its JSON results[] into verify as { command, ok, outputTail }, and add credited: "verified-tree" to each when the JSON's credited is not null. When verify.mjs does not exist, run the commands one by one as above.`,
       ]
       : []),
@@ -1469,7 +1469,7 @@ function integratePrompt(levelIndex, results, baseBranch, isLastLevel, keepWorkt
       ]
       : []),
     `4. If every merge succeeded, remove the merged task worktrees to leave the repository tidy: git worktree remove --force <path> for each of ${worktrees.join(', ')}. Keep their branches.`,
-    isLastLevel && !keepWorktree ? `5. This is the last level. Also remove the integration worktree (git worktree remove --force .claude/worktrees/doug-integration); the branch ${integrationBranch} keeps the result.` : isLastLevel ? `5. This is the last level, but keep the integration worktree: the adversary reviews the merged size-S tasks there, and plan.mjs land reuses and removes it.` : `5. Keep the integration worktree; the next level merges into it.`,
+    isLastLevel && !keepWorktree ? `5. This is the last level. Also remove the integration worktree (git worktree remove --force ${INTEGRATION_WORKTREE}); the branch ${integrationBranch} keeps the result.` : isLastLevel ? `5. This is the last level, but keep the integration worktree: the adversary reviews the merged size-S tasks there, and plan.mjs land reuses and removes it.` : `5. Keep the integration worktree; the next level merges into it.`,
     isLastLevel
       ? `6. ok=true only if all merges succeeded, all verify commands passed, and every acceptance command exited 0. Do not push. Do not check out anything in the main working tree.`
       : `6. ok=true only if all merges succeeded and all verify commands passed. Do not push. Do not check out anything in the main working tree.`,

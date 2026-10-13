@@ -23,6 +23,28 @@ export function readPlanSummary(dir) {
   }
 }
 
+// Every active (enforced, not landed) per-card plan under .doug/plans/, as readPlanSummary shapes them.
+export function readPlanSummaries(dir) {
+  const out = [];
+  try {
+    const d = join(dir, ".doug/plans");
+    if (!existsSync(d)) return out;
+    for (const name of readdirSync(d).filter((f) => f.endsWith(".json")).sort()) {
+      try {
+        const p = JSON.parse(readFileSync(join(d, name), "utf8"));
+        if (!p || typeof p !== "object" || !Array.isArray(p.tasks) || p.landed) continue;
+        if (p.status !== "approved" && p.status !== "done") continue;
+        out.push({ title: p.title || "(untitled)", status: p.status, card: typeof p.card === "string" ? p.card : null, tasks: p.tasks.map((t) => ({ id: t.id, files: Array.isArray(t.files) ? t.files : [] })) });
+      } catch {
+        // an unreadable per-card plan is skipped
+      }
+    }
+  } catch {
+    return out;
+  }
+  return out;
+}
+
 // Short HEAD sha and current branch, tolerant of a non-repo or a git failure (moved from stop-gate.mjs; used by
 // both the Stop gate's own handoff and the PreCompact snapshot).
 export function gitHead(dir) {
@@ -55,7 +77,7 @@ export function readDecisions(dir) {
 // plan/decisions/edited-files lines (card precompact-keeps-handoff, review MAJOR): those grow unbounded with a
 // session's edited-file count, and SessionStart's re-injection caps the whole anchor at 4000 characters, so a few
 // short handoff lines must be near the top to survive that cap on a long session.
-export function snapshotSection({ plan, decisions, state, now, handoff }) {
+export function snapshotSection({ plan, plans, decisions, state, now, handoff }) {
   const lines = [`## Compaction snapshot (doug, ${now.toISOString()})`];
   if (handoff) {
     lines.push("");
@@ -70,9 +92,12 @@ export function snapshotSection({ plan, decisions, state, now, handoff }) {
     if (typeof handoff.contextPct === "number") lines.push(`Context: ${handoff.contextPct}%`);
   }
   lines.push("");
-  if (plan) {
-    lines.push(`Plan: ${plan.title} [${plan.status}]${plan.card ? ` (card ${plan.card})` : ""}`);
-    for (const t of plan.tasks) lines.push(`- ${t.id} owns ${t.files.length ? t.files.join(", ") : "(no files)"}`);
+  const shown = plan ? [plan] : plans || [];
+  if (shown.length) {
+    for (const pl of shown) {
+      lines.push(`Plan: ${pl.title} [${pl.status}]${pl.card ? ` (card ${pl.card})` : ""}`);
+      for (const t of pl.tasks) lines.push(`- ${t.id} owns ${t.files.length ? t.files.join(", ") : "(no files)"}`);
+    }
   } else lines.push("Plan: none in .doug/plan.json");
   lines.push("");
   lines.push(decisions.length ? `Decisions (docs/decisions): ${decisions.join(", ")}` : "Decisions: none under docs/decisions");

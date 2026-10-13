@@ -22,7 +22,7 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { acceptanceEntries, integrationBranchFor, savePlan } from "./plan.mjs";
+import { acceptanceEntries, integrationBranchFor, integrationWorktreeFor, savePlan, PLAN_RELPATH } from "./plan.mjs";
 import { removeFinishedWorktrees } from "./worktrees.mjs";
 
 export const INTEGRATION_WORKTREE = ".claude/worktrees/doug-integration";
@@ -109,7 +109,7 @@ function verifyViaVendored(script, dir, work, commands, timeoutMs) {
       const why = r.error && r.error.code === "ETIMEDOUT" ? "timed out" : "gave no readable result";
       return { error: `the vendored verify.mjs ${why}; land does not re-run the commands` };
     }
-    return out.results.map((x) => ({
+    const rows = out.results.map((x) => ({
       command: x.command,
       ok: x.ok === true,
       status: x.status,
@@ -118,13 +118,20 @@ function verifyViaVendored(script, dir, work, commands, timeoutMs) {
       outputTail: x.outputTail || "",
       ...(out.credited ? { credited: out.credited } : {}),
     }));
+    if (typeof out.lockWaitMs === "number") rows.lockWaitMs = out.lockWaitMs;
+    return rows;
   } catch (err) {
     return { error: `the vendored verify.mjs could not run: ${err && err.message}` };
   }
 }
 
 // Returns { ok: true, base, branch, mergeCommit, verify } or { ok: false, reason, verify? }. Never throws on a refusal.
-export function landPlan(dir, plan, { timeoutMs = 600000, now = () => new Date(), deleteBranches = false } = {}) {
+// Card parallel-card-queens B5: rebase (set by plan.mjs land --card) rebases the integration branch onto the base
+// when the base has moved, in the worktree that has the branch checked out, and verifies the rebased tree; a
+// conflict is aborted and refused as "rebase-conflict: <files>". ownOnly removes only this plan's own task
+// branches' worktrees and its own integration worktree (no sweep of worktrees merged into base). planRelpath is
+// where plan.landed is saved (the per-card plan under --card). The result carries lockWaitMs from verify.mjs.
+export function landPlan(dir, plan, { timeoutMs = 600000, now = () => new Date(), deleteBranches = false, rebase = false, ownOnly = false, planRelpath = PLAN_RELPATH } = {}) {
   if (!plan) return { ok: false, reason: "no plan" };
   if (plan.status !== "done") return { ok: false, reason: `plan status is "${plan.status}", not "done"; run plan.mjs done after a green doug-implement run` };
   if (plan.landed) return { ok: false, reason: `plan was already landed as ${plan.landed.mergeCommit} on ${plan.landed.at}` };
@@ -152,15 +159,17 @@ export function landPlan(dir, plan, { timeoutMs = 600000, now = () => new Date()
   if (dirty.length) return { ok: false, reason: `tracked files are modified: ${dirty.join(", ")}; commit or stash them first` };
 
   // Verify on the branch itself, in the integration worktree if the workflow left it, else a temporary one.
-  const existing = join(dir, INTEGRATION_WORKTREE);
+  const existing = join(dir, integrationWorktreeFor(plan));
   const reuse = existsSync(existing) && tryGit(existing, ["symbolic-ref", "--short", "-q", "HEAD"]) === branch;
   let work = reuse ? existing : null;
   let temp = null;
+  const needsRebase = rebase && tryGit(dir, ["merge-base", "--is-ancestor", base, branch]) === null;
   if (!work) {
     temp = mkdtempSync(join(tmpdir(), "doug-land-"));
     work = join(temp, "wt");
     try {
-      git(dir, ["worktree", "add", "--detach", work, branch]);
+      // A rebase moves the branch ref, so the temporary worktree then has the branch itself checked out.
+      git(dir, needsRebase ? ["worktree", "add", work, branch] : ["worktree", "add", "--detach", work, branch]);
     } catch (err) {
       rmSync(temp, { recursive: true, force: true });
       return { ok: false, reason: `could not create a worktree for ${branch}: ${tail(err.stderr || err.message, 3)}` };
@@ -168,7 +177,16 @@ export function landPlan(dir, plan, { timeoutMs = 600000, now = () => new Date()
   }
   const verify = [];
   const acceptance = [];
+  let lockWaitMs;
   try {
+    if (needsRebase) {
+      const rb = tryGitCapture(work, ["rebase", base]);
+      if (!rb.ok) {
+        const files = (tryGit(work, ["diff", "--name-only", "--diff-filter=U"]) || "").split("\n").filter(Boolean);
+        tryGit(work, ["rebase", "--abort"]);
+        return { ok: false, reason: `rebase-conflict: ${files.length ? files.join(", ") : tail(rb.error.stderr || rb.error.message, 3)}` };
+      }
+    }
     // card verified-tree-record: install always runs through run(). plan.verify goes through the vendored
     // verify.mjs when the project has one (it credits a verified-tree record of the branch's tree and writes one
     // for the main checkout after a green run); otherwise, or when it cannot be read, today's loop runs.
@@ -189,6 +207,7 @@ export function landPlan(dir, plan, { timeoutMs = 600000, now = () => new Date()
       return { ok: false, reason: `verify failed on ${branch}: ${viaVerify.error}`, verify, acceptance: [] };
     }
     if (viaVerify) {
+      if (typeof viaVerify.lockWaitMs === "number") lockWaitMs = viaVerify.lockWaitMs;
       for (const r of viaVerify) {
         verify.push(r);
         if (!r.ok) return failVerify(r);
@@ -249,7 +268,7 @@ export function landPlan(dir, plan, { timeoutMs = 600000, now = () => new Date()
     removedWorktrees.push(existingReal);
   }
   const taskBranches = (plan.tasks || []).flatMap((t) => [`doug/task-${t.id}`, ...(typeof t.reuse === "string" ? [t.reuse] : [])]);
-  const wtResult = removeFinishedWorktrees(dir, { branches: taskBranches, mergedInto: base });
+  const wtResult = removeFinishedWorktrees(dir, { branches: taskBranches, mergedInto: ownOnly ? null : base });
   const worktrees = { removed: [...removedWorktrees, ...wtResult.removed], kept: wtResult.kept };
 
   const branchesResult = { deleted: [], kept: [] };
@@ -278,6 +297,6 @@ export function landPlan(dir, plan, { timeoutMs = 600000, now = () => new Date()
     verify: verify.map((v) => ({ command: v.command, ok: v.ok, durationMs: v.durationMs, ...(v.credited ? { credited: v.credited } : {}) })),
     acceptance: acceptance.map((a) => ({ text: a.text, command: a.command, ok: a.ok, durationMs: a.durationMs, ...(a.reused ? { reused: a.reused } : {}) })),
   };
-  savePlan(dir, { ...plan, landed });
-  return { ok: true, base, branch, mergeCommit, verify, acceptance, worktrees, branches: branchesResult };
+  savePlan(dir, { ...plan, landed }, planRelpath);
+  return { ok: true, base, branch, mergeCommit, verify, acceptance, worktrees, branches: branchesResult, ...(lockWaitMs !== undefined ? { lockWaitMs } : {}) };
 }

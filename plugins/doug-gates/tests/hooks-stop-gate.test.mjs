@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { writeFileSync, appendFileSync, mkdirSync, readFileSync, existsSync, mkdtempSync, rmSync } from "node:fs";
+import { writeFileSync, appendFileSync, mkdirSync, readFileSync, existsSync, mkdtempSync, rmSync, readdirSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { join, dirname, basename } from "node:path";
@@ -10,12 +10,70 @@ import { makeProject, runHookScript } from "./helpers.mjs";
 // own header comment for that precedent).
 import { applyProposal, unifiedDiff } from "../../doug-flow/lib/learn.mjs";
 import { baseConfig } from "./hooks-fixtures.mjs";
+import { isAppliedContent } from "../lib/proposals.mjs";
 
 describe("stop-gate", () => {
   it("allows when nothing was edited", () => {
     const dir = makeProject({ config: baseConfig, git: true });
     const r = runHookScript("stop-gate", { hook_event_name: "Stop", stop_hook_active: false }, { dir });
     expect(r.json).toBeNull();
+  });
+  describe("per-card plans (card parallel-card-queens, B7)", () => {
+    const cardPlan = (id, files, extra = {}) => ({ version: 1, title: `Card ${id}`, status: "approved", card: id, tasks: [{ id: `${id}-t`, files }], ...extra });
+    const put = (dir, name, body) => {
+      mkdirSync(join(dir, ".doug/plans"), { recursive: true });
+      writeFileSync(join(dir, ".doug/plans", name), typeof body === "string" ? body : JSON.stringify(body));
+    };
+    it("S01 with no .doug/plan.json, a file outside both approved per-card plans blocks; files they own do not", () => {
+      const dir = makeProject({ config: baseConfig, git: true });
+      put(dir, "a.json", cardPlan("a", ["owned-a.txt"]));
+      put(dir, "b.json", cardPlan("b", ["owned-b.txt"]));
+      runHookScript("session-start-baseline", { hook_event_name: "SessionStart", source: "startup" }, { dir });
+      writeFileSync(join(dir, "owned-a.txt"), "x");
+      writeFileSync(join(dir, "owned-b.txt"), "x");
+      writeFileSync(join(dir, "stray.txt"), "x");
+      const r = runHookScript("stop-gate", { hook_event_name: "Stop" }, { dir });
+      expect(r.json.decision).toBe("block");
+      expect(r.json.reason).toContain("stray.txt");
+      const state = JSON.parse(readFileSync(join(dir, ".doug/.state/test-session.json"), "utf8"));
+      expect(state.lastGate.scope.outOfScope).toEqual(["stray.txt"]);
+    });
+    it("S02 a landed per-card plan holds no scope", () => {
+      const dir = makeProject({ config: baseConfig, git: true });
+      put(dir, "a.json", cardPlan("a", ["owned-a.txt"]));
+      put(dir, "old.json", cardPlan("old", ["old.txt"], { status: "done", landed: { at: "2026-09-04T16:00:00.000Z", mergeCommit: "abc1234" } }));
+      runHookScript("session-start-baseline", { hook_event_name: "SessionStart", source: "startup" }, { dir });
+      writeFileSync(join(dir, "old.txt"), "x");
+      const r = runHookScript("stop-gate", { hook_event_name: "Stop" }, { dir });
+      expect(r.json.decision).toBe("block");
+      const state = JSON.parse(readFileSync(join(dir, ".doug/.state/test-session.json"), "utf8"));
+      expect(state.lastGate.scope.outOfScope).toEqual(["old.txt"]);
+    });
+    it("S03 an unreadable per-card plan fails open: the hook exits 0 and prints the scope-not-checked note", () => {
+      const dir = makeProject({ config: baseConfig, git: true });
+      put(dir, "bad.json", "{ nope");
+      runHookScript("session-start-baseline", { hook_event_name: "SessionStart", source: "startup" }, { dir });
+      writeFileSync(join(dir, "stray.txt"), "x");
+      const r = runHookScript("stop-gate", { hook_event_name: "Stop" }, { dir });
+      expect(r.status).toBe(0);
+      expect(r.stderr || "").toContain("scope not checked");
+      expect(r.stderr || "").not.toMatch(/TypeError|at .*\.mjs:\d+/);
+    });
+  });
+  describe("per-card plan fail-open (card parallel-card-queens, B7 fix pass)", () => {
+    it("a valid per-card plan next to a corrupt one: scope is not checked, the note names the corrupt file", () => {
+      const dir = makeProject({ config: baseConfig, git: true });
+      mkdirSync(join(dir, ".doug/plans"), { recursive: true });
+      writeFileSync(join(dir, ".doug/plans/a.json"), JSON.stringify({ version: 1, title: "Card a", status: "approved", card: "a", tasks: [{ id: "a-t", files: ["owned-a.txt"] }] }));
+      writeFileSync(join(dir, ".doug/plans/b.json"), "{ nope");
+      runHookScript("session-start-baseline", { hook_event_name: "SessionStart", source: "startup" }, { dir });
+      writeFileSync(join(dir, "owned-b.txt"), "x");
+      const r = runHookScript("stop-gate", { hook_event_name: "Stop" }, { dir });
+      expect(r.status).toBe(0);
+      expect(r.stderr || "").toContain(".doug/plans/b.json is unreadable");
+      expect(r.stderr || "").toContain("scope not checked");
+      expect((r.json && r.json.reason) || "").not.toContain("owned-b.txt");
+    });
   });
   describe("baseline of already-dirty paths (card stop-gate-waiting-on-subagents)", () => {
     const withEvidence = { ...baseConfig, stopGate: { ...baseConfig.stopGate, requireEvidence: true } };
@@ -278,6 +336,90 @@ describe("stop-gate", () => {
 
       const r = runHookScript("stop-gate", { hook_event_name: "Stop" }, { dir });
       expect(r.json).toBeNull();
+    });
+    // Card ledger-two-committed-applies: with both applies committed, the second diff's preimage (v1) is
+    // neither the session baseline nor HEAD, so it must be re-derived onto each commit that touched the target.
+    const sha = (s) => createHash("sha256").update(s).digest("hex");
+    const sequentialApplies = (dir, relPath, versions) => {
+      const diffDir = join(dir, ".doug/.state/learn/manual");
+      mkdirSync(diffDir, { recursive: true });
+      const diffPaths = [];
+      let prev = "";
+      versions.forEach((v, i) => {
+        const diffPath = join(diffDir, `0${i + 1}-decision.diff`);
+        writeFileSync(diffPath, unifiedDiff(relPath, prev, v));
+        expect(applyProposal(diffPath, { dir })).toEqual({ ok: true, target: relPath });
+        commitAll(dir, `apply v${i + 1}`);
+        diffPaths.push(diffPath);
+        prev = v;
+      });
+      return diffPaths;
+    };
+    it("two sequential approved applies on the same ADR, both committed in-session, pass", () => {
+      const dir = makeProject({ config: baseConfig, git: true });
+      commitAll(dir, "base");
+      runHookScript("session-start-baseline", { hook_event_name: "SessionStart", source: "startup" }, { dir });
+      const v1 = "# 0007. applied\n";
+      const v2 = `${v1}\n## Amendment\n\nMore text.\n`;
+      sequentialApplies(dir, "docs/decisions/0007-applied.md", [v1, v2]);
+      const r = runHookScript("stop-gate", { hook_event_name: "Stop" }, { dir });
+      expect(r.json).toBeNull();
+    });
+    it("three sequential approved applies on the same ADR, each committed in-session, pass", () => {
+      const dir = makeProject({ config: baseConfig, git: true });
+      commitAll(dir, "base");
+      runHookScript("session-start-baseline", { hook_event_name: "SessionStart", source: "startup" }, { dir });
+      const v1 = "# 0007. applied\n";
+      const v2 = `${v1}\n## Amendment\n\nMore text.\n`;
+      const v3 = `${v2}\n## Second amendment\n\nEven more text.\n`;
+      sequentialApplies(dir, "docs/decisions/0007-applied.md", [v1, v2, v3]);
+      const r = runHookScript("stop-gate", { hook_event_name: "Stop" }, { dir });
+      expect(r.json).toBeNull();
+    });
+    // Reviewer MAJOR (card ledger-two-committed-applies): `base` is agent-writable state, so it must never reach
+    // git unvalidated - a value like "--output=<path>" made git write a file instead of naming a revision.
+    it("an option-shaped base never reaches git: no file is created, the base is dropped", () => {
+      const dir = makeProject({ config: baseConfig, git: true });
+      commitAll(dir, "base");
+      const relPath = "docs/decisions/0007-applied.md";
+      const v1 = "# 0007. applied\n";
+      const v2 = `${v1}\n## Amendment\n\nMore text.\n`;
+      sequentialApplies(dir, relPath, [v1, v2]);
+      const out = mkdtempSync(join(tmpdir(), "doug-base-probe-"));
+      try {
+        let result;
+        expect(() => {
+          result = isAppliedContent(dir, relPath, { base: `--output=${join(out, "x")}` });
+        }).not.toThrow();
+        expect(result).toBe(false); // base dropped: HEAD already holds v2, so v2's diff cannot apply onto it
+        expect(readdirSync(out)).toEqual([]);
+      } finally {
+        rmSync(out, { recursive: true, force: true });
+      }
+    });
+    it("a hand-edited file with a forged ledger row still blocks after two committed applies", () => {
+      const dir = makeProject({ config: baseConfig, git: true });
+      commitAll(dir, "base");
+      runHookScript("session-start-baseline", { hook_event_name: "SessionStart", source: "startup" }, { dir });
+      const relPath = "docs/decisions/0007-applied.md";
+      const v1 = "# 0007. applied\n";
+      const v2 = `${v1}\n## Amendment\n\nMore text.\n`;
+      const [, diffPath2] = sequentialApplies(dir, relPath, [v1, v2]);
+      const edited = `${v2}\nHand edited, never proposed.\n`;
+      writeFileSync(join(dir, relPath), edited);
+      commitAll(dir, "hand edit");
+      const forged = {
+        target: relPath,
+        sha256: sha(edited),
+        diffSha256: sha(readFileSync(diffPath2)),
+        at: new Date().toISOString(),
+        proposal: ".doug/.state/learn/manual/02-decision.diff",
+      };
+      appendFileSync(join(dir, ".doug/.state/proposals/applied.jsonl"), `${JSON.stringify(forged)}\n`);
+      const r = runHookScript("stop-gate", { hook_event_name: "Stop" }, { dir });
+      expect(r.json.decision).toBe("block");
+      expect(r.json.reason).toContain("Decisions/rules were written outside the proposal path");
+      expect(r.json.reason).toContain(relPath);
     });
     it("a gitignored .claude/rules file written by hand blocks; one already there, untouched, does not", () => {
       const dir = makeProject({ config: baseConfig, git: true });
@@ -1117,5 +1259,422 @@ describe("stop-gate", () => {
       expect(checkpointIdx).toBeGreaterThanOrEqual(0);
       expect(noticeIdx).toBeGreaterThan(checkpointIdx);
     });
+  });
+});
+
+// Card landing-block-enforced: board.mjs record/summary leave .doug/.state/reports/<id>/landing-block.txt and an
+// empty landing-block.pending; a main-agent Stop blocks until the final message carries every line of each pending
+// block, deletes the marker once it has checked, and fails open on anything unreadable.
+describe("stop-gate landing block (card landing-block-enforced)", () => {
+  const BLOCK = [
+    "Changed: Doug now prints a landing block when a card lands.",
+    "Outcome: landed demo-card at abc1234, 5 min, typecheck 0; unit 1 passed, $1.40",
+    "Learned: nothing new",
+  ];
+  const BLOCK2 = [
+    "Changed: A second card also lands.",
+    "Outcome: landed other-card at def5678, 7 min, acceptance 2/2",
+    "Learned: The fixture needed three items.",
+  ];
+  const setup = (opts = {}) => {
+    const dir = makeProject({ config: opts.config || baseConfig, git: true });
+    return dir;
+  };
+  const arm = (dir, id, lines = BLOCK, { pending = true, text = true, content = "" } = {}) => {
+    const d = join(dir, ".doug/.state/reports", id);
+    mkdirSync(d, { recursive: true });
+    if (text) writeFileSync(join(d, "landing-block.txt"), lines.join("\n") + "\n");
+    if (pending) writeFileSync(join(d, "landing-block.pending"), content);
+    return d;
+  };
+  const stop = (dir, message, extra = {}) => runHookScript("stop-gate", { hook_event_name: "Stop", ...(message === undefined ? {} : { last_assistant_message: message }), ...extra }, { dir });
+  const pendingOf = (dir, id) => join(dir, ".doug/.state/reports", id, "landing-block.pending");
+
+  it("G1: blocks a finishing turn whose final message lacks the block, naming the card and quoting the lines to paste", () => {
+    const dir = setup();
+    arm(dir, "demo-card");
+    const r = stop(dir, "All done, landed it.");
+    expect(r.json && r.json.decision).toBe("block");
+    expect(r.json.reason.startsWith("Landing block missing from your final message for demo-card.")).toBe(true);
+    for (const line of BLOCK) expect(r.json.reason).toContain(line);
+  });
+  it("G1: blocks the same way after an edited, green turn (the landing check sits before the final allow of the main path)", () => {
+    const dir = setup();
+    writeFileSync(join(dir, ".gitignore"), ".doug/.state/\n");
+    writeFileSync(join(dir, "a.txt"), "edited");
+    runHookScript("edit-loop", { tool_name: "Edit", tool_input: { file_path: "a.txt" } }, { dir });
+    arm(dir, "demo-card");
+    const r = stop(dir, "Landed.");
+    expect(r.json && r.json.decision).toBe("block");
+    expect(r.json.reason).toContain("Landing block missing from your final message for demo-card.");
+  });
+  it("G2: allows when the final message contains the whole block, surrounded by other text", () => {
+    const dir = setup();
+    arm(dir, "demo-card");
+    const r = stop(dir, `Done.\n\n${BLOCK.join("\n")}\n\nNext card?`);
+    expect(r.json && r.json.decision).not.toBe("block");
+  });
+  it("G7: a final message with the Changed line but not the Outcome line is still blocked", () => {
+    const dir = setup();
+    arm(dir, "demo-card");
+    const r = stop(dir, `${BLOCK[0]}\n${BLOCK[2]}\n`);
+    expect(r.json && r.json.decision).toBe("block");
+    expect(r.json.reason).toContain(BLOCK[1]);
+  });
+  it("G7: a message with only the Changed line is blocked", () => {
+    const dir = setup();
+    arm(dir, "demo-card");
+    const r = stop(dir, BLOCK[0]);
+    expect(r.json && r.json.decision).toBe("block");
+  });
+  it("G3: the pending marker is deleted after a check that blocked, so the next Stop allows without the block", () => {
+    const dir = setup();
+    arm(dir, "demo-card");
+    expect(stop(dir, "no block here").json.decision).toBe("block");
+    expect(existsSync(pendingOf(dir, "demo-card"))).toBe(false);
+    const again = stop(dir, "still no block here");
+    expect(again.json && again.json.decision).not.toBe("block");
+  });
+  it("G3: the pending marker is deleted after a check that allowed", () => {
+    const dir = setup();
+    arm(dir, "demo-card");
+    const r = stop(dir, BLOCK.join("\n"));
+    expect(r.json && r.json.decision).not.toBe("block");
+    expect(existsSync(pendingOf(dir, "demo-card"))).toBe(false);
+    expect(existsSync(join(dir, ".doug/.state/reports/demo-card/landing-block.txt"))).toBe(true);
+  });
+  it("G6: with no pending marker nothing happens, even when a block file sits there", () => {
+    const dir = setup();
+    arm(dir, "demo-card", BLOCK, { pending: false });
+    const r = stop(dir, "no block in this message");
+    expect(r.json).toBeNull();
+  });
+  it("G6: a project with no reports directory at all is unchanged", () => {
+    const dir = setup();
+    const r = stop(dir, "anything");
+    expect(r.json).toBeNull();
+    expect(r.stderr || "").not.toContain("landing-block check skipped");
+  });
+  it("several pending cards: one block naming each card, and every block's lines", () => {
+    const dir = setup();
+    arm(dir, "demo-card");
+    arm(dir, "other-card", BLOCK2);
+    const r = stop(dir, "Landed both.");
+    expect(r.json && r.json.decision).toBe("block");
+    expect(r.json.reason).toContain("demo-card");
+    expect(r.json.reason).toContain("other-card");
+    for (const line of [...BLOCK, ...BLOCK2]) expect(r.json.reason).toContain(line);
+    expect(existsSync(pendingOf(dir, "demo-card"))).toBe(false);
+    expect(existsSync(pendingOf(dir, "other-card"))).toBe(false);
+  });
+  it("several pending cards: only the missing one is named when the other's block is in the message", () => {
+    const dir = setup();
+    arm(dir, "demo-card");
+    arm(dir, "other-card", BLOCK2);
+    const r = stop(dir, BLOCK.join("\n"));
+    expect(r.json && r.json.decision).toBe("block");
+    expect(r.json.reason).toContain("other-card");
+    expect(r.json.reason).toContain(BLOCK2[1]);
+    expect(r.json.reason).not.toContain(BLOCK[1]);
+  });
+  it("G4: fails open when the block file is missing: allows, one stderr line, marker not left to loop", () => {
+    const dir = setup();
+    arm(dir, "demo-card", BLOCK, { text: false });
+    const r = stop(dir, "no block");
+    expect(r.status).toBe(0);
+    expect(r.json && r.json.decision).not.toBe("block");
+    expect(r.stderr).toContain("[doug] landing-block check skipped:");
+  });
+  it("G4: fails open when the block file is unreadable (a directory where the file should be)", () => {
+    const dir = setup();
+    const d = arm(dir, "demo-card", BLOCK, { text: false });
+    mkdirSync(join(d, "landing-block.txt"));
+    const r = stop(dir, "no block");
+    expect(r.status).toBe(0);
+    expect(r.json && r.json.decision).not.toBe("block");
+    expect(r.stderr).toContain("[doug] landing-block check skipped:");
+  });
+  it("G4: fails open when last_assistant_message is missing or not a string", () => {
+    for (const message of [undefined, 42, null, { text: "x" }]) {
+      const dir = setup();
+      arm(dir, "demo-card");
+      const r = stop(dir, undefined, message === undefined ? {} : { last_assistant_message: message });
+      expect(r.status, JSON.stringify(message)).toBe(0);
+      expect(r.json && r.json.decision, JSON.stringify(message)).not.toBe("block");
+      expect(r.stderr, JSON.stringify(message)).toContain("[doug] landing-block check skipped:");
+    }
+  });
+  it("G5: a SubagentStop ignores pending markers: no block, and the marker is left for the lead's Stop", () => {
+    const dir = setup();
+    arm(dir, "demo-card");
+    const r = runHookScript("stop-gate", { hook_event_name: "SubagentStop", agent_id: "ag1", agent_type: "Explore", last_assistant_message: "no block" }, { dir });
+    expect(r.json && r.json.decision).not.toBe("block");
+    expect(existsSync(pendingOf(dir, "demo-card"))).toBe(true);
+    const lead = stop(dir, "no block");
+    expect(lead.json && lead.json.decision).toBe("block");
+  });
+  it("stop_hook_active allows without blocking, so a block happens at most once per stop cycle", () => {
+    const dir = setup();
+    arm(dir, "demo-card");
+    const r = stop(dir, "no block", { stop_hook_active: true });
+    expect(r.json && r.json.decision).not.toBe("block");
+  });
+  it("a red gate keeps its own block reason; the landing check never masks it", () => {
+    const dir = setup({ config: { ...baseConfig, commands: { test: "node -e \"process.exit(1)\"" } } });
+    writeFileSync(join(dir, ".gitignore"), ".doug/.state/\n");
+    writeFileSync(join(dir, "a.txt"), "edited");
+    runHookScript("edit-loop", { tool_name: "Edit", tool_input: { file_path: "a.txt" } }, { dir });
+    arm(dir, "demo-card");
+    const r = stop(dir, "Landed.");
+    expect(r.json && r.json.decision).toBe("block");
+    expect(r.json.reason).not.toContain("Landing block missing");
+  });
+
+  // Round 2 (briefs/4-round2.md).
+  // F1: the check runs only on a main Stop's plain allow exits. A systemMessage exit (block-cap stand-down, turn-budget
+  // stand-down, deferral notice) returns its own text unchanged and leaves the marker for a later plain allow.
+  const editedProject = (config) => {
+    const dir = setup({ config });
+    writeFileSync(join(dir, ".gitignore"), ".doug/.state/\n");
+    writeFileSync(join(dir, "a.txt"), "edited");
+    runHookScript("edit-loop", { tool_name: "Edit", tool_input: { file_path: "a.txt" } }, { dir });
+    return dir;
+  };
+  const patchState = (dir, patch, session = "test-session") => {
+    const f = join(dir, ".doug/.state", `${session}.json`);
+    const cur = existsSync(f) ? JSON.parse(readFileSync(f, "utf8")) : {};
+    mkdirSync(dirname(f), { recursive: true });
+    writeFileSync(f, JSON.stringify({ ...cur, ...patch }));
+  };
+  it("F1a: red at the block cap returns the stand-down systemMessage, not the landing reason, and the marker stays", () => {
+    const dir = editedProject({ ...baseConfig, commands: { test: "node -e \"process.exit(1)\"" } });
+    patchState(dir, { stopBlocks: 3 });
+    arm(dir, "demo-card");
+    const r = stop(dir, "Landed.");
+    expect(r.json && r.json.decision).not.toBe("block");
+    expect(r.json && r.json.systemMessage).toContain("standing down");
+    expect(r.json.systemMessage).not.toContain("Landing block");
+    expect(existsSync(pendingOf(dir, "demo-card")), "a stand-down exit must not consume the marker").toBe(true);
+  });
+  it("F1b: turn budget exceeded returns its own message, and the marker stays", () => {
+    const dir = setup({ config: { ...baseConfig, budget: { maxTurns: 1 } } });
+    patchState(dir, { turns: 5 });
+    arm(dir, "demo-card");
+    const r = stop(dir, "Landed.");
+    expect(r.json && r.json.decision).not.toBe("block");
+    expect(r.json && r.json.systemMessage).toContain("Turn budget of 1 exceeded");
+    expect(r.json.systemMessage).not.toContain("Landing block");
+    expect(existsSync(pendingOf(dir, "demo-card"))).toBe(true);
+  });
+  it("F1c: the deferral notice is returned unchanged and the marker stays", () => {
+    const cfg = { ...baseConfig, trace: { enabled: true } };
+    const dir = setup({ config: cfg });
+    mkdirSync(join(dir, "src"));
+    writeFileSync(join(dir, "src/a.ts"), "base");
+    execFileSync("git", ["add", "-A"], { cwd: dir });
+    execFileSync("git", ["commit", "-q", "-m", "base"], { cwd: dir });
+    writeFileSync(join(dir, "src/a.ts"), "edited this session");
+    runHookScript("edit-loop", { tool_name: "Edit", tool_input: { file_path: "src/a.ts" } }, { dir });
+    const tf = join(dir, ".doug/.state/trace/test-session.jsonl");
+    mkdirSync(dirname(tf), { recursive: true });
+    writeFileSync(tf, JSON.stringify({ t: new Date().toISOString(), event: "SubagentStart", session: "test-session", agent: "ag1", agentType: "coder" }) + "\n");
+    arm(dir, "demo-card");
+    const r = stop(dir, "Landed.");
+    expect(r.json && r.json.decision).not.toBe("block");
+    expect(r.json && r.json.systemMessage.toLowerCase()).toContain("deferred");
+    expect(r.json.systemMessage).not.toContain("Landing block");
+    expect(existsSync(pendingOf(dir, "demo-card"))).toBe(true);
+  });
+  it("F1d: after a stand-down kept the marker, a later plain allow checks it and blocks", () => {
+    const dir = setup({ config: { ...baseConfig, budget: { maxTurns: 1 } } });
+    patchState(dir, { turns: 5 });
+    arm(dir, "demo-card");
+    expect(stop(dir, "Landed.").json.systemMessage).toContain("Turn budget");
+    // Budget lifted: the next plain allow is a check.
+    writeFileSync(join(dir, ".doug/config.json"), JSON.stringify(baseConfig));
+    const r = stop(dir, "Landed.");
+    expect(r.json && r.json.decision).toBe("block");
+    expect(r.json.reason).toContain("Landing block missing from your final message for demo-card.");
+  });
+
+  // F4: a non-string final message leaves the marker (it is not consumed unchecked).
+  it("F4b: a missing, null, or numeric last_assistant_message leaves the pending marker in place and allows with the skip line", () => {
+    for (const message of [undefined, null, 42]) {
+      const dir = setup();
+      arm(dir, "demo-card");
+      const r = stop(dir, undefined, message === undefined ? {} : { last_assistant_message: message });
+      expect(r.json && r.json.decision, String(message)).not.toBe("block");
+      expect(r.stderr, String(message)).toContain("[doug] landing-block check skipped:");
+      expect(existsSync(pendingOf(dir, "demo-card")), `marker kept for ${String(message)}`).toBe(true);
+    }
+  });
+
+  // F5: markers are per session; the content is the session id that armed them, empty when unknown.
+  it("F5a: a marker holding another session's id is ignored and kept", () => {
+    const dir = setup();
+    arm(dir, "demo-card", BLOCK, { content: "other-session" });
+    const r = stop(dir, "no block here", { session_id: "s1" });
+    expect(r.json && r.json.decision).not.toBe("block");
+    expect(existsSync(pendingOf(dir, "demo-card"))).toBe(true);
+    expect(readFileSync(pendingOf(dir, "demo-card"), "utf8")).toBe("other-session");
+  });
+  it("F5a: a marker holding this session's id is checked: blocks without the block, and is consumed", () => {
+    const dir = setup();
+    arm(dir, "demo-card", BLOCK, { content: "s1" });
+    const r = stop(dir, "no block here", { session_id: "s1" });
+    expect(r.json && r.json.decision).toBe("block");
+    expect(existsSync(pendingOf(dir, "demo-card"))).toBe(false);
+  });
+  it("F5a: a marker holding this session's id allows when the block is shown", () => {
+    const dir = setup();
+    arm(dir, "demo-card", BLOCK, { content: "s1" });
+    const r = stop(dir, BLOCK.join("\n"), { session_id: "s1" });
+    expect(r.json && r.json.decision).not.toBe("block");
+    expect(existsSync(pendingOf(dir, "demo-card"))).toBe(false);
+  });
+  it("F5a: an empty marker is checked by any session", () => {
+    const dir = setup();
+    arm(dir, "demo-card", BLOCK, { content: "" });
+    const r = stop(dir, "no block here", { session_id: "s1" });
+    expect(r.json && r.json.decision).toBe("block");
+  });
+  it("F5a: only the foreign marker is skipped when two cards are pending in different sessions", () => {
+    const dir = setup();
+    arm(dir, "demo-card", BLOCK, { content: "s1" });
+    arm(dir, "other-card", BLOCK2, { content: "other-session" });
+    const r = stop(dir, "nothing", { session_id: "s1" });
+    expect(r.json && r.json.decision).toBe("block");
+    expect(r.json.reason).toContain("demo-card");
+    expect(r.json.reason).not.toContain("other-card");
+    expect(existsSync(pendingOf(dir, "other-card"))).toBe(true);
+  });
+});
+
+// Card landing-block-shown-on-deferral: a stand-down or deferral exit keeps its text unchanged, and deletes a
+// pending marker (owned by this session or by none) whose whole block is in the final message; a marker whose
+// block is missing, or that belongs to another session, stays.
+describe("stop-gate landing block on a deferral or stand-down (card landing-block-shown-on-deferral)", () => {
+  const BLOCK = [
+    "Changed: Doug now prints a landing block when a card lands.",
+    "Outcome: landed demo-card at abc1234, 5 min, typecheck 0; unit 1 passed, $1.40",
+    "Learned: nothing new",
+  ];
+  const arm = (dir, id, { content = "", lines = BLOCK } = {}) => {
+    const d = join(dir, ".doug/.state/reports", id);
+    mkdirSync(d, { recursive: true });
+    writeFileSync(join(d, "landing-block.txt"), lines.join("\n") + "\n");
+    writeFileSync(join(d, "landing-block.pending"), content);
+  };
+  const pendingOf = (dir, id) => join(dir, ".doug/.state/reports", id, "landing-block.pending");
+  const stop = (dir, message, extra = {}) => runHookScript("stop-gate", { hook_event_name: "Stop", last_assistant_message: message, ...extra }, { dir });
+  // A deferral: an edited tracked file plus a SubagentStart with no stop in this session's trace.
+  const deferralProject = () => {
+    const dir = makeProject({ config: { ...baseConfig, trace: { enabled: true } }, git: true });
+    mkdirSync(join(dir, "src"));
+    writeFileSync(join(dir, "src/a.ts"), "base");
+    execFileSync("git", ["add", "-A"], { cwd: dir });
+    execFileSync("git", ["commit", "-q", "-m", "base"], { cwd: dir });
+    writeFileSync(join(dir, "src/a.ts"), "edited this session");
+    runHookScript("edit-loop", { tool_name: "Edit", tool_input: { file_path: "src/a.ts" } }, { dir });
+    const tf = join(dir, ".doug/.state/trace/test-session.jsonl");
+    mkdirSync(dirname(tf), { recursive: true });
+    writeFileSync(tf, JSON.stringify({ t: new Date().toISOString(), event: "SubagentStart", session: "test-session", agent: "ag1", agentType: "coder" }) + "\n");
+    return { dir, tf };
+  };
+  const shown = `Landed.\n\n${BLOCK.join("\n")}\n\nNext?`;
+
+  it("(a) deferral exit with the whole block shown deletes the marker and leaves the output unchanged", () => {
+    const base = deferralProject();
+    const baseline = stop(base.dir, shown);
+    expect(baseline.json && baseline.json.systemMessage.toLowerCase()).toContain("deferred");
+    const { dir } = deferralProject();
+    arm(dir, "demo-card");
+    const r = stop(dir, shown);
+    expect(r.json).toEqual(baseline.json);
+    expect(r.status).toBe(0);
+    expect(existsSync(pendingOf(dir, "demo-card")), "a shown block must consume the marker on a deferral exit").toBe(false);
+  });
+  it("(b) deferral exit with a block line missing keeps the marker and leaves the output unchanged", () => {
+    const base = deferralProject();
+    const baseline = stop(base.dir, "Landed.");
+    const { dir } = deferralProject();
+    arm(dir, "demo-card");
+    const r = stop(dir, `${BLOCK[0]}\n${BLOCK[2]}\n`);
+    expect(r.json).toEqual(baseline.json);
+    expect(existsSync(pendingOf(dir, "demo-card"))).toBe(true);
+  });
+  it("(c) a turn-budget stand-down with the block shown deletes the marker and leaves its text unchanged", () => {
+    const mk = () => {
+      const dir = makeProject({ config: { ...baseConfig, budget: { maxTurns: 1 } }, git: true });
+      const f = join(dir, ".doug/.state/test-session.json");
+      mkdirSync(dirname(f), { recursive: true });
+      writeFileSync(f, JSON.stringify({ turns: 5 }));
+      return dir;
+    };
+    const baseline = stop(mk(), shown);
+    expect(baseline.json && baseline.json.systemMessage).toContain("Turn budget of 1 exceeded");
+    const dir = mk();
+    arm(dir, "demo-card");
+    const r = stop(dir, shown);
+    expect(r.json).toEqual(baseline.json);
+    expect(existsSync(pendingOf(dir, "demo-card")), "a shown block must consume the marker on a stand-down exit").toBe(false);
+  });
+  it("(d) on a deferral exit another session's marker is left untouched even with its block shown", () => {
+    const { dir } = deferralProject();
+    arm(dir, "demo-card", { content: "other-session" });
+    const r = stop(dir, shown, { session_id: "test-session" });
+    expect(r.json && r.json.systemMessage.toLowerCase()).toContain("deferred");
+    expect(existsSync(pendingOf(dir, "demo-card"))).toBe(true);
+    expect(readFileSync(pendingOf(dir, "demo-card"), "utf8")).toBe("other-session");
+  });
+  it("(e) after a deferral that showed the block, a later plain stop with an unrelated message is not blocked", () => {
+    const { dir, tf } = deferralProject();
+    arm(dir, "demo-card");
+    expect(stop(dir, shown).json.systemMessage.toLowerCase()).toContain("deferred");
+    writeFileSync(tf, ""); // the subagent is gone
+    const r = stop(dir, "Something unrelated.");
+    expect(String((r.json && r.json.reason) || ""), "no landing demand").not.toContain("Landing block missing");
+    expect(r.json && r.json.decision).not.toBe("block");
+  });
+
+  // Card landing-block-repeat-deferral: a repeat deferral (same agents, same tree) exits quietly; it consumes a
+  // shown block like the other deferral exits and never blocks on a missing one.
+  const firstDeferral = () => {
+    const p = deferralProject();
+    const first = stop(p.dir, "Working.");
+    expect(first.json && first.json.systemMessage.toLowerCase(), "first stop speaks the deferral notice").toContain("deferred");
+    return p;
+  };
+  const expectRepeat = (r) => {
+    expect(r.json && r.json.systemMessage ? r.json.systemMessage.toLowerCase() : "", "second identical stop is the repeat path").not.toContain("deferred");
+  };
+  it("(r1) a repeat deferral with the block missing allows and keeps the marker", () => {
+    const { dir } = firstDeferral();
+    arm(dir, "demo-card");
+    const r = stop(dir, "Still working.");
+    expectRepeat(r);
+    expect(r.status).toBe(0);
+    expect(r.json && r.json.decision, "must not demand a block while a subagent runs").not.toBe("block");
+    expect(existsSync(pendingOf(dir, "demo-card"))).toBe(true);
+  });
+  it("(r2) a repeat deferral with the block shown allows and deletes the marker", () => {
+    const { dir } = firstDeferral();
+    arm(dir, "demo-card");
+    const r = stop(dir, shown);
+    expectRepeat(r);
+    expect(r.status).toBe(0);
+    expect(r.json && r.json.decision).not.toBe("block");
+    expect(existsSync(pendingOf(dir, "demo-card")), "a shown block must consume the marker on a repeat deferral").toBe(false);
+  });
+  it("(r3) after a repeat deferral kept the marker, a plain stop with no subagent still demands the block", () => {
+    const { dir, tf } = firstDeferral();
+    arm(dir, "demo-card");
+    const r1 = stop(dir, "Still working.");
+    expectRepeat(r1);
+    expect(existsSync(pendingOf(dir, "demo-card"))).toBe(true);
+    writeFileSync(tf, ""); // the subagent is gone
+    const r = stop(dir, "Something unrelated.");
+    expect(r.json && r.json.decision).toBe("block");
+    expect(String(r.json.reason)).toContain("Landing block missing");
   });
 });

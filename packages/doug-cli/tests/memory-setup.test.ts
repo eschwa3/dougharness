@@ -3,6 +3,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
+import { EventEmitter } from "node:events";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -119,12 +120,29 @@ afterEach(async () => {
   while (dirs.length) rmSync(dirs.pop()!, { recursive: true, force: true });
 });
 
+// Safe defaults: a temp cacheDir and an installLocal stub, so a regression that installs on an empty answer
+// cannot run the real npm install or model download. A test that passes its own deps keeps them.
 function harness(extra: { ask?: string } = {}) {
   const lines: string[] = [];
+  const installs: string[] = [];
+  const cacheDir = mkdtempSync(join(tmpdir(), "memory-setup-cache-"));
+  dirs.push(cacheDir);
   return {
     lines,
+    installs,
     text: () => lines.join("\n"),
-    deps: { out: (l: string) => void lines.push(l), isTTY: true, ask: async () => extra.ask ?? "", listTimeoutMs: 2000, embedTimeoutMs: 5000 },
+    deps: {
+      out: (l: string) => void lines.push(l),
+      isTTY: true,
+      ask: async () => extra.ask ?? "",
+      listTimeoutMs: 2000,
+      embedTimeoutMs: 5000,
+      cacheDir,
+      installLocal: async (c: string) => {
+        installs.push(c);
+        return { ok: true };
+      },
+    },
   };
 }
 
@@ -189,6 +207,7 @@ describe.skipIf(listenDenied !== "")("doug memory setup", () => {
     const mac = harness();
     const r1 = await runMemorySetup({ dir }, { ...mac.deps, endpoints: eps, platform: "darwin", ask: async () => "" });
     expect(r1.status).toBe("keyword-only");
+    expect(mac.installs).toEqual([]);
     expect(mac.text().split("\n").filter((l) => l.includes(eps[0].url)).length).toBe(1);
     expect(mac.text()).toContain("curl -fsSL https://ollama.com/install.sh | sh");
     expect(mac.text()).toContain("ollama pull embeddinggemma");
@@ -196,6 +215,7 @@ describe.skipIf(listenDenied !== "")("doug memory setup", () => {
     const r2 = await runMemorySetup({ dir }, { ...win.deps, endpoints: eps, platform: "win32" });
     expect(r2.status).toBe("keyword-only");
     expect(win.text()).toContain("irm https://ollama.com/install.ps1 | iex");
+    expect(win.installs).toEqual([]);
   });
 
   it("6: finds the one live server among three endpoints", async () => {
@@ -401,6 +421,225 @@ describe.skipIf(listenDenied !== "")("card memory-setup-dedupe-url", () => {
     await runMemorySetup({ dir, url: `${alias}/v1` }, { ...h.deps, endpoints: [ep] });
     expect(h.lines.some((l) => l.includes("Found") && l.includes("Defaultsrv") && l.includes(ep.url))).toBe(true);
     expect(h.lines.some((l) => l.includes("the given server") && l.includes(alias))).toBe(true);
+  });
+});
+
+// Card memory-bundled-embedding: the second-yes offer to install the bundled local model, made only when no
+// server runs. The new deps (cacheDir, installLocal, loadTransformers) are passed through a loosely typed bag
+// until the coder declares them on MemorySetupDeps.
+const LOCAL_ID = "onnx-community/embeddinggemma-300m-ONNX";
+const offerQuestion = (cacheDir: string) =>
+  `Or install the bundled embedding model instead: about 470 MB of runtime and 310 MB of weights (embeddinggemma q8) into ${cacheDir}. The model is under the Gemma Terms of Use: https://ai.google.dev/gemma/terms. Install it? [y/N] `;
+
+function localStub() {
+  const row = Array.from({ length: 768 }, (_, j) => (j % 5) + 1);
+  const mod = {
+    env: {} as Record<string, unknown>,
+    AutoTokenizer: { from_pretrained: async () => (texts: string[]) => ({ texts }) },
+    AutoModel: { from_pretrained: async () => async (inputs: { texts: string[] }) => ({ sentence_embedding: { tolist: () => inputs.texts.map(() => row) } }) },
+  };
+  return async () => mod;
+}
+
+function offerHarness(answers: { offer?: string; installResult?: { ok: boolean; reason?: string } }) {
+  const questions: string[] = [];
+  const installs: string[] = [];
+  const cacheDir = mkdtempSync(join(tmpdir(), "memory-setup-cache-"));
+  dirs.push(cacheDir);
+  const h = harness();
+  const deps = {
+    ...h.deps,
+    cacheDir,
+    ask: async (q: string) => {
+      questions.push(q);
+      return q.startsWith("Or install") ? (answers.offer ?? "") : "";
+    },
+    installLocal: async (c: string) => {
+      installs.push(c);
+      return answers.installResult ?? { ok: true };
+    },
+    loadTransformers: localStub(),
+  };
+  return { h, deps, questions, installs, cacheDir };
+}
+
+describe.skipIf(listenDenied !== "")("doug memory setup: the bundled local model offer", () => {
+  it("L-M11: with no server reachable on a TTY the exact offer is asked once, naming 470 MB, 310 MB, the cache dir, and the Gemma terms", async () => {
+    const eps = [await closedPort(), await closedPort()];
+    const { dir } = project();
+    const t = offerHarness({ offer: "" });
+    await runMemorySetup({ dir }, { ...t.deps, endpoints: eps } as never);
+    const offers = t.questions.filter((q) => q.startsWith("Or install"));
+    expect(offers).toEqual([offerQuestion(t.cacheDir)]);
+    expect(offers[0]).toContain("470 MB");
+    expect(offers[0]).toContain("310 MB");
+    expect(offers[0]).toContain("https://ai.google.dev/gemma/terms");
+    // the Ollama pointer comes first, unchanged
+    expect(t.h.text()).toContain("ollama pull embeddinggemma");
+  });
+
+  it("L-M12: Enter, n, no, and other non-y answers never install; declined, config untouched", async () => {
+    for (const answer of ["", "n", "N", "no", "maybe", "  "]) {
+      const eps = [await closedPort()];
+      const { dir, config } = project();
+      const before = readFileSync(config, "utf8");
+      const t = offerHarness({ offer: answer });
+      const r = await runMemorySetup({ dir }, { ...t.deps, endpoints: eps } as never);
+      expect(t.installs, `answer ${JSON.stringify(answer)}`).toEqual([]);
+      expect(r).toEqual({ status: "keyword-only", reason: "declined" });
+      expect(readFileSync(config, "utf8")).toBe(before);
+    }
+  });
+
+  it("L-M10: a reachable server never shows the offer, whether it passes or not", async () => {
+    const good = await fake({ models: [{ id: "embeddinggemma:latest" }] });
+    const empty = await fake({ models: [] });
+    const same = await fake({ models: [{ id: "embeddinggemma:latest" }], embeddings: "same" });
+    for (const ep of [good, empty, same]) {
+      const { dir } = project();
+      const t = offerHarness({ offer: "y" });
+      await runMemorySetup({ dir }, { ...t.deps, endpoints: [ep] } as never);
+      expect(t.questions.filter((q) => q.startsWith("Or install"))).toEqual([]);
+      expect(t.installs).toEqual([]);
+    }
+  });
+
+  it("L-M13: no TTY never asks the offer and never installs; the result is today's no-server line", async () => {
+    const eps = [await closedPort()];
+    const { dir, config } = project();
+    const before = readFileSync(config, "utf8");
+    const t = offerHarness({ offer: "y" });
+    const r = await runMemorySetup({ dir }, { ...t.deps, isTTY: false, endpoints: eps } as never);
+    expect(t.questions).toEqual([]);
+    expect(t.installs).toEqual([]);
+    expect(r).toEqual({ status: "keyword-only", reason: "no server reachable" });
+    expect(readFileSync(config, "utf8")).toBe(before);
+  });
+
+  it("L-M14: --yes never asks the offer and never installs", async () => {
+    const eps = [await closedPort()];
+    const { dir, config } = project();
+    const before = readFileSync(config, "utf8");
+    const t = offerHarness({ offer: "y" });
+    const r = await runMemorySetup({ dir, yes: true }, { ...t.deps, endpoints: eps } as never);
+    expect(t.questions.filter((q) => q.startsWith("Or install"))).toEqual([]);
+    expect(t.installs).toEqual([]);
+    expect(r).toEqual({ status: "keyword-only", reason: "no server reachable" });
+    expect(readFileSync(config, "utf8")).toBe(before);
+  });
+
+  it("L-M15/L-M16: a y installs into the cache dir, writes exactly { preset: local }, re-embeds lessons with the local model, prints the doctor report", async () => {
+    for (const answer of ["y", "Y", "yes"]) {
+      const eps = [await closedPort()];
+      const { dir, config } = project();
+      const m = openMemory(dir);
+      addLesson(m, { text: "a lesson to embed locally", kind: "project", source: { agent: "test" } });
+      m.close();
+      const t = offerHarness({ offer: answer });
+      const r = await runMemorySetup({ dir }, { ...t.deps, endpoints: eps } as never);
+      expect(r).toEqual({ status: "enabled", reason: "enabled" });
+      expect(t.installs).toEqual([t.cacheDir]);
+      const written = JSON.parse(readFileSync(config, "utf8"));
+      expect(written.memory.embeddings).toEqual({ preset: "local" });
+      expect(written.memory.staleDays).toBe(30);
+      expect(written.other).toEqual({ a: 1 });
+      const m2 = openMemory(dir);
+      expect(lessonsNeedingEmbedding(m2, { model: LOCAL_ID, dims: 512 })).toHaveLength(0);
+      m2.close();
+      expect(t.h.text()).toContain("Embedded 1/1 lesson(s)");
+      expect(t.h.text()).toContain("Cache:");
+    }
+  });
+
+  it("L-M18: a failed install prints the reason, returns local install failed, and leaves the config untouched", async () => {
+    const eps = [await closedPort()];
+    const { dir, config } = project();
+    const before = readFileSync(config, "utf8");
+    const t = offerHarness({ offer: "y", installResult: { ok: false, reason: "disk full" } });
+    const r = await runMemorySetup({ dir }, { ...t.deps, endpoints: eps } as never);
+    expect(t.installs).toEqual([t.cacheDir]);
+    expect(r).toEqual({ status: "keyword-only", reason: "local install failed" });
+    expect(t.h.text()).toContain("Bundled model install failed: disk full");
+    expect(readFileSync(config, "utf8")).toBe(before);
+  });
+});
+
+describe.skipIf(listenDenied !== "")("doug memory setup: the default local install", () => {
+  function spawnStub(code: number) {
+    const calls: { command: string; args: string[] }[] = [];
+    const impl = (command: string, args: string[]) => {
+      calls.push({ command, args });
+      const child = new EventEmitter();
+      setImmediate(() => child.emit("close", code));
+      return child;
+    };
+    return { calls, impl };
+  }
+  function transformersStub() {
+    const row = Array.from({ length: 768 }, (_, j) => (j % 5) + 1);
+    const remoteAtLoad: unknown[] = [];
+    const env: Record<string, unknown> = {};
+    const mod = {
+      env,
+      AutoTokenizer: { from_pretrained: async () => (texts: string[]) => ({ texts }) },
+      AutoModel: {
+        from_pretrained: async () => {
+          remoteAtLoad.push(env.allowRemoteModels);
+          return async (inputs: { texts: string[] }) => ({ sentence_embedding: { tolist: () => inputs.texts.map(() => row) } });
+        },
+      },
+    };
+    return { remoteAtLoad, load: async () => mod };
+  }
+
+  it("L-R8: the default install runs the runtime install then downloads the model", async () => {
+    const eps = [await closedPort()];
+    const { dir, config } = project();
+    const cacheDir = mkdtempSync(join(tmpdir(), "memory-setup-cache-"));
+    dirs.push(cacheDir);
+    const sp = spawnStub(0);
+    const tf = transformersStub();
+    const h = harness();
+    const { installLocal: _drop, ...base } = h.deps;
+    const r = await runMemorySetup({ dir }, {
+      ...base,
+      cacheDir,
+      endpoints: eps,
+      ask: async (q: string) => (q.startsWith("Or install") ? "y" : ""),
+      spawnImpl: sp.impl,
+      loadTransformers: tf.load,
+    } as never);
+    expect(sp.calls).toHaveLength(1);
+    expect(sp.calls[0].args).toContain("install");
+    expect(sp.calls[0].args).toContain("--prefix");
+    expect(tf.remoteAtLoad).toContain(true);
+    expect(JSON.parse(readFileSync(config, "utf8")).memory.embeddings).toEqual({ preset: "local" });
+    expect(r.status).toBe("enabled");
+  });
+
+  it("L-R8b: a failed runtime install prints the reason and never downloads the model", async () => {
+    const eps = [await closedPort()];
+    const { dir, config } = project();
+    const before = readFileSync(config, "utf8");
+    const cacheDir = mkdtempSync(join(tmpdir(), "memory-setup-cache-"));
+    dirs.push(cacheDir);
+    const sp = spawnStub(1);
+    const tf = transformersStub();
+    const h = harness();
+    const { installLocal: _drop, ...base } = h.deps;
+    const r = await runMemorySetup({ dir }, {
+      ...base,
+      cacheDir,
+      endpoints: eps,
+      ask: async (q: string) => (q.startsWith("Or install") ? "y" : ""),
+      spawnImpl: sp.impl,
+      loadTransformers: tf.load,
+    } as never);
+    expect(sp.calls).toHaveLength(1);
+    expect(h.text()).toContain("Bundled model install failed: ");
+    expect(tf.remoteAtLoad).toEqual([]);
+    expect(r).toEqual({ status: "keyword-only", reason: "local install failed" });
+    expect(readFileSync(config, "utf8")).toBe(before);
   });
 });
 

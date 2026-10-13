@@ -1,5 +1,10 @@
 #!/usr/bin/env node
 // CLI for the plan file. Used by the doug-plan, doug-approve, and doug-implement skills.
+//   Any command takes --card <id> (right after the command): it works on the card's plan .doug/plans/<id>.json
+//   and report .doug/.state/reports/<id>/last-report.json instead of .doug/plan.json (card parallel-card-queens)
+//   plan.mjs anchor --cards [dir]
+//                               writes .doug/anchor.md as one section per approved per-card plan, keeping the
+//                               "## Autopilot handoff" section of the old anchor
 //   plan.mjs validate [dir] [--file <path>]
 //                               exit 0 if .doug/plan.json (or the plan at --file, a card's draft) is valid, 1 with errors otherwise
 //   plan.mjs show [dir] [--file <path>]
@@ -29,8 +34,12 @@
 //                               land.deleteBranches: true in .doug/config.json) also deletes the plan's
 //                               task branches after the merge with `git branch -d`; the integration
 //                               branch is always kept
+//   plan.mjs land-card <id> --branch <b> --worktree <abs> [--base main]
+//                               land a hand card with no plan file: rebase its worktree on the base, gate the rebased
+//                               tree through verify.mjs, fast-forward the base, remove the card worktree; prints the
+//                               commit, the gate line, lockWaitMs and the removed worktrees; exit 1 on a refusal
 //   plan.mjs set <key> <value> [dir]
-//                               set install, baseBranch, integrationBranch, adversary.command,
+//                               set install, baseBranch, integrationBranch, integrationWorktree (under .claude/worktrees/), adversary.command,
 //                               adversary.fallback (<model>[/<effort>], or off), card, fixAttempts, swarm (on|off),
 //                               or workerCheck (on|off) in the plan file
 //                               (the file is what the workflow and land read; never pass these as launch args only)
@@ -44,13 +53,14 @@
 
 import { writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { loadPlan, savePlan, validatePlan, setStatus, renderPlan, levelize, withSpecHashes, loadReport, reusePlan, staleReuseErrors, REPORT_RELPATH, acceptanceEntries, humanGateLevels, planWarnings, mergePlans, draftPath, PLAN_RELPATH } from "../lib/plan.mjs";
+import { integrationWorktreeFor, loadPlan, savePlan, validatePlan, setStatus, renderPlan, levelize, withSpecHashes, loadReport, reusePlan, staleReuseErrors, REPORT_RELPATH, acceptanceEntries, humanGateLevels, planWarnings, mergePlans, draftPath, PLAN_RELPATH, PLANS_RELPATH, planPathFor, reportPathFor } from "../lib/plan.mjs";
 import { loadBoard, boardPath } from "../lib/board.mjs";
 import { loadModels, validateModelRefs, resolvePlanModels, renderModels, isModelName, EFFORTS } from "../lib/models.mjs";
 import { landPlan, INTEGRATION_WORKTREE } from "../lib/land.mjs";
+import { landCard } from "../lib/card-land.mjs";
 import { removeFinishedWorktrees, retireTaskWorktrees, retireIntegrationWorktree, branchHead, isGitRepo } from "../lib/worktrees.mjs";
 import { readMemoryConfig, readMemoryStaleDays, readIndexConfig, createProvider } from "../lib/embeddings.mjs";
-import { existsSync, readFileSync, statSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 
 // The project's install command from .doug/config.json, used when the plan does not name one.
@@ -255,9 +265,24 @@ async function attachCodeContext(plan, dir, provider) {
   }
 }
 
-const SETTABLE = ["install", "baseBranch", "integrationBranch", "adversary.command", "adversary.fallback", "card", "fixAttempts", "swarm", "workerCheck"];
+const SETTABLE = ["install", "baseBranch", "integrationBranch", "integrationWorktree", "adversary.command", "adversary.fallback", "card", "fixAttempts", "swarm", "workerCheck"];
 
-const [cmd, ...rawArgs] = process.argv.slice(2);
+const [cmd, ...argsRaw] = process.argv.slice(2);
+// --card=<id> is the same as --card <id>.
+const argsWithCard = argsRaw.flatMap((a) => (a.startsWith("--card=") ? ["--card", a.slice("--card=".length)] : [a]));
+// --card <id> (card parallel-card-queens): the command works on that card's plan .doug/plans/<id>.json and report
+// .doug/.state/reports/<id>/last-report.json instead of the single .doug/plan.json. The flag and its value are
+// stripped before any positional is read.
+const cardFlag = argsWithCard.indexOf("--card");
+const cardId = cardFlag >= 0 ? argsWithCard[cardFlag + 1] : undefined;
+const rawArgs = cardFlag >= 0 ? argsWithCard.filter((_, i) => i !== cardFlag && i !== cardFlag + 1) : argsWithCard;
+if (cardFlag >= 0 && (!cardId || cardId.startsWith("--") || !/^[A-Za-z0-9._-]+$/.test(cardId) || cardId.startsWith("."))) {
+  process.stderr.write("plan.mjs --card needs a card id (letters, digits, . _ -)\n");
+  process.exit(2);
+}
+const cardPlanRel = cardId ? planPathFor(cardId) : PLAN_RELPATH;
+const reportRel = cardId ? reportPathFor(cardId) : REPORT_RELPATH;
+const anchorCards = cmd === "anchor" && rawArgs.includes("--cards");
 // --file <path>: validate or show a plan file other than .doug/plan.json (a card's draft), relative to the project dir.
 const fileFlag = rawArgs.indexOf("--file");
 const planFile = fileFlag >= 0 && (cmd === "validate" || cmd === "show") ? rawArgs[fileFlag + 1] : undefined;
@@ -269,7 +294,7 @@ const lastDirArg = (args) => {
   const last = positional[positional.length - 1];
   return last && existsSync(last) && statSync(last).isDirectory() ? last : undefined;
 };
-const dirArg = cmd === "set" || cmd === "gate" ? restArgs.slice(2).find((a) => !a.startsWith("--")) : cmd === "merge" ? lastDirArg(restArgs) : firstNonFlag(restArgs);
+const dirArg = cmd === "land-card" ? undefined : cmd === "set" || cmd === "gate" ? restArgs.slice(2).find((a) => !a.startsWith("--")) : cmd === "merge" ? lastDirArg(restArgs) : firstNonFlag(restArgs);
 const dir = resolve(process.env.CLAUDE_PROJECT_DIR || dirArg || process.cwd());
 const deleteBranchesFlag = cmd === "land" && restArgs.includes("--delete-branches");
 const forceDoneFlag = cmd === "done" && restArgs.includes("--force");
@@ -286,8 +311,8 @@ function fail(msg, code = 1) {
   process.exit(code);
 }
 
-const plan = loadPlan(dir, planFile);
-if (!plan && cmd !== undefined && cmd !== "models" && cmd !== "merge") fail(`No plan at ${join(dir, planFile || PLAN_RELPATH)}. Run /doug-plan first.`, 2);
+const plan = anchorCards ? null : loadPlan(dir, planFile || cardPlanRel);
+if (!plan && cmd !== undefined && cmd !== "models" && cmd !== "merge" && cmd !== "land-card" && !anchorCards) fail(`No plan at ${join(dir, planFile || cardPlanRel)}. Run /doug-plan first.`, 2);
 const models = loadModels(dir);
 
 function allErrors(p) {
@@ -336,7 +361,7 @@ switch (cmd) {
     const errors = allErrors(plan);
     if (errors.length) fail("Refusing to approve an invalid plan:\n" + errors.map((e) => "  - " + e).join("\n"));
     if (plan.tasks.some((t) => t.reuse !== undefined)) {
-      const reuseErrors = staleReuseErrors(plan, loadReport(dir), { git: gitResolver });
+      const reuseErrors = staleReuseErrors(plan, loadReport(dir, reportRel), { git: gitResolver });
       if (reuseErrors.length) fail("Refusing to approve: stale reuse marks:\n" + reuseErrors.map((e) => "  - " + e).join("\n"));
     }
     if (plan.status === "approved") {
@@ -361,19 +386,19 @@ switch (cmd) {
       for (const r of retired.renamed) process.stdout.write(`  renamed branch ${r.from} to ${r.to}\n`);
     }
     printWarnings(plan);
-    savePlan(dir, setStatus(plan, "approved", new Date().toISOString()));
+    savePlan(dir, setStatus(plan, "approved", new Date().toISOString()), cardPlanRel);
     process.stdout.write(`Approved: ${plan.title}. Run /doug-implement to execute it.\n`);
     break;
   }
   case "reject": {
-    savePlan(dir, setStatus(plan, "rejected"));
+    savePlan(dir, setStatus(plan, "rejected"), cardPlanRel);
     process.stdout.write("Plan rejected. Edit it or run /doug-plan again.\n");
     break;
   }
   case "done": {
     // A run paused at a human gate has levels still to run; landing it would merge half a plan. --force does not
     // override this: a paused run genuinely has work left, unlike a stopped one that merely failed.
-    const lastReport = loadReport(dir);
+    const lastReport = loadReport(dir, reportRel);
     if (lastReport && lastReport.paused && typeof lastReport.paused.level === "number" && lastReport.plan === plan.title && plan.status === "approved") fail(`Refusing to mark the plan done: the last run is paused at the human gate after level ${lastReport.paused.level} (next: ${(lastReport.paused.next || []).join(", ")}). Open it with plan.mjs gate open ${lastReport.paused.level} and resume the run with its id, or reject the plan.`);
     // A run that stopped short (a failed level, a level adversary still blocked) or otherwise finished not-ok must
     // not be markable done: that would let land merge a broken run. --force overrides with a printed warning.
@@ -389,48 +414,89 @@ switch (cmd) {
       if (!forceDoneFlag) fail(`Refusing to mark the plan done: the last run is not ok; ${levelPart}${reasonsPart}. Re-plan with plan.mjs replan and run again, or plan.mjs done --force to override.`);
       process.stderr.write(`Warning: marking the plan done although the last run is not ok (${typeof lastReport.stoppedAtLevel === "number" ? `stopped at level ${lastReport.stoppedAtLevel}` : "finished not ok with no stopped level"}).\n`);
     }
-    savePlan(dir, setStatus(plan, "done", new Date().toISOString()));
+    savePlan(dir, setStatus(plan, "done", new Date().toISOString()), cardPlanRel);
     process.stdout.write("Plan marked done.\n");
     break;
   }
   case "anchor": {
-    const cardLines = typeof plan.card === "string" && plan.card.trim() ? [`Card: ${plan.card}`, ""] : Array.isArray(plan.cards) && plan.cards.length ? [`Cards: ${plan.cards.join(", ")}`, ""] : [];
-    const acceptanceLines = acceptanceEntries(plan.acceptance).flatMap(({ text, command }) => (command ? [`- ${text}`, `  $ ${command}`] : [`- ${text}`]));
-    const lines = [`# ${plan.title}`, "", ...cardLines, plan.goal, "", "Acceptance:", ...acceptanceLines, "", "Tasks and owned files:"];
-    for (const t of plan.tasks) lines.push(`- ${t.id}${t.card ? ` [${t.card}]` : ""}: ${t.title} -> ${t.files.join(", ")}${t.reuse ? ` (reuse ${t.reuse})` : ""}`);
-    writeFileSync(join(dir, ".doug/anchor.md"), lines.join("\n") + "\n");
+    const anchorLines = (p) => {
+      const cardLines = typeof p.card === "string" && p.card.trim() ? [`Card: ${p.card}`, ""] : Array.isArray(p.cards) && p.cards.length ? [`Cards: ${p.cards.join(", ")}`, ""] : [];
+      const acceptanceLines = acceptanceEntries(p.acceptance).flatMap(({ text, command }) => (command ? [`- ${text}`, `  $ ${command}`] : [`- ${text}`]));
+      const lines = [`# ${p.title}`, "", ...cardLines, p.goal, "", "Acceptance:", ...acceptanceLines, "", "Tasks and owned files:"];
+      for (const t of p.tasks) lines.push(`- ${t.id}${t.card ? ` [${t.card}]` : ""}: ${t.title} -> ${t.files.join(", ")}${t.reuse ? ` (reuse ${t.reuse})` : ""}`);
+      return lines;
+    };
+    if (anchorCards) {
+      // One section per approved, not-landed per-card plan; the "## Autopilot handoff" section of the old anchor is kept.
+      const plansDir = join(dir, PLANS_RELPATH);
+      const sections = [];
+      for (const name of existsSync(plansDir) ? readdirSync(plansDir).filter((f) => f.endsWith(".json")).sort() : []) {
+        const p = loadPlan(dir, `${PLANS_RELPATH}/${name}`);
+        if (p && p.status === "approved" && !p.landed) sections.push(anchorLines(p).join("\n"));
+      }
+      const anchorFile = join(dir, ".doug/anchor.md");
+      let handoff = "";
+      if (existsSync(anchorFile)) {
+        const old = readFileSync(anchorFile, "utf8");
+        const at = old.startsWith("## Autopilot handoff") ? 0 : old.indexOf("\n## Autopilot handoff");
+        if (at >= 0) {
+          const from = at === 0 ? 0 : at + 1;
+          const next = old.indexOf("\n## ", from + 1);
+          handoff = old.slice(from, next >= 0 ? next + 1 : undefined).replace(/\n*$/, "\n");
+        }
+      }
+      writeFileSync(anchorFile, [...sections.map((x) => x + "\n"), ...(handoff ? [handoff] : [])].join("\n"));
+      process.stdout.write(`Wrote .doug/anchor.md (${sections.length} card plans)\n`);
+      break;
+    }
+    writeFileSync(join(dir, ".doug/anchor.md"), anchorLines(plan).join("\n") + "\n");
     process.stdout.write("Wrote .doug/anchor.md\n");
     break;
   }
   case "land": {
     const deleteBranches = deleteBranchesFlag || configDeleteBranches(dir);
-    const r = landPlan(dir, withDefaults(plan, dir), { deleteBranches });
+    const r = landPlan(dir, withDefaults(plan, dir), { deleteBranches, ...(cardId ? { rebase: true, ownOnly: true, planRelpath: cardPlanRel } : {}) });
     if (!r.ok) fail(`Refusing to land: ${r.reason}`);
     process.stdout.write(`Landed ${r.branch} into ${r.base} as ${r.mergeCommit}.\n`);
+    process.stdout.write(`lockWaitMs ${r.lockWaitMs ?? 0}\n`);
     for (const v of r.verify) process.stdout.write(`  verify ${v.ok ? "ok" : "failed"}: ${v.command} (${v.durationMs} ms)\n`);
     for (const a of r.acceptance) process.stdout.write(`  acceptance ${a.ok ? "ok" : "failed"}: ${a.text} (${a.durationMs} ms)\n`);
     for (const p of r.worktrees.removed) process.stdout.write(`  removed worktree ${p}\n`);
     for (const k of r.worktrees.kept) process.stdout.write(`  kept worktree ${k.path}: ${k.reason}\n`);
     for (const n of r.branches.deleted) process.stdout.write(`  deleted branch ${n}\n`);
     for (const k of r.branches.kept) process.stdout.write(`  kept branch ${k.name}: ${k.reason}\n`);
-    process.stdout.write(`The branch ${r.branch} is kept; delete it when you no longer need it. Recorded in .doug/plan.json as landed.\n`);
+    process.stdout.write(`The branch ${r.branch} is kept; delete it when you no longer need it. Recorded in ${cardPlanRel} as landed.\n`);
+    break;
+  }
+  case "land-card": {
+    // plan.mjs land-card <id> --branch <b> --worktree <abs> [--base main]: land a hand card (no plan file needed).
+    const opt = (name) => {
+      const i = restArgs.indexOf(name);
+      return i >= 0 ? restArgs[i + 1] : undefined;
+    };
+    const id = restArgs.find((a, i) => !a.startsWith("--") && !(i > 0 && restArgs[i - 1].startsWith("--")));
+    const r = landCard(dir, { id, branch: opt("--branch"), worktree: opt("--worktree"), base: opt("--base") || "main" });
+    if (!r.ok) fail(`Refusing to land: ${r.reason}`);
+    process.stdout.write(`Landed ${r.id || opt("--branch")} as ${r.commit}.\n${r.gateLine}\nlockWaitMs ${r.lockWaitMs}\n`);
+    for (const p of r.removed) process.stdout.write(`  removed worktree ${p}\n`);
+    for (const k of r.kept) process.stdout.write(`  kept worktree ${k.path}: ${k.reason}\n`);
     break;
   }
   case "gate": {
     // plan.mjs gate open <level>: release the human gate after that level so a resumed run continues past it.
-    const [, action, levelArg] = process.argv.slice(2);
+    const [, action, levelArg] = [cmd, ...rawArgs];
     const gated = humanGateLevels(plan);
     if (action !== "open" || !/^\d+$/.test(String(levelArg))) fail(`usage: plan.mjs gate open <level> [dir]${gated.length ? `\nlevels with a human gate: ${gated.join(", ")}` : "\nthis plan has no human gate"}`, 2);
     if (plan.landed) fail("Refusing to change a landed plan.");
     const level = Number(levelArg);
     if (!gated.includes(level)) fail(`plan.mjs gate open: level ${level} has no human gate${gated.length ? ` (levels with one: ${gated.join(", ")})` : " (this plan has none)"}`, 2);
     const opened = [...new Set([...(plan.gatesOpened || []), level])].sort((a, b) => a - b);
-    savePlan(dir, { ...plan, gatesOpened: opened });
+    savePlan(dir, { ...plan, gatesOpened: opened }, cardPlanRel);
     process.stdout.write(`Opened the human gate after level ${level}. Resume the run with its id; levels already run replay, and the run continues with level ${level + 1}.\n`);
     break;
   }
   case "set": {
-    const [, key, value] = process.argv.slice(2);
+    const [, key, value] = [cmd, ...rawArgs];
     if (!SETTABLE.includes(key) || typeof value !== "string" || !value.trim()) fail(`usage: plan.mjs set <${SETTABLE.join("|")}> <value> [dir]`, 2);
     if (existsSync(value) && statSync(value).isDirectory()) fail(`plan.mjs set ${key}: the value ${JSON.stringify(value)} is a directory; the value comes before the optional [dir] argument.\nusage: plan.mjs set <${SETTABLE.join("|")}> <value> [dir]`, 2);
     if (plan.landed) fail("Refusing to change a landed plan.");
@@ -458,8 +524,12 @@ switch (cmd) {
       if (!/^\d+$/.test(value)) fail(`plan.mjs set fixAttempts: the value must be a non-negative integer, got ${JSON.stringify(value)}`, 2);
       next.fixAttempts = Number(value);
     } else next[key] = value;
-    savePlan(dir, next);
-    process.stdout.write(`Set ${key} in .doug/plan.json.\n`);
+    if (key === "integrationWorktree") {
+      const bad = validatePlan(next).filter((e) => e.includes("integrationWorktree"));
+      if (bad.length) fail(`plan.mjs set integrationWorktree: ${bad.join("; ")}`, 2);
+    }
+    savePlan(dir, next, cardPlanRel);
+    process.stdout.write(`Set ${key} in ${cardPlanRel}.\n`);
     break;
   }
   case "merge": {
@@ -501,10 +571,10 @@ switch (cmd) {
   }
   case "replan": {
     if (plan.landed) fail("Refusing to replan a landed plan.");
-    const report = loadReport(dir);
-    if (report === null) fail(`No report at ${REPORT_RELPATH}; run the workflow first (doug-next saves its report there).`);
+    const report = loadReport(dir, reportRel);
+    if (report === null) fail(`No report at ${reportRel}; run the workflow first (doug-next saves its report there).`);
     const { plan: next, decisions } = reusePlan(plan, report, { git: gitResolver });
-    savePlan(dir, next);
+    savePlan(dir, next, cardPlanRel);
     process.stdout.write(`Plan "${plan.title}" is a draft again.\n`);
     for (const d of decisions) {
       if (d.reuse) process.stdout.write(d.renamed ? `  ${d.id}: reuse ${d.reuse} (${d.reason})\n` : `  ${d.id}: reuse ${d.reuse}\n`);
@@ -527,11 +597,11 @@ switch (cmd) {
     // The integration worktree is cleared too: a leftover from the plan's last run must not be reused as is by
     // the next one (card integration-worktree-stale). Its branch is untouched; the workflow's first integration
     // recreates the worktree from the base branch.
-    const integrationRetired = retireIntegrationWorktree(dir);
+    const integrationRetired = retireIntegrationWorktree(dir, integrationWorktreeFor(plan));
     if (integrationRetired.removed) process.stdout.write(`  removed integration worktree ${integrationRetired.removed}\n`);
     process.stdout.write("Review it with plan.mjs show, edit .doug/plan.json if a fresh task needs a new spec, then approve.\n");
     break;
   }
   default:
-    fail("usage: plan.mjs <validate|show|json|models|approve|reject|done|anchor|land|set|replan|gate|merge> [dir]", 2);
+    fail("usage: plan.mjs <validate|show|json|models|approve|reject|done|anchor|land|land-card|set|replan|gate|merge> [dir]", 2);
 }

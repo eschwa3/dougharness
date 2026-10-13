@@ -1,8 +1,8 @@
 import { describe, it, expect } from "vitest";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { validatePlan, levelize, setStatus, renderPlan, loadPlan, savePlan, acceptanceEntries, DEFAULT_BUDGET, GATES, humanGateLevels, planWarnings, TASK_CAP, FEATURE_TASKS } from "../lib/plan.mjs";
+import { validatePlan, levelize, setStatus, renderPlan, loadPlan, savePlan, acceptanceEntries, DEFAULT_BUDGET, GATES, PLAN_RELPATH, PLANS_RELPATH, planPathFor, reportPathFor, planFor, integrationWorktreeFor, loadReport, REPORT_RELPATH, humanGateLevels, planWarnings, TASK_CAP, FEATURE_TASKS } from "../lib/plan.mjs";
 
 function plan(overrides = {}) {
   return {
@@ -439,5 +439,67 @@ describe("worker check opt-in (card swarm-topology)", () => {
     expect(renderPlan(plan({ swarm: true, workerCheck: true }))).toContain("Worker check: on (before the merge the workflow checks each swarm worker's filesTouched against its brief and that it committed; a failure is a block the lead may re-brief once)");
     expect(renderPlan(plan({ swarm: true, workerCheck: false }))).not.toContain("Worker check");
     expect(renderPlan(plan({ swarm: true }))).not.toContain("Worker check");
+  });
+});
+
+// Card parallel-card-queens, brief B2: per-card plan and report paths.
+describe("per-card plan paths (planFor)", () => {
+  const cardPlan = (title) => plan({ title });
+  function dirWith() {
+    const dir = mkdtempSync(join(tmpdir(), "doug-planfor-"));
+    mkdirSync(join(dir, ".doug"), { recursive: true });
+    return dir;
+  }
+  it("names the tracked plan path and the per-card report path", () => {
+    expect(PLANS_RELPATH).toBe(".doug/plans");
+    expect(planPathFor("alpha")).toBe(".doug/plans/alpha.json");
+    expect(reportPathFor("alpha")).toBe(".doug/.state/reports/alpha/last-report.json");
+  });
+  // Edited from the tester's version (reason: design section 0, "A stale .doug/plan.json must not be read for
+  // another card"): the old case pinned the stale fallback for a card with no per-card plan.
+  it("P04 planFor prefers the per-card plan and never reads a stale .doug/plan.json for another card", () => {
+    const dir = dirWith();
+    savePlan(dir, cardPlan("Default"));
+    savePlan(dir, cardPlan("Alpha"), planPathFor("alpha"));
+    expect(planFor(dir, "alpha").title).toBe("Alpha");
+    expect(loadPlan(dir).title).toBe("Default");
+    expect(planFor(dir, "other")).toBeNull();
+    expect(planFor(dir, undefined).title).toBe("Default");
+    expect(planFor(dir).title).toBe("Default");
+  });
+  it("P04 planFor falls back to .doug/plan.json only when that plan is the card's (card equals it, or cards include it)", () => {
+    const dir = dirWith();
+    savePlan(dir, plan({ title: "Single", card: "solo" }));
+    expect(planFor(dir, "solo").title).toBe("Single");
+    expect(planFor(dir, "other")).toBeNull();
+    savePlan(dir, plan({ title: "Batch", cards: ["one", "two"] }));
+    expect(planFor(dir, "two").title).toBe("Batch");
+    expect(planFor(dir, "three")).toBeNull();
+  });
+  it("P04 planFor is null when neither plan exists", () => {
+    expect(planFor(dirWith(), "alpha")).toBeNull();
+  });
+  it("savePlan and loadReport take a relpath and default to the single-plan paths", () => {
+    const dir = dirWith();
+    savePlan(dir, cardPlan("Alpha"), planPathFor("alpha"));
+    expect(loadPlan(dir, planPathFor("alpha")).title).toBe("Alpha");
+    expect(loadPlan(dir)).toBeNull();
+    mkdirSync(join(dir, ".doug/.state/reports/alpha"), { recursive: true });
+    writeFileSync(join(dir, reportPathFor("alpha")), JSON.stringify({ plan: "Alpha", ok: true, levels: [] }));
+    writeFileSync(join(dir, REPORT_RELPATH), JSON.stringify({ plan: "Global", ok: true, levels: [] }));
+    expect(loadReport(dir, reportPathFor("alpha")).plan).toBe("Alpha");
+    expect(loadReport(dir).plan).toBe("Global");
+    expect(PLAN_RELPATH).toBe(".doug/plan.json");
+  });
+  it("integrationWorktreeFor defaults to the fixed path and honors plan.integrationWorktree", () => {
+    expect(integrationWorktreeFor(plan())).toBe(".claude/worktrees/doug-integration");
+    expect(integrationWorktreeFor(plan({ integrationWorktree: ".claude/worktrees/doug-integration-alpha" }))).toBe(".claude/worktrees/doug-integration-alpha");
+  });
+  it("P05 validatePlan refuses an integrationWorktree outside .claude/worktrees/", () => {
+    expect(validatePlan(plan({ integrationWorktree: ".claude/worktrees/doug-integration-alpha" }))).toEqual([]);
+    for (const bad of ["/tmp/x", "../x", "src/wt", ".claude/worktrees/../escape", ".claude/worktrees", "", 5]) {
+      const errs = validatePlan(plan({ integrationWorktree: bad }));
+      expect(errs.some((e) => e.includes("integrationWorktree")), String(bad)).toBe(true);
+    }
   });
 });

@@ -77,7 +77,7 @@ export function priceUsage(usage, model) {
 
 // The transcript writes one line per content block of an API response, each carrying that response's usage (and
 // the early blocks a partial output count), so usage is taken once per message id, the largest value seen per field.
-export function transcriptUsage(file) {
+export function transcriptUsage(file, { since = null, until = null } = {}) {
   const perMessage = new Map();
   const models = new Map();
   for (const line of readFileSync(file, "utf8").split("\n")) {
@@ -90,6 +90,13 @@ export function transcriptUsage(file) {
     }
     const m = o && o.message;
     if (o.type !== "assistant" || !m || !m.usage) continue;
+    if (since !== null || until !== null) {
+      // A window (card usd-budget-size-class) keeps only the lines whose timestamp falls in it, inclusive at both
+      // ends. A line with no readable timestamp cannot be placed and is kept: counting it is the conservative
+      // choice for a budget.
+      const at = Date.parse(o.timestamp);
+      if (!Number.isNaN(at) && ((since !== null && at < since) || (until !== null && at > until))) continue;
+    }
     const id = m.id || o.requestId || o.uuid;
     const u = m.usage;
     const cur = perMessage.get(id) || { ...emptyUsage(), model: m.model || null };
@@ -468,7 +475,7 @@ export function sessionTranscriptPath({ session, claudeDir = join(homedir(), ".c
 // <slug>/<session>/subagents/, recursively (plain agents and workflows/wf_*/ agents). `session` is an id or "latest",
 // the most recently modified top-level transcript in the project's slug directory. Throws when none is found.
 // Workflow journal.jsonl files carry no usage lines and add nothing.
-export function costSession({ session, claudeDir = join(homedir(), ".claude"), projectDir = process.cwd() } = {}) {
+export function costSession({ session, claudeDir = join(homedir(), ".claude"), projectDir = process.cwd(), since = null, until = null } = {}) {
   const top = sessionTranscriptPath({ session, claudeDir, projectDir });
   const slugDir = join(claudeDir, "projects", projectSlug(projectDir));
   const id = basename(top, ".jsonl");
@@ -485,23 +492,26 @@ export function costSession({ session, claudeDir = join(homedir(), ".claude"), p
   const usage = emptyUsage();
   let usd = 0;
   let unpriced = 0;
+  let counted = 0;
+  const windowed = since !== null || until !== null;
   const notes = [];
   for (const f of files) {
-    const t = transcriptUsage(f);
+    const t = transcriptUsage(f, { since, until });
     addUsage(usage, t.usage);
     if (!t.messages) continue;
+    counted++;
     const price = t.usd;
     if (price === null) {
       unpriced++;
       notes.push(`${f}: model ${t.model || "unknown"} is not in the price table; not priced`);
     } else usd += price;
   }
-  return { session: id, files: files.length, total: { usage, usd, unpriced, agents: files.length }, pricesDated: PRICES_DATED, notes };
+  return { session: id, files: windowed ? counted : files.length, windowed, total: { usage, usd, unpriced, agents: windowed ? counted : files.length }, pricesDated: PRICES_DATED, notes };
 }
 
 export function renderSession(result) {
   const t = result.total;
-  const lines = [`Session ${result.session}: ${result.files} transcript${result.files === 1 ? "" : "s"}.`];
+  const lines = [`Session ${result.session}: ${result.files} transcript${result.files === 1 ? "" : "s"}${result.windowed ? " in window" : ""}.`];
   lines.push(`Session total: ${fmtInt(t.usage.input)} input, ${fmtInt(t.usage.output)} output, ${fmtInt(t.usage.cacheRead)} cache read, ${fmtInt(t.usage.cacheWrite)} cache write tokens; ${fmtUsd(t.usd)}${t.unpriced ? ` (${t.unpriced} transcript(s) unpriced)` : ""} at list prices dated ${result.pricesDated}.`);
   for (const n of result.notes) lines.push(`Note: ${n}.`);
   return lines.join("\n") + "\n";

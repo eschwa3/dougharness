@@ -37,6 +37,11 @@ const MAX_VERIFIED_ROWS = 20;
 // Every spawned git call gets a hard ceiling (ms) so a hung or adversarially slow git invocation cannot itself
 // become the way to blow the Stop-gate timeout (review MINOR 7).
 const GIT_TIMEOUT_MS = 5000;
+// Most commits (newest first) that touched a target since the session baseline whose parent is tried as a
+// re-derivation ref (card ledger-two-committed-applies): a bound, so a long session cannot make the walk costly.
+const MAX_PARENT_REFS = 10;
+// A git commit sha, abbreviated or full (same shape lib/baseline.mjs accepts for baselineHead).
+const GIT_SHA_RE = /^[0-9a-f]{7,64}$/;
 
 // Every well-formed line, tolerant of a missing file or a torn line (a crashed process mid-write) - never fatal.
 export function readAppliedLedger(dir) {
@@ -139,18 +144,48 @@ function diffAppliesAtRef(dir, relPath, diffAbsPath, currentSha, ref) {
   }
 }
 
+// The parents of the commits since `base` that touched relPath, newest first, capped at MAX_PARENT_REFS: each
+// `<commit>^` holds relPath as it was just before that commit, which is where an in-session apply's preimage
+// lives once a later apply is also committed (card ledger-two-committed-applies). Empty when `base` is not a
+// usable sha, or the git call fails or times out (GIT_TIMEOUT_MS); never throws.
+function parentRefsSince(dir, relPath, base) {
+  try {
+    const listed = spawnSync("git", ["rev-list", `--max-count=${MAX_PARENT_REFS}`, `${base}..HEAD`, "--", relPath], {
+      cwd: dir,
+      timeout: GIT_TIMEOUT_MS,
+      encoding: "utf8",
+    });
+    if (listed.status !== 0 || typeof listed.stdout !== "string") return [];
+    return listed.stdout
+      .split("\n")
+      .map((line) => line.trim())
+      .filter((line) => /^[0-9a-f]{7,64}$/.test(line))
+      .map((sha) => `${sha}^`);
+  } catch {
+    return [];
+  }
+}
+
 // `base` (card stop-scan-committed-changes) is the session's baseline HEAD when known, tried first: a diff
 // that created `relPath` after that baseline still applies onto "absent" even once the session has since
 // committed `relPath` itself (HEAD would otherwise already equal the current bytes, and git apply refuses to
 // create a file that already exists there). M1 fix: when the base attempt fails, HEAD is also tried before
 // giving up, not only when `base` is null/omitted - a second approved apply on the same target, committed
 // in-session after the first (so its preimage is the first version, not the pre-session base), re-derives
-// correctly onto HEAD even though it cannot re-derive onto the pre-session base at all. Every other check
+// correctly onto HEAD even though it cannot re-derive onto the pre-session base at all. Card
+// ledger-two-committed-applies: once two or more applies on one target are committed in-session, the earlier
+// ones' preimage is neither the base nor HEAD; when both fail and `base` is known, the parent of each commit
+// since `base` that touched `relPath` (parentRefsSince, newest first, capped) is tried too. Every other check
 // (row shape, containment, diffSha256, diffNamesOnly) is unchanged; this only widens which ref the content
 // re-derivation itself is allowed to succeed against.
 function diffReproducesCurrentContent(dir, relPath, diffAbsPath, currentSha, base) {
-  const refs = typeof base === "string" && base && base !== "HEAD" ? [base, "HEAD"] : ["HEAD"];
-  return refs.some((ref) => diffAppliesAtRef(dir, relPath, diffAbsPath, currentSha, ref));
+  // `base` is agent-writable state (state.baselineHead): only a hex sha ever reaches git, so a value such as
+  // "--output=<path>" is dropped here and can neither be read as an option nor name a revision.
+  const hasBase = typeof base === "string" && GIT_SHA_RE.test(base);
+  const refs = hasBase ? [base, "HEAD"] : ["HEAD"];
+  if (refs.some((ref) => diffAppliesAtRef(dir, relPath, diffAbsPath, currentSha, ref))) return true;
+  if (!hasBase) return false;
+  return parentRefsSince(dir, relPath, base).some((ref) => diffAppliesAtRef(dir, relPath, diffAbsPath, currentSha, ref));
 }
 
 // One row's full verification, wrapped so that no exception - a malformed field of any type, an unreadable
@@ -182,8 +217,9 @@ function rowIsGenuine(dir, relPath, sha, learnDirAbs, row, base) {
 // before the session started, not only against HEAD (which, once the target is committed, already equals the
 // current bytes and would make a new-file diff fail to apply there). HEAD is always tried too (M1 review
 // fix) - a second approved apply on the same target, committed in-session after the first, has the first
-// version as its preimage and can only re-derive onto HEAD, not onto the pre-session base. With `base` null
-// or omitted, only HEAD is tried, exactly as before this card.
+// version as its preimage and can only re-derive onto HEAD, not onto the pre-session base. With several applies
+// committed in-session (card ledger-two-committed-applies), the parent of each commit since `base` that touched
+// the target is tried as well. With `base` null or omitted, only HEAD is tried, exactly as before this card.
 export function isAppliedContent(dir, relPath, { base = null } = {}) {
   const sha = currentSha256(dir, relPath);
   const learnDirAbs = resolve(dir, LEARN_STATE_RELPATH);

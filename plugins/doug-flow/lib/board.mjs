@@ -62,7 +62,9 @@ export function readyCapWarning(board) {
 // autopilot-wall-cap-by-size, wall-budget-size-class). Each size has `all`; a class key is present only when its
 // cell had WALL_BUDGET_MIN_N or more landings. `board.mjs budgets --from docs/live-runs.md` recomputes it.
 export const WALL_BUDGET_MIN_N = 5;
-export const WALL_BUDGET_MIN = {"S":{"all":57,"code":53,"docs":29,"gate-script":116,"prose":50,"tests-only":66},"M":{"all":102,"code":112,"gate-script":289},"L":{"all":274}};
+// Source: `board.mjs budgets --from docs/live-runs.md` on 2026-10-12 over 373 cards with a Wall clock row (S 274, M 83, L 16;
+// rehearsal entries skipped, repeated ids summed).
+export const WALL_BUDGET_MIN = {"S":{"all":52,"code":46,"docs":29,"gate-script":112,"prose":41,"tests-only":66},"M":{"all":106,"code":90,"gate-script":157},"L":{"all":170}};
 
 // A card's budget: its size's class cell when it has one, else the size's `all`. No or an unknown size counts as M.
 export function cardBudgetMinutes(card, table = WALL_BUDGET_MIN) {
@@ -78,8 +80,9 @@ export function wallCapMinutes(cards, table = WALL_BUDGET_MIN) {
 
 // The landings in a docs/live-runs.md text: one { id, minutes } per `## <date>, <id>: <title>` section that has a
 // `| Wall clock | <n> min |` row (text after min is allowed; a decimal n is skipped) (the first such row). Older multi-column tables have no such row and are skipped.
+// Rehearsal entries are skipped, and a card with several entries is one sample, their sum.
 export function parseLiveRunWalls(text) {
-  const out = [];
+  const byId = new Map();
   let id = null;
   let seen = false;
   for (const line of String(text).split("\n")) {
@@ -90,13 +93,18 @@ export function parseLiveRunWalls(text) {
       continue;
     }
     if (id === null || seen) continue;
+    // A rehearsal entry (the fixture's run, not this repository's) is no landing of the card.
+    if (/^Rehearsal /.test(line)) {
+      id = null;
+      continue;
+    }
     const w = /^\| Wall clock \| (\d+) min(?:\s[^|]*)? \|\s*$/.exec(line);
     if (w) {
-      out.push({ id, minutes: Number(w[1]) });
+      byId.set(id, (byId.get(id) ?? 0) + Number(w[1]));
       seen = true;
     }
   }
-  return out;
+  return [...byId].map(([k, minutes]) => ({ id: k, minutes }));
 }
 
 // The table recomputed from samples joined to their cards: p80 (sorted ascending, index min(floor(0.8 n), n - 1)) per size and per size/class cell. A
@@ -124,6 +132,71 @@ export function wallBudgetTable(samples, board, { minN = WALL_BUDGET_MIN_N, fall
     }
   }
   return { table, cells };
+}
+
+// USD budget per card in dollars, a size x class table at p80 of measured cost over flow and hand landings (card
+// usd-budget-size-class), shaped like WALL_BUDGET_MIN. Each size has `all`; a class key is present only when its cell
+// had USD_BUDGET_MIN_N or more landings with a Cost row. `board.mjs budgets --usd --from docs/live-runs.md`
+// recomputes it. There is no floor: the autopilot USD cap is the sum of these over the queue.
+export const USD_BUDGET_MIN_N = 5;
+// Source: `board.mjs budgets --usd --from docs/live-runs.md` on 2026-10-11 over 19 cards with a measured Cost (rehearsal entries
+// skipped, repeated ids summed): S 5, M 10, L 4, so no class cell reached USD_BUDGET_MIN_N and each size is its all-class p80.
+// Every row so far is a flow entry, since hand entries only gain a Cost row with this card. L rests on 4 cards.
+export const USD_BUDGET = {"S":{"all":3.32},"M":{"all":15.79},"L":{"all":14.51}};
+
+// A card's USD budget: its size's class cell when it has one, else the size's `all`. No or an unknown size counts as M.
+export function cardBudgetDollars(card, table = USD_BUDGET) {
+  const size = card && (card.size === "S" || card.size === "M" || card.size === "L") ? card.size : "M";
+  const row = table[size];
+  const cls = card && card.class;
+  return typeof cls === "string" && Object.prototype.hasOwnProperty.call(row, cls) && cls !== "all" ? row[cls] : row.all;
+}
+
+export function usdCapDollars(cards, table = USD_BUDGET) {
+  return cards.reduce((sum, c) => sum + cardBudgetDollars(c, table), 0);
+}
+
+// The measured costs in a docs/live-runs.md text: one { id, usd } per `## <date>, <id>: <title>` section that has a
+// `| Cost | $<n> |` row (text after the amount is allowed; the first such row; `not measured` is skipped). Flow and hand
+// entries share the row. Rehearsal entries are skipped, and a card with several entries is one sample, their sum.
+export function parseLiveRunCosts(text) {
+  const byId = new Map();
+  let id = null;
+  let seen = false;
+  let tableSeen = false;
+  for (const line of String(text).split("\n")) {
+    if (line.startsWith("## ")) {
+      const m = /^## \d{4}-\d{2}-\d{2}, ([^:\s]+): /.exec(line);
+      id = m ? m[1] : null;
+      seen = false;
+      tableSeen = false;
+      continue;
+    }
+    if (id === null || seen) continue;
+    // A rehearsal entry (the fixture's run, not this repository's) is no landing of the card.
+    if (/^Rehearsal /.test(line)) {
+      id = null;
+      continue;
+    }
+    if (line.trim() !== "" && !line.startsWith("|") && tableSeen) {
+      // prose after the section's table ends the landing: a later Cost row belongs to no landing
+      id = null;
+      continue;
+    }
+    if (line.startsWith("|")) tableSeen = true;
+    const c = /^\| Cost \| \$(\d+(?:\.\d+)?)(?:\s[^|]*)? \|\s*$/.exec(line);
+    if (c) {
+      byId.set(id, Math.round(((byId.get(id) ?? 0) + Number(c[1])) * 100) / 100);
+      seen = true;
+    }
+  }
+  return [...byId].map(([k, usd]) => ({ id: k, usd }));
+}
+
+// usdBudgetTable is wallBudgetTable's twin over { id, usd } samples: p80 per size and per size/class cell, a class
+// cell under minN left out, an empty size keeping the fallback's `all`.
+export function usdBudgetTable(samples, board, { minN = USD_BUDGET_MIN_N, fallback = USD_BUDGET } = {}) {
+  return wallBudgetTable(samples.map((s) => ({ id: s.id, minutes: s.usd })), board, { minN, fallback });
 }
 
 function today() {
@@ -707,7 +780,14 @@ function wallRow(wall, flags) {
   return `within budget (${wall.wallMinutes ?? wallMin(longest)} min a task)${unverified}`;
 }
 
-export function runEntry({ card, report, cost = null, codexCost = null, wallClock = null, wall = null, mergeCommit = null, record = null, adversary = [], date = new Date().toISOString().slice(0, 10), batch = null, sharedCost = null, taskIds = [], note = null, rehearsal = null }) {
+// The first prose line of a rehearsal entry. The start scenario runs in an empty git repo; every other scenario
+// (start-feature included) on the ts-basic fixture, the rule rehearse-lib's rehearsalNote uses.
+function rehearsalLine(rehearsal, cardId) {
+  const where = rehearsal === "start" ? "an empty git repo" : "the ts-basic fixture";
+  return `Rehearsal ${rehearsal} for card \`${cardId}\` on ${where} (scripts/rehearse.mjs); the commit and gate below are the fixture's, not this repository's.`;
+}
+
+export function runEntry({ card, report, cost = null, codexCost = null, wallClock = null, wall = null, mergeCommit = null, record = null, adversary = [], date = new Date().toISOString().slice(0, 10), batch = null, sharedCost = null, taskIds = [], note = null, rehearsal = null, rehearsalOutcome = null }) {
   const inBatch = Array.isArray(batch) && batch.length > 1;
   if (inBatch) report = filterReportForCard(report, card.id, taskIds);
   const lines = [];
@@ -716,13 +796,13 @@ export function runEntry({ card, report, cost = null, codexCost = null, wallCloc
   const batchNote = inBatch ? `, in one plan with ${listOthers(batch, card.id)} (one approval, one run, one landing)` : "";
   lines.push(
     rehearsal
-      ? `Rehearsal ${rehearsal} for card \`${card.id}\` on the ts-basic fixture (scripts/rehearse.mjs); the commit and gate below are the fixture's, not this repository's.`
+      ? rehearsalLine(rehearsal, card.id)
       : `Ran through /doug-next on this repo from card \`${card.id}\`${record ? ` in \`${record}\`` : ""}${batchNote}. Plan "${report.plan}", integration branch \`${report.integrationBranch}\`${report.modelsSource ? `, models from ${report.modelsSource}` : ""}.`,
   );
   lines.push("");
   lines.push("| Measure | Value |");
   lines.push("|---|---|");
-  lines.push(`| Outcome | ${outcomeOf(report)}${pausedAt(report) ? `; next: ${listNext(report)}` : ""} |`);
+  lines.push(`| Outcome | ${rehearsal ? `rehearsal ${rehearsal} ${rehearsalOutcome}` : outcomeOf(report)}${!rehearsal && pausedAt(report) ? `; next: ${listNext(report)}` : ""} |`);
   lines.push(`| Cost | ${cost === null ? "not measured" : `$${Number(cost).toFixed(2)}${inBatch ? " for this card's tasks" : ""}`} |`);
   if (!inBatch || batch[0] === card.id) {
     lines.push(
@@ -794,22 +874,23 @@ export function handWallVerdict(card, wallClock, table = WALL_BUDGET_MIN) {
 
 // The live-runs entry for a hand-track card (decision 0005): no workflow report and no levels, so it records what
 // doug-hand can measure: the landing commit, the wall clock, and the gate result, plus an optional note.
-export function handEntry({ card, commit = null, wallClock = null, gate = null, note = null, record = null, date = new Date().toISOString().slice(0, 10), rehearsal = null, table = WALL_BUDGET_MIN }) {
+export function handEntry({ card, commit = null, wallClock = null, gate = null, note = null, record = null, date = new Date().toISOString().slice(0, 10), rehearsal = null, rehearsalOutcome = null, table = WALL_BUDGET_MIN, cost = null }) {
   const lines = [];
   lines.push(`## ${date}, ${card.id}: ${card.title}`);
   lines.push("");
   lines.push(
     rehearsal
-      ? `Rehearsal ${rehearsal} for card \`${card.id}\` on the ts-basic fixture (scripts/rehearse.mjs); the commit and gate below are the fixture's, not this repository's.`
+      ? rehearsalLine(rehearsal, card.id)
       : `Built by hand through doug-hand from card \`${card.id}\`${record ? ` in \`${record}\`` : ""} (hand track: a gated by-hand change); no workflow run.`,
   );
   lines.push("");
   lines.push("| Measure | Value |");
   lines.push("|---|---|");
-  lines.push(`| Outcome | ${commit ? "landed" : "not landed"} |`);
+  lines.push(`| Outcome | ${rehearsal ? `rehearsal ${rehearsal} ${rehearsalOutcome}` : commit ? "landed" : "not landed"} |`);
   const shownCommit = rehearsal && commit ? String(commit).slice(0, 7) : commit;
   lines.push(`| Commit | ${shownCommit ? `\`${shownCommit}\`` : "none"} |`);
   lines.push(`| Wall clock | ${wallClock === null ? "not measured" : wallClock} |`);
+  if (cost !== null && cost !== undefined) lines.push(`| Cost | $${Number(cost).toFixed(2)} |`);
   if (!rehearsal) lines.push(`| Wall budget | ${handWallVerdict(card, wallClock, table).text} |`);
   lines.push(`| Gate | ${gate === null ? "not recorded" : gate} |`);
   lines.push("");

@@ -1,9 +1,10 @@
 // `doug memory setup`: find a running local embedding server, verify it, and (on the user's yes) enable it in
-// .doug/config.json. Never installs anything, never runs a child process, never throws for a bad server.
+// .doug/config.json. Only when no server runs does it offer, as a second yes, to install the bundled local
+// model into the user-level cache. Never throws for a bad server.
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
-import { checkEmbeddingSanity, createProvider, DEFAULT_SANITY_PAIRS, doctorReport, loadSanityPairs, probeProvider, readMemoryConfig } from "@dougharness/flow/lib/embeddings.mjs";
+import { checkEmbeddingSanity, createProvider, DEFAULT_SANITY_PAIRS, doctorReport, downloadLocalModel, installLocalRuntime, loadSanityPairs, localCacheDir, probeProvider, readMemoryConfig } from "@dougharness/flow/lib/embeddings.mjs";
 import type { EmbeddingProvider } from "@dougharness/flow/lib/embeddings.mjs";
 import { embedLessons, openMemory } from "@dougharness/flow/lib/memory.mjs";
 
@@ -34,6 +35,10 @@ export interface MemorySetupDeps {
   out?: (line: string) => void;
   listTimeoutMs?: number;
   embedTimeoutMs?: number;
+  cacheDir?: string;
+  installLocal?: (cacheDir: string) => Promise<{ ok: boolean; reason?: string }>;
+  loadTransformers?: () => Promise<unknown>;
+  spawnImpl?: unknown;
 }
 
 export interface MemorySetupOpts {
@@ -212,6 +217,57 @@ function urlEndpoint(url: string): Endpoint {
   return { id: "url", label: "the given server", url, hint: "load or serve an embedding model in that server" };
 }
 
+type LocalOpts = { cacheDir?: string; loadTransformers?: () => Promise<unknown> };
+
+// Writes memory.embeddings into .doug/config.json, re-embeds the existing lessons, prints the doctor report.
+// provider null means the config just written names the provider (the local preset).
+async function enable(
+  dir: string,
+  provider: EmbeddingProvider | null,
+  embeddingsConfig: Record<string, unknown>,
+  out: (line: string) => void,
+  local: LocalOpts,
+): Promise<{ status: "enabled" | "keyword-only"; reason: string }> {
+  const file = join(dir, ".doug", "config.json");
+  let config: Record<string, unknown> | null = null;
+  try {
+    if (existsSync(file)) {
+      const parsed = JSON.parse(readFileSync(file, "utf8"));
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) config = parsed;
+    }
+  } catch {
+    config = null;
+  }
+  if (!config) {
+    out("run doug init first (no readable .doug/config.json).");
+    return { status: "keyword-only", reason: "no config" };
+  }
+  const memory = config.memory && typeof config.memory === "object" && !Array.isArray(config.memory) ? (config.memory as Record<string, unknown>) : {};
+  config.memory = { ...memory, embeddings: embeddingsConfig };
+  writeFileSync(file, JSON.stringify(config, null, 2) + "\n");
+  out(`Wrote memory.embeddings to ${file}.`);
+
+  try {
+    const m = openMemory(dir);
+    try {
+      const r = await embedLessons(m, provider ?? createProvider(readMemoryConfig(dir), local) as EmbeddingProvider);
+      out(`Embedded ${r.embedded}/${r.total} lesson(s)`);
+      if (r.failed) out(`${r.failed} lesson(s) failed to embed: ${r.reason}`);
+    } finally {
+      m.close();
+    }
+  } catch (err) {
+    out(`Re-embedding existing lessons failed: ${reasonOf(err)}`);
+  }
+  try {
+    const cfg = readMemoryConfig(dir);
+    out(doctorReport(cfg, await probeProvider(cfg, local)));
+  } catch (err) {
+    out(`doctor report failed: ${reasonOf(err)}`);
+  }
+  return { status: "enabled", reason: "enabled" };
+}
+
 export async function runMemorySetup(
   opts: MemorySetupOpts,
   deps: MemorySetupDeps = {},
@@ -256,7 +312,28 @@ export async function runMemorySetup(
         out("No local embedding server found. To get one, install Ollama:");
         out(`  ${cmd}`);
         out("  ollama pull embeddinggemma");
-        return keywordOnly("no server reachable");
+        if (!isTTY || opts.yes) return keywordOnly("no server reachable");
+        const cacheDir = deps.cacheDir ?? localCacheDir();
+        const answer = (
+          await ask(
+            `Or install the bundled embedding model instead: about 470 MB of runtime and 310 MB of weights (embeddinggemma q8) into ${cacheDir}. The model is under the Gemma Terms of Use: https://ai.google.dev/gemma/terms. Install it? [y/N] `,
+          )
+        )
+          .trim()
+          .toLowerCase();
+        if (!answer.startsWith("y")) return keywordOnly("declined");
+        const install =
+          deps.installLocal ??
+          (async (dir: string) => {
+            const r = await installLocalRuntime({ cacheDir: dir, spawnImpl: deps.spawnImpl });
+            return r.ok ? downloadLocalModel({ cacheDir: dir, loadTransformers: deps.loadTransformers }) : r;
+          });
+        const installed = await install(cacheDir);
+        if (!installed.ok) {
+          out(`Bundled model install failed: ${installed.reason ?? "unknown error"}`);
+          return keywordOnly("local install failed");
+        }
+        return await enable(opts.dir, null, { preset: "local" }, out, { cacheDir, loadTransformers: deps.loadTransformers });
       }
       out("No server passed verification; memory stays keyword-only.");
       return keywordOnly("no server passed verification");
@@ -288,44 +365,7 @@ export async function runMemorySetup(
       }
     }
 
-    const file = join(opts.dir, ".doug", "config.json");
-    let config: Record<string, unknown> | null = null;
-    try {
-      if (existsSync(file)) {
-        const parsed = JSON.parse(readFileSync(file, "utf8"));
-        if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) config = parsed;
-      }
-    } catch {
-      config = null;
-    }
-    if (!config) {
-      out("run doug init first (no readable .doug/config.json).");
-      return keywordOnly("no config");
-    }
-    const memory = config.memory && typeof config.memory === "object" && !Array.isArray(config.memory) ? (config.memory as Record<string, unknown>) : {};
-    config.memory = { ...memory, embeddings: { provider: "openai-compatible", baseUrl: found.baseUrl, model: found.model, dims: found.dims } };
-    writeFileSync(file, JSON.stringify(config, null, 2) + "\n");
-    out(`Wrote memory.embeddings to ${file}.`);
-
-    try {
-      const m = openMemory(opts.dir);
-      try {
-        const r = await embedLessons(m, found.provider);
-        out(`Embedded ${r.embedded}/${r.total} lesson(s)`);
-        if (r.failed) out(`${r.failed} lesson(s) failed to embed: ${r.reason}`);
-      } finally {
-        m.close();
-      }
-    } catch (err) {
-      out(`Re-embedding existing lessons failed: ${reasonOf(err)}`);
-    }
-    try {
-      const cfg = readMemoryConfig(opts.dir);
-      out(doctorReport(cfg, await probeProvider(cfg)));
-    } catch (err) {
-      out(`doctor report failed: ${reasonOf(err)}`);
-    }
-    return { status: "enabled", reason: "enabled" };
+    return await enable(opts.dir, found.provider, { provider: "openai-compatible", baseUrl: found.baseUrl, model: found.model, dims: found.dims }, out, {});
   } catch (err) {
     out(`memory setup failed: ${reasonOf(err)}`);
     return keywordOnly(reasonOf(err));

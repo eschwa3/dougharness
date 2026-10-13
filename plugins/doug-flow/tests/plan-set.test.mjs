@@ -1169,3 +1169,131 @@ describe("plan.mjs json code context", () => {
     expect(out.stderr).not.toContain("[doug] memory recall: embeddings provider unavailable");
   });
 });
+
+// Card parallel-card-queens, brief B2: --card <id> on every plan.mjs command moves the plan to the tracked
+// .doug/plans/<id>.json and the report to .doug/.state/reports/<id>/last-report.json.
+describe("plan.mjs --card (per-card plan files)", () => {
+  const body = (title, extra = {}) => ({
+    version: 1, title, goal: "A goal that explains the change.", status: "draft", acceptance: ["ok"], verify: ["true"],
+    tasks: [{ id: "a", title: "A", spec: "Do the thing in src/a.ts with a test.", files: ["src/a.ts"] }], ...extra,
+  });
+  const cardFile = (dir, id) => join(dir, ".doug/plans", `${id}.json`);
+  const readCard = (dir, id) => JSON.parse(readFileSync(cardFile(dir, id), "utf8"));
+  function cardProject({ withDefault = true } = {}) {
+    const dir = mkdtempSync(join(tmpdir(), "doug-plancard-"));
+    mkdirSync(join(dir, ".doug/plans"), { recursive: true });
+    mkdirSync(join(dir, ".doug/.state"), { recursive: true });
+    if (withDefault) writeFileSync(join(dir, ".doug/plan.json"), JSON.stringify(body("Default plan"), null, 2) + "\n");
+    writeFileSync(cardFile(dir, "alpha"), JSON.stringify(body("Alpha plan"), null, 2) + "\n");
+    writeFileSync(cardFile(dir, "beta"), JSON.stringify(body("Beta plan"), null, 2) + "\n");
+    return dir;
+  }
+
+  it("P01 approve, set, json and done with --card read and write the per-card plan and leave .doug/plan.json untouched", () => {
+    const dir = cardProject();
+    const defaultBefore = readFileSync(join(dir, ".doug/plan.json"), "utf8");
+    const approved = run(["approve", "--card", "alpha"], dir);
+    expect(approved.status, approved.stderr).toBe(0);
+    expect(readCard(dir, "alpha").status).toBe("approved");
+    expect(readCard(dir, "beta").status).toBe("draft");
+    const set = run(["set", "--card", "alpha", "install", "npm ci"], dir);
+    expect(set.status, set.stderr).toBe(0);
+    expect(readCard(dir, "alpha").install).toBe("npm ci");
+    expect(readCard(dir, "beta").install).toBeUndefined();
+    const json = run(["json", "--card", "alpha"], dir);
+    expect(json.status, json.stderr).toBe(0);
+    expect(JSON.parse(json.stdout).title).toBe("Alpha plan");
+    const done = run(["done", "--card", "alpha"], dir);
+    expect(done.status, done.stderr).toBe(0);
+    expect(readCard(dir, "alpha").status).toBe("done");
+    expect(readFileSync(join(dir, ".doug/plan.json"), "utf8")).toBe(defaultBefore);
+  });
+
+  it("P01 --card works with no .doug/plan.json at all, and a missing per-card plan is refused naming its path", () => {
+    const dir = cardProject({ withDefault: false });
+    expect(run(["approve", "--card", "beta"], dir).status).toBe(0);
+    expect(readCard(dir, "beta").status).toBe("approved");
+    expect(existsSync(join(dir, ".doug/plan.json"))).toBe(false);
+    const missing = run(["show", "--card", "nope"], dir);
+    expect(missing.status).toBe(2);
+    expect(missing.stderr).toContain(".doug/plans/nope.json");
+  });
+
+  it("P02 done --card reads the per-card report, not the global one", () => {
+    const dir = cardProject();
+    expect(run(["approve", "--card", "alpha"], dir).status).toBe(0);
+    // The global report is ok for this title; only the per-card report says the run failed.
+    writeFileSync(join(dir, REPORT_RELPATH), JSON.stringify({ plan: "Alpha plan", ok: true, levels: [] }));
+    mkdirSync(join(dir, ".doug/.state/reports/alpha"), { recursive: true });
+    writeFileSync(join(dir, ".doug/.state/reports/alpha/last-report.json"), JSON.stringify({
+      plan: "Alpha plan", ok: false, stoppedAtLevel: 0, levels: [{ index: 0, tasks: [{ id: "a", stopReason: "verify failed: card report" }] }],
+    }));
+    const refused = run(["done", "--card", "alpha"], dir);
+    expect(refused.status).toBe(1);
+    expect(refused.stderr).toContain("the last run is not ok");
+    expect(refused.stderr).toContain("a: verify failed: card report");
+    expect(readCard(dir, "alpha").status).toBe("approved");
+    // Another card has no report of its own: the global report must not be read for it.
+    expect(run(["approve", "--card", "beta"], dir).status).toBe(0);
+    writeFileSync(join(dir, REPORT_RELPATH), JSON.stringify({ plan: "Beta plan", ok: false, stoppedAtLevel: 0, levels: [{ index: 0, tasks: [{ id: "a", stopReason: "global report" }] }] }));
+    const beta = run(["done", "--card", "beta"], dir);
+    expect(beta.status, beta.stderr).toBe(0);
+    expect(readCard(dir, "beta").status).toBe("done");
+  });
+
+  it("P03 without --card the default plan and the global report behave as before", () => {
+    const dir = cardProject();
+    expect(run(["approve"], dir).status).toBe(0);
+    expect(JSON.parse(readFileSync(join(dir, ".doug/plan.json"), "utf8")).status).toBe("approved");
+    expect(readCard(dir, "alpha").status).toBe("draft");
+    writeFileSync(join(dir, REPORT_RELPATH), JSON.stringify({ plan: "Default plan", ok: false, stoppedAtLevel: 0, levels: [{ index: 0, tasks: [{ id: "a", stopReason: "global stop" }] }] }));
+    const refused = run(["done"], dir);
+    expect(refused.status).toBe(1);
+    expect(refused.stderr).toContain("a: global stop");
+    expect(readCard(dir, "alpha").status).toBe("draft");
+  });
+
+  it("--card refuses a path-like or empty id with exit 2, writing nothing", () => {
+    const dir = cardProject();
+    for (const bad of ["../x", "a/b", ".hidden", "", "--install"]) {
+      const r = run(["show", "--card", bad], dir);
+      expect(r.status, bad).toBe(2);
+    }
+    expect(run(["show", "--card"], dir).status).toBe(2);
+    expect(existsSync(join(dir, "x.json"))).toBe(false);
+  });
+
+  it("--card=<id> is accepted as --card <id>, and a bad id in that form is refused", () => {
+    const dir = cardProject();
+    expect(run(["approve", "--card=alpha"], dir).status).toBe(0);
+    expect(readCard(dir, "alpha").status).toBe("approved");
+    expect(readCard(dir, "beta").status).toBe("draft");
+    expect(JSON.parse(run(["json", "--card=alpha"], dir).stdout).title).toBe("Alpha plan");
+    expect(run(["show", "--card=../x"], dir).status).toBe(2);
+  });
+
+  it("P05 integrationWorktree is settable through the plan file and refused when outside .claude/worktrees/", () => {
+    const dir = cardProject();
+    expect(run(["set", "--card", "alpha", "integrationWorktree", ".claude/worktrees/doug-integration-alpha"], dir).status).toBe(0);
+    expect(readCard(dir, "alpha").integrationWorktree).toBe(".claude/worktrees/doug-integration-alpha");
+    const bad = run(["set", "--card", "alpha", "integrationWorktree", "/tmp/elsewhere"], dir);
+    expect(bad.status).not.toBe(0);
+    expect(readCard(dir, "alpha").integrationWorktree).toBe(".claude/worktrees/doug-integration-alpha");
+  });
+
+  it("P06 anchor --cards writes one section per approved per-card plan and keeps the Autopilot handoff section", () => {
+    const dir = cardProject({ withDefault: false });
+    expect(run(["approve", "--card", "alpha"], dir).status).toBe(0);
+    expect(run(["approve", "--card", "beta"], dir).status).toBe(0);
+    writeFileSync(join(dir, ".doug/anchor.md"), "# Old anchor\n\nSome text.\n\n## Autopilot handoff\n\nLanded: card-one. Resume with /doug-next --auto.\n");
+    const r = run(["anchor", "--cards"], dir);
+    expect(r.status, r.stderr).toBe(0);
+    const anchor = readFileSync(join(dir, ".doug/anchor.md"), "utf8");
+    expect(anchor).toContain("# Alpha plan");
+    expect(anchor).toContain("# Beta plan");
+    expect(anchor).toContain("## Autopilot handoff");
+    expect(anchor).toContain("Landed: card-one. Resume with /doug-next --auto.");
+    expect(anchor).not.toContain("# Old anchor");
+    expect(anchor.indexOf("# Alpha plan")).toBeLessThan(anchor.indexOf("## Autopilot handoff"));
+  });
+});

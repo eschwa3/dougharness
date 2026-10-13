@@ -5,12 +5,14 @@ import { spawnSync, spawn } from "node:child_process";
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, readdirSync, rmSync, renameSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { parseTotals } from "../lib/test-totals.mjs";
 import * as gateLock from "../lib/gate-lock.mjs";
+const { gateLockPath } = gateLock;
 import { computeTree, readRecord, writeRecord, removeRecord, creditable, noTestPathHit, resolveCommands, RECORD_RELPATH } from "../lib/verified-tree.mjs";
 
 const VERIFY = join(dirname(fileURLToPath(import.meta.url)), "..", "scripts", "verify.mjs");
+const GATE_LOCK_LIB = pathToFileURL(join(dirname(fileURLToPath(import.meta.url)), "..", "lib", "gate-lock.mjs")).href;
 
 function cleanEnv(extra = {}) {
   const env = {};
@@ -596,19 +598,19 @@ describe("verify.mjs end to end (card verified-tree-record V8)", () => {
   });
 });
 
-// Card verify-takes-gate-lock: verify.mjs takes the Stop gate's .doug/.state/gate.lock around its commands.
+// Card verify-takes-gate-lock: verify.mjs takes the Stop gate's gate.lock (gateLockPath) around its commands.
 describe("verify.mjs takes gate.lock (card verify-takes-gate-lock)", () => {
   const T = [
     `import { appendFileSync, mkdirSync, copyFileSync, existsSync } from "node:fs";`,
+    `import { gateLockPath } from "${GATE_LOCK_LIB}";`,
     `mkdirSync(".doug/.state", { recursive: true });`,
     `appendFileSync(".doug/.state/ran.marker", "ran\\n");`,
-    `if (existsSync(".doug/.state/gate.lock")) copyFileSync(".doug/.state/gate.lock", ".doug/.state/lock.seen");`,
+    `if (existsSync(gateLockPath(process.cwd()))) copyFileSync(gateLockPath(process.cwd()), ".doug/.state/lock.seen");`,
     `console.log("Tests  3 passed (3)");`,
     ``,
   ].join("\n");
   const T_RED = T.replace(`console.log("Tests  3 passed (3)");`, `console.error("RED-MARK");\nprocess.exit(1);`);
   const CONFIG = { commands: { test: "node t.mjs" }, stopGate: { commands: ["test"], timeoutMs: 60000 } };
-  const LOCK = ".doug/.state/gate.lock";
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const fixture = () => makeRepo({ "t.mjs": T, ".doug/config.json": JSON.stringify(CONFIG), ".gitignore": ".doug/.state/\n" });
   const runs = (dir) => {
@@ -630,7 +632,8 @@ describe("verify.mjs takes gate.lock (card verify-takes-gate-lock)", () => {
     return spawn(process.execPath, ["-e", "setTimeout(() => {}, 60000)"], { stdio: "ignore" });
   }
   function holdLock(dir, pid) {
-    write(dir, LOCK, JSON.stringify({ pid, session: "holder", at: Date.now() }));
+    mkdirSync(dirname(gateLockPath(dir)), { recursive: true });
+    writeFileSync(gateLockPath(dir), JSON.stringify({ pid, session: "holder", at: Date.now() }));
   }
   const holderRecord = (dir) => ({
     version: 1,
@@ -652,14 +655,14 @@ describe("verify.mjs takes gate.lock (card verify-takes-gate-lock)", () => {
       expect(v.exited(), "verify.mjs must wait while a live holder has gate.lock").toBe(false);
       expect(runs(dir)).toBe(0);
       writeRecord(dir, holderRecord(dir));
-      rmSync(join(dir, LOCK));
+      rmSync(gateLockPath(dir));
       const r = await v.done;
       expect(r.status, r.out).toBe(0);
       expect(r.out).toContain("credited verified-tree record");
       expect(r.out).toContain("by holder");
       expect(lastLine(r.stdout)).toBe("gate: test 0 (3 passed)");
       expect(runs(dir), "the commands must not run when the holder's record credits").toBe(0);
-      expect(existsSync(join(dir, LOCK)), "a credited run leaves no lock behind").toBe(false);
+      expect(existsSync(gateLockPath(dir)), "a credited run leaves no lock behind").toBe(false);
     } finally {
       holder.kill();
     }
@@ -691,7 +694,7 @@ describe("verify.mjs takes gate.lock (card verify-takes-gate-lock)", () => {
     expect(r.status, r.out).toBe(0);
     expect(r.ms, "a dead holder must not make verify wait out the bound").toBeLessThan(5000);
     expect(runs(dir)).toBe(1);
-    expect(existsSync(join(dir, LOCK))).toBe(false);
+    expect(existsSync(gateLockPath(dir))).toBe(false);
   }, 30000);
 
   it("T4: holds the lock under its own pid while the commands run and releases it after, green or red", async () => {
@@ -702,13 +705,39 @@ describe("verify.mjs takes gate.lock (card verify-takes-gate-lock)", () => {
     expect(r.status, r.out).toBe(0);
     const seen = JSON.parse(readFileSync(join(dir, ".doug/.state/lock.seen"), "utf8"));
     expect(seen.pid, "gate.lock names the verify.mjs process while its commands run").toBe(pid);
-    expect(existsSync(join(dir, LOCK)), "no lock left after a green run").toBe(false);
+    expect(existsSync(gateLockPath(dir)), "no lock left after a green run").toBe(false);
 
     write(dir, "t.mjs", T_RED);
     const red = await startVerify(dir).done;
     expect(red.status, red.out).toBe(1);
     expect(red.out).toContain("RED-MARK");
-    expect(existsSync(join(dir, LOCK)), "no lock left after a red run").toBe(false);
+    expect(existsSync(gateLockPath(dir)), "no lock left after a red run").toBe(false);
+  }, 30000);
+
+  // Card gate-lock-shared: gate.lock is shared by every worktree of the repo, so verify.mjs run inside worktree
+  // B waits on a lock a live holder took through worktree A, then runs and holds that same shared lock.
+  it("W1: verify.mjs in worktree B waits on a lock held via worktree A, then runs and holds the shared lock under its own pid", async () => {
+    const dirA = fixture();
+    const dirB = join(mkdtempSync(join(tmpdir(), "doug-vt-wt-")), "wtb");
+    git(dirA, ["worktree", "add", "-q", "-b", "wtb", dirB]);
+    expect(gateLockPath(dirB), "both worktrees must resolve one lock path").toBe(gateLockPath(dirA));
+    const holder = sleeper();
+    try {
+      holdLock(dirA, holder.pid);
+      const v = startVerify(dirB);
+      await sleep(800);
+      expect(v.exited(), "verify.mjs in worktree B must wait while a live holder has the lock via worktree A").toBe(false);
+      expect(runs(dirB)).toBe(0);
+      rmSync(gateLockPath(dirA));
+      const r = await v.done;
+      expect(r.status, r.out).toBe(0);
+      expect(runs(dirB), "having waited, worktree B's verify runs its commands").toBe(1);
+      const seen = JSON.parse(readFileSync(join(dirB, ".doug/.state/lock.seen"), "utf8"));
+      expect(seen.pid, "the shared lock names the verify.mjs process while its commands run").toBe(v.child.pid);
+      expect(existsSync(gateLockPath(dirA)), "no lock left behind").toBe(false);
+    } finally {
+      holder.kill();
+    }
   }, 30000);
 
   // Card verify-lock-wait-bound D1/D3/D4: the wait bound is the per-command timeout x the command count (the
@@ -740,7 +769,7 @@ describe("verify.mjs takes gate.lock (card verify-takes-gate-lock)", () => {
         { name: "node t.mjs", command: "node t.mjs", exit: 0, durationMs: 5 },
         { name: "node t.mjs second", command: "node t.mjs second", exit: 0, durationMs: 5 },
       ], totals: { "node t.mjs": parseTotals("Tests  3 passed (3)\n"), "node t.mjs second": parseTotals("Tests  3 passed (3)\n") } });
-      rmSync(join(dir, LOCK));
+      rmSync(gateLockPath(dir));
       const r = await v.done;
       expect(r.status, r.out).toBe(0);
       expect(r.out).toContain("credited verified-tree record");
@@ -792,7 +821,7 @@ describe("verify.mjs takes gate.lock (card verify-takes-gate-lock)", () => {
       expect(v.exited()).toBe(false);
       write(dir, "changed-while-waiting.txt", "new\n");
       writeRecord(dir, holderRecord(dir));
-      rmSync(join(dir, LOCK));
+      rmSync(gateLockPath(dir));
       const r = await v.done;
       expect(r.status, r.out).toBe(0);
       expect(r.out).toContain("credited verified-tree record");
@@ -800,5 +829,44 @@ describe("verify.mjs takes gate.lock (card verify-takes-gate-lock)", () => {
     } finally {
       holder.kill();
     }
+  }, 30000);
+
+  // Card parallel-card-queens B4: the time spent waiting on gate.lock is reported (json lockWaitMs, a text line).
+  it("V01: a live lock released after ~800 ms gives lockWaitMs >= 300 under --json and the 'waited' line in text mode", async () => {
+    for (const json of [true, false]) {
+      const dir = fixture();
+      const holder = sleeper();
+      try {
+        holdLock(dir, holder.pid);
+        const v = startVerify(dir, json ? ["--json"] : []);
+        await sleep(800); // node start-up eats part of the sleep before the wait begins
+        rmSync(gateLockPath(dir));
+        const r = await v.done;
+        expect(r.status, r.out).toBe(0);
+        expect(runs(dir), "no holder record, so the commands run").toBe(1);
+        if (json) {
+          const j = JSON.parse(lastLine(r.stdout));
+          expect(j.lockWaitMs, "json result carries the wait").toBeGreaterThanOrEqual(300);
+          expect(j.lockWaitMs).toBeLessThan(20000);
+        } else {
+          const m = r.out.match(/\[doug\] verify: waited (\d+) ms on gate\.lock/);
+          expect(m, r.out).not.toBeNull();
+          expect(Number(m[1])).toBeGreaterThanOrEqual(300);
+        }
+      } finally {
+        holder.kill();
+      }
+    }
+  }, 30000);
+
+  it("V02: no lock held: lockWaitMs is 0 under --json and text mode prints no 'waited' line", async () => {
+    const dirJ = fixture();
+    const rj = await startVerify(dirJ, ["--json"]).done;
+    expect(rj.status, rj.out).toBe(0);
+    expect(JSON.parse(lastLine(rj.stdout)).lockWaitMs).toBe(0);
+    const dirT = fixture();
+    const rt = await startVerify(dirT).done;
+    expect(rt.status, rt.out).toBe(0);
+    expect(rt.out).not.toMatch(/waited \d+ ms on gate\.lock/);
   }, 30000);
 });

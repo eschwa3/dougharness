@@ -21,6 +21,7 @@ export const PLUGIN_DIR = join(ROOT, "plugins/doug-flow");
 export const PLAN_MJS = join(PLUGIN_DIR, "scripts/plan.mjs");
 export const BOARD_MJS = join(PLUGIN_DIR, "scripts/board.mjs");
 export const MEMORY_MJS = join(PLUGIN_DIR, "scripts/memory.mjs");
+export const LEARN_MJS = join(PLUGIN_DIR, "scripts/learn.mjs");
 export const CLI = join(ROOT, "packages/doug-cli/dist/bin.js");
 export const FIXTURE_DIR = join(ROOT, "evals/fixtures/ts-basic");
 export const TASKS_FILE = join(ROOT, "evals/tasks/ts-basic.json");
@@ -54,7 +55,7 @@ export function cleanEnv(extra = {}) {
 // stage figure, not the scenario total (item workflow-rehearsal-review #6: research gives no single number, so
 // the flow and hand totals are split across their sessions in proportion to what each is expected to do, and the
 // swarm total is all in its one implement session).
-export const SCENARIOS = ["flow", "swarm", "hand", "auto"];
+export const SCENARIOS = ["flow", "swarm", "hand", "auto", "parallel", "start", "start-feature"];
 export const ESTIMATES = {
   flow: {
     // /doug-next's own first step moves the card (uncommitted working state, never a "Board: <id> moved to In
@@ -77,6 +78,18 @@ export const ESTIMATES = {
   auto: {
     stages: { gate: 0.5, build: 8.0 },
     source: "two hand builds at the hand figure ($2.16/3.8 min each, docs/live-runs.md, 2026-09-09, rounded up with a gate that reads two cards); unmeasured, no autopilot rehearsal has run live",
+  },
+  parallel: {
+    stages: { gate: 0.5, build: 9.0 },
+    source: "one flow card (measured up to $4.15/9 min, docs/live-runs.md, 2026-09-09) and one hand card (up to $2.16/3.8 min, 2026-09-09) at once, plus about $1.50 for main's coordination and the two queens' relays; unmeasured, no parallel rehearsal has run live",
+  },
+  start: {
+    stages: { idea: 0.5, architecture: 1.5, skeleton: 2.0, scope: 0.7 },
+    source: "project mode from an empty git repo, one session per phase (idea, architecture, skeleton, scope): the first passing live run measured $2.81/7.3 min (docs/live-runs.md, 2026-10-11, card doug-start-skill); the per-stage figures are the card's pre-run estimates, not measured per stage, and the skeleton figure is the hand build's measured $1.39 (docs/live-runs.md, 2026-10-09) plus init and board calls, rounded up",
+  },
+  "start-feature": {
+    stages: { spec: 0.5, architecture: 0.7, plan: 0.7 },
+    source: "feature mode on the ts-basic fixture's fix-hours card, one session per phase (spec, architecture, plan): the first passing live run measured $1.57/3.6 min (docs/live-runs.md, 2026-10-11, card doug-start-skill); the per-stage figures are the card's pre-run estimates, not measured per stage, and the plan figure is below the flow gate's measured $0.58 (docs/live-runs.md, 2026-10-09) plus the lead's turns",
   },
 };
 
@@ -111,7 +124,7 @@ export function estimateLines(scenario = null) {
 }
 
 // ---- CLI argument parsing ------------------------------------------------------------------------------
-// `rehearse.mjs [flow|swarm|hand|auto|all] --card <id> --spend [dir]`. Pure: does not validate the scenario name
+// `rehearse.mjs [flow|swarm|hand|auto|parallel|start|start-feature|all] --card <id> --spend [dir]`. Pure: does not validate the scenario name
 // or check the card exists (the caller does, before anything is spawned).
 export function parseArgs(argv) {
   const positional = [];
@@ -400,9 +413,23 @@ function autoSecondCard(suite) {
   return { id: "add-truncate", title: "Add truncate", goal: task.prompt };
 }
 
+// The start scenario's fixture (card doug-start-skill): a git repo on main with one empty commit and nothing else, so
+// the session starts where a new project starts. Doug is not installed in it; the idea session runs `doug init`.
+function prepareStartFixture({ dir, tempPrefix } = {}) {
+  const target = dir || mkdtempSync(join(tmpdir(), tempPrefix || "doug-rehearse-start-"));
+  mkdirSync(target, { recursive: true });
+  const git = (...args) => execFileSync("git", args, { cwd: target, encoding: "utf8", env: cleanEnv() }).trim();
+  git("init", "-q", "-b", "main");
+  git("config", "user.email", "rehearse@example.com");
+  git("config", "user.name", "rehearse");
+  git("commit", "-q", "--allow-empty", "-m", "fixture");
+  return { dir: target, card: { id: "start", title: "Start a project", goal: "Start a new project from an idea." }, task: null, baseline: git("rev-parse", "HEAD") };
+}
+
 export function prepareFixture({ scenario, dir, tempPrefix } = {}) {
   if (!SCENARIOS.includes(scenario)) throw new Error(`prepareFixture: unknown scenario "${scenario}"; scenarios are ${SCENARIOS.join(", ")}`);
   if (!existsSync(CLI)) throw new Error(`the doug CLI is not built (${relative(ROOT, CLI)} is missing); run "pnpm build" first`);
+  if (scenario === "start") return prepareStartFixture({ dir, tempPrefix });
   const suite = fixtureSuite();
   const task = fixtureTask(suite, scenario === "swarm" ? SWARM_TASK_ID : "fix-hours-planned");
   const cardId = scenario === "swarm" ? SWARM_TASK_ID : "fix-hours";
@@ -426,12 +453,15 @@ export function prepareFixture({ scenario, dir, tempPrefix } = {}) {
     writeFileSync(gitignorePath, `${gitignore}${gitignore && !gitignore.endsWith("\n") ? "\n" : ""}.claude/worktrees/\n`);
   }
 
-  let board = { ...newBoard(), components: ["flow"] };
+  // Card parallel-card-queens (B13): the parallel scenario's pair is one flow card and one hand card in different
+  // components, so the coordinator's disjointness rule lets them run together under workers.max 2.
+  const parallel = scenario === "parallel";
+  let board = { ...newBoard(), components: parallel ? ["duration", "strings"] : ["flow"] };
   board = addCard(board, {
     id: cardId,
     title: task.plan.title,
     goal: task.plan.goal,
-    component: "flow",
+    component: parallel ? "duration" : "flow",
     size: "S",
     track: scenario === "hand" || scenario === "auto" ? "hand" : undefined,
     column: "ready",
@@ -445,6 +475,12 @@ export function prepareFixture({ scenario, dir, tempPrefix } = {}) {
     board = addCard(board, { ...second, component: "flow", size: "S", track: "hand", column: "ready", class: "code" });
     // Card autopilot-unlimited: a bare `--auto` takes Ready cards only, so this Backlog card must come out untouched.
     board = addCard(board, { ...AUTO_BACKLOG_CARD, component: "flow", size: "S", track: "hand", column: "backlog", class: "code" });
+  }
+  if (parallel) {
+    board = addCard(board, { ...autoSecondCard(suite), component: "strings", size: "S", track: "hand", column: "ready", class: "code" });
+    const configPath = join(target, ".doug/config.json");
+    const config = JSON.parse(readFileSync(configPath, "utf8"));
+    writeFileSync(configPath, JSON.stringify({ ...config, workers: { ...(config.workers || {}), max: 2 } }, null, 2) + "\n");
   }
   mkdirSync(join(target, ".doug"), { recursive: true });
   writeFileSync(join(target, BOARD_RELPATH), JSON.stringify(board, null, 2) + "\n");
@@ -491,12 +527,18 @@ export function runStage({ dir, prompt, maxTurns, stage, capUsd = null, claudeBi
 // was killed, or the assertion itself threw) turned into a normal `{ ok:false, message }` instead of a crash or
 // a misleading assertion failure (card workflow-rehearsal-review #5). Always carries `streamPath` and `cost`.
 export function runSessionStage(stage, { dir, card, baseline, capUsd = null, claudeBin } = {}) {
+  let head = null;
+  try {
+    head = execFileSync("git", ["rev-parse", "HEAD"], { cwd: dir, encoding: "utf8", env: cleanEnv() }).trim();
+  } catch {
+    // no git HEAD: the held-at-gate commit check is skipped for this stage
+  }
   const r = runStage({ dir, prompt: stage.prompt({ card }), maxTurns: stage.maxTurns, stage: stage.name, capUsd, ...(claudeBin ? { claudeBin } : {}) });
   if (r.error) return { ok: false, message: `claude could not run: ${r.error.message}`, streamPath: r.streamPath, cost: null };
   if (r.signal) return { ok: false, message: `claude was killed by signal ${r.signal} before finishing`, streamPath: r.streamPath, cost: r.cost };
   let result;
   try {
-    result = stage.assert({ dir, card, baseline, stream: r.stdout });
+    result = stage.assert({ dir, card, baseline, head, stream: r.stdout });
   } catch (err) {
     result = fail(`assertion threw: ${err && err.message ? err.message : String(err)}`);
   }
@@ -568,11 +610,16 @@ function runBoardCli(args) {
 // since that scenario is the one that proves plugin loading and agent-name resolution in the real runtime.
 // A stage's own message (for example the approve act's "the plan also owns ..." note) is folded into the stage
 // list so it reaches the record instead of being discarded (card workflow-rehearsal-review #10).
+// Scenarios whose outcome records in the hand form (no workflow report): hand, auto, and the two start scenarios.
+export function recordsAsHand(scenario) {
+  return scenario === "hand" || scenario === "auto" || scenario === "parallel" || scenario === "start" || scenario === "start-feature";
+}
+
 export function rehearsalNote({ scenario, outcome, stages, cost = null, agentNames = null }) {
   const stageList = stages.map((s) => `${s.name} (${s.wallClock})${s.message ? ` — ${s.message}` : ""}`).join(", ");
   const base =
-    scenario === "hand" || scenario === "auto"
-      ? `Rehearsal ${scenario} on the ts-basic fixture: ${outcome}; cost ${cost === null ? "not measured" : `$${Number(cost).toFixed(2)}`}; stages ${stageList}`
+    recordsAsHand(scenario)
+      ? `Rehearsal ${scenario} on ${scenario === "start" ? "an empty git repo" : "the ts-basic fixture"}: ${outcome}; cost ${cost === null ? "not measured" : `$${Number(cost).toFixed(2)}`}; stages ${stageList}`
       : `Rehearsal ${scenario} on the ts-basic fixture: ${outcome}; stages ${stageList}`;
   if (scenario !== "swarm") return base;
   return `${base}; plugin loading and agent-name resolution asserted in the runtime (plugins: doug-flow; agents resolved: ${(agentNames || []).join(", ") || "none"})`;
@@ -590,16 +637,22 @@ export function extractGateLine(dir) {
   return last && last !== "not recorded" ? last : null;
 }
 
+// The gate text a rehearsal records: the scenario result's own (start's end assert ran the fixture's verify.mjs),
+// else the fixture's recorded "| Gate |" row, else "not observed".
+export function rehearsalGate(result, fixtureDir) {
+  return (result && result.gate) || extractGateLine(fixtureDir) || "not observed";
+}
+
 // Records a flow or swarm outcome under `cardId` on the board at `dir` (the real repository by default; a temp
 // copy in tests) by spawning `board.mjs record <id> <report> [dir] ...` exactly as a normal run does. Throws on a
 // non-zero exit (the caller decides how to report that; it is never swallowed).
-export function recordRunOutcome(dir, cardId, { reportFile, wallClock = null, cost = null, mergeCommit = null, note = null, rehearsal = null }) {
+export function recordRunOutcome(dir, cardId, { reportFile, wallClock = null, cost = null, mergeCommit = null, note = null, rehearsal = null, outcome = null }) {
   const args = ["record", cardId, reportFile, "--summary", "A rehearsal run was recorded."];
   if (cost !== null) args.push("--cost", String(cost));
   if (wallClock !== null) args.push("--wall", wallClock);
   if (mergeCommit) args.push("--commit", mergeCommit);
   if (note) args.push("--note", note);
-  if (rehearsal) args.push("--rehearsal", rehearsal);
+  if (rehearsal) args.push("--rehearsal", rehearsal, "--rehearsal-outcome", outcome);
   args.push(dir);
   const r = runBoardCli(args);
   if (!r.ok) throw new Error(`board.mjs record failed: ${r.stderr || r.stdout}`);
@@ -608,17 +661,154 @@ export function recordRunOutcome(dir, cardId, { reportFile, wallClock = null, co
 
 // Records a hand outcome under `cardId` on the board at `dir` by spawning `board.mjs record <id> --hand [dir]
 // ...` exactly as a normal hand-track landing does.
-export function recordHandOutcome(dir, cardId, { commit = null, wallClock = null, gate = null, note = null, rehearsal = null }) {
+export function recordHandOutcome(dir, cardId, { commit = null, wallClock = null, gate = null, note = null, rehearsal = null, outcome = null }) {
   const args = ["record", cardId, "--hand", "--summary", "A rehearsal hand landing was recorded."];
   if (commit) args.push("--commit", commit);
   if (wallClock !== null) args.push("--wall", wallClock);
   if (gate !== null) args.push("--gate", gate);
   if (note) args.push("--note", note);
-  if (rehearsal) args.push("--rehearsal", rehearsal);
+  if (rehearsal) args.push("--rehearsal", rehearsal, "--rehearsal-outcome", outcome);
   args.push(dir);
   const r = runBoardCli(args);
   if (!r.ok) throw new Error(`board.mjs record --hand failed: ${r.stderr || r.stdout}`);
   return r.stdout;
+}
+
+// ---- The start scenarios' acts and end assertions (card doug-start-skill) ---------------------------------------
+// In `claude -p` AskUserQuestion is absent from the tool list (measured, Claude Code 2.1.296: the init event's tools
+// lack it and ToolSearch finds nothing), and the skill's unanswered-gate rule ends the phase there, with its file written;
+// the act after it stands in for the human's approval by committing what the session left, so the next session,
+// deriving state from disk, resumes at the next phase. Nothing here spawns claude or reads a stream.
+function commitPhase(dir, message) {
+  try {
+    const run = (...args) => execFileSync("git", args, { cwd: dir, encoding: "utf8", env: cleanEnv() });
+    run("add", "-A");
+    if (run("status", "--porcelain").trim()) run("commit", "-q", "-m", message);
+    return pass(`committed: ${message}`);
+  } catch (err) {
+    return fail(`git commit failed: ${err.stderr || err.stdout || err.message}`);
+  }
+}
+
+// The tool_use names and Agent spawns in a stream (the Agent tool was called Task in older runtimes).
+function agentSpawns(stream) {
+  const types = new Set();
+  for (const j of jsonLines(stream)) {
+    const content = j && j.type === "assistant" && j.message && Array.isArray(j.message.content) ? j.message.content : [];
+    for (const c of content) if (c && c.type === "tool_use" && (c.name === "Agent" || c.name === "Task") && c.input && c.input.subagent_type) types.add(c.input.subagent_type);
+  }
+  return types;
+}
+
+// Proof a /doug-start session really ran the skill: the plugin loaded, the command was offered, every expected agent
+// was spawned by its subagent_type. The gate itself leaves no trace in the stream (the tool is absent in print mode),
+// so being held at it is checked on disk by heldAtGate. A session that only wrote a file by itself would otherwise
+// pass on the file check alone.
+export function assertSkillRan(stream, { agents }) {
+  const prefix = "the skill did not run";
+  if (!pluginsLoaded(stream, ["doug-flow"])) return fail(`${prefix}: the init event's plugins did not name doug-flow`);
+  if (!slashCommandPresent(stream, "doug-flow:doug-start")) return fail(`${prefix}: the init event's slash_commands did not carry doug-flow:doug-start`);
+  const spawned = agentSpawns(stream);
+  const missing = agents.filter((a) => !spawned.has(a));
+  if (missing.length) return fail(`${prefix}: the stream never spawned ${missing.join(", ")} (spawned: ${[...spawned].join(", ") || "none"})`);
+  return pass("the skill ran: plugin loaded, command present, agents spawned");
+}
+
+// Held at the gate: no later phase's file exists and the session made no commit. `head` is HEAD when the session
+// started (runSessionStage records it; the acts between sessions commit, so the fixture baseline cannot serve);
+// a caller that passes none gets the file check only.
+function heldAtGate({ dir, head }, later) {
+  const written = later.filter((rel) => existsSync(join(dir, rel)));
+  if (written.length) return fail(`the session ran past its gate: ${written.join(", ")} was written`);
+  if (head) {
+    let now;
+    try {
+      now = execFileSync("git", ["rev-parse", "HEAD"], { cwd: dir, encoding: "utf8", env: cleanEnv() }).trim();
+    } catch (err) {
+      return fail(`git rev-parse HEAD failed: ${err.message}`);
+    }
+    if (now !== head) return fail(`the session ran past its gate: it made a commit (HEAD ${head.slice(0, 7)} -> ${now.slice(0, 7)})`);
+  }
+  return pass("held at the gate");
+}
+
+// A session stage's assert: the stream proof, then held-at-gate state (nothing later written, no commit), then the
+// stage's own file check. `later` lists the files of the phases after this one.
+function afterSkillRan(agents, filesCheck, later = []) {
+  return (ctx) => {
+    const ran = assertSkillRan(ctx.stream, { agents });
+    if (!ran.ok) return ran;
+    const held = heldAtGate(ctx, later);
+    return held.ok ? filesCheck(ctx) : held;
+  };
+}
+
+// The pending decision proposals (`memory.mjs decision propose` writes <ts>/NN-decision.diff under .doug/.state/learn/).
+// docs/decisions/** is proposal-only, so a project-mode Architecture session leaves one of these and never the ADR.
+function pendingDecisionProposals(dir) {
+  const root = join(dir, ".doug/.state/learn");
+  if (!existsSync(root)) return [];
+  return readdirSync(root).flatMap((d) => (existsSync(join(root, d)) && readdirSync(join(root, d)).filter((f) => /-decision\.diff$/.test(f)).map((f) => join(root, d, f))) || []);
+}
+
+function boardCards(dir) {
+  return JSON.parse(readFileSync(join(dir, BOARD_RELPATH), "utf8")).cards || [];
+}
+
+function stopGateCommands(dir) {
+  try {
+    const cfg = JSON.parse(readFileSync(join(dir, ".doug/config.json"), "utf8"));
+    return Array.isArray(cfg?.stopGate?.commands) ? cfg.stopGate.commands : [];
+  } catch {
+    return [];
+  }
+}
+
+// The start scenario's end: a board with walking-skeleton Done and at least one other card, and every
+// gate passes in the project (its own verify.mjs --no-credit exits 0), so the gates check something green.
+function assertStartEnded(dir) {
+  let cards = [];
+  try {
+    cards = boardCards(dir);
+  } catch (err) {
+    return fail(`cannot read the board: ${err.message}`);
+  }
+  const skeleton = cards.find((c) => c.id === "walking-skeleton");
+  if (!skeleton || skeleton.column !== "done") return fail("the walking-skeleton card is not in Done on the board");
+  if (!cards.some((c) => c.id !== "walking-skeleton")) return fail("the board has no card besides walking-skeleton");
+  const commands = stopGateCommands(dir);
+  if (!commands.length) return fail(".doug/config.json stopGate.commands is empty");
+  // Run the gate the way Doug does: the fixture's own vendored verify.mjs (doug init copies it), which resolves each
+  // stopGate entry (a package script name such as "test", or a shell command) exactly as the Stop gate does.
+  const verify = join(dir, ".doug/hooks/scripts/verify.mjs");
+  if (!existsSync(verify)) return fail(".doug/hooks/scripts/verify.mjs is missing from the project; doug init should have vendored it");
+  const r = spawnSync(process.execPath, [verify, "--no-credit", "--dir", dir], { cwd: dir, encoding: "utf8", timeout: 600000, env: commandEnv(cleanEnv()) });
+  if (r.status !== 0) return fail(`verify.mjs --no-credit exited ${r.status === null ? `by signal ${r.signal}` : r.status}: ${((r.stdout || "") + (r.stderr || "")).trim().slice(-600) || "(no output)"}`);
+  // verify.mjs's last "gate: <command> <exit>; ..." line, without the prefix, is the run's gate for the record.
+  const gateLines = (r.stdout || "").split("\n").map((l) => l.trim()).filter((l) => l.startsWith("gate: "));
+  const gate = gateLines.length ? gateLines[gateLines.length - 1].slice("gate: ".length).trim() : null;
+  return pass(`the board has ${cards.length} card(s) and the gate (verify.mjs, ${commands.length} command(s)) exits 0`, gate ? { gate } : {});
+}
+
+// The start-feature scenario's end: the spec, the architecture, and a plan that is still a draft (approval is the
+// user's, through /doug-approve, never the skill's).
+function assertFeatureEnded(dir) {
+  for (const rel of ["docs/specs/fix-hours/spec.md", "docs/specs/fix-hours/architecture.md", ".doug/plan.json"]) {
+    if (!existsSync(join(dir, rel))) return fail(`${rel} was not written`);
+  }
+  let plan;
+  try {
+    plan = JSON.parse(readFileSync(join(dir, ".doug/plan.json"), "utf8"));
+  } catch (err) {
+    return fail(`.doug/plan.json is not valid JSON: ${err.message}`);
+  }
+  if (plan.status === "approved") return fail("the plan is already approved; the skill must leave approval to /doug-approve");
+  const validate = act(PLAN_MJS, ["validate"], dir);
+  if (!validate.ok) return fail(`plan.mjs validate failed: ${validate.stderr || validate.stdout}`);
+  if (plan.card !== "fix-hours") return fail(`the plan's card is ${JSON.stringify(plan.card)}, not "fix-hours"`);
+  // Not checked: that every file architecture.md names is owned by a task. architecture.md is free prose with no
+  // machine-readable files list, and a file it only mentions (read, not changed) would fail a correct paid run.
+  return pass(`spec, architecture, and a ${plan.status || "draft"} plan exist`);
 }
 
 // ---- The three scenarios, stage by stage ------------------------------------------------------------------
@@ -627,6 +817,136 @@ export function recordHandOutcome(dir, cardId, { commit = null, wallClock = null
 // stage's `prompt`/`assert` take `{ dir, card, baseline, stream }`; an act stage's `run` takes `{ dir, card,
 // baseline }` and returns `{ ok, message, ...extra }` (`commit` when it lands or builds something).
 export const SCENARIO_STAGES = {
+  start: [
+    {
+      kind: "session",
+      name: "idea",
+      maxTurns: 25,
+      prompt: () =>
+        [
+          "/doug-start",
+          `Project mode. My idea: a tiny Node command-line tool, no dependencies, that converts durations such as "90m" or "1h30m" to seconds. Doug is not installed in this repo yet: first run \`node ${CLI} init . --yes --quiet\` (use that command wherever the skill says \`doug\`). Do only the Idea phase, then stop at its gate as the skill says; do not invoke the doug-board skill.`,
+        ].join("\n\n"),
+      assert: afterSkillRan(["doug-flow:spec-writer"], ({ dir }) => (existsSync(join(dir, "docs/product/idea.md")) ? pass("idea.md written") : fail("docs/product/idea.md was not written")), ["docs/product/architecture.md", "docs/decisions/0001-stack.md", "package.json", "docs/product/scope.md"]),
+    },
+    { kind: "act", name: "approve-idea", run: ({ dir }) => commitPhase(dir, "docs: idea") },
+    {
+      kind: "session",
+      name: "architecture",
+      maxTurns: 30,
+      prompt: () =>
+        [
+          "/doug-start",
+          `Project mode. I approved the idea (committed). The doug CLI here is \`node ${CLI}\`. Keep the stack to Node with the built-in \`node --test\` runner and no dependencies. Spawn one researcher with one question answerable offline: what \`node --test\` does in the installed Node (its \`--version\` and \`--help\`, no web). Then spawn the project's architect agent as the skill says; the stack ADR goes through the proposal path and is not applied by you. Do only the Architecture phase, then stop at its gate as the skill says.`,
+        ].join("\n\n"),
+      assert: afterSkillRan(
+        ["doug-flow:researcher", "architect"],
+        ({ dir }) => {
+          if (!existsSync(join(dir, "docs/product/architecture.md"))) return fail("docs/product/architecture.md was not written");
+          return pendingDecisionProposals(dir).length ? pass("architecture.md written and the stack ADR is a pending proposal") : fail("no pending decision proposal under .doug/.state/learn/: the ADR must go through memory.mjs decision propose");
+        },
+        // docs/decisions/0001-stack.md exists only once the proposal is applied, which is the human's yes (the act below).
+        ["docs/decisions/0001-stack.md", "package.json", "docs/product/scope.md"],
+      ),
+    },
+    {
+      kind: "act",
+      name: "approve-architecture",
+      run: ({ dir }) => {
+        // Standing in for the human's yes to the stack ADR proposal: apply it, then commit (docs/decisions/** is proposal-only).
+        const pending = pendingDecisionProposals(dir);
+        if (pending.length !== 1) return fail(`expected exactly one pending decision proposal under .doug/.state/learn/, found ${pending.length}`);
+        const applied = act(LEARN_MJS, ["apply", pending[0]], dir);
+        if (!applied.ok) return fail(`learn.mjs apply failed: ${applied.stderr || applied.stdout}`);
+        return commitPhase(dir, "docs: architecture");
+      },
+    },
+    {
+      kind: "session",
+      name: "skeleton",
+      maxTurns: 60,
+      prompt: () =>
+        [
+          "/doug-start",
+          `Project mode. I approved the architecture (committed). The doug CLI here is \`node ${CLI}\`. Do only the Walking skeleton phase, keeping it tiny: a package.json with a "test" script running \`node --test\`, one source file, one passing test. Then re-run \`node ${CLI} init . --yes --quiet\` so the gate commands are detected, then stop at its gate as the skill says. Do not move the walking-skeleton card to Done: that is the approval, which I give. Do not invoke the doug-board skill.`,
+        ].join("\n\n"),
+      assert: afterSkillRan(["tester", "coder", "reviewer"], ({ dir }) => {
+        if (!existsSync(join(dir, "package.json"))) return fail("no package.json: the walking skeleton was not built");
+        if (!stopGateCommands(dir).length) return fail(".doug/config.json stopGate.commands is empty after the skeleton");
+        let skeleton;
+        try {
+          skeleton = boardCards(dir).find((c) => c.id === "walking-skeleton");
+        } catch (err) {
+          return fail(`cannot read the board: ${err.message}`);
+        }
+        if (!skeleton) return fail("the walking-skeleton card is not on the board");
+        // Done is the approval's act (approve-skeleton), so a Done card here means the session ran past its gate.
+        return skeleton.column !== "done" ? pass("skeleton built, stopGate.commands detected, walking-skeleton waiting at the gate") : fail("the walking-skeleton card is already Done: the session ran past its gate");
+      }, ["docs/product/scope.md"]),
+    },
+    {
+      kind: "act",
+      name: "approve-skeleton",
+      run: ({ dir }) => {
+        // Standing in for the human's yes: Done on the board, then commit the skeleton with it.
+        const moved = act(BOARD_MJS, ["move", "walking-skeleton", "done"], dir);
+        if (!moved.ok) return fail(`board.mjs move walking-skeleton done failed: ${moved.stderr || moved.stdout}`);
+        return commitPhase(dir, "feat: walking skeleton");
+      },
+    },
+    {
+      kind: "session",
+      name: "scope",
+      maxTurns: 30,
+      prompt: () =>
+        [
+          "/doug-start",
+          `Project mode. I approved the walking skeleton (committed). The doug CLI here is \`node ${CLI}\`. Do only the Scope phase. I approve in advance the card list the spec-writer returns, as long as it has two or three cards: add them with \`node ${CLI} board add\`, then stop at its gate as the skill says.`,
+        ].join("\n\n"),
+      assert: afterSkillRan(["doug-flow:spec-writer"], ({ dir }) => {
+        if (!existsSync(join(dir, "docs/product/scope.md"))) return fail("docs/product/scope.md was not written");
+        try {
+          return boardCards(dir).some((c) => c.id !== "walking-skeleton") ? pass("scope.md written and cards added") : fail("no card besides walking-skeleton was added to the board");
+        } catch (err) {
+          return fail(`cannot read the board: ${err.message}`);
+        }
+      }),
+    },
+    {
+      kind: "act",
+      name: "approve-scope",
+      run: ({ dir }) => {
+        const committed = commitPhase(dir, "docs: scope");
+        if (!committed.ok) return committed;
+        return assertStartEnded(dir);
+      },
+    },
+  ],
+  "start-feature": [
+    {
+      kind: "session",
+      name: "spec",
+      maxTurns: 20,
+      prompt: () => ["/doug-start fix-hours", "Do only the Specification phase, then stop at its gate as the skill says. Do not invoke the doug-board skill."].join("\n\n"),
+      assert: afterSkillRan(["doug-flow:spec-writer"], ({ dir }) => (existsSync(join(dir, "docs/specs/fix-hours/spec.md")) ? pass("spec.md written") : fail("docs/specs/fix-hours/spec.md was not written")), ["docs/specs/fix-hours/pseudocode.md", "docs/specs/fix-hours/architecture.md", ".doug/plan.json"]),
+    },
+    { kind: "act", name: "approve-spec", run: ({ dir }) => commitPhase(dir, "docs: fix-hours spec") },
+    {
+      kind: "session",
+      name: "architecture",
+      maxTurns: 30,
+      prompt: () => ["/doug-start fix-hours", "I approved the spec (committed) and skipped Pseudocode. Do only the Architecture phase, then stop at its gate as the skill says."].join("\n\n"),
+      assert: afterSkillRan(["architect"], ({ dir }) => (existsSync(join(dir, "docs/specs/fix-hours/architecture.md")) ? pass("architecture.md written") : fail("docs/specs/fix-hours/architecture.md was not written")), [".doug/plan.json"]),
+    },
+    { kind: "act", name: "approve-architecture", run: ({ dir }) => commitPhase(dir, "docs: fix-hours architecture") },
+    {
+      kind: "session",
+      name: "plan",
+      maxTurns: 30,
+      prompt: () => ["/doug-start fix-hours", "I approved the architecture (committed) and skipped Pseudocode. Do only the Refinement phase: write the draft plan, show it, then stop at its gate as the skill says. Do not approve the plan."].join("\n\n"),
+      assert: afterSkillRan(["doug-flow:planner"], ({ dir }) => assertFeatureEnded(dir)),
+    },
+  ],
   hand: [
     {
       kind: "session",
@@ -684,6 +1004,26 @@ export const SCENARIO_STAGES = {
           "I approved the queue as shown, with the caps you proposed. Do not invoke the doug-board skill at any step: this checkout publishes nothing.",
         ].join("\n\n"),
       assert: (ctx) => assertAutoBuilt(ctx),
+    },
+  ],
+  parallel: [
+    {
+      kind: "session",
+      name: "gate",
+      maxTurns: 20,
+      prompt: () => "/doug-next --auto",
+      assert: ({ dir, stream }) => assertParallelGateHeld(dir, stream),
+    },
+    {
+      kind: "session",
+      name: "build",
+      maxTurns: 160,
+      prompt: () =>
+        [
+          "/doug-next --auto",
+          "I approved the queue as shown, with the caps you proposed. Do not invoke the doug-board skill at any step: this checkout publishes nothing.",
+        ].join("\n\n"),
+      assert: (ctx) => assertParallelBuilt(ctx),
     },
   ],
   flow: [
@@ -853,6 +1193,90 @@ export function assertAutoBuilt({ dir, baseline, stream }) {
   return pass(`built as ${commits.join(", ")}`, { commit: commits[commits.length - 1] });
 }
 
+// The parallel scenario's gate stage: assertAutoGateHeld (both cards Ready, only the fixture commit, no source touched)
+// plus no Workflow launch: the denied queue approval must stop main before any queen starts.
+export function assertParallelGateHeld(dir, stream) {
+  if (toolUseNames(stream).includes("Workflow")) return fail("the gate stream carries a Workflow tool_use: a queen was launched before the queue approval");
+  return assertAutoGateHeld(dir, stream);
+}
+
+// The parallel scenario's build assertion (card parallel-card-queens, B13): a doug-implement Workflow launch and a
+// card-queen.js Workflow launch both come before the first `plan.mjs land`/`land-card` Bash call (the cards ran at
+// once, not one after the other); main edited no source file and asked no question; each card has a per-card report
+// under .doug/.state/reports/<id>/; no .doug/plan.json; the flow card landed as a merge commit with two parents; the
+// hand card has its code commit, Done record and hand-track entry; both held-out tests pass. Every miss names the card.
+const PARALLEL_FLOW = { id: "fix-hours", files: ["src/duration.ts", "tests/duration.test.ts"], heldOut: { id: "fix-hours", file: HELDOUT_FILE } };
+const PARALLEL_HAND = { id: "add-truncate", files: ["src/strings.ts", "tests/strings.test.ts"], heldOut: { id: "add-truncate", file: join(ROOT, "evals/heldout/add-truncate.test.ts") } };
+
+function toolUses(stream, { mainOnly = false } = {}) {
+  const uses = [];
+  for (const j of jsonLines(stream)) {
+    if (mainOnly && j && j.parent_tool_use_id) continue;
+    const content = j && j.type === "assistant" && j.message && Array.isArray(j.message.content) ? j.message.content : [];
+    for (const c of content) if (c && c.type === "tool_use" && c.name) uses.push(c);
+  }
+  return uses;
+}
+
+export function assertParallelBuilt({ dir, baseline, stream }) {
+  if (!baseline) return fail("no baseline commit was recorded for this fixture");
+  const uses = toolUses(stream);
+  const mainUses = toolUses(stream, { mainOnly: true });
+  if (uses.some((u) => u.name === "AskUserQuestion")) return fail("the build stream carries an AskUserQuestion tool_use: autopilot asked a question");
+  for (const u of mainUses) {
+    if (!["Edit", "Write", "MultiEdit", "NotebookEdit"].includes(u.name)) continue;
+    const p = String((u.input && (u.input.file_path || u.input.notebook_path)) || "").replaceAll("\\", "/");
+    if (/(^|\/)src\//.test(p.startsWith(dir) ? p.slice(dir.length) : p) && !p.includes("/.doug/")) return fail(`main edited a source file under src/ itself (${u.name} ${p}): the queens' seats do the building`);
+  }
+  const launch = (needle) => uses.findIndex((u) => u.name === "Workflow" && [u.input && u.input.name, u.input && u.input.scriptPath].some((v) => typeof v === "string" && v.includes(needle)));
+  const firstLand = uses.findIndex((u) => u.name === "Bash" && /plan\.mjs"?\s+land(-card)?\b/.test(String(u.input && u.input.command)));
+  if (firstLand < 0) return fail("no plan.mjs land or land-card Bash call in the build stream");
+  const implement = launch("doug-implement");
+  if (implement < 0 || implement > firstLand) return fail("no doug-implement Workflow launch before the first plan.mjs land/land-card call: the flow card's queen did not start before landing");
+  const queen = launch("card-queen");
+  if (queen < 0 || queen > firstLand) return fail("no card-queen.js Workflow launch before the first plan.mjs land/land-card call: the hand card's queen did not start before landing");
+  for (const [c, name] of [[PARALLEL_FLOW, "last-report.json"], [PARALLEL_HAND, "card-report.json"]]) {
+    if (!existsSync(join(dir, ".doug/.state/reports", c.id, name))) return fail(`no per-card report for ${c.id}: .doug/.state/reports/${c.id}/${name} is missing`);
+  }
+  if (existsSync(join(dir, ".doug/plan.json"))) return fail(".doug/plan.json exists: a parallel flow card's plan is per card (.doug/plans/<id>.json)");
+  let shas;
+  let merges;
+  let board;
+  try {
+    const revs = (...a) => execFileSync("git", ["rev-list", ...a, `${baseline}..HEAD`], { cwd: dir, encoding: "utf8", env: cleanEnv() }).trim().split("\n").filter(Boolean);
+    shas = revs();
+    merges = revs("--merges");
+    board = JSON.parse(readFileSync(boardPath(dir), "utf8"));
+  } catch (err) {
+    return fail(`could not read the fixture's git history or board: ${err.message}`);
+  }
+  if (!shas.length) return fail("no commits since the fixture baseline; the build never committed");
+  const filesOf = (sha) => execFileSync("git", ["show", "--name-only", "--pretty=format:", sha], { cwd: dir, encoding: "utf8", env: cleanEnv() }).split("\n").filter(Boolean);
+  const codeCommitOf = (c) => shas.find((sha) => c.files.every((f) => filesOf(sha).includes(f)));
+  const runs = existsSync(join(dir, "docs/live-runs.md")) ? readFileSync(join(dir, "docs/live-runs.md"), "utf8") : "";
+  const doneCard = (c) => {
+    const card = (board.cards || []).find((x) => x.id === c.id);
+    return card && card.column === "done" ? card : null;
+  };
+  const flowCode = codeCommitOf(PARALLEL_FLOW);
+  if (!flowCode) return fail(`no commit since the fixture baseline changes both ${PARALLEL_FLOW.files.join(" and ")} (card ${PARALLEL_FLOW.id})`);
+  const flowCard = doneCard(PARALLEL_FLOW);
+  if (!flowCard) return fail(`the fixture board does not have ${PARALLEL_FLOW.id} in done`);
+  if (!merges.length) return fail(`${PARALLEL_FLOW.id} did not land as a merge commit with two parents: no merge commit since the baseline`);
+  if (!merges.some((m) => String(flowCard.source || "").includes(m.slice(0, 7)))) return fail(`${PARALLEL_FLOW.id}'s source does not name a merge commit with two parents (source: ${flowCard.source || "none"}; merges: ${merges.join(", ")})`);
+  const handCode = codeCommitOf(PARALLEL_HAND);
+  if (!handCode) return fail(`no commit since the fixture baseline changes both ${PARALLEL_HAND.files.join(" and ")} (card ${PARALLEL_HAND.id})`);
+  const handCard = doneCard(PARALLEL_HAND);
+  if (!handCard) return fail(`the fixture board does not have ${PARALLEL_HAND.id} in done`);
+  if (!handCard.source || !String(handCard.source).includes(handCode.slice(0, 7))) return fail(`${PARALLEL_HAND.id}'s source does not name the code commit ${handCode} (source: ${handCard.source || "none"})`);
+  if (!runs.includes(`\`${PARALLEL_HAND.id}\``) || !runs.includes("hand track: a gated by-hand change")) return fail(`docs/live-runs.md carries no hand-track entry for ${PARALLEL_HAND.id} (board.mjs record --hand did not run)`);
+  for (const c of [PARALLEL_FLOW, PARALLEL_HAND]) {
+    const held = runHeldOutAndClean(dir, c.heldOut);
+    if (!held.ok) return fail(`${c.id}: ${held.message}`);
+  }
+  return pass(`built: ${PARALLEL_FLOW.id} merged, ${PARALLEL_HAND.id} as ${handCode}`, { commit: shas[0] });
+}
+
 // HEAD is a merge commit (two parents), not a fast-forward or a no-op: `git rev-list --parents -n 1 HEAD` lists
 // the commit followed by each parent, so a plain commit has one token after it and a merge has two or more.
 export function assertTwoParents(dir) {
@@ -882,7 +1306,7 @@ function landAndVerify(dir, heldOut) {
 // Runs every stage of `scenario` in order, stopping at the first failed assertion. Every stage runs through
 // runSessionStage/runActStage, so a throw anywhere (a missing binary, a killed session, an assertion that threw)
 // becomes a normal failed stage instead of crashing the run (card workflow-rehearsal-review #5). Returns
-// `{ scenario, outcome, stages, totalCost, wallClock, fixtureDir, commit, reportFile, reportSynthesized,
+// `{ scenario, outcome, stages, totalCost, wallClock, fixtureDir, commit, gate, reportFile, reportSynthesized,
 // failedStage, failedMessage, agentNames }`. For flow/swarm, `reportFile` always exists on return: the real one
 // when the workflow wrote it, otherwise a small synthetic one this function writes (never inventing task rows).
 export function runScenario(scenario, { tempPrefix } = {}) {
@@ -891,6 +1315,7 @@ export function runScenario(scenario, { tempPrefix } = {}) {
   const stages = [];
   let outcome = "passed";
   let commit = null;
+  let gate = null;
   let failedStage = null;
   let failedMessage = null;
   for (const stage of SCENARIO_STAGES[scenario]) {
@@ -899,6 +1324,7 @@ export function runScenario(scenario, { tempPrefix } = {}) {
     const wallClock = `${Math.round((Date.now() - stageStarted) / 6000) / 10} min`;
     stages.push({ name: stage.name, wallClock, cost: result.cost, streamPath: result.streamPath, message: result.message });
     if (result.commit) commit = result.commit;
+    if (result.gate) gate = result.gate;
     if (!result.ok) {
       outcome = `failed at ${stage.name}: ${result.message}`;
       failedStage = stage.name;
@@ -911,7 +1337,7 @@ export function runScenario(scenario, { tempPrefix } = {}) {
   let reportFile = null;
   let reportSynthesized = false;
   let agentNames = [];
-  if (scenario !== "hand" && scenario !== "auto") {
+  if (!recordsAsHand(scenario)) {
     const realReport = join(dir, RESULTS_FILE);
     if (existsSync(realReport)) {
       reportFile = realReport;
@@ -932,6 +1358,7 @@ export function runScenario(scenario, { tempPrefix } = {}) {
     wallClock: `${Math.round((Date.now() - started) / 6000) / 10} min`,
     fixtureDir: dir,
     commit,
+    gate,
     reportFile,
     reportSynthesized,
     failedStage,

@@ -55,7 +55,8 @@ const LESSON_KINDS = ["feedback", "project", "pitfall", "pattern"];
 // row. On a hand row the following columns are NULL because they do not exist on that track — never because
 // they measured zero: run_id, spec_hash, files, size, shape, models, implemented, verified, reviewed,
 // review_issues, review_issue_count, adversary_verdict, adversary_blocked, adversary_source, blocks, passes,
-// fix_passes, stop_reason, in_scope, budget_spent, tokens, usd, codex_usd, report_hash, report_path, partial. In particular
+// fix_passes, stop_reason, stop_class, in_scope, budget_spent, tokens, codex_usd, report_hash, report_path, partial (usd too,
+// except that a hand landing recorded with --cost carries its measured session cost there; card usd-budget-size-class). In particular
 // verified is null on a hand row even though the gate passed: no independent verifier ran on that track, and
 // the gate's own text lives in the `gate` column instead. A consumer that averages fix_passes or counts
 // blocks across both tracks must filter on track. wall_clock, gate, and note only exist on a hand row; they
@@ -108,6 +109,7 @@ const OUTCOMES_COLUMNS_SQL = `
   tokens TEXT,
   usd REAL,
   codex_usd REAL,
+  stop_class TEXT,
   commit_sha TEXT,
   track TEXT NOT NULL DEFAULT 'flow',
   wall_clock TEXT,
@@ -399,6 +401,27 @@ function migrateV7ToV8(db) {
   }
 }
 
+// v8 had no stop_class column on outcomes (card memory-stop-class): the typed cause of a stop, from
+// task.stopClass, so stops can be counted by cause across runs. Additive like v7->v8: one guarded ALTER, then
+// the version bump; old rows stay null. OUTCOMES_COLUMNS_SQL carries stop_class for a v1 store's rebuild, so
+// this step is a no-op there instead of a duplicate-column error.
+const V9_STOP_COLUMNS = [["stop_class", "TEXT"]];
+
+function migrateV8ToV9(db) {
+  db.exec("BEGIN");
+  try {
+    const cols = db.prepare("PRAGMA table_info(outcomes)").all().map((c) => c.name);
+    for (const [name, type] of V9_STOP_COLUMNS) {
+      if (!cols.includes(name)) db.exec(`ALTER TABLE outcomes ADD COLUMN ${name} ${type};`);
+    }
+    db.exec("PRAGMA user_version = 9");
+    db.exec("COMMIT");
+  } catch (err) {
+    db.exec("ROLLBACK");
+    throw err;
+  }
+}
+
 export function openMemory(dir) {
   const file = memoryPath(dir);
   mkdirSync(dirname(file), { recursive: true });
@@ -407,7 +430,7 @@ export function openMemory(dir) {
   const version = db.prepare("PRAGMA user_version").get().user_version;
   if (version === 0) {
     db.exec(SCHEMA_SQL);
-    db.exec("PRAGMA user_version = 8");
+    db.exec("PRAGMA user_version = 9");
   } else if (version === 1) {
     migrateV1ToV2(db);
     migrateV2ToV3(db);
@@ -416,6 +439,7 @@ export function openMemory(dir) {
     migrateV5ToV6(db);
     migrateV6ToV7(db);
     migrateV7ToV8(db);
+    migrateV8ToV9(db);
   } else if (version === 2) {
     migrateV2ToV3(db);
     migrateV3ToV4(db);
@@ -423,29 +447,37 @@ export function openMemory(dir) {
     migrateV5ToV6(db);
     migrateV6ToV7(db);
     migrateV7ToV8(db);
+    migrateV8ToV9(db);
   } else if (version === 3) {
     migrateV3ToV4(db);
     migrateV4ToV5(db);
     migrateV5ToV6(db);
     migrateV6ToV7(db);
     migrateV7ToV8(db);
+    migrateV8ToV9(db);
   } else if (version === 4) {
     migrateV4ToV5(db);
     migrateV5ToV6(db);
     migrateV6ToV7(db);
     migrateV7ToV8(db);
+    migrateV8ToV9(db);
   } else if (version === 5) {
     migrateV5ToV6(db);
     migrateV6ToV7(db);
     migrateV7ToV8(db);
+    migrateV8ToV9(db);
   } else if (version === 6) {
     migrateV6ToV7(db);
     migrateV7ToV8(db);
+    migrateV8ToV9(db);
   } else if (version === 7) {
     migrateV7ToV8(db);
-  } else if (version !== 8) {
+    migrateV8ToV9(db);
+  } else if (version === 8) {
+    migrateV8ToV9(db);
+  } else if (version !== 9) {
     db.close();
-    throw new Error(`memory store ${file} is user_version ${version}; this code understands up to version 8`);
+    throw new Error(`memory store ${file} is user_version ${version}; this code understands up to version 9`);
   }
   return {
     file,
@@ -479,7 +511,7 @@ export function probeSqliteFts5() {
 // Read-only look at the store for `doug doctor`: creates nothing, migrates nothing, never throws.
 export function inspectMemory(dir) {
   const file = memoryPath(dir);
-  const out = { file, exists: false, userVersion: null, maxUserVersion: 8, quickCheck: null, error: null };
+  const out = { file, exists: false, userVersion: null, maxUserVersion: 9, quickCheck: null, error: null };
   if (!existsSync(file)) return out;
   out.exists = true;
   let db;
@@ -719,7 +751,7 @@ export function checkCitation(lesson, checkoutDir, { report } = {}) {
     }
     const taskId = rest.slice(0, slash);
     const blockId = rest.slice(slash + 1);
-    const found = adversaryBlocks(report).some((b) => b.task === taskId && b.id === blockId);
+    const found = adversaryBlocks(report).some((b) => b.task === taskId && (b.id === blockId || b.id === `${taskId}/${blockId}`));
     return found ? { ok: true, reason: "block holds" } : { ok: false, reason: `no block "${blockId}" of task "${taskId}" in this report` };
   }
   const match = citation.match(CITATION_RE);
@@ -1259,6 +1291,7 @@ export function outcomeRows(report, opts) {
         passes,
         fix_passes: fixPasses,
         stop_reason: task.stopReason ?? null,
+        stop_class: task.stopClass ?? null,
         in_scope: toIntOrNull(task.inScope),
         budget_spent: (task.budget && task.budget.spent) || null,
         tokens,
@@ -1329,7 +1362,7 @@ export function conditionConfigHash(dir) {
 // null when none was found: null fills every one of the seven condition columns with null, exactly like a row
 // that has never been stamped. `backfilled` is always 0 here — only `memory.mjs condition backfill`, which never
 // goes through this function, ever sets it to 1.
-export function handOutcomeRow({ card, commit, wallClock = null, gate = null, note = null, now = nowIso(), condition = null } = {}) {
+export function handOutcomeRow({ card, commit, wallClock = null, gate = null, note = null, now = nowIso(), condition = null, cost = null } = {}) {
   if (!card) throw new Error("handOutcomeRow requires card");
   if (!commit) throw new Error("handOutcomeRow requires commit");
   return {
@@ -1357,10 +1390,11 @@ export function handOutcomeRow({ card, commit, wallClock = null, gate = null, no
     passes: null,
     fix_passes: null,
     stop_reason: null,
+    stop_class: null,
     in_scope: null,
     budget_spent: null,
     tokens: null,
-    usd: null,
+    usd: typeof cost === "number" && Number.isFinite(cost) ? cost : null,
     codex_usd: null,
     commit_sha: commit,
     track: "hand",
@@ -1381,7 +1415,7 @@ export function handOutcomeRow({ card, commit, wallClock = null, gate = null, no
 const OUTCOME_COLUMNS = [
   "recorded", "run", "run_id", "report_hash", "report_path", "card", "task", "spec_hash", "files", "size", "shape",
   "models", "implemented", "verified", "reviewed", "review_issues", "review_issue_count", "adversary_verdict",
-  "adversary_blocked", "adversary_source", "blocks", "passes", "fix_passes", "stop_reason", "in_scope",
+  "adversary_blocked", "adversary_source", "blocks", "passes", "fix_passes", "stop_reason", "stop_class", "in_scope",
   "budget_spent", "tokens", "usd", "codex_usd", "commit_sha", "track", "wall_clock", "gate", "note", "partial",
   "harness_commit", "config_hash", "class", "arm", "assigned_by", "explore_probability", "backfilled",
 ];
@@ -1507,7 +1541,7 @@ function reflectionRowToObject(row) {
 // Deterministic, no LLM. harmful is an explicit mark (card reflect-harmful-irrelevant-lessons): only an id in
 // `harmfulIds` (the lead's judgement that the lesson misled the work) gets harmful +1, once however often it is
 // named or used; a real block alone bumps nothing. For each task whose memoryUsed is non-empty, a real block earns
-// no helpful (real wins even when the task also verified), else a first-verified task bumps helpful on every used
+// no helpful (real wins even when the task also verified; except on the hand track, whose reviewer blocks never withhold it), else a first-verified task bumps helpful on every used
 // lesson not named harmful; neither verified nor real does nothing. An id naming no lesson is reported in
 // `unknown`, never an error. apply:false (a dry run's preview) computes the same result without writing anything.
 function computeReflectCounters(m, blocks, report, { apply, harmfulIds = [] }) {
@@ -1527,7 +1561,9 @@ function computeReflectCounters(m, blocks, report, { apply, harmfulIds = [] }) {
     for (const task of level.tasks || []) {
       const used = Array.isArray(task.memoryUsed) ? task.memoryUsed : [];
       if (!used.length) continue;
-      const real = blocks.some((b) => b.task === task.id && b.class === "real");
+      // A hand report's blocks are reviewer blockers a later round fixed (card reflect-review-key-text): they are no
+      // evidence the lesson misled, so they never withhold helpful; only --harmful marks that.
+      const real = report.track !== "hand" && blocks.some((b) => b.task === task.id && b.class === "real");
       if (real) {
         for (const id of used) {
           if (!getLesson(m, id) && !named.has(id)) unknown.push(id);
@@ -1595,7 +1631,7 @@ export function buildReflectPrompt(report, { blocks = [], plan = null, existingL
       if (Array.isArray(task.verifierFindings) && task.verifierFindings.length) lines.push(`  verifier findings: ${JSON.stringify(task.verifierFindings)}`);
       if (taskBlocks.length) {
         lines.push("  blocks:");
-        for (const b of taskBlocks) lines.push(`    - report:${task.id}/${b.id} class=${b.class || "unclassified"} reason=${b.reason || "none"}`);
+        for (const b of taskBlocks) lines.push(`    - report:${b.id.startsWith(`${task.id}/`) ? b.id : `${task.id}/${b.id}`} class=${b.class || "unclassified"} reason=${b.reason || "none"}`);
       }
       lines.push(`  memoryUsed: ${used.length ? used.join(", ") : "none"}`);
     }

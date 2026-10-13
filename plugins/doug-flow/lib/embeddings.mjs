@@ -3,12 +3,39 @@
 // /v1/embeddings endpoint (Ollama, llama-server, vLLM, LM Studio, a hosted OpenAI-shaped key) and Voyage AI's
 // own endpoint. Product first: memory.embeddings in .doug/config.json is null by default, and every function
 // here treats "no provider" or "provider unreachable" as a normal outcome, never a thrown error.
-import { readFileSync, existsSync } from "node:fs";
+import { readFileSync, existsSync, mkdirSync } from "node:fs";
 import { join, dirname } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { homedir } from "node:os";
+import { createRequire } from "node:module";
+import { spawn } from "node:child_process";
 
 const CONFIG_RELPATH = ".doug/config.json";
 const VALID_PROVIDERS = new Set(["openai-compatible", "voyage"]);
+
+// The bundled local model (card memory-bundled-embedding, ADR 0006 amendment 2026-10-08): the runtime is
+// installed into a user-level cache and loaded by dynamic import, never a dependency of any Doug package.
+export const LOCAL_MODEL_ID = "onnx-community/embeddinggemma-300m-ONNX";
+export const LOCAL_DTYPE = "q8";
+export const LOCAL_RUNTIME_PACKAGE = "@huggingface/transformers@4.3.1";
+export const LOCAL_QUERY_PREFIX = "task: search result | query: ";
+export const LOCAL_DOCUMENT_PREFIX = "title: none | text: ";
+const LOCAL_DIMS = 512;
+
+export function localCacheDir(env = process.env, home = homedir()) {
+  if (env.DOUG_CACHE_DIR) return env.DOUG_CACHE_DIR;
+  return join(env.XDG_CACHE_HOME || join(home, ".cache"), "doug");
+}
+
+export function localPaths(cacheDir) {
+  const modelsDir = join(cacheDir, "models");
+  return {
+    cacheDir,
+    runtimeDir: join(cacheDir, "runtime"),
+    modelsDir,
+    modelFile: join(modelsDir, "onnx-community", "embeddinggemma-300m-ONNX", "onnx", "model_quantized.onnx"),
+  };
+}
 const DEFAULT_TIMEOUT_MS = 2000;
 const OLLAMA_BASE_URL = "http://localhost:11434";
 const DEFAULT_MODEL = "embeddinggemma";
@@ -21,6 +48,7 @@ const PRESETS = {
   unsloth: { provider: "openai-compatible", baseUrl: "http://127.0.0.1:8888", apiKeyEnv: "UNSLOTH_API_KEY", sendsDims: false, requiresKey: true, modelsList: "v1" },
   openai: { provider: "openai-compatible", baseUrl: "https://api.openai.com", apiKeyEnv: "OPENAI_API_KEY", sendsDims: true, requiresKey: true, modelsList: "v1" },
   voyage: { provider: "voyage", baseUrl: "https://api.voyageai.com", apiKeyEnv: "VOYAGE_API_KEY", sendsDims: true, requiresKey: true, modelsList: null },
+  local: { provider: "local", baseUrl: undefined, apiKeyEnv: undefined, sendsDims: false, requiresKey: false, modelsList: null },
   custom: { provider: undefined, baseUrl: undefined, apiKeyEnv: undefined, sendsDims: true, requiresKey: false, modelsList: null },
 };
 
@@ -60,7 +88,8 @@ export function readMemoryConfig(dir) {
   const e = memory && typeof memory === "object" ? memory.embeddings : undefined;
   if (e === null || e === undefined) return { embeddings: null };
   const resolved = applyPreset(e);
-  if (!isValidEmbeddingsConfig(resolved)) {
+  const isLocal = e.preset === "local";
+  if (isLocal ? !isValidLocalConfig(resolved) : !isValidEmbeddingsConfig(resolved)) {
     process.stderr.write(`[doug] ${CONFIG_RELPATH} memory.embeddings is not a valid shape; treating as unset (keyword-only)\n`);
     return { embeddings: null };
   }
@@ -80,7 +109,16 @@ function applyPreset(e) {
   for (const k of ["provider", "baseUrl", "apiKeyEnv"]) {
     if (out[k] === undefined && p[k] !== undefined) out[k] = p[k];
   }
+  if (e.preset === "local") {
+    if (out.model === undefined) out.model = LOCAL_MODEL_ID;
+    if (out.dims === undefined) out.dims = LOCAL_DIMS;
+  }
   return out;
+}
+
+// The local runtime runs one model at one width: a config that names anything else is invalid.
+function isValidLocalConfig(r) {
+  return !!(r && r.provider === "local" && r.model === LOCAL_MODEL_ID && r.dims === LOCAL_DIMS);
 }
 
 function isValidIndexConfig(idx) {
@@ -452,11 +490,96 @@ async function embedBatched(texts, inputType, sendBatch) {
   return { ok: true, vectors };
 }
 
+async function defaultLoadTransformers(runtimeDir) {
+  const req = createRequire(join(runtimeDir, "noop.js"));
+  return import(pathToFileURL(req.resolve("@huggingface/transformers")).href);
+}
+
+// The in-process provider: the transformers module comes from opts.loadTransformers (the test seam) or the
+// runtime dir under the cache. Loads lazily on the first embed and keeps the model for the provider's life.
+// Recall never reaches the network (allowRemoteModels false); only setup's download passes allowRemote.
+function createLocalProvider(e, opts) {
+  const paths = localPaths(opts.cacheDir ?? localCacheDir());
+  const loadTransformers = opts.loadTransformers ?? (() => defaultLoadTransformers(paths.runtimeDir));
+  let loaded = null;
+  const load = async () => {
+    if (loaded) return loaded;
+    let mod;
+    try {
+      mod = await loadTransformers();
+    } catch {
+      return { failure: { ok: false, reason: `local embedding runtime not installed at ${paths.runtimeDir}: run doug memory setup` } };
+    }
+    mod.env.cacheDir = paths.modelsDir;
+    mod.env.allowRemoteModels = opts.allowRemote === true;
+    const tokenizer = await mod.AutoTokenizer.from_pretrained(LOCAL_MODEL_ID);
+    const model = await mod.AutoModel.from_pretrained(LOCAL_MODEL_ID, { dtype: LOCAL_DTYPE });
+    loaded = { tokenizer, model };
+    return loaded;
+  };
+  const sendBatch = async (texts, inputType) => {
+    const l = await load();
+    if (l.failure) return l.failure;
+    const prefix = inputType === "query" ? LOCAL_QUERY_PREFIX : LOCAL_DOCUMENT_PREFIX;
+    const inputs = l.tokenizer(texts.map((t) => prefix + t), { padding: true, truncation: true });
+    const { sentence_embedding } = await l.model(inputs);
+    const vectors = [];
+    for (const row of sentence_embedding.tolist()) {
+      if (row.length < LOCAL_DIMS) return { ok: false, reason: `wrong dims: got ${row.length}, expected ${LOCAL_DIMS}` };
+      vectors.push(l2normalize(Float32Array.from(row.slice(0, LOCAL_DIMS))));
+    }
+    return { ok: true, vectors };
+  };
+  return {
+    name: "local",
+    model: LOCAL_MODEL_ID,
+    dims: LOCAL_DIMS,
+    async embed(texts, { inputType = "document" } = {}) {
+      try {
+        return await embedBatched(texts, inputType, sendBatch);
+      } catch (err) {
+        return { ok: false, reason: `local embedding failed: ${err.message}` };
+      }
+    },
+  };
+}
+
+const LOCAL_CONFIG = { embeddings: { preset: "local", provider: "local", model: LOCAL_MODEL_ID, dims: LOCAL_DIMS } };
+
+// Installs the pinned runtime into <cacheDir>/runtime with the npm CLI, CPU only (the CUDA download is skipped on
+// every platform). Never throws.
+export function installLocalRuntime({ cacheDir, spawnImpl = spawn, platform = process.platform } = {}) {
+  return new Promise((resolve) => {
+    try {
+      const { runtimeDir } = localPaths(cacheDir ?? localCacheDir());
+      mkdirSync(runtimeDir, { recursive: true });
+      const child = spawnImpl(
+        platform === "win32" ? "npm.cmd" : "npm",
+        ["install", "--prefix", runtimeDir, "--no-audit", "--no-fund", LOCAL_RUNTIME_PACKAGE],
+        { stdio: "inherit", env: { ...process.env, ONNXRUNTIME_NODE_INSTALL: "skip" } },
+      );
+      child.on("error", (err) => resolve({ ok: false, reason: `npm install failed to start: ${err.message}` }));
+      child.on("close", (code) => resolve(code === 0 ? { ok: true } : { ok: false, reason: `npm install exited with code ${code}` }));
+    } catch (err) {
+      resolve({ ok: false, reason: `npm install failed: ${err.message}` });
+    }
+  });
+}
+
+// One document embed with remote models allowed: from_pretrained downloads the tokenizer and q8 model into the
+// models dir. Never throws.
+export async function downloadLocalModel({ cacheDir, loadTransformers } = {}) {
+  const provider = createProvider(LOCAL_CONFIG, { cacheDir, loadTransformers, allowRemote: true });
+  const r = await provider.embed(["probe"], { inputType: "document" });
+  return r.ok ? { ok: true } : { ok: false, reason: r.reason };
+}
+
 // cfg is the { embeddings } shape readMemoryConfig returns. Returns null when nothing is configured (the
 // caller's cue to run keyword-only); otherwise { name, model, dims, embed(texts, { inputType }) }.
 export function createProvider(cfg, opts = {}) {
   const e = cfg && cfg.embeddings;
   if (!e) return null;
+  if (e.provider === "local") return createLocalProvider(e, opts);
   const fetchImpl = opts.fetch || globalThis.fetch;
   const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const state = { omitDims: false };
@@ -569,6 +692,14 @@ export async function probeProvider(cfg, opts = {}) {
   const baseUrl = e && e.baseUrl ? e.baseUrl : process.env.DOUG_OLLAMA_BASE_URL || OLLAMA_BASE_URL;
   const wantModel = e && e.model ? e.model : DEFAULT_MODEL;
   const root = baseUrl.replace(/\/$/, "");
+  if (e && e.provider === "local") {
+    const { cacheDir, modelFile } = localPaths(opts.cacheDir ?? localCacheDir());
+    const modelPresent = existsSync(modelFile);
+    const base = { kind: "local", cacheDir, modelFile, modelPresent };
+    if (!modelPresent) return { ...base, reachable: false, embedOk: false, reason: "model file missing" };
+    const result = await createProvider(cfg, { cacheDir, loadTransformers: opts.loadTransformers }).embed(["probe"]);
+    return { ...base, reachable: result.ok, embedOk: result.ok, reason: result.ok ? null : result.reason };
+  }
   const preset = presetOf(e);
   if (preset && preset.modelsList === "v1") return probeV1Models(e, root, wantModel, { fetchImpl, timeoutMs });
   if (preset && e.provider === "voyage") {
@@ -675,6 +806,16 @@ export function doctorReport(cfg, probe, platform = process.platform) {
     return lines.join("\n");
   }
 
+  if (embeddings.provider === "local") {
+    lines.push(`memory.embeddings is configured: local ${embeddings.model}/${embeddings.dims} (bundled, in-process).`);
+    lines.push(`Cache: ${probe.cacheDir}`);
+    lines.push(`Model file: ${probe.modelFile} (${probe.modelPresent ? "present" : "missing"})`);
+    lines.push(`Dims: ${embeddings.dims}`);
+    if (!probe.modelPresent) lines.push("Run doug memory setup to install it.");
+    else if (probe.embedOk) lines.push("Test embed: ok");
+    else lines.push(`Test embed failed: ${probe.reason || "unknown error"}`);
+    return lines.join("\n");
+  }
   lines.push(`memory.embeddings is configured: ${embeddings.provider} ${embeddings.model}/${embeddings.dims} at ${embeddings.baseUrl}.`);
   if (presetOf(embeddings) && PRESETS[embeddings.preset].modelsList === "v1") {
     if (!probe.reachable) lines.push(`Not reachable: ${probe.reason || "unknown error"}.`);

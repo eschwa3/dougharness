@@ -198,15 +198,15 @@ export function retireTaskWorktrees(dir, { tasks = [], saveDir }) {
   return result;
 }
 
-// Retires the integration worktree at .claude/worktrees/doug-integration, if one is registered (card
+// Retires the integration worktree at `path` (default .claude/worktrees/doug-integration; a per-card run passes its own), if one is registered (card
 // integration-worktree-stale, 2026-09-08): a leftover from an abandoned run must not survive into the next one,
 // since the workflow's own leftover-vs-this-run's-own check (integratePrompt's firstIntegration) only runs inside
 // a run already underway. Removed with --force; the branch is never renamed or deleted (the workflow's
 // `git worktree add -B` on the next run's first integration resets it from the base branch). A worktree that is
 // not there is not an error.
 // Returns { removed: string | null } - the path removed, or null when none was registered.
-export function retireIntegrationWorktree(dir) {
-  const target = join(realpathOrSelf(dir), ".claude", "worktrees", "doug-integration");
+export function retireIntegrationWorktree(dir, path = ".claude/worktrees/doug-integration") {
+  const target = resolve(realpathOrSelf(dir), path);
   const match = taskWorktrees(dir).find((wt) => realpathOrSelf(wt.path) === realpathOrSelf(target));
   if (!match) return { removed: null };
   const removal = tryGit(dir, ["worktree", "remove", "--force", match.path]);

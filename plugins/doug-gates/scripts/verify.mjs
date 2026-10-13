@@ -4,7 +4,7 @@
 //   node .doug/hooks/scripts/verify.mjs [--no-credit] [--json] [--dir <project>] [--cwd <tree dir>] [--timeout-ms <n>]
 //     [--record-dir <dir>] [--credit-dir <dir>]... [--by <writer>] [--command <cmd>]...
 // Exit: 0 all green or credited; 1 any command failed or timed out; 2 usage error or no commands.
-// No count ratchet and no scans here (no session baseline); the Stop gate does those. Takes the Stop gate's .doug/.state/gate.lock around the commands (card verify-takes-gate-lock).
+// No count ratchet and no scans here (no session baseline); the Stop gate does those. Takes the Stop gate's gate.lock (under the git common dir, shared by every worktree) around the commands (card verify-takes-gate-lock).
 
 import { spawnSync } from "node:child_process";
 import { unlinkSync } from "node:fs";
@@ -78,6 +78,7 @@ function main() {
     return 2;
   }
   let treeBefore = computeTree(cwd);
+  let lockWaitMs = 0;
 
   // Credits a verified-tree record of the same tree when one exists; returns the exit code, or null.
   const tryCredit = () => {
@@ -98,7 +99,7 @@ function main() {
       const entries = record.commands.map((c) => ({ name: c.name, exit: c.exit, passed: passed(record.totals[c.command]) }));
       if (o.json) {
         const results = record.commands.map((c) => ({ name: c.name, command: c.command, ok: true, status: c.exit, timedOut: false, durationMs: c.durationMs, outputTail: "" }));
-        process.stdout.write(JSON.stringify({ ok: true, credited: "verified-tree", tree: treeBefore, record, results }) + "\n");
+        process.stdout.write(JSON.stringify({ ok: true, credited: "verified-tree", tree: treeBefore, record, results, lockWaitMs }) + "\n");
       } else {
         process.stdout.write(`[doug] verify: credited verified-tree record (tree ${treeBefore.slice(0, 7)}, by ${record.by || "unknown"}, ${record.at}, node ${record.node}); commands not re-run. --no-credit runs them.\n`);
         process.stdout.write(gateLine(entries) + "\n");
@@ -142,7 +143,8 @@ function main() {
         takeOverGateLock(dir, o.by || "verify");
         lockOwned = true;
       } else {
-        const deadline = Date.now() + waitBoundMs;
+        const waitStart = Date.now();
+        const deadline = waitStart + waitBoundMs;
         let live = held;
         const nap = new Int32Array(new SharedArrayBuffer(4));
         while (true) {
@@ -150,6 +152,8 @@ function main() {
           if (stale(live) || Date.now() >= deadline) break;
           Atomics.wait(nap, 0, 0, 200);
         }
+        lockWaitMs = Date.now() - waitStart;
+        if (!o.json && lockWaitMs > 0) process.stdout.write(`[doug] verify: waited ${lockWaitMs} ms on gate.lock\n`);
         treeBefore = computeTree(cwd);
         const again = tryCredit();
         if (again !== null) return again;
@@ -186,7 +190,7 @@ function main() {
   } else {
     removeRecord(recordDir);
   }
-  if (o.json) process.stdout.write(JSON.stringify({ ok, credited: null, tree: treeBefore, record: null, results }) + "\n");
+  if (o.json) process.stdout.write(JSON.stringify({ ok, credited: null, tree: treeBefore, record: null, results, lockWaitMs }) + "\n");
   else process.stdout.write(gateLine(entries) + "\n");
   return ok ? 0 : 1;
 }
