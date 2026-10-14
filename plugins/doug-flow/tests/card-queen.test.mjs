@@ -201,6 +201,45 @@ describe("card-queen workflow (parallel-card-queens B10)", () => {
     expect(v.reason).toBe("agent-null");
   });
 
+  const BOOM = "structured output failed validation after 5 attempts";
+
+  it("Q13 a throwing agent() at the coder seat yields a stopped agent-null report, no retry, error logged", async () => {
+    const { agent, calls } = fakeAgent((seat) => {
+      if (seat === "coder") throw new Error(BOOM);
+      return okHB(seat);
+    });
+    const logs = [];
+    const report = await runQueen(ARGS, agent, [], logs);
+    expect(report.outcome).toBe("stopped");
+    expect(report.reason).toBe("agent-null");
+    expect(report.stoppedAt).toBe("coder");
+    expect(calls.filter((c) => c.seat === "coder").length).toBe(1);
+    expect(calls.map((c) => c.seat)).toEqual(["setup", "research", "lead", "tester", "coder"]);
+    expect(logs.some((l) => l.includes("coder") && l.includes(BOOM))).toBe(true);
+  });
+
+  it("Q13b a throw at the first seat also yields a stopped report after one call", async () => {
+    const { agent, calls } = fakeAgent(() => {
+      throw new Error(BOOM);
+    });
+    const report = await runQueen(ARGS, agent);
+    expect(report.outcome).toBe("stopped");
+    expect(report.reason).toBe("agent-null");
+    expect(report.stoppedAt).toBe("setup");
+    expect(calls.length).toBe(1);
+  });
+
+  it("Q13c seam: a throwing run's report classifies as resume (agent-null)", async () => {
+    const { agent } = fakeAgent((seat) => {
+      if (seat === "coder") throw new Error(BOOM);
+      return okHB(seat);
+    });
+    const report = await runQueen(ARGS, agent);
+    const v = classifyNotification("hand", { status: "completed", result: JSON.stringify(report) });
+    expect(v.action).toBe("resume");
+    expect(v.reason).toBe("agent-null");
+  });
+
   it("Q05 a designQuestion stops with design-decision and carries the question", async () => {
     const { agent, calls } = fakeAgent((seat) => (seat === "lead" ? okHB(seat, { designQuestion: "Which of the two shapes?" }) : okHB(seat)));
     const report = await runQueen(ARGS, agent);

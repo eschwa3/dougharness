@@ -366,3 +366,28 @@ export function capsReached(caps, used) {
   }
   return out;
 }
+
+// The queen's short run label (card queen-run-name): the first two hyphen segments of the card id (the id itself
+// with fewer), or the full id when another id in `others` (the card's own id excluded) shortens to the same form.
+const shortForm = (id) => String(id).split("-").slice(0, 2).join("-");
+export function queenLabel(id, others = []) {
+  const short = shortForm(id);
+  return others.some((o) => o !== id && shortForm(o) === short) ? String(id) : short;
+}
+
+// The queen script's source with only its meta literal renamed: name becomes "<label> card-queen" (hand) or
+// "<label> flow-queen" (flow), description gets "<label>: " in front. Throws when either is missing from the meta.
+export function renameQueenMeta(source, { kind, label }) {
+  const start = source.indexOf("export const meta = {");
+  if (start < 0) throw new Error("no meta literal in the queen script");
+  const e = source.indexOf("\n}", start);
+  const end = e < 0 ? source.length : e;
+  let meta = source.slice(start, end);
+  const nameRe = /^(\s*name: ')[^']*(',)/m;
+  const descRe = /^(\s*description: ')/m;
+  if (!nameRe.test(meta)) throw new Error("no meta name in the queen script");
+  if (!descRe.test(meta)) throw new Error("no meta description in the queen script");
+  const suffix = kind === "flow" ? "flow-queen" : "card-queen";
+  meta = meta.replace(nameRe, (_m, a, b) => `${a}${label} ${suffix}${b}`).replace(descRe, (_m, a) => `${a}${label}: `);
+  return source.slice(0, start) + meta + source.slice(end);
+}

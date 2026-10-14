@@ -1,5 +1,21 @@
 # Changelog
 
+## 1.3.0
+
+- Crew testers: `plan.mjs set crew.testers <n>` (default 1) runs that many verifier agents in parallel per full-shape task; seats 2 and up probe edge cases and error paths, a criterion any seat fails fails, and size S keeps one check.
+- `memory.mjs reflect` offers a CLAUDE.md candidate when a new lesson has no home, written to `.doug/.state/learn/claude-md-candidates/<lesson id>.json` with the `claude-md propose` command printed; it never writes CLAUDE.md.
+- Faster lesson recall: recall caches decoded vectors in process, so warm hybrid recall at 100,000 lessons drops from 1159 ms to 212 ms p50 (embeddinggemma); a fresh process is still 665-716 ms.
+- `autopilot.mjs agent-types` prints a queen's agent types, and `/doug-next` launches no queen when one is missing (run `/reload-plugins` or restart).
+- Each card queen's run name carries its short card id (`<label> card-queen`, `<label> flow-queen`).
+- A seat agent that throws becomes a stopped report, not a run with no report; commit seats run `git commit` in the foreground with a 600000 ms timeout.
+- Research: one question per researcher, each brief names where to read and a turn budget; researcher and reviewer maxTurns go from 30 to 40.
+- The research cap lets loopback fetches piped to head, tail or `python -m json.tool`, with `2>&1`, escaped JSON bodies and line continuations through, and its counter lines carry the URL hosts.
+- The stop gate keys the test-count baseline per worktree.
+- In the card loop, a reviewer major that carries evidence gets one fix pass, as a blocker does; one still open stops the card (`reviewer-major-open`) and autopilot asks.
+- The gate seat never runs `git add` or `git commit`; a gate hand-back that does is invalid and stops the card.
+- The autopilot pane also refreshes on prompt submit, turn end, and after each Bash call, so a new run shows after a reload drops the pane's timer.
+- `/doug-next` names each per-card `queen.js` by `scriptPath`, and the `autopilot.mjs` usage names `--with` and both written paths.
+
 ## 1.2.0
 
 - Parallel cards (ADR 0015): `/doug-next --auto` runs disjoint cards at once in one session, a Workflow queen per card; a hand card's queen runs the host-neutral card loop, a flow card's queen runs doug-implement on its own per-card plan (`plan.mjs --card`).

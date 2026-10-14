@@ -437,8 +437,8 @@ import { spawnSync } from "node:child_process";
 
 describe("orchestration arms", () => {
   const plan = { version: 1, title: "P", goal: "g", acceptance: ["x"], verify: ["true"], tasks: [{ id: "a", title: "A", spec: "Do the thing for a with a test.", files: ["src/a.ts"] }] };
-  it("names the six arms and sets swarm and the crew per arm on an approved copy of the plan", () => {
-    expect(Object.keys(ARMS)).toEqual(["pipeline", "swarm", "swarm-cheap", "crew", "swarm-crew", "memory"]);
+  it("names the seven arms and sets swarm and the crew per arm on an approved copy of the plan", () => {
+    expect(Object.keys(ARMS)).toEqual(["pipeline", "swarm", "swarm-cheap", "crew", "swarm-crew", "memory", "testers"]);
     expect(armFor("full")).toBeNull();
     expect(armFor("constructor")).toBeNull();
     expect(armPlan(plan, ARMS.pipeline)).toEqual({ ...plan, status: "approved" });
@@ -446,6 +446,9 @@ describe("orchestration arms", () => {
     expect(armPlan(plan, ARMS["swarm-cheap"]).swarm).toBe(true);
     expect(armPlan(plan, ARMS.crew)).toEqual({ ...plan, status: "approved", crew: { reviewers: 2, adversaries: 2 } });
     expect(armPlan(plan, ARMS["swarm-crew"])).toEqual({ ...plan, status: "approved", swarm: true, crew: { reviewers: 2, adversaries: 2 } });
+    // Card crew-tester-seat: the two-coders-two-reviewers-two-testers shape.
+    expect(ARMS.testers).toMatchObject({ swarm: true, crew: { reviewers: 2, testers: 2 } });
+    expect(armPlan(plan, ARMS.testers)).toEqual({ ...plan, status: "approved", swarm: true, crew: { reviewers: 2, testers: 2 } });
     expect(armPlan({ ...plan, swarm: true, crew: { reviewers: 3 } }, ARMS.pipeline)).toEqual({ ...plan, status: "approved" });
     expect(plan.status).toBeUndefined();
   });

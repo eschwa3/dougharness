@@ -97,7 +97,11 @@
 //                                                 0); --dry-run applies nothing but still runs the LLM pass and
 //                                                 prints what would happen. Cost is measured from the same local
 //                                                 transcripts cost.mjs reads, falling back to the CLI's own
-//                                                 cost estimate. Needs Node >=22.16 (node:sqlite).
+//                                                 cost estimate. For each appended lesson with no CLAUDE.md home
+//                                                 it prints `claude-md candidate for lesson <id>: <command>`
+//                                                 (edits file under .doug/.state/learn/claude-md-candidates/,
+//                                                 nothing under --dry-run) or `... dropped: <reason>`; --json
+//                                                 carries claudeMd and claudeMdDropped. Needs Node >=22.16 (node:sqlite).
 //   memory.mjs reflect --hand <card-id> [dir] --commit <sha> [--rounds <n>] [--review "<R<n> or <card-id>/R<n>>=<class>[: <reason>]"]...
 //                       [--harmful <id>]... [--note <text>] [--claude-bin <path>] [--model <name>] [--max-usd <n>] [--dry-run] [--json]
 //                                                 (card memory-every-session) the same pass for a hand landing:
@@ -776,6 +780,14 @@ try {
         for (const r of result.rejected) {
           process.stdout.write(`  rejected ${r.text ? JSON.stringify(r.text) : "(no text)"}: ${r.reason}\n`);
         }
+        for (const c of result.claudeMd || []) {
+          process.stdout.write(
+            result.dryRun
+              ? `claude-md candidate for lesson ${c.lessonId} (dry run, not written)\n`
+              : `claude-md candidate for lesson ${c.lessonId}: ${c.command}\n`
+          );
+        }
+        for (const d of result.claudeMdDropped || []) process.stdout.write(`claude-md candidate for lesson ${d.lessonId} dropped: ${d.reason}\n`);
       }
       break;
     }

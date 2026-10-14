@@ -484,6 +484,17 @@ describe("workflow template", () => {
     expect(verify).toContain("Report such a commit as a finding that names it, and passed=false.");
     expect(readFileSync(join(root, "agents/implementer.md"), "utf8")).toContain(rule);
   });
+  it("tells every committing implement prompt to run git commit in the foreground", () => {
+    expect(source).toContain("const FOREGROUND_COMMIT = '");
+    expect(source).toContain("with the Bash tool timeout set to 600000 ms");
+    expect(source).toContain("never run_in_background, a Monitor, or a sleep loop");
+    expect(source).toContain("only from git rev-parse HEAD after git commit has returned");
+    for (const fn of ["implementPrompt", "leadPrompt", "workerPrompt", "fixPrompt", "resumePrompt"]) {
+      const start = source.indexOf(`function ${fn}(`);
+      const body = source.slice(start, source.indexOf("\n}\n", start));
+      expect(body, fn).toContain("${FOREGROUND_COMMIT}");
+    }
+  });
   it("requires per-criterion acceptance results from the verifier and copies them into the report", () => {
     const start = source.indexOf("const VERIFY_SCHEMA");
     const slice = source.slice(start, source.indexOf("\n}\n", start) + 3);
@@ -545,7 +556,7 @@ describe("fix loop", () => {
 
   const taskShape = new Function(fnSlice("function taskShape(") + "\nreturn taskShape;")();
 
-  function loadLoop({ agent, fixAttempts, adversary = null, plan = defaultPlan, budget = null, parallel = plainParallel, log = () => {}, implementPrompt = () => "implement", leadPrompt = () => "lead" }) {
+  function loadLoop({ agent, fixAttempts, adversary = null, plan = defaultPlan, budget = null, parallel = plainParallel, log = () => {}, implementPrompt = () => "implement", leadPrompt = () => "lead", verifyPrompt = () => "verify" }) {
     const ledger = ledgerModule();
     const adversaryRequired = (t) => !!adversary && taskShape(t) !== "S";
     const { taskBudget } = budgetsOf(plan);
@@ -578,7 +589,7 @@ describe("fix loop", () => {
       implementPrompt,
       (t) => `reuse ${t.reuse}`,
       fixPrompt,
-      () => "verify",
+      verifyPrompt,
       () => "review",
       checkPrompt,
       () => "adversary",
@@ -629,9 +640,11 @@ describe("fix loop", () => {
     expect(source).toMatch(/const pair = await parallel\(\[\n\s*\(\) => launch\(verifyPrompt\(task, impl, baseBranch\)/);
     expect(source).toMatch(/\(\) => launch\(reviewPrompt\(task, impl, baseBranch\)/);
     expect(source).not.toMatch(/reviewPrompt\(task, impl, ver, baseBranch\)/);
-    // Five batches (card flow-adversary-parallel): the first-pass verifier, review crew and adversary crew, the review crew
-    // on a fix pass, the adversary crew's own seats, and the fix pass's focused check beside the adversary.
-    expect(source.match(/await parallel\(/g).length).toBe(5);
+    // Six batches (cards flow-adversary-parallel, crew-tester-seat): the first-pass verifier, review crew and adversary crew,
+    // the review crew on a fix pass, the adversary crew's own seats, the fix pass's focused check beside the adversary, and
+    // the tester crew on a fix pass.
+    expect(source.match(/await parallel\(/g).length).toBe(6);
+    expect(source).not.toContain("Promise.resolve(parallel(");
   });
 
   // Card flow-adversary-parallel: the adversary reviews a tree beside the verifier and the reviewer, and beside the
@@ -1469,6 +1482,182 @@ describe("fix loop", () => {
     const p = await loadLoop({ agent: plain.agent, fixAttempts: 3, adversary: codex }).runTask(task, "main");
     expect(plain.calls.map((c) => c.opts.label)).toEqual(["implement:a", "verify:a", "review:a", "adversary:a"]);
     expect(p.attempts[0].stages).toEqual(["implement", "verify", "review", "adversary"]);
+    // Card crew-tester-seat: the default tester count is one seat, so no verify-2 anywhere.
+    expect(plain.calls.map((c) => c.opts.label)).not.toContain("verify-2:a");
+    expect(p.attempts[0].stages).not.toContain("verify-2");
+  });
+
+  describe("crew testers (card crew-tester-seat)", () => {
+    const codexT = { command: "codex-review", timeoutMs: 1000, fallback: false };
+    const testerTask = { ...task, crew: { testers: 2 } };
+    const pass = (extra = {}) => ({ taskId: "a", passed: true, findings: [], acceptance: [], ...extra });
+    const fail = (findings) => ({ taskId: "a", passed: false, findings, acceptance: [] });
+    const dupFinding = "src/x.ts returns 1 for empty input";
+    const batchesOf = (calls) => {
+      const batches = [];
+      const parallel = async (thunks) => {
+        const before = calls.length;
+        const out = await plainParallel(thunks);
+        batches.push(calls.slice(before).map((c) => c.opts.label));
+        return out;
+      };
+      return { batches, parallel };
+    };
+    const happy = (over = {}) => ({
+      "implement:a": () => implResult,
+      "verify:a": () => pass(),
+      "verify-2:a": () => pass(),
+      "review:a": () => passingReview,
+      "check:a": () => passingCheck,
+      "adversary:a": () => ({ taskId: "a", ran: true, verdict: "pass", summary: "", issues: [], commandsRun: [], error: null }),
+      "fix:a": () => ({ ...implResult, commit: "c2" }),
+      ...over,
+    });
+
+    it("(a) launches the second tester in the first-pass parallel batch on the verify row, with a seat brief", async () => {
+      const seen = [];
+      const s = scripted(happy());
+      const b = batchesOf(s.calls);
+      const spyPrompt = (t, i, base, seat) => { seen.push(seat); return "verify"; };
+      const r = await loadLoop({ agent: s.agent, fixAttempts: 2, adversary: codexT, parallel: b.parallel, verifyPrompt: spyPrompt }).runTask(testerTask, "main");
+      expect(b.batches[b.batches.length - 1].slice().sort()).toEqual(["adversary:a", "review:a", "verify-2:a", "verify:a"]);
+      expect(b.batches.flat().filter((l) => l.startsWith("verify")).length).toBe(2);
+      const seat2 = labelled(s.calls, "verify-2:a")[0];
+      expect(seat2.opts).toMatchObject({ role: "verify", label: "verify-2:a", phase: "Verify", agentType: "doug-flow:verifier", schema: { schema: "verify" } });
+      expect(labelled(s.calls, "verify:a")[0].opts).toMatchObject({ role: "verify", agentType: "doug-flow:verifier", schema: { schema: "verify" } });
+      // The loop hands the seat number to verifyPrompt: seat 2 for the second tester, seat 1 (or none) for the first.
+      expect(seen).toContain(2);
+      expect(seen.filter((x) => x === 2).length).toBe(1);
+      expect(seen.filter((x) => x === undefined || x === 1).length).toBe(1);
+      expect(r.attempts[0].stages).toEqual(["implement", "verify", "verify-2", "review", "adversary"]);
+      expect(r.stopReason).toBeNull();
+    });
+
+    it("(a2) the real verifyPrompt gives seat 2 a distinct brief naming the seat and the probing, and seat 1 the standard brief", () => {
+      const crewOfFn = new Function("plan", fnSlice("function crewOf(") + "\nreturn crewOf;")({ crew: {} });
+      const real = new Function("plan", "acceptanceEntries", "CONTRADICTION_MARKER", "ENVIRONMENT_MARKER", "crewOf", CONSTS + fnSlice("function verifyPrompt(") + "\nreturn verifyPrompt;")(defaultPlan, acceptanceEntriesFn(), "SPEC CONTRADICTS ACCEPTANCE", "ENVIRONMENT ONLY", crewOfFn);
+      const seat2 = real(testerTask, implResult, "main", 2);
+      expect(seat2).toContain("crew seat 2 of 2");
+      expect(seat2).toMatch(/edge cases/i);
+      expect(seat2).toMatch(/error paths/i);
+      expect(real(testerTask, implResult, "main")).not.toContain("crew seat");
+      expect(real(testerTask, implResult, "main", 1)).not.toContain("crew seat");
+      expect(real(testerTask, implResult, "main")).not.toBe(seat2);
+    });
+
+    it("(b) two testers who report the same defect open one ledger entry", async () => {
+      const s = scripted(happy({
+        "verify:a": (i) => (i === 0 ? fail([dupFinding]) : pass()),
+        "verify-2:a": (i) => (i === 0 ? fail([dupFinding]) : pass()),
+      }));
+      const r = await loadLoop({ agent: s.agent, fixAttempts: 3, adversary: codexT }).runTask(testerTask, "main");
+      expect(labelled(s.calls, "verify-2:a").length, "the second tester ran").toBeGreaterThan(0);
+      expect(r.ledger.map((e) => [e.id, e.stage, e.description])).toEqual([["F1", "verify", dupFinding]]);
+      expect(r.attempts[0].blockingStage).toBe("verify");
+    });
+
+    it("(c) a defect only the second tester finds still blocks at verify", async () => {
+      const s = scripted(happy({
+        "verify:a": () => pass(),
+        "verify-2:a": (i) => (i === 0 ? fail(["src/x.ts throws on null input"]) : pass()),
+      }));
+      const r = await loadLoop({ agent: s.agent, fixAttempts: 3, adversary: codexT }).runTask(testerTask, "main");
+      expect(r.attempts[0].verified).toBe(false);
+      expect(r.attempts[0].blockingStage).toBe("verify");
+      expect(r.ledger.map((e) => [e.stage, e.description])).toEqual([["verify", "src/x.ts throws on null input"]]);
+      expect(r.attempts[1].ready).toBe(true);
+      expect(r.stopReason).toBeNull();
+    });
+
+    it("(d) a null tester seat is dropped; both null is a verifier that returned nothing", async () => {
+      const one = scripted(happy({ "verify-2:a": () => null }));
+      const a = await loadLoop({ agent: one.agent, fixAttempts: 2, adversary: codexT }).runTask(testerTask, "main");
+      expect(labelled(one.calls, "verify-2:a").length, "the second tester ran and returned nothing").toBeGreaterThan(0);
+      expect(a.attempts[0].verified).toBe(true);
+      expect(a.attempts[0].blockingStage).toBeNull();
+      expect(a.stopReason).toBeNull();
+      const none = scripted(happy({ "verify:a": () => null, "verify-2:a": () => null }));
+      const b = await loadLoop({ agent: none.agent, fixAttempts: 2, adversary: codexT }).runTask(testerTask, "main");
+      expect(labelled(none.calls, "verify-2:a").length).toBeGreaterThan(0);
+      expect(b.stopReason).toBe("verification failed; not retried: verifier returned nothing");
+      expect(b.stopClass).toBe("stage-missing");
+    });
+
+    it("(e) a fix pass blocked by verify reruns every tester seat in parallel", async () => {
+      const s = scripted(happy({ "verify-2:a": (i) => (i === 0 ? fail(["src/x.ts throws on null input"]) : pass()) }));
+      const b = batchesOf(s.calls);
+      const r = await loadLoop({ agent: s.agent, fixAttempts: 3, adversary: codexT, parallel: b.parallel }).runTask(testerTask, "main");
+      expect(r.attempts[0].blockingStage).toBe("verify");
+      expect(r.attempts[1].stages.slice(0, 3)).toEqual(["fix", "verify", "verify-2"]);
+      const rerun = b.batches.find((batch) => batch.includes("verify:a:2"));
+      expect(rerun, "both seats in one parallel batch").toBeDefined();
+      expect(rerun.slice().sort()).toEqual(["verify-2:a:2", "verify:a:2"]);
+      expect(r.stopReason).toBeNull();
+    });
+
+    it("(e2) a fix pass blocked at verify counts every tester seat in the projected budget", async () => {
+      const script = () => happy({ "verify:a": (i) => (i === 0 ? fail(["src/x.ts throws on null input"]) : pass()) });
+      const tight = scripted(script());
+      const t = await loadLoop({ agent: tight.agent, fixAttempts: 3, plan: { ...defaultPlan, budget: { agents: 7 } } }).runTask(testerTask, "main");
+      expect(labelled(tight.calls, "fix:").length, "pass 2 must not launch").toBe(0);
+      expect(t.stopClass).toBe("budget");
+      expect(t.stopReason).toContain("would exceed the task budget");
+      expect(t.stopReason).toContain("agents 8 > 7");
+      const roomy = scripted(script());
+      const r = await loadLoop({ agent: roomy.agent, fixAttempts: 3, plan: { ...defaultPlan, budget: { agents: 8 } } }).runTask(testerTask, "main");
+      expect(labelled(roomy.calls, "fix:").length, "pass 2 launches").toBe(1);
+      expect(r.stopClass).not.toBe("budget");
+    });
+
+    it("(f) a size-S task keeps one focused check whatever crew.testers says", async () => {
+      const s = scripted({ "implement:a": () => implResult, "check:a": () => passingCheck });
+      const r = await loadLoop({ agent: s.agent, fixAttempts: 2, adversary: codexT }).runTask({ ...testerTask, size: "S" }, "main");
+      expect(s.calls.map((c) => c.opts.label)).toEqual(["implement:a", "check:a"]);
+      expect(r.attempts[0].stages).toEqual(["implement", "check"]);
+    });
+
+    it("(g) the plan-level crew.testers applies to a task with no crew of its own", async () => {
+      const s = scripted(happy());
+      const r = await loadLoop({ agent: s.agent, fixAttempts: 2, adversary: codexT, plan: { ...defaultPlan, crew: { testers: 2 } } }).runTask(task, "main");
+      expect(r.attempts[0].stages).toContain("verify-2");
+      expect(s.calls.map((c) => c.opts.label)).toContain("verify-2:a");
+    });
+
+    it("(h) crewOf carries testers (default 1) and the report records the crew and names every tester seat under stages", () => {
+      const crewOfFor = (plan) => new Function("plan", fnSlice("function crewOf(") + "\nreturn crewOf;")(plan);
+      expect(crewOfFor({})(task)).toEqual({ reviewers: 1, adversaries: 1, testers: 1 });
+      expect(crewOfFor({ crew: { testers: 3 } })(task)).toEqual({ reviewers: 1, adversaries: 1, testers: 3 });
+      expect(crewOfFor({ crew: { testers: 3 } })({ ...task, crew: { testers: 2 } })).toMatchObject({ testers: 2 });
+      for (const bad of [0, -1, 1.5, "2"]) expect(crewOfFor({})({ ...task, crew: { testers: bad } }).testers, String(bad)).toBe(1);
+      expect(source).toMatch(/crew:\s*crewOf\(r\.task\)/);
+    });
+
+    it("(i) mergeVerifies: passed only if every returning seat passed, findings concatenated, a criterion ok only when every seat reports it ok, null dropped", () => {
+      const mergeVerifies = new Function(fnSlice("function mergeVerifies(") + "\nreturn mergeVerifies;")();
+      const accOk = { text: "x exists", command: "test -f x", ok: true, exitCode: 0 };
+      const accBad = { ...accOk, ok: false, exitCode: 1 };
+      const m = mergeVerifies([pass({ acceptance: [accOk] }), { ...fail(["boom"]), acceptance: [accBad] }]);
+      expect(m.passed).toBe(false);
+      expect(m.findings).toEqual(["boom"]);
+      expect(m.acceptance).toHaveLength(1);
+      expect(m.acceptance[0]).toMatchObject({ text: "x exists", ok: false });
+      // Both seats pass but disagree on a criterion: the criterion is failed (never "any seat ok").
+      const d = mergeVerifies([pass({ acceptance: [accOk] }), pass({ acceptance: [accBad] })]);
+      expect(d.acceptance[0].ok).toBe(false);
+      const same = mergeVerifies([pass({ acceptance: [accOk] }), pass({ acceptance: [accOk] })]);
+      expect(same.passed).toBe(true);
+      expect(same.acceptance).toHaveLength(1);
+      expect(same.acceptance[0].ok).toBe(true);
+      // Findings from both seats are kept; a duplicate is left for the ledger to collapse.
+      expect(mergeVerifies([fail(["a"]), fail(["b"])]).findings).toEqual(["a", "b"]);
+      // One seat that passed and one that returned nothing: judged on the seat that returned.
+      expect(mergeVerifies([pass(), null]).passed).toBe(true);
+      expect(mergeVerifies([null, fail(["z"])]).passed).toBe(false);
+      expect(mergeVerifies([null, null])).toBeNull();
+      // A single seat comes back unchanged.
+      const only = pass({ acceptance: [accBad] });
+      expect(mergeVerifies([only])).toBe(only);
+    });
   });
 
   it("merges a crew adversary per seat: a seat that would block alone still blocks after merging with a seat's non-blocking issue (card fix-loop-minor-verdict)", async () => {
@@ -6861,6 +7050,26 @@ describe("plugin layout", () => {
     expect(section, "T3 rule inside The note").toContain(rule);
     expect(section, "T3 budget inside The note").toContain(budget);
   });
+  it("research skill: each researcher gets one question, a comparison with this repository is its own question, and every brief names where to read and its turn budget (card research-focused-briefs)", () => {
+    const research = readFileSync(join(root, "skills/research/SKILL.md"), "utf8");
+    const start = research.indexOf("## One researcher or several");
+    expect(start, "section heading").toBeGreaterThanOrEqual(0);
+    const next = research.indexOf("\n## ", start + 1);
+    const section = research.slice(start, next === -1 ? undefined : next);
+    expect(section).toContain("Each researcher brief asks exactly one question; a brief that reads an external system and then compares it with this repository asks two.");
+    expect(section).toContain("A comparison with this repository's code is its own question for its own researcher, never appended to a question about an external system.");
+    expect(section).toContain("Every researcher brief names where to read, the raw URLs in priority order or the directories and files of a downloaded tree, and its turn budget: at most 40 tool calls (the researcher agent's maxTurns), stopping with at least 5 to spare to return what it has.");
+  });
+  it("researcher and reviewer return a partial report at their turn cap; researcher maxTurns is set from measured counts, never below 30 (card research-focused-briefs)", () => {
+    const researcher = readFileSync(join(root, "agents/researcher.md"), "utf8");
+    const reviewer = readFileSync(join(root, "agents/reviewer.md"), "utf8");
+    expect(researcher).toContain("7. Turns: you have at most 40 tool calls (maxTurns). Stop with at least 5 calls to spare and return what you have, marking every part you did not reach unverified: a capped run returns a partial report, never an empty one.");
+    expect(reviewer).toContain("Budget your turns: you have at most 40 tool calls (maxTurns). Read the diff and run the checks your prompt names first, then any deeper probes; stop with at least 5 calls to spare and return your review with what you found: a capped run returns a partial review, never an empty one.");
+    const r = Number(parseFrontmatter(researcher).maxTurns);
+    expect(r).toBeGreaterThanOrEqual(30);
+    expect(r).toBe(40);
+    expect(Number(parseFrontmatter(reviewer).maxTurns)).toBe(40);
+  });
   it("names a research step before the plan for a card whose goal depends on facts outside the repository", () => {
     // 2026-09-06: run-trace and precompact-anchor each needed the claude-code-guide agent ad hoc; no procedure said so.
     const research = readFileSync(join(root, "skills/research/SKILL.md"), "utf8");
@@ -7925,12 +8134,13 @@ describe("card parallel-card-queens: doug-next Parallel cards paragraph", () => 
     "set card, integrationBranch, integrationWorktree": "For each planned card main runs `plan.mjs set card <id> --card <id>`, `plan.mjs set integrationBranch doug/<id> --card <id>`, and `plan.mjs set integrationWorktree .claude/worktrees/doug-integration-<id> --card <id>`,",
     "show, approve, then pick again": "puts `plan.mjs show --card <id>` in the chat, and runs `plan.mjs approve --card <id>`, because the queue approval stands for it; then main picks again.",
     "step 2 class, move, condition open": "A flow card gets section 1's move and a hand card gets doug-hand step 2's class, move, and condition open, before its launch.",
-    "the flow queen": 'A flow queen is `Workflow({ name: "doug-flow:doug-implement", args: <plan.mjs json --card <id>> })`;',
-    "the hand queen": 'a hand queen is `Workflow({ scriptPath: "' + A + '/workflows/card-queen.js", args })` with args `{ card, options, models, repoRoot, worktreePath }`, the worktreePath being `<repoRoot>/.claude/worktrees/card-<id>`.',
-    "launch: queen-args, the Workflow call, launched": 'To launch a queen, main runs `node "' + A + '/scripts/autopilot.mjs" queen-args <id> --kind <flow|hand>`, which writes `.doug/.state/reports/<id>/queen-args.json` and prints its path; then the Workflow call with that file\'s JSON as args; then `autopilot.mjs launched <id> --run <wf_id> --kind <flow|hand> --worktree <abs> --args-file <path>`, the flow worktree being `<repoRoot>/<the plan\'s integrationWorktree>`, because that value is relative.',
+    "the flow queen": 'A flow queen is `Workflow({ scriptPath: <the queen.js path>, args: <plan.mjs json --card <id>> })`, the queen.js being the per-card copy of `workflows/doug-implement.js` that `autopilot.mjs queen-args` writes to `.doug/.state/reports/<id>/queen.js`;',
+    "the hand queen": 'a hand queen is `Workflow({ scriptPath: <the queen.js path>, args })`, the per-card copy of `workflows/card-queen.js` at the same path, with args `{ card, options, models, repoRoot, worktreePath }`, the worktreePath being `<repoRoot>/.claude/worktrees/card-<id>`.',
+    "agent-types preflight before a queen launch": "Before any queen launch, main runs `node \"" + A + "/scripts/autopilot.mjs\" agent-types --kind <flow|hand>`, which prints the agent types that queen spawns, one per line, and compares each name with the agent types its own session lists; when one is missing it launches no queen and tells the user to run /reload-plugins or restart.",
+    "launch: queen-args, the Workflow call, launched": 'To launch a queen, main runs `node "' + A + '/scripts/autopilot.mjs" queen-args <id> --kind <flow|hand> --with <the other ids launched in the same message>`, which writes `.doug/.state/reports/<id>/queen-args.json` and the per-card `.doug/.state/reports/<id>/queen.js`, whose run name is `<short id> card-queen` or `<short id> flow-queen`, and prints both paths; then `Workflow({ scriptPath: <the queen.js path>, args })` with that file\'s JSON as args; then `autopilot.mjs launched <id> --run <wf_id> --kind <flow|hand> --worktree <abs> --args-file <path>`, the flow worktree being `<repoRoot>/<the plan\'s integrationWorktree>`, because that value is relative.',
     "launches in one message, main never briefs": "Main starts all the Workflow calls in one message, and it never briefs, builds, or reviews a queen card.",
     "reports arrive in the task-notification": "Each queen's report arrives in that run's task-notification `<result>`, not in the Workflow tool's return, and main pipes it through `autopilot.mjs report --run <wf_id> --file .doug/.state/briefs/<id>-result.json`, the queen's result saved there, which prints land, resume, or ask.",
-    "the report's answer maps to land, resume, ask": "Land means the landing steps below; resume relaunches the queen with `resumeFromRunId` and the saved `queen-args.json`, then runs `autopilot.mjs resumed <id> --run <new wf_id>`, once, and a second resume is ask; ask stops that card and asks the user.",
+    "the report's answer maps to land, resume, ask": "Land means the landing steps below; resume relaunches the same `.doug/.state/reports/<id>/queen.js` with `resumeFromRunId` and the saved `queen-args.json`, then runs `autopilot.mjs resumed <id> --run <new wf_id>`, once, and a second resume is ask; ask stops that card and asks the user.",
     "land one card at a time": "Main lands one card at a time: a flow card with `plan.mjs done --card <id>` then `plan.mjs land --card <id>`, a hand card with `plan.mjs land-card <id> --branch card/<id> --worktree <abs>`.",
     "after each landing": "After each landing main runs `board.mjs move`, the run-report skill with `cost.mjs <wf_id> --report <per-card report path>`, which is `.doug/.state/reports/<id>/last-report.json` for a flow card and `.doug/.state/reports/<id>/card-report.json` for a hand card, and `autopilot.mjs lock-wait <id> --ms <n>`, where n is the `lockWaitMs` line that `plan.mjs land` or `land-card` printed, and the landing commit carries the card's plan `.doug/plans/<id>.json`.",
     "a resume never replans": "A resume never replans.",
@@ -7953,6 +8163,11 @@ describe("card parallel-card-queens: doug-next Parallel cards paragraph", () => 
       expect(at, name).toBeGreaterThan(prev);
       prev = at;
     }
+  });
+  it("the Autopilot section no longer defines a queen by registered name or the shared card-queen.js", () => {
+    const auto = sliceFrom(nextText(), "## Autopilot (--auto)");
+    expect(auto).not.toContain('Workflow({ name: "doug-flow:doug-implement"');
+    expect(auto).not.toContain('scriptPath: "' + A + '/workflows/card-queen.js"');
   });
   it("section 4 says a background run's result arrives in its task-notification", () => {
     const s = sliceFrom(nextText(), "## 4. Implement");

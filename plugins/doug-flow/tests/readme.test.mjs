@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { fileURLToPath } from "node:url";
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import path from "node:path";
 import { execFileSync, spawnSync } from "node:child_process";
 
@@ -40,10 +40,10 @@ function readRoot(relPath) {
 }
 
 
-const GUARDED_FILES = ["README.md", "docs/reference.md"];
+const GUARDED_FILES = ["README.md", "docs/reference.md", "docs/how-tos.md"];
 
 describe("README guard", () => {
-  it("every backticked repo path in README.md and docs/reference.md is tracked in git", () => {
+  it("every backticked repo path in README.md, docs/reference.md and docs/how-tos.md is tracked in git", () => {
     const tracked = execFileSync("git", ["ls-files"], {
       cwd: root,
       encoding: "utf8",
@@ -134,7 +134,7 @@ describe("README guard", () => {
     expect(RUNTIME_PATHS).toEqual([".doug/board.json", ".doug/plan.json", ".doug/anchor.md", "docs/research", "docs/decisions", "docs/live-runs.md"]);
   });
 
-  it("every pnpm command shown in README.md or docs/reference.md is a package.json script or a pnpm builtin", () => {
+  it("every pnpm command shown in README.md, docs/reference.md or docs/how-tos.md is a package.json script or a pnpm builtin", () => {
     const pkg = JSON.parse(readRoot("package.json"));
     const scripts = new Set(Object.keys(pkg.scripts || {}));
     const builtins = new Set([
@@ -166,7 +166,7 @@ describe("README guard", () => {
     expect(missing, `Unknown pnpm commands: ${missing.join(", ")}`).toEqual([]);
   });
 
-  it("every doug command shown in README.md or docs/reference.md appears in the CLI usage", () => {
+  it("every doug command shown in README.md, docs/reference.md or docs/how-tos.md appears in the CLI usage", () => {
     const bin = readRoot("packages/doug-cli/src/bin.ts");
     const board = readRoot("packages/doug-cli/src/board.ts");
     const usage = bin + "\n" + board;
@@ -198,7 +198,7 @@ describe("README guard", () => {
   });
 
   it(
-    "every test-count claim in README.md or docs/reference.md matches the measured unit suite",
+    "every test-count claim in README.md, docs/reference.md or docs/how-tos.md matches the measured unit suite",
     () => {
       const result = spawnSync(
         "pnpm",
@@ -502,7 +502,7 @@ describe("README scannable (card readme-scannable)", () => {
     expect(badNpx, `npx lines must name a real packages/*/package.json name (${[...pkgNames].join(", ")}): ${badNpx.join(", ")}`).toEqual([]);
   });
 
-  it("S7: every relative markdown link in README.md and docs/reference.md resolves, relative to its own file's directory, to a tracked file or directory", () => {
+  it("S7: every relative markdown link in README.md, docs/reference.md and docs/how-tos.md resolves, relative to its own file's directory, to a tracked file or directory", () => {
     const tracked = execFileSync("git", ["ls-files"], { cwd: root, encoding: "utf8" })
       .split("\n")
       .filter((l) => l.length > 0);
@@ -513,7 +513,7 @@ describe("README scannable (card readme-scannable)", () => {
       for (let i = 1; i < parts.length; i++) dirSet.add(parts.slice(0, i).join("/"));
     }
 
-    const fileDirs = { "README.md": "", "docs/reference.md": "docs" };
+    const fileDirs = { "README.md": "", "docs/reference.md": "docs", "docs/how-tos.md": "docs" };
     const missing = [];
     for (const [file, dir] of Object.entries(fileDirs)) {
       const text = readRoot(file);
@@ -733,5 +733,132 @@ describe("board docs show --summary on every record and summary form (card docs-
 
   it("docs/reference.md lists doug board summary", () => {
     expect(readRoot("docs/reference.md")).toMatch(/^doug board summary /m);
+  });
+});
+
+// Card readme-v1-3: README and docs/how-tos.md describe 1.3 and teach four how-tos.
+describe("README for 1.3 (card readme-v1-3)", () => {
+  const changelogSection = () => sectionBody(readRoot("CHANGELOG.md"), "1.3.0");
+  const FEATURES = {
+    "crew testers": /crew\.testers|crew testers/i,
+    "CLAUDE.md candidate": /CLAUDE\.md candidate/i,
+    "faster recall": /(faster|cached) (lesson )?recall|recall[^.\n]{0,40}(cache|faster)/i,
+    "agent-type preflight": /agent[- ]types?/i,
+  };
+  const TOPICS = ["Your first card", "Autopilot", "Gates and hooks", "Memory"];
+
+  it("V1: CHANGELOG.md's newest section is 1.3.0, then 1.2.0, and 1.3.0 lists at least 5 bullets", () => {
+    const hs = headings(readRoot("CHANGELOG.md"));
+    expect(hs[0]?.text).toBe("1.3.0");
+    expect(hs[1]?.text).toBe("1.2.0");
+    const section = changelogSection();
+    expect(section, "CHANGELOG.md has no ## 1.3.0 section").not.toBeNull();
+    expect(topLevelBullets(section).length).toBeGreaterThanOrEqual(5);
+  });
+
+  it("V2: the four 1.3 features appear in the CHANGELOG 1.3.0 section and in README's Feature highlights, which names 1.3", () => {
+    const cl = changelogSection() ?? "";
+    const hl = sectionBody(readRoot("README.md"), "Feature highlights") ?? "";
+    expect(hl, "README has no ## Feature highlights section").not.toBe("");
+    expect(hl).toContain("1.3");
+    const missingCl = Object.entries(FEATURES).filter(([, re]) => !re.test(cl)).map(([k]) => k);
+    const missingHl = Object.entries(FEATURES).filter(([, re]) => !re.test(hl)).map(([k]) => k);
+    expect(missingCl, `CHANGELOG 1.3.0 lacks: ${missingCl.join(", ")}`).toEqual([]);
+    expect(missingHl, `README Feature highlights lacks: ${missingHl.join(", ")}`).toEqual([]);
+  });
+
+  it("V3: README's 3rd and 4th headings are Feature highlights and How-tos, highlights have 3-7 bullets", () => {
+    const readme = readRoot("README.md");
+    const hs = headings(readme);
+    expect(hs[2]?.text).toBe("Feature highlights");
+    expect(hs[3]?.text).toBe("How-tos");
+    const n = topLevelBullets(sectionBody(readme, "Feature highlights") ?? "").filter((l) => l.startsWith("- **")).length;
+    expect(n).toBeGreaterThanOrEqual(3);
+    expect(n).toBeLessThanOrEqual(7);
+  });
+
+  it("V4: README How-tos has four bullets, one per topic, each linking to a docs/how-tos.md heading", () => {
+    const bullets = topLevelBullets(sectionBody(readRoot("README.md"), "How-tos") ?? "");
+    expect(bullets.length).toBe(4);
+    const slugs = headings(readRoot("docs/how-tos.md")).map((h) => githubSlug(h.text));
+    const [first, auto, gates, mem] = bullets;
+    expect(first).toMatch(/first card/i);
+    expect(auto).toMatch(/autopilot/i);
+    expect(auto).toContain("/doug-next --auto");
+    expect(gates).toMatch(/gate|hook/i);
+    expect(mem).toMatch(/memory/i);
+    expect(mem).toContain("doug memory setup");
+    for (const b of bullets) {
+      const m = b.match(/\]\(docs\/how-tos\.md#([^)]+)\)/);
+      expect(m, `bullet lacks a docs/how-tos.md#<slug> link: ${b}`).not.toBeNull();
+      expect(slugs, `slug ${m?.[1]} is not a heading in docs/how-tos.md`).toContain(m[1]);
+    }
+  });
+
+  it("V5: docs/how-tos.md has the four headings in order, each naming its commands", () => {
+    const guide = readRoot("docs/how-tos.md");
+    expect(headings(guide).map((h) => h.text)).toEqual(TOPICS);
+    const need = {
+      "Your first card": ["`doug init`", "`doug board add`", "`/doug-next`", /approv/i, /\bland/i],
+      Autopilot: ["`/doug-next --auto`", /cards/i, /wall/i, /USD/, "`workers.max`", "`/doug-autopilot`"],
+      "Gates and hooks": ["protect-paths", "guard-bash", "secret-scan", "stop-gate", "pre-commit"],
+      Memory: ["`doug memory setup`", /recall/i, /lessons?/i, /reflect/i],
+    };
+    const missing = [];
+    for (const [h, items] of Object.entries(need)) {
+      const body = sectionBody(guide, h) ?? "";
+      for (const it2 of items) {
+        const ok = typeof it2 === "string" ? body.includes(it2) : it2.test(body);
+        if (!ok) missing.push(`${h}: ${String(it2)}`);
+      }
+    }
+    expect(missing).toEqual([]);
+  });
+
+  it("V5b: docs/how-tos.md scopes the pre-commit hook to a clone of the Doug repo, not to every project", () => {
+    const body = sectionBody(readRoot("docs/how-tos.md"), "Gates and hooks") ?? "";
+    expect(body).not.toMatch(/The pre-commit hook runs/);
+    const line = body.split("\n").find((l) => l.includes("pre-commit")) ?? "";
+    expect(line).toMatch(/Doug repo/);
+    expect(line).toMatch(/doug init/);
+  });
+
+  it("V6: every --flag on a doug command in README.md and docs/how-tos.md is in that command's usage line", () => {
+    const usageText = readRoot("packages/doug-cli/src/bin.ts") + "\n" + readRoot("packages/doug-cli/src/board.ts");
+    const usage = [];
+    for (const raw of usageText.split("\n")) {
+      if (/^\s+doug /.test(raw)) usage.push(raw.trim());
+      else if (/^\s{10,}\[/.test(raw) && usage.length > 0) usage[usage.length - 1] += " " + raw.trim();
+    }
+    const bad = [];
+    for (const file of ["README.md", "docs/how-tos.md"]) {
+      for (const span of codeSpans(readRoot(file))) {
+        const m = span.match(/^doug\s+([a-z][a-z-]*)(?:\s+([a-z][a-z-]*))?/);
+        if (!m) continue;
+        const flags = span.match(/(?<![\w-])--[a-z][a-z-]*/g) ?? [];
+        if (flags.length === 0) continue;
+        const [, cmd, sub] = m;
+        let lines = sub ? usage.filter((l) => l.startsWith(`doug ${cmd} ${sub}`)) : [];
+        if (lines.length === 0) lines = usage.filter((l) => l.startsWith(`doug ${cmd}`));
+        for (const f of flags) {
+          if (!lines.some((l) => l.includes(f))) bad.push(`${file}: ${span} -> ${f}`);
+        }
+      }
+    }
+    expect(bad, `flags not in the CLI usage line: ${bad.join(" | ")}`).toEqual([]);
+  });
+
+  it("V7: every /doug-<name> in README.md and docs/how-tos.md is a skill or the doug-autopilot command", () => {
+    const skills = new Set(readdirSync(path.join(root, "plugins/doug-flow/skills")));
+    const registered = readRoot("plugins/doug-flow/hooks/register.tsx");
+    const bad = [];
+    for (const file of ["README.md", "docs/how-tos.md"]) {
+      for (const m of readRoot(file).matchAll(/(?<![\w/.-])\/(doug-[a-z-]+)/g)) {
+        const name = m[1];
+        const ok = skills.has(name) || (name === "doug-autopilot" && registered.includes("name: 'doug-autopilot'"));
+        if (!ok) bad.push(`${file}: /${name}`);
+      }
+    }
+    expect(bad).toEqual([]);
   });
 });

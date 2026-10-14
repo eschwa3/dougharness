@@ -241,6 +241,15 @@ describe("briefs", () => {
     expect(ids("coder")).toContain("mutations-in-scratch");
     expect(ids("reviewer")).toEqual(expect.arrayContaining(["mutations-in-scratch", "reviewer-reruns-mutations"]));
     expect(ids("commit")).toEqual(expect.arrayContaining(["no-trailers", "leave-plan-anchor-out"]));
+    expect(ids("commit")).toEqual(expect.arrayContaining(["commit-foreground", "commit-no-background", "commit-sha-from-git-log"]));
+    {
+      const commit = actions.find((x) => x.kind === "seat" && x.seat === "commit").brief.rules;
+      const text = (id) => commit.find((r) => r.id === id).text;
+      expect(text("commit-foreground")).toContain("Run git commit in the foreground with the Bash tool timeout set to 600000 ms");
+      expect(text("commit-no-background")).toContain("Never use run_in_background, a Monitor, or a sleep loop for git commit");
+      expect(text("commit-sha-from-git-log")).toContain("Report the sha only from git log -1 --format=%H after git commit has returned");
+    }
+    for (const id of ["commit-foreground", "commit-no-background", "commit-sha-from-git-log"]) expect(ids("coder")).not.toContain(id);
     expect(ids("coder")).not.toContain("red-claim");
     expect(ids("reviewer")).not.toContain("no-test-edit-without-reason");
     expect(ids("tester")).not.toContain("no-trailers");
@@ -771,9 +780,121 @@ describe("B8 lock wait and briefPrompt", () => {
   });
 });
 
+describe("evidenced majors", () => {
+  const major = (over = {}) => ({ id: "F2", severity: "major", file: "b.mjs", description: "meh", evidence: "ran X, saw Y", ...over });
+  const GATE_WALK = ["setup", "lead", "tester", "coder", "reviewer", "gate", "commit"];
+
+  it("T44 an evidenced major on the first review gets one fix pass", () => {
+    const s = stateAt("reviewer");
+    const r = go(s, okHB("reviewer", s, { verdict: "fail", findings: [major()] }));
+    expect(r.action.kind).toBe("seat");
+    expect(r.state.pending).toBe("coder");
+    expect(r.state.counters.fixPasses).toBe(1);
+    expect(r.action.brief.findings.map((f) => f.id)).toEqual(["F2"]);
+  });
+
+  it("T45 an evidenced major still open after the fix pass stops with reviewer-major-open", () => {
+    const s = stateAt("reviewer");
+    const r1 = go(s, okHB("reviewer", s, { verdict: "fail", findings: [major()] }));
+    const r2 = ok(r1.state);
+    const r3 = go(r2.state, okHB("reviewer", r2.state, { verdict: "fail", findings: [major({ id: "F3" })] }));
+    expect(r3.action.kind).toBe("stopped");
+    expect(r3.action.reason).toBe("reviewer-major-open");
+    expect(r3.state.counters.fixPasses).toBe(1);
+  });
+
+  it("T46 a major without evidence goes to the gate", () => {
+    for (const evidence of [undefined, null, "", "   "]) {
+      const { seats, last } = walk(CARD, {}, { "reviewer#1": { verdict: "fail", findings: [major({ evidence })] } });
+      expect(seats).toEqual(GATE_WALK);
+      expect(last.kind).toBe("done");
+    }
+  });
+
+  it("T47 a minor, even with evidence, goes to the gate", () => {
+    const minor = { id: "F3", severity: "minor", file: "c.mjs", description: "nit", evidence: "ran X, saw Y" };
+    const { seats, last } = walk(CARD, {}, { "reviewer#1": { verdict: "fail", findings: [minor] } });
+    expect(seats).toEqual(GATE_WALK);
+    expect(last.kind).toBe("done");
+  });
+
+  it("T48 a blocker open with an evidenced major after the fix pass keeps reviewer-blocker-open", () => {
+    const s = stateAt("reviewer");
+    const r1 = go(s, okHB("reviewer", s, { verdict: "fail", findings: [major()] }));
+    const r2 = ok(r1.state);
+    const r3 = go(r2.state, okHB("reviewer", r2.state, { verdict: "fail", findings: [major({ id: "F3" }), blocker({ id: "F4" })] }));
+    expect(r3.action.kind).toBe("stopped");
+    expect(r3.action.reason).toBe("reviewer-blocker-open");
+  });
+});
+
+describe("gate seat writes no git", () => {
+  const GATE_RULE = "Run the gate commands only. Never run git add, git commit, or any other command that writes to git; the commit seat is the only seat that commits.";
+  const ERR = "gate seat must not run git add or git commit";
+  const gateHB = (s, command) => okHB("gate", s, { commands: [{ command, exitCode: 0 }] });
+
+  it("T49 only the gate brief carries gate-no-git-writes, with the exact text", () => {
+    const rules = (seat) => currentAction(stateAt(seat)).brief.rules;
+    const gate = rules("gate").find((r) => r.id === "gate-no-git-writes");
+    expect(gate).toBeTruthy();
+    expect(gate.text).toBe(GATE_RULE);
+    for (const seat of ["commit", "coder", "reviewer", "tester"]) {
+      expect(rules(seat).map((r) => r.id)).not.toContain("gate-no-git-writes");
+    }
+  });
+
+  it.each([
+    ["git commit", 'git commit -m "x"'],
+    ["git add", "git add a b"],
+    ["a compound command", 'cd /some/path && git commit -m "x"'],
+    ["git -C <path>", "git -C /some/path commit -m x"],
+  ])("T50 a gate hand-back with %s is invalid and stops the card", (_n, command) => {
+    const s = stateAt("gate");
+    const errors = validateHandBack(s, gateHB(s, command));
+    expect(errors.join("; ")).toContain(ERR);
+    const r = go(s, gateHB(s, command));
+    expect(r.action.kind).toBe("stopped");
+    expect(r.action.reason).toBe("hand-back-invalid");
+    expect(r.action.report.stoppedAt).toBe("gate");
+  });
+
+  it("T50b a gate hand-back whose second command commits is invalid", () => {
+    const s = stateAt("gate");
+    const hb = okHB("gate", s, { commands: [
+      { command: "node .doug/hooks/scripts/verify.mjs", exitCode: 0 },
+      { command: 'git commit -m "x"', exitCode: 0 },
+    ] });
+    expect(validateHandBack(s, hb).join("; ")).toContain(ERR);
+    const r = go(s, hb);
+    expect(r.action.kind).toBe("stopped");
+    expect(r.action.reason).toBe("hand-back-invalid");
+  });
+
+  it("T52 implementer.md tells non-commit seats never to run git add or git commit", () => {
+    const doc = readFileSync(join(HERE, "..", "agents", "implementer.md"), "utf8");
+    expect(doc).toContain("In a card loop, only the commit seat commits: when your brief names you the gate seat or any seat other than commit, never run git add or git commit.");
+  });
+
+  it("T51 read-only git and non-git commands that mention a word pass to the commit seat", () => {
+    const s = stateAt("gate");
+    const commands = [
+      "git status --short",
+      "git diff --stat",
+      "git log --oneline -3",
+      "node .doug/hooks/scripts/verify.mjs",
+      "pnpm exec vitest run tests/commit.test.mjs",
+    ].map((command) => ({ command, exitCode: 0 }));
+    const hb = okHB("gate", s, { commands });
+    expect(validateHandBack(s, hb)).toEqual([]);
+    const r = go(s, hb);
+    expect(r.action.kind).toBe("seat");
+    expect(r.action.seat).toBe("commit");
+  });
+});
+
 describe("coverage", () => {
   it("T32 every STOP_REASONS entry is produced by at least one test", () => {
     expect([...seenReasons].sort()).toEqual([...STOP_REASONS].sort());
-    expect(STOP_REASONS.length).toBe(9);
+    expect(STOP_REASONS.length).toBe(10);
   });
 });

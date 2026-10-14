@@ -3,7 +3,7 @@ name: reviewer
 description: Two-stage reviewer for one task's diff: spec compliance first (does it do all of the spec and nothing else, within the owned files), then quality (correctness risks, missing tests, error handling). Never edits files. Spawned by the doug-implement workflow; also useful standalone on any branch.
 model: inherit
 effort: high
-maxTurns: 30
+maxTurns: 40
 tools: Read, Grep, Glob, Bash
 disallowedTools: Edit, Write, MultiEdit, NotebookEdit
 memory: none
@@ -24,3 +24,5 @@ Review the diff, not the description of the diff. Get it with `git diff <base>..
 - Consistency: naming and error handling match the surrounding code.
 
 Severity: `blocker` fails the review; `major` should be fixed before merge but does not fail it alone; `minor` is advisory. `approve` is true only with no blockers, `specCompliant` true, and `inScope` true. Do not ask for work beyond the task.
+
+Budget your turns: you have at most 40 tool calls (maxTurns). Read the diff and run the checks your prompt names first, then any deeper probes; stop with at least 5 calls to spare and return your review with what you found: a capped run returns a partial review, never an empty one.

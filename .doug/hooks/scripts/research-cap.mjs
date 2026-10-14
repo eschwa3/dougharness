@@ -27,9 +27,11 @@
 // Loopback exemption (card research-cap-localhost, whole-command grammar, fix pass 5): a local model probe is not
 // web research, so it is neither counted nor denied. The exemption applies only when the entire raw command
 // string, before any splitting, is ONE simple fetch (isLoopbackFetch):
-//   1. Trimmed, it tokenizes into words. Single quotes are literal; double quotes may not hold $, a backtick, a
-//      backslash or !; an unterminated quote is not exempt. Outside quotes only space, tab, [A-Za-z0-9._:/=@%+,-]
-//      and a redirect's > are allowed, so & | ; ( ) { } [ ] * ? ~ # $ ` \ ! < and a newline are never exempt.
+//   1. Trimmed, it tokenizes into words. Single quotes are literal; double quotes may not hold $, a backtick or !,
+//      and a backslash only as \" or \\ (a literal char; any other backslash is not exempt); an unterminated quote
+//      is not exempt. Outside quotes only space, tab, [A-Za-z0-9._:/=@%+,-], a redirect's >, the exact word 2>&1
+//      and a backslash-newline continuation (removed, no word break) are allowed, so & | ; ( ) { } [ ] * ? ~ # $
+//      ` \ ! < and a bare newline are otherwise never exempt (2>&1>x, a&b, 2>&1; are not the exact word).
 //   2. The first word is exactly curl or wget: no path, wrapper, assignment or other case.
 //   3. Every other word is an allowlisted option (value-less -s -S -f -L -i -v -g or --silent and similar,
 //      combinable in one short token; value-taking -o -H -d -X -w -m for curl, -O -T and --header for wget,
@@ -41,11 +43,18 @@
 //      exactly /dev/null or does not start with /dev/ (bash opens /dev/tcp and /dev/udp as sockets).
 // A command outside the grammar is not an error: it is counted by bashFetchVerbs exactly as at HEAD, one count
 // per split command whose first resolved fetch form is curl or wget. Only Bash curl/wget is affected; WebFetch
-// and WebSearch always count. Anything doubtful counts: a compound line, a pipe, a wrapper, a mixed local and
-// remote command, no URL such as curl --version, other 127.x addresses, 0.0.0.0, host.docker.internal.
+// and WebSearch always count.
 // Accepted limits of the exemption: an env proxy (https_proxy=http://evil.com in the environment, not on the
 // command) routes the request out; -L, and wget by default, follow a redirect a local server can point at a
 // remote host; a ~/.curlrc or ~/.wgetrc can add a URL or a proxy.
+// Anything doubtful counts: a compound line, a pipe that is not a safe pipe consumer (below), a wrapper, a mixed
+// local and remote command, no URL such as curl --version, other 127.x addresses, 0.0.0.0, host.docker.internal.
+//
+// Pipe consumers (card research-cap-loopback-post): the same exemption holds for a pipeline of unquoted single "|"
+// (never ||, |& or an empty segment) whose first segment is a loopback fetch unchanged and whose every later
+// segment is, with no redirect, head/tail with only a count (-c N, -n N, -cN, -nN, -N) or exactly
+// python3|python -m json.tool. Anything else (jq, sh, curl, python -c) counts as at HEAD. Each counted Bash
+// counter line also carries hosts, the URL hosts of that split command, so a miss is diagnosable.
 //
 // Known limit: several calls issued in one message can each read the same count before any of them appends, so
 // a single burst can push an agent's count past the cap by the number of calls it issues at once.
@@ -305,14 +314,29 @@ function tokenize(text) {
     gt = false;
     open = false;
   };
-  for (const ch of text) {
+  for (let i = 0; i < text.length; i += 1) {
+    const ch = text[i];
     if (quote) {
+      if (quote === '"' && ch === "\\") {
+        // Only \" and \\ are escapes inside double quotes; both give a literal char. Any other backslash
+        // (\$, \`, \!, backslash-newline) leaves the grammar.
+        const next = text[i + 1];
+        if (next !== '"' && next !== "\\") return null;
+        raw += ch + next;
+        val += next;
+        i += 1;
+        continue;
+      }
       raw += ch;
       if (ch === quote) quote = "";
-      else if (quote === '"' && "$`\\!".includes(ch)) return null;
+      else if (quote === '"' && "$`!".includes(ch)) return null;
       else val += ch;
     } else if (ch === " " || ch === "\t") end();
-    else {
+    else if (ch === "\\" && text[i + 1] === "\n") i += 1; // a line continuation: removed, no word break
+    else if (!open && text.startsWith("2>&1", i) && (i + 4 === text.length || " \t".includes(text[i + 4]))) {
+      words.push({ raw: "2>&1", val: "2>&1", gt: false, dup: true }); // the exact word only, never a prefix
+      i += 3;
+    } else {
       open = true;
       raw += ch;
       if (ch === "'" || ch === '"') quote = ch;
@@ -337,7 +361,8 @@ function isLoopbackFetch(command) {
   let urls = 0;
   let wantValue = false;
   for (let k = 1; k < words.length; k += 1) {
-    const { raw, val, gt } = words[k];
+    const { raw, val, gt, dup } = words[k];
+    if (dup) continue;
     if (gt) {
       const m = REDIRECT.exec(raw);
       if (!m) return false;
@@ -368,19 +393,98 @@ function isLoopbackFetch(command) {
   return urls > 0;
 }
 
-// Returns one verb ("curl" or "wget") per split command of a Bash command line that resolves to a fetch;
-// non-fetch split commands contribute nothing. A non-string command (missing, or e.g. a number) is zero
+// Splits a raw command on unquoted single "|" (card research-cap-loopback-post). Null when the text has a "||", a
+// "|&", an empty segment, or no pipe at all, so only a plain pipeline is ever split.
+function splitPipeline(command) {
+  const text = String(command);
+  const segs = [];
+  let quote = "";
+  let cur = "";
+  for (let i = 0; i < text.length; i += 1) {
+    const ch = text[i];
+    if (quote) {
+      if (quote === '"' && ch === "\\" && i + 1 < text.length) {
+        cur += ch + text[i + 1];
+        i += 1;
+        continue;
+      }
+      if (ch === quote) quote = "";
+      cur += ch;
+    } else if (ch === "'" || ch === '"') {
+      quote = ch;
+      cur += ch;
+    } else if (ch === "|") {
+      if (text[i + 1] === "|" || text[i + 1] === "&" || cur.trim() === "") return null;
+      segs.push(cur);
+      cur = "";
+    } else cur += ch;
+  }
+  if (quote || cur.trim() === "" || segs.length === 0) return null;
+  segs.push(cur);
+  return segs;
+}
+
+// One pipe consumer that cannot fetch: head or tail with only a count, or python[3] -m json.tool. No redirect.
+function isSafeConsumer(segment) {
+  const words = tokenize(segment.trim());
+  if (!words || words.length === 0 || words.some((w) => w.gt || w.raw !== w.val)) return false;
+  const v = words.map((w) => w.val);
+  if (v[0] === "head" || v[0] === "tail") {
+    const rest = v.slice(1);
+    if (rest.length === 0) return false;
+    if (rest.length === 1) return /^-(?:[cn]?\d+)$/.test(rest[0]);
+    return rest.length === 2 && /^-[cn]$/.test(rest[0]) && /^\d+$/.test(rest[1]);
+  }
+  return (v[0] === "python3" || v[0] === "python") && v.length === 3 && v[1] === "-m" && v[2] === "json.tool";
+}
+
+// True when the whole command is one loopback fetch, or one followed by safe consumers (see the header).
+function isLoopbackCommand(command) {
+  if (isLoopbackFetch(command)) return true;
+  const segs = splitPipeline(command);
+  return !!segs && isLoopbackFetch(segs[0]) && segs.slice(1).every(isSafeConsumer);
+}
+
+// URL hosts of one split command, lower-cased, unique, in order (card research-cap-loopback-post). Diagnostic
+// only: never throws and never returns the command text.
+function urlHosts(cmd) {
+  const hosts = [];
+  try {
+    for (const w of String(cmd).match(/(?:[^\s"']+|"[^"]*"|'[^']*')+/g) || []) {
+      const word = w.replace(/["']/g, "");
+      if (word === "" || word.startsWith("-")) continue;
+      let host = "";
+      const scheme = /^[a-z][a-z0-9+.-]*:\/\/([^/?#]*)/i.exec(word);
+      if (scheme) {
+        const auth = scheme[1].slice(scheme[1].lastIndexOf("@") + 1);
+        const m = /^(\[[^\]]*\]|[^:]*)/.exec(auth);
+        host = m ? m[1] : "";
+      } else {
+        const m = /^(\[::1\]|[a-z0-9.-]+)(:\d+)?([/?#]|$)/i.exec(word);
+        if (m && (/^(?:localhost|127\.0\.0\.1|\[::1\])$/i.test(m[1]) || m[2] || m[3])) host = m[1];
+      }
+      host = host.toLowerCase();
+      if (host && !hosts.includes(host)) hosts.push(host);
+    }
+  } catch {
+    // diagnostic only
+  }
+  return hosts;
+}
+
+// Returns one {verb, hosts} per split command of a Bash command line that resolves to a fetch (verb "curl" or
+// "wget"); non-fetch split commands contribute nothing. A non-string command (missing, or e.g. a number) is zero
 // fetches. commandForms runs on each split command's original text with its quotes intact (it does its own
 // quote parsing for a shell -c script), never on stripped or reconstructed text. A command that is one simple
-// loopback fetch (isLoopbackFetch) is not a fetch to count.
+// loopback fetch, alone or piped to a safe consumer (isLoopbackCommand), is not a fetch to count.
 function bashFetchVerbs(command) {
-  if (isLoopbackFetch(command)) return [];
+  if (isLoopbackCommand(command)) return [];
   const verbs = [];
   for (const cmd of splitTopLevel(command)) {
     for (const form of commandForms(cmd)) {
       const verb = firstWordBasename(form);
       if (FETCH_VERBS.has(verb)) {
-        verbs.push(verb);
+        verbs.push({ verb, hosts: urlHosts(cmd) });
         break;
       }
     }
@@ -401,7 +505,7 @@ runHook("research-cap", async (input) => {
   if (input.tool_name === "Bash") {
     const verbs = bashFetchVerbs(input.tool_input && input.tool_input.command);
     if (verbs.length === 0) return allow(); // an ordinary Bash command is never counted or denied here
-    entries = verbs.map((verb) => ({ tool: "Bash", verb }));
+    entries = verbs.map(({ verb, hosts }) => ({ tool: "Bash", verb, hosts }));
   } else {
     entries = [{ tool: input.tool_name }];
   }

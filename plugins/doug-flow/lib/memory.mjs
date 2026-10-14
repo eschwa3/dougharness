@@ -11,7 +11,8 @@
 // can supersede a lesson (superseded_by) but never delete or rewrite its text — two triggers on the table enforce
 // that in the database itself, not just in this module's API.
 import { createRequire } from "node:module";
-import { mkdirSync, existsSync, readFileSync, statSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { mkdirSync, existsSync, readFileSync, statSync, readdirSync, writeFileSync } from "node:fs";
 import { dirname, resolve, join } from "node:path";
 import { createHash } from "node:crypto";
 import { homedir } from "node:os";
@@ -669,6 +670,11 @@ function floatsToBlob(vector) {
 function blobToFloats(blob) {
   if (!blob) return null;
   const bytes = blob instanceof Uint8Array ? blob : new Uint8Array(blob);
+  // A 4-aligned view over the row's own buffer needs no copy; any other offset or length keeps the copy (a
+  // misaligned Float32Array view throws, and so does a length that is not a multiple of 4, as before).
+  if (bytes.byteOffset % 4 === 0 && bytes.byteLength % 4 === 0) {
+    return new Float32Array(bytes.buffer, bytes.byteOffset, bytes.byteLength / 4);
+  }
   const copy = new Uint8Array(bytes.length);
   copy.set(bytes);
   return new Float32Array(copy.buffer);
@@ -859,6 +865,144 @@ function toRecallLesson(lesson, extra) {
   return { ...rest, hasVector: !!embedding, ...extra };
 }
 
+// --- Recall row cache (card recall-hybrid-scale) ----------------------------------------------------------------
+// The dense side of recallLessons needs every live lesson's recency anchor, scope and (under the provider's
+// model/dims) vector. Decoding them is the cost of a hybrid recall at scale, so the decoded rows are kept in
+// module scope per database file, model and dims, and reused while the database is unchanged. "Unchanged" is
+// PRAGMA data_version (moves when ANOTHER connection commits) together with total_changes() (this connection's own
+// row changes); both are per connection, so an entry belongs to the connection that built it and any other
+// connection rebuilds. Bounded: RECALL_CACHE_MAX_ENTRIES entries and RECALL_CACHE_MAX_BYTES of vectors in all,
+// oldest evicted first, an entry larger than the byte bound never stored (100,000 x 768 floats is about 300 MB).
+const RECALL_CACHE_MAX_ENTRIES = 3;
+const RECALL_CACHE_MAX_BYTES = 1024 * 1024 * 1024;
+const RECALL_WINDOW_MARGIN_DAYS = 2;
+const recallCache = new Map();
+
+export function clearRecallCache() {
+  recallCache.clear();
+}
+
+function recallSignature(m) {
+  return {
+    dv: m.prepare("PRAGMA data_version").get().data_version,
+    tc: m.prepare("SELECT total_changes() AS c").get().c,
+  };
+}
+
+// SQL for "this row is certainly outside the window" (1) or "keep it" (0, also for NULL): the anchor is JS's
+// `confirmed || created` (NULLIF drops the empty string), it must be a whole ISO form both SQLite and JS read
+// (date, date-time, optional .mmm, optional Z; real calendar date, hour < 24, minute and second < 60; checked by
+// a fuzz of 60,000 odd strings against ageDaysOf) and older than the cutoff. The first term is a cheap string
+// comparison that every such row passes (ISO text sorts as time), so the costly date functions run only on rows
+// that look old; its parameter is the day after the cutoff's date.
+const SQL_ANCHOR = "COALESCE(NULLIF(confirmed, ''), created)";
+const SQL_ISO_FORMS = (() => {
+  const d = "[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]";
+  const t = "T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]";
+  return [d, d + t, d + t + "Z", d + t + ".[0-9][0-9][0-9]", d + t + ".[0-9][0-9][0-9]Z"]
+    .map((f) => `${SQL_ANCHOR} GLOB '${f}'`)
+    .join(" OR ");
+})();
+const SQL_OUTSIDE_WINDOW = `IFNULL(${SQL_ANCHOR} < ?
+  AND (${SQL_ISO_FORMS})
+  AND date(${SQL_ANCHOR}) = substr(${SQL_ANCHOR}, 1, 10)
+  AND (length(${SQL_ANCHOR}) = 10 OR (substr(${SQL_ANCHOR}, 12, 2) < '24' AND substr(${SQL_ANCHOR}, 15, 2) < '60' AND substr(${SQL_ANCHOR}, 18, 2) < '60'))
+  AND julianday(${SQL_ANCHOR}) < ?, 0)`;
+
+// The julian-day cutoff below which recallRows may drop a row in SQL. Margin: SQLite reads a zone-less
+// date-time as UTC and JS as local time, so a row is only dropped when it is clearly outside the window.
+function recallCutoffJd(nowMs, staleDays) {
+  const jd = nowMs / 86400000 + 2440587.5 - staleDays - RECALL_WINDOW_MARGIN_DAYS;
+  return Number.isFinite(jd) ? jd : -1e18;
+}
+
+// Live rows with decoded vectors for provider.model/provider.dims. The SQL window drops only a row whose
+// confirmed-or-created is a plain ISO date SQLite and JS agree on and that is older than the cutoff; every other
+// row (unparseable text, forms only JS parses, a date within the margin) is kept and the JS rule in recallLessons
+// decides, so the window is exactly ageDaysOf's.
+function recallRows(m, provider, nowMs, staleDays, sig) {
+  const cutoffJd = recallCutoffJd(nowMs, staleDays);
+  const key = m.file ? `${m.file}\u0000${provider.model}\u0000${provider.dims}` : null;
+  const hit = key ? recallCache.get(key) : null;
+  if (hit && hit.owner === m && hit.sig.dv === sig.dv && hit.sig.tc === sig.tc && !Number.isNaN(staleDays) && hit.cutoffJd <= cutoffJd) return hit;
+  if (hit) recallCache.delete(key);
+
+  // No live row holds a vector under this model/dims: nothing to decode, and no blob is read.
+  const any = m
+    .prepare(
+      "SELECT 1 AS x FROM lessons WHERE superseded_by IS NULL AND stale IS NULL AND embedding IS NOT NULL AND embedding_model = ? AND embedding_dims = ? LIMIT 1"
+    )
+    .get(provider.model, provider.dims);
+  if (!any) return null;
+
+  const stmt = m.prepare(
+    `SELECT id, created, confirmed, scope,
+            CASE WHEN embedding_model = ? AND embedding_dims = ? THEN embedding END AS emb
+     FROM lessons
+     WHERE superseded_by IS NULL AND stale IS NULL AND ${SQL_OUTSIDE_WINDOW} = 0`
+  );
+  const ids = [];
+  const anchorMs = [];
+  const scopeRaw = [];
+  const vecs = [];
+  let bytes = 0;
+  const cutoffMs = (cutoffJd - 2440587.5) * 86400000;
+  const looksOld = Number.isFinite(cutoffMs) && cutoffMs > -6e13 && cutoffMs < 8e15 ? new Date(cutoffMs + 86400000).toISOString().slice(0, 10) : "0000-00-00";
+  for (const r of stmt.iterate(provider.model, provider.dims, looksOld, cutoffJd)) {
+    ids.push(r.id);
+    anchorMs.push(new Date(r.confirmed || r.created).getTime());
+    scopeRaw.push(r.scope);
+    const vec = blobToFloats(r.emb);
+    vecs.push(vec);
+    if (vec) bytes += vec.byteLength;
+  }
+  const entry = {
+    owner: m,
+    sig,
+    cutoffJd,
+    n: ids.length,
+    ids,
+    anchorMs: Float64Array.from(anchorMs),
+    scopeRaw,
+    vecs,
+    live: new Uint8Array(ids.length).fill(1),
+    bytes,
+  };
+  if (key && bytes <= RECALL_CACHE_MAX_BYTES) {
+    recallCache.set(key, entry);
+    let total = 0;
+    for (const e of recallCache.values()) total += e.bytes;
+    for (const [k2, e] of recallCache) {
+      if (recallCache.size <= RECALL_CACHE_MAX_ENTRIES && total <= RECALL_CACHE_MAX_BYTES) break;
+      if (e === entry) continue;
+      recallCache.delete(k2);
+      total -= e.bytes;
+    }
+  }
+  return entry;
+}
+
+// recallLessons's own citation writes (stale mark, confirmed stamp) are applied to the entry it just used, and
+// the entry takes the new signature, so a recall with a checkout does not throw its own cache away. If anything
+// else changed the database meanwhile (data_version moved, or total_changes moved by more than these writes) the
+// entry is dropped instead.
+function followOwnWrites(m, entry, written, confirmedIso, sigBefore) {
+  const sigAfter = recallSignature(m);
+  const ours = written.reduce((n, w) => n + w.changes, 0);
+  if (sigAfter.dv !== sigBefore.dv || sigAfter.tc !== sigBefore.tc + ours || entry.owner !== m) {
+    for (const [k, e] of recallCache) if (e === entry) recallCache.delete(k);
+    return;
+  }
+  const confirmedMs = new Date(confirmedIso).getTime();
+  for (const w of written) {
+    const i = entry.ids.indexOf(w.id);
+    if (i < 0) continue;
+    if (w.stale) entry.live[i] = 0;
+    else entry.anchorMs[i] = confirmedMs;
+  }
+  entry.sig = sigAfter;
+}
+
 // --- Dense-ranked recall -----------------------------------------------------------------------------------
 // With a provider and vectors stored under its model/dims, every vectored live in-window lesson is ranked by
 // cosine similarity x recency weight x scope boost (memory-benchmark section 9: cosine x recency beat the old
@@ -876,51 +1020,60 @@ export async function recallLessons(m, query, opts = {}) {
   const nowMs = nowDate.getTime();
   const checked = isProjectRoot(checkoutDir);
 
-  // (a) candidates: not superseded, not stale, and confirmed-or-created within staleDays.
-  // Light columns only: the embedding blob is never loaded here (card recall-scale-row-load).
-  const allRows = m
-    .prepare(
-      "SELECT id, created, confirmed, scope, embedding_model, embedding_dims, embedding IS NOT NULL AS has_vec FROM lessons WHERE superseded_by IS NULL AND stale IS NULL"
-    )
-    .all()
-    .map(lessonRowToObject);
-  const hasVec = (l) => !!l.has_vec;
-  const freshRows = allRows.filter((l) => ageDaysOf(l.confirmed || l.created, nowMs) <= staleDays);
-  const byId = new Map(freshRows.map((l) => [l.id, l]));
-
-  // (b) BM25 side, top 50.
+  // (a)+(b) BM25 side, top 50: live (not superseded, not stale) hits, kept when confirmed-or-created is within
+  // staleDays. The whole-table work below (the dense side) runs only with a provider (card recall-hybrid-scale).
   const match = ftsMatchQuery(query);
   let bm25Ranked = [];
+  const bm25Info = new Map();
   if (match) {
     const rows = m
       .prepare(
-        `SELECT l.id FROM lessons_fts f JOIN lessons l ON l.id = f.id
+        `SELECT l.id, l.created, l.confirmed, l.scope,
+                (l.embedding IS NOT NULL AND l.embedding_model = ? AND l.embedding_dims = ?) AS has_match
+         FROM lessons_fts f JOIN lessons l ON l.id = f.id
          WHERE lessons_fts MATCH ? AND l.superseded_by IS NULL AND l.stale IS NULL
          ORDER BY bm25(lessons_fts) LIMIT 50`
       )
-      .all(match);
-    bm25Ranked = rows.map((r) => r.id).filter((id) => byId.has(id));
+      .all(provider ? provider.model : null, provider ? provider.dims : null, match);
+    for (const r of rows) {
+      const age = ageDaysOf(r.confirmed || r.created, nowMs);
+      if (!(age <= staleDays)) continue;
+      bm25Ranked.push(r.id);
+      bm25Info.set(r.id, { scope: r.scope, hasMatch: !!r.has_match, age });
+    }
   }
 
   // (c) dense side, only with a provider and rows stored under the same model+dims: cosine (dot of the stored
-  // vectors) for every such row, not only BM25 hits.
+  // vectors) for every such row, not only BM25 hits. The rows come from recallRows: decoded once per database,
+  // model and dims and reused until a write (this connection's or another's) changes the database.
   let mode = "keyword-only";
   let reason = "no provider configured";
   let providerName = null;
-  const cosine = new Map();
+  let rows = null;
+  let ages = null;
+  let cosine = null;
+  let cosineScores = null;
+  let freshTotal = 0;
+  let freshVectored = 0;
+  let sigBefore = null;
   if (provider) {
     providerName = provider.name;
-    // Blobs are read only when the light columns say a fresh row holds one under this model/dims.
-    const anyMatching = freshRows.some((l) => hasVec(l) && l.embedding_model === provider.model && l.embedding_dims === provider.dims);
-    const vectorRows = !anyMatching
-      ? []
-      : m
-      .prepare(
-        "SELECT id, embedding FROM lessons WHERE superseded_by IS NULL AND stale IS NULL AND embedding IS NOT NULL AND embedding_model = ? AND embedding_dims = ?"
-      )
-      .all(provider.model, provider.dims)
-      .filter((l) => byId.has(l.id));
-    if (!vectorRows.length) {
+    sigBefore = recallSignature(m);
+    rows = recallRows(m, provider, nowMs, staleDays, sigBefore);
+    ages = new Float64Array(rows ? rows.n : 0);
+    for (let i = 0; rows && i < rows.n; i++) {
+      if (!rows.live[i]) continue;
+      const t = rows.anchorMs[i];
+      const age = Number.isFinite(t) ? (nowMs - t) / 86400000 : 0;
+      ages[i] = age;
+      if (age <= staleDays) {
+        freshTotal++;
+        if (rows.vecs[i]) freshVectored++;
+      } else {
+        ages[i] = Infinity; // out of the window; never a candidate
+      }
+    }
+    if (!freshVectored) {
       reason = `no vectors stored for ${provider.model}/${provider.dims}`;
     } else {
       const embedResult = await provider.embed([String(query || "")], { inputType: "query" });
@@ -928,11 +1081,15 @@ export async function recallLessons(m, query, opts = {}) {
         reason = embedResult.reason;
       } else {
         const qVec = embedResult.vectors[0];
-        for (const l of vectorRows) {
-          const vec = blobToFloats(l.embedding);
+        cosine = [];
+        cosineScores = new Float64Array(rows.n);
+        for (let r = 0; r < rows.n; r++) {
+          const vec = rows.vecs[r];
+          if (!vec || ages[r] === Infinity || !rows.live[r]) continue;
           let dot = 0;
           for (let i = 0; i < qVec.length && i < vec.length; i++) dot += qVec[i] * vec[i];
-          cosine.set(l.id, dot);
+          cosineScores[r] = dot;
+          cosine.push(r);
         }
         mode = "hybrid";
         reason = null;
@@ -948,42 +1105,49 @@ export async function recallLessons(m, query, opts = {}) {
   const degraded = mode === "keyword-only" && (!!provider || hasAnyVector(m) || !!detectedProvider);
   const coverage = {};
   if (mode === "hybrid") {
-    coverage.total = freshRows.length;
-    coverage.unvectored = freshRows.filter(
-      (l) => !(hasVec(l) && l.embedding_model === provider.model && l.embedding_dims === provider.dims)
-    ).length;
+    coverage.total = freshTotal;
+    coverage.unvectored = freshTotal - freshVectored;
   }
 
   // (d) scores: recency weight, then scope boost. Dense mode scores cosine; the BM25 order scores 1/(60+rank).
   const bm25Rank = new Map(bm25Ranked.map((id, idx) => [id, idx]));
-  const weigh = (lesson, base) => {
-    const ageDays = ageDaysOf(lesson.confirmed || lesson.created, nowMs);
+  const weigh = (ageDays, scopeRaw, base) => {
     let score = base * (0.5 + 0.5 * Math.exp(-ageDays / 90));
-    if (files.length && (lesson.scope.length === 0 || scopeMatchesFiles(lesson.scope, files))) score *= 1.5;
+    if (files.length) {
+      const scope = parseJsonColumn(scopeRaw, []);
+      if (scope.length === 0 || scopeMatchesFiles(scope, files)) score *= 1.5;
+    }
     return score;
   };
-  const byScoreThenId = (a, b) => b.score - a.score || (a.lesson.id < b.lesson.id ? -1 : a.lesson.id > b.lesson.id ? 1 : 0);
-  const sidesOf = (id) => {
-    const sides = [];
-    if (bm25Rank.has(id)) sides.push("bm25");
-    if (cosine.has(id)) sides.push("vector");
-    return sides;
+  const idCmp = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
+  const byScoreThenId = (a, b) => b.score - a.score || idCmp(a.id, b.id);
+  // Candidates in rank order, each { id, score, sides }, read through at(j) so the dense side never builds one
+  // object per stored vector.
+  const bm25Only = (id) => {
+    const info = bm25Info.get(id);
+    return { id, score: weigh(info.age, info.scope, 1 / (60 + bm25Rank.get(id) + 1)), sides: ["bm25"] };
   };
   let candidates;
   if (mode === "hybrid") {
     // (e) vectored lessons by cosine x recency x scope, then BM25 hits with no vector, in BM25 order.
-    const dense = [...cosine.entries()].map(([id, dot]) => {
-      const lesson = byId.get(id);
-      return { lesson, score: weigh(lesson, dot), sides: sidesOf(id) };
-    });
-    dense.sort(byScoreThenId);
-    const appended = bm25Ranked
-      .filter((id) => !cosine.has(id))
-      .map((id) => ({ lesson: byId.get(id), score: weigh(byId.get(id), 1 / (60 + bm25Rank.get(id) + 1)), sides: sidesOf(id) }));
-    candidates = [...dense, ...appended];
+    const order = Int32Array.from(cosine);
+    const scores = new Float64Array(rows.n);
+    for (const r of cosine) scores[r] = weigh(ages[r], rows.scopeRaw[r], cosineScores[r]);
+    order.sort((x, y) => scores[y] - scores[x] || idCmp(rows.ids[x], rows.ids[y]));
+    const dense = { length: order.length, at: (j) => {
+      const r = order[j];
+      const id = rows.ids[r];
+      return { id, score: scores[r], sides: bm25Rank.has(id) ? ["bm25", "vector"] : ["vector"] };
+    } };
+    const appended = bm25Ranked.filter((id) => !bm25Info.get(id).hasMatch).map(bm25Only);
+    candidates = {
+      length: dense.length + appended.length,
+      at: (j) => (j < dense.length ? dense.at(j) : appended[j - dense.length]),
+    };
   } else {
-    candidates = bm25Ranked.map((id) => ({ lesson: byId.get(id), score: weigh(byId.get(id), 1 / (60 + bm25Rank.get(id) + 1)), sides: sidesOf(id) }));
-    candidates.sort(byScoreThenId);
+    const list = bm25Ranked.map(bm25Only);
+    list.sort(byScoreThenId);
+    candidates = { length: list.length, at: (j) => list[j] };
   }
 
   // (g) top k. With a real project root, each candidate's citation is re-checked: a failure marks the row
@@ -999,11 +1163,12 @@ export async function recallLessons(m, query, opts = {}) {
     .join(", ");
   const loadById = m.prepare(`SELECT ${loadCols}, embedding IS NOT NULL AS has_vec FROM lessons WHERE id = ?`);
   const result = [];
+  const written = []; // each write below, so the cached rows can follow them
   let idx = 0;
   while (result.length < k && idx < candidates.length) {
-    const cand = candidates[idx++];
+    const cand = candidates.at(idx++);
     // Every column except the blob (and the model/dims toRecallLesson strips anyway); hasVector comes from has_vec.
-    const { has_vec, ...full } = loadById.get(cand.lesson.id);
+    const { has_vec, ...full } = loadById.get(cand.id);
     cand.lesson = lessonRowToObject({ ...full, embedding: has_vec ? true : null });
     if (!checked) {
       result.push(toRecallLesson(cand.lesson, { score: cand.score, sides: cand.sides }));
@@ -1011,12 +1176,15 @@ export async function recallLessons(m, query, opts = {}) {
     }
     const check = checkCitation(cand.lesson, checkoutDir);
     if (!check.ok) {
-      m.prepare("UPDATE lessons SET stale = ? WHERE id = ?").run(nowIsoStr, cand.lesson.id);
+      const res = m.prepare("UPDATE lessons SET stale = ? WHERE id = ?").run(nowIsoStr, cand.lesson.id);
+      written.push({ id: cand.lesson.id, stale: true, changes: Number(res.changes) });
       continue;
     }
-    m.prepare("UPDATE lessons SET confirmed = ? WHERE id = ?").run(nowIsoStr, cand.lesson.id);
+    const res = m.prepare("UPDATE lessons SET confirmed = ? WHERE id = ?").run(nowIsoStr, cand.lesson.id);
+    written.push({ id: cand.lesson.id, stale: false, changes: Number(res.changes) });
     result.push(toRecallLesson({ ...cand.lesson, confirmed: nowIsoStr }, { score: cand.score, sides: cand.sides }));
   }
+  if (rows && written.length) followOwnWrites(m, rows, written, nowIsoStr, sigBefore);
 
   return { mode, reason: mode === "hybrid" ? null : reason, provider: providerName, checked, degraded, ...coverage, lessons: result };
 }
@@ -1513,6 +1681,13 @@ export const REFLECT_SCHEMA = {
           task: { type: "string" },
           scope: { type: "array", items: { type: "string" } },
           notDerivableBecause: { type: "string" },
+          // Optional (card reflect-offers-claude-md): the CLAUDE.md bullet this lesson would be, only when it is a
+          // rule a future session should follow.
+          claudeMd: {
+            type: "object",
+            required: ["heading", "line"],
+            properties: { heading: { type: "string" }, line: { type: "string" } },
+          },
         },
       },
     },
@@ -1598,13 +1773,25 @@ function mostRecentLessons(lessons, limit) {
   return withTime.slice(0, limit).map((x) => x.lesson);
 }
 
+// The `## ` headings of CLAUDE.md at dir ([] when it is missing or unreadable).
+function claudeMdHeadings(dir) {
+  try {
+    return readFileSync(join(dir, "CLAUDE.md"), "utf8")
+      .split("\n")
+      .filter((l) => l.startsWith("## "))
+      .map((l) => l.trim());
+  } catch {
+    return [];
+  }
+}
+
 // The prompt for the cheap-row pass: the rules in plain words, every task's facts (owned files from the plan when
 // it names the task, verified/passes/stopReason, review and verifier findings, its blocks with class and reason,
 // memoryUsed), the id and text of the most recently created/confirmed existing lessons (so the model avoids
 // re-proposing them; capped at REFLECT_PROMPT_LESSON_CAP, said so in the prompt when it is), and the citation
 // forms it may use. Filter C.4's duplicate check still runs against the full, uncapped set of existing lessons —
 // this cap only bounds what the model itself sees.
-export function buildReflectPrompt(report, { blocks = [], plan = null, existingLessons = [] } = {}) {
+export function buildReflectPrompt(report, { blocks = [], plan = null, existingLessons = [], dir = null } = {}) {
   const lines = [];
   lines.push("You are proposing at most 3 lessons for a coding harness's memory store, from one workflow report.");
   lines.push("Every rule below is enforced again in code after you answer, so follow it exactly:");
@@ -1617,6 +1804,13 @@ export function buildReflectPrompt(report, { blocks = [], plan = null, existingL
   lines.push("- never propose a lesson whose text is already covered by one of the existing lessons listed below.");
   lines.push("- propose at most 3 lessons; an empty list is a perfectly good answer when nothing here is worth remembering.");
   lines.push("- a task marked partial=true below ran out of context, not verification; propose no lesson that blames its code or its tests for that.");
+  const headings = dir ? claudeMdHeadings(dir) : [];
+  if (headings.length) {
+    lines.push(
+      "- claudeMd is optional: add { heading, line } to a lesson only when it is a rule a future session should follow. line is exactly one bullet starting with \"- \", heading is one of the existing CLAUDE.md headings below, and never ## Models or ## Commands. Omit it otherwise."
+    );
+    lines.push(`  CLAUDE.md headings: ${headings.join(" | ")}`);
+  }
   lines.push("");
   lines.push("Tasks in this report:");
   for (const level of report.levels || []) {
@@ -1812,6 +2006,87 @@ function computeReflectCost({ dir, claudeDir, sessionId, totalCostUsd }) {
   return { usd: null, usdSource: null };
 }
 
+// Does a lesson already have a home (card reflect-offers-claude-md)? home:true when the cheap pass gave no usable
+// CLAUDE.md suggestion, when a hook under .doug/hooks/scripts already enforces it (the lesson text or the
+// suggestion names a script as a whole word, with or without .mjs), or when an existing CLAUDE.md bullet already
+// contains at least 60% of the suggestion line's tokens (containment over the suggestion's tokens, reflectTokens;
+// a line with no tokens counts as covered). { home:false } means: offer a candidate.
+export const CLAUDE_MD_COVERED_CONTAINMENT = 0.6;
+
+export function claudeMdHome({ dir, lesson, suggestion } = {}) {
+  if (!suggestion || typeof suggestion !== "object" || typeof suggestion.heading !== "string" || typeof suggestion.line !== "string") {
+    return { home: true, why: "no suggestion" };
+  }
+  const haystack = `${lesson && typeof lesson.text === "string" ? lesson.text : ""}\n${suggestion.line}`;
+  let scripts = [];
+  try {
+    scripts = readdirSync(join(dir, ".doug", "hooks", "scripts"))
+      .filter((n) => n.endsWith(".mjs"))
+      .map((n) => n.slice(0, -4));
+  } catch {
+    scripts = [];
+  }
+  for (const name of scripts) {
+    const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    if (new RegExp(`(?<![\\w-])${escaped}(?:\\.mjs)?(?![\\w-])`).test(haystack)) {
+      return { home: true, why: `enforced by the ${name} gate script` };
+    }
+  }
+  const tokens = reflectTokens(suggestion.line);
+  if (tokens.size === 0) return { home: true, why: "the suggestion line has no content words" };
+  let text = "";
+  try {
+    text = readFileSync(join(dir, "CLAUDE.md"), "utf8");
+  } catch {
+    return { home: false };
+  }
+  let inFence = false;
+  for (const existing of text.split("\n")) {
+    if (/^\s*(```|~~~)/.test(existing)) {
+      inFence = !inFence;
+      continue;
+    }
+    if (inFence || !existing.startsWith("- ")) continue;
+    const have = reflectTokens(existing);
+    let shared = 0;
+    for (const t of tokens) if (have.has(t)) shared++;
+    if (shared / tokens.size >= CLAUDE_MD_COVERED_CONTAINMENT) return { home: true, why: `already covered by CLAUDE.md line: ${existing}` };
+  }
+  return { home: false };
+}
+
+// A standing CLAUDE.md offer for each APPENDED lesson with no home (card reflect-offers-claude-md). Runs for the
+// report form and the --hand form alike (the hand CLI assembles a report and calls runReflect). The edits file is
+// checked with proposeClaudeMd in dryRun, written only when ok (and never under --dry-run) to
+// .doug/.state/learn/claude-md-candidates/<lesson id>.json; a refusal is dropped with its reason. CLAUDE.md is never
+// written and learn.mjs apply never runs: the printed command only makes a diff.
+async function offerClaudeMdCandidates({ dir, dryRun, reportHash, card, appendedRows, suggestions }) {
+  const claudeMd = [];
+  const claudeMdDropped = [];
+  const { proposeClaudeMd } = await import("./decisions.mjs");
+  const script = resolve(dirname(fileURLToPath(import.meta.url)), "../scripts/memory.mjs");
+  for (const row of appendedRows) {
+    const s = suggestions.get(row.id);
+    if (!s || claudeMdHome({ dir, lesson: { text: s.text }, suggestion: s.claudeMd }).home) continue;
+    const edits = {
+      note: `reflect ${card || reportHash.slice(0, 12)}: lesson ${row.id}`,
+      add: [{ heading: s.claudeMd.heading, line: s.claudeMd.line, source: `lesson ${row.id}` }],
+    };
+    const checked = proposeClaudeMd({ dir, edits, dryRun: true });
+    if (!checked.ok) {
+      claudeMdDropped.push({ lessonId: row.id, reason: checked.reason });
+      continue;
+    }
+    const file = join(dir, ".doug/.state/learn/claude-md-candidates", `${row.id}.json`);
+    if (!dryRun) {
+      mkdirSync(dirname(file), { recursive: true });
+      writeFileSync(file, JSON.stringify(edits, null, 2) + "\n", "utf8");
+    }
+    claudeMd.push({ lessonId: row.id, file, command: `node ${script} claude-md propose --file ${file}` });
+  }
+  return { claudeMd, claudeMdDropped };
+}
+
 // The whole reflect pass (card memory-reflect): counters first (committed even if the LLM pass fails), then the
 // cheap-row pass via `propose`, then the filters in C, then cost. Idempotent on report_hash: a second call on the
 // same report does nothing and returns { alreadyReflected: true, row }. `propose(prompt)` resolves to
@@ -1880,7 +2155,7 @@ export async function runReflect(m, report, opts = {}) {
   }
 
   const existingLessons = listLessons(m);
-  const prompt = buildReflectPrompt(report, { blocks, plan, existingLessons });
+  const prompt = buildReflectPrompt(report, { blocks, plan, existingLessons, dir });
 
   let proposeResult = null;
   let proposeError = null;
@@ -1913,6 +2188,8 @@ export async function runReflect(m, report, opts = {}) {
       rejected,
       usd: null,
       usdSource: null,
+      claudeMd: [],
+      claudeMdDropped: [],
       model,
       sessionId: null,
       reason: proposeError.message,
@@ -1924,6 +2201,7 @@ export async function runReflect(m, report, opts = {}) {
   const totalCostUsd = typeof proposeResult.totalCostUsd === "number" ? proposeResult.totalCostUsd : null;
 
   const appendedRows = [];
+  const suggestions = new Map(); // lesson id -> { lesson text, claudeMd suggestion } for appended lessons only
   const bumped = [];
   const rejected = [];
   for (const proposal of proposals) {
@@ -1944,7 +2222,9 @@ export async function runReflect(m, report, opts = {}) {
       continue;
     }
     if (dryRun) {
-      appendedRows.push({ id: computeLessonId({ kind: proposal.kind, citation: proposal.citation || null, text: proposal.text }), text: proposal.text, kind: proposal.kind });
+      const dryId = computeLessonId({ kind: proposal.kind, citation: proposal.citation || null, text: proposal.text });
+      appendedRows.push({ id: dryId, text: proposal.text, kind: proposal.kind });
+      suggestions.set(dryId, { text: proposal.text, claudeMd: proposal.claudeMd });
       continue;
     }
     const reportTask = findReportTask(report, proposal.task);
@@ -1959,6 +2239,18 @@ export async function runReflect(m, report, opts = {}) {
       commit: commit != null ? commit : (reportTask && reportTask.commit) || null,
     });
     appendedRows.push(row);
+    suggestions.set(row.id, { text: proposal.text, claudeMd: proposal.claudeMd });
+  }
+
+  let claudeMd = [];
+  let claudeMdDropped = [];
+  try {
+    ({ claudeMd, claudeMdDropped } = await offerClaudeMdCandidates({ dir, dryRun, reportHash, card, appendedRows, suggestions }));
+  } catch (err) {
+    // Fail open: the offer is advisory, so an error never leaves the reflection half-written.
+    const message = err && err.message ? err.message : String(err);
+    claudeMd = [];
+    claudeMdDropped = appendedRows.map((r) => ({ lessonId: r.id, reason: `claude-md offer failed: ${message}` }));
   }
 
   const cost = computeReflectCost({ dir, claudeDir, sessionId, totalCostUsd });
@@ -1987,6 +2279,8 @@ export async function runReflect(m, report, opts = {}) {
     appended: appendedRows.map((r) => r.id),
     bumped,
     rejected,
+    claudeMd,
+    claudeMdDropped,
     usd: cost.usd,
     usdSource: cost.usdSource,
     model,

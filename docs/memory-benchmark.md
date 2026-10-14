@@ -30,6 +30,8 @@ Every number below ends with a bracketed tag naming the command that produced it
 | [GR] | `node evals/bench-memory.mjs accuracy --frameworks graphiti --framework-config '{"limit":2}' --json` (`s3-fw-graphiti-limit2`; run before a bare `graphiti` was routed as nondeterministic, so its JSON shows it under the deterministic modes) |
 | [FWS] | `node evals/bench-memory.mjs speed --frameworks mem0:verbatim,langmem,langmem:content --sizes real,1000,10000 --skip-cold-start --json` (`s3-fw-speed-a`) and `... speed --frameworks letta --sizes real,1000 --skip-cold-start --json` (`s3-fw-speed-b`); run with the stage-3 adapters before the prefix option existed (no prefixes) |
 | [FWD] | `node evals/bench-memory.mjs accuracy --frameworks mem0:verbatim,langmem:verbatim,letta:verbatim --framework-config '{"prefix":true}' --json`, run twice (`s4-fwdet1`, `s4-fwdet2`) |
+| [RHT] | `node evals/bench-memory.mjs accuracy --ollama --json` (`rht-accuracy`, exit 0; 129 queries: the 100 of [ACC] plus 14 `time` and 15 `identifier`; adds the `shipped:<m>` rows of `shippedVariants`) |
+| [EG2] | `node evals/bench-memory.mjs accuracy --unsloth --models <id> --dims 512,768 --json` once per model against Unsloth Studio on 127.0.0.1:8888 (`beg2-accuracy-A`, `beg2-accuracy-B` with `gguf_variant` BF16, exit 0; 129 queries); latency: three runs of one warm `/v1/embeddings` request per query string (`beg2-latency-A-1..3`, `beg2-latency-B-1..3`) |
 
 Reproduce in order: `node evals/bench-memory.mjs install-stores`, `install-frameworks`, `snapshot`, then the commands above. Letta needs a second venv and a Docker Postgres (section 6); `docker rm -f doug-bench-pg` if a run is killed.
 
@@ -259,6 +261,8 @@ Keyword paths [SPD]:
 - `fts5` is the shipped `recallLessons` (it loads every live row before ranking); `fts5:norecency` is the same formula over the bench's scratch store and times only the bm25 top-50 query plus the window filter. The gap (549.609 against 41.078 ms p50 at 100,000) is row loading and handling, the same 86 percent finding stage 2 profiled (`recallLessons` 612.5 ms, bm25 query alone 83.1 ms, bare `SELECT *` of live rows 211.8 ms at 100,000, median of 5, `.doug/.state/scratch/profile.mjs`, log `.doug/.state/bench/logs/profile-recall-100k.log`; a stage-2 measurement from a scratch script that is not in the repo).
 
 - After card `recall-scale-row-load` (`recallLessons` selects light columns for the whole-table work and loads full rows only for the lessons that reach the result): `fts5` at 100,000 is 319.855 / 386.716 ms p50 / p95 [SPD], against 549.609 / 631.519 ms above (real size 1.207 / 2.229 ms against 1.044 / 2.022). Command: `node evals/bench-memory.mjs speed --ollama --sizes real,100000 --json > .doug/.state/bench/logs/recall-row-load-speed.json`, log `.doug/.state/bench/logs/recall-row-load-speed.json`. The remainder over this run's `fts5:norecency` (59.741 / 86.469 ms at 100,000, same log) is the light-column scan and the freshness filter over 100,000 rows (the full-table light scan alone is about 230 ms, per the review probe in the next bullet).
+
+- After card `recall-hybrid-scale` (the freshness window moves into SQL as a prefilter that keeps every row it cannot decide, so the JS rule `ageDaysOf` stays the final word; vectors decode as 4-aligned views instead of copies; keyword recall no longer scans the table; decoded rows are cached in process per database file, model and dims, valid while `PRAGMA data_version` and `total_changes()` are unchanged, at most 3 entries and 1 GiB): `hybrid-shipped` at 100,000, warm (repeated calls in one process, the cache hit) p50 / p95 ms [SPD]: embeddinggemma 212.181 / 270.936, nomic-embed-text 222.86 / 277.601, mxbai-embed-large 237.916 / 270.452, bge-m3 240.223 / 275.327, qwen3-embedding:0.6b 238.179 / 271.129, against 1159.039 / 1377.982 (embeddinggemma) above; the default model is under 300 ms p50 warm. At the real size 14.904 to 41.554 ms p50 (embeddinggemma 17.269 / 25.091). `fts5` at 100,000 is 51.604 / 88.673 ms. Cold, one fresh node process per sample (wall clock including process start; every shipped caller is a fresh process, so the cache does not help them) p50 / p95 ms [SPD]: embeddinggemma 665.094 / 765.6, nomic-embed-text 687.161 / 789.59, mxbai-embed-large 709.731 / 837.326, bge-m3 715.679 / 946.263, qwen3-embedding:0.6b 714.413 / 834.447, bare `node -e 0` 20.5 to 20.8; real size 43.947 to 48.052 ms against 20.9 to 22.9 bare. Cold is not under 300 ms: it is the table scan (the 3 KB blob rows overflow, so even a scan without the blob column walks the whole file, about 110 ms at 100,000) plus the blob read (about 150 ms) plus the dot products (about 70 ms). The before figure for cold was not run through the bench; the same code path before and after on one synthetic 100,000 x 768 store (scratch script, one fresh process per call, not a repo command) was 881 to 930 ms before and 524 to 530 ms after. Command: `node evals/bench-memory.mjs speed --ollama --sizes real,100000 --json > .doug/.state/bench/logs/rhs-speed.json 2> .doug/.state/bench/logs/rhs-speed.err`, log `.doug/.state/bench/logs/rhs-speed.json` (the cold figures are `coldStartHybrid` in it).
 
 The other costs of the shipped store at every size [SPD] (p50 / p95 ms):
 
@@ -523,6 +527,84 @@ Limits of this recommendation: one corpus (this repository's 112 live lessons), 
 ### 9.1 Landed: cosine times recency (card recall-dense-ranking, 2026-10-03)
 
 `recallLessons` now ranks by cosine times the recency weight (times the scope boost) when a provider and stored vectors exist, with lesson-id tie-break, and keeps BM25 as the no-provider fallback; BM25 hits with no vector are appended after the vectored lessons. Re-measured with `node evals/bench-memory.mjs accuracy --ollama --models embeddinggemma --json`: `hybrid-shipped:embeddinggemma` MRR 0.6576, up from 0.5549 (+0.1027), equal to the `dense:embeddinggemma:recency` 0.6576 of section 9; `hybrid-shipped:embeddinggemma:norecency` is 0.5945 [ACC], but it stays the pre-change RRF formula with recency 1 (`hybridShippedNorecency` in `evals/bench-memory.mjs`), so 0.5945 is not a norecency of the new ranking. The `hybrid-shipped` rows in the tables above (0.5549 and the like) are all pre-change.
+
+### 9.2 Recency, the BM25 tail and exact identifiers (card recall-hybrid-tune, 2026-10-13)
+
+Question (the 2026-10-03 request to tune memory for hybrid search): is the shipped ranking (cosine times `0.5 + 0.5 * exp(-ageDays / 90)`, unvectored BM25 hits appended, section 9.1) worth changing? Command: [RHT]. The query set grew from 100 to 129: 14 `time` queries (the right answer is the newer of two or more live lessons on one topic; each lists the older competitors in `older`) and 15 `identifier` queries (short, built around one string that occurs verbatim in the expected lesson: a commit sha, a flag, a function, a card id). Both sets were written from the snapshot's lesson text before any run of the new rows, and checked against the snapshot afterwards without edits: every `identifier` occurs in its expected lesson, every `older` lesson is live and older than the expected one. The 100 original queries are unchanged: `hybrid-shipped:embeddinggemma` scores MRR 0.6576 on them, as in 9.1 [RHT]. The tables of sections 2 to 9.1 are 100-query tables; the numbers below are 129-query numbers and differ from them for that reason.
+
+`shippedVariants` (in `evals/bench-memory.mjs`) re-implements the hybrid branch of `recallLessons` over the bench's cached vectors so the half-life can vary: `shipped:<m>` (tau 90), `:tau30`, `:tau180`, `:tau365`, `:norecency` (weight 1), `:kwboost` (the shipped order with the BM25 top 3 lifted to ranks 2 to 4). BM25 depth is 50, as `recallLessons` (`memory.mjs` line 899, `LIMIT 50`). Fidelity: for every model, `shipped:<m>` equals `hybrid-shipped:<m>` (the product path through `createProvider`) on MRR, R@8 and every per-type MRR and R@8 [RHT].
+
+MRR over all 129 queries (change against `hybrid-shipped` in brackets):
+
+| variant | embeddinggemma | nomic-embed-text | mxbai-embed-large | bge-m3 | qwen3-embedding:0.6b |
+|---|---|---|---|---|---|
+| hybrid-shipped (tau 90) | 0.6958 | 0.6274 | 0.6329 | 0.6529 | 0.6984 |
+| tau30 | 0.6300 (-0.0659) | 0.3839 (-0.2435) | 0.4441 (-0.1888) | 0.4845 (-0.1683) | 0.6458 (-0.0526) |
+| tau180 | 0.7109 (+0.0151) | 0.6720 (+0.0446) | 0.6634 (+0.0306) | 0.6840 (+0.0311) | 0.7076 (+0.0091) |
+| tau365 | 0.7182 (+0.0224) | 0.6816 (+0.0542) | 0.6799 (+0.0470) | 0.6882 (+0.0353) | 0.7087 (+0.0102) |
+| norecency | 0.7191 (+0.0233) | 0.6924 (+0.0650) | 0.6960 (+0.0631) | 0.6869 (+0.0340) | 0.7179 (+0.0194) |
+| kwboost | 0.6837 (-0.0122) | 0.6368 (+0.0094) | 0.6365 (+0.0036) | 0.6518 (-0.0011) | 0.6791 (-0.0194) |
+
+The default model, embeddinggemma (`.doug/config.json` `memory.embeddings` is `embeddinggemma:latest` at 768 dims via Ollama, the same dims as the run), in full (R@8 = recall at 8; "ident" = identifier):
+
+| variant | MRR | R@8 | paraphrase R@8 | time R@8 | time MRR | ident R@8 | ident MRR |
+|---|---|---|---|---|---|---|---|
+| hybrid-shipped | 0.6958 | 0.9225 | 0.6250 | 1.0000 | 0.7619 | 1.0000 | 0.8889 |
+| shipped:tau30 | 0.6300 | 0.8992 | 0.6250 | 1.0000 | 0.7321 | 1.0000 | 0.9333 |
+| shipped:tau180 | 0.7109 | 0.9225 | 0.6250 | 1.0000 | 0.7589 | 1.0000 | 0.8889 |
+| shipped:tau365 | 0.7182 | 0.9147 | 0.6875 | 0.9286 | 0.7440 | 1.0000 | 0.8889 |
+| shipped:norecency | 0.7191 | 0.9302 | 0.7500 | 0.9286 | 0.7083 | 1.0000 | 0.8889 |
+| shipped:kwboost | 0.6837 | 0.9070 | 0.5000 | 1.0000 | 0.7702 | 1.0000 | 0.9000 |
+| dense (reference) | 0.7191 | 0.9302 | 0.7500 | 0.9286 | 0.7083 | 1.0000 | 0.8889 |
+| dense:recency (reference) | 0.6958 | 0.9225 | 0.6250 | 1.0000 | 0.7619 | 1.0000 | 0.8889 |
+| dense+kwboost (reference) | 0.7023 | 0.9070 | 0.5625 | 1.0000 | 0.7345 | 1.0000 | 0.9000 |
+
+Findings, per question of the card:
+
+- **(a) Other models.** The ordering holds on all five: no recency is the best MRR for four models and within 0.0013 of the best (tau365) for bge-m3, and `tau30` is the worst, by 0.05 to 0.24 MRR (a 30-day half-life punishes a lesson that is old but still the answer). The shipped rank order is the same for `hybrid-shipped` and `dense:<m>:recency` on every model, MRR for MRR [RHT].
+- **(b) Recency on time-sensitive queries.** On the 14 `time` queries, embeddinggemma's shipped weight scores MRR 0.7619 and R@8 1.0000, against 0.7083 and 0.9286 with no recency (one query out of 14 falls out of the top 8 without it). But the gain is thin: cosine alone already ranks the expected lesson above every older competitor in 9 of the 14 queries, 11 of 14 rank the expected lesson identically with and without recency, and the whole gain comes from three queries (tm-bash-rules-normalise, tm-swarm-default, tm-pre-commit-credit). In three pairs the age gap is at most 0.5 days (tm-gate-timeout-normalise, tm-deferral-cap, tm-rehearsal-costs), which the tau-90 weight cannot decide. So the time set is weak evidence either way; a stronger set needs competitors that cosine ranks above the newer lesson. The effect is not consistent across models: with no recency, time MRR is higher for nomic (0.7286 against 0.6990) and mxbai (0.7662 against 0.7524) and lower for bge-m3 (0.7560 against 0.8036) and qwen3 (0.7679 against 0.8274) [RHT]. Recency costs embeddinggemma 0.0233 overall MRR on this set (0.0376 on the 100 queries of section 2.4) and 0.1250 paraphrase R@8 (2 of 16 queries), and gains 0.0536 on 14 time queries; those 14 are too few to call the gain larger than the cost.
+- **(c) Exact identifiers.** Not a problem under the shipped ranking: identifier R@8 is 1.0000 for all five models (15 of 15 in the top 8), identifier MRR 0.8800 to 0.9556. `:kwboost` moves embeddinggemma's identifier MRR from 0.8889 to 0.9000 (about one query one rank higher), and costs 0.1250 paraphrase R@8 and 0.0122 overall MRR; across models its overall effect is -0.0194 to +0.0094 [RHT].
+- **(d) The BM25 tail.** Not measurable on this set. The bench embeds every eligible lesson, so no lesson is unvectored and the tail is empty: `hybrid-shipped:<m>` and `dense:<m>:recency` have identical MRR, R@8 and per-type numbers for all five models. Whether the tail should rank above negative-cosine lessons needs a store with unvectored rows, which this snapshot is not.
+
+The card's rule on embeddinggemma: a variant qualifies if its MRR beats `hybrid-shipped:embeddinggemma` (0.6958) by more than 0.03, i.e. exceeds 0.7258, and its paraphrase R@8 is not lower than 0.6250.
+
+| variant | MRR | gain | paraphrase R@8 | qualifies |
+|---|---|---|---|---|
+| tau30 | 0.6300 | -0.0659 | 0.6250 | no (MRR) |
+| tau180 | 0.7109 | +0.0151 | 0.6250 | no (gain under 0.03) |
+| tau365 | 0.7182 | +0.0224 | 0.6875 | no (gain under 0.03) |
+| norecency | 0.7191 | +0.0233 | 0.7500 | no (gain under 0.03) |
+| kwboost | 0.6837 | -0.0122 | 0.5000 | no (MRR, and paraphrase lower) |
+
+Verdict: no change to `recallLessons`. No variant clears the 0.03 band on the default model; the closest, `norecency` (+0.0233, paraphrase R@8 up), is also the one that gives up the time-sensitive gain (time R@8 1.0000 to 0.9286) and removes the only mechanism that prefers the newer of two close lessons. Other models gain more from a longer half-life or none (nomic +0.0542 to +0.0650, mxbai +0.0470 to +0.0631 at tau365 or none), which makes a longer half-life the cheapest candidate for a later card, but the rule is stated on the default model and the 14 time queries cannot adjudicate it. Limits: one corpus, 129 single-answer queries (differences under about 0.03 MRR are noise), 14 time and 15 identifier queries written by the same author who designed the check, an identifier set that barely separates retrievers (100 of the 105 retrievers in the log score identifier R@8 1.0, the keyword-only path included at R@8 1.0, MRR 0.8889, and 11 of the 15 identifiers occur in no other live lesson, so "(c) not a problem" holds with that limit), and an empty BM25 tail.
+
+### 9.3 EmbeddingGemma 2 against embeddinggemma (card bench-embeddinggemma2, 2026-10-13)
+
+Question: does `unsloth/embeddinggemma-2-GGUF` (B) beat the embeddinggemma Studio serves today (A, `ggml-org/embeddinggemma-300M-GGUF`) enough to switch? The bar: B's MRR gain over A has a 95% interval entirely above 0, and B's median single-query embed latency is at most 1.5x A's. Command: [EG2]. Provider: Unsloth Studio's `/v1/embeddings`, one model resident at a time (A loaded, measured, then B loaded with `POST /v1/load {"model_path":"unsloth/embeddinggemma-2-GGUF","gguf_variant":"BF16"}`; `/v1/status` then showed `"gguf_variant":"BF16"` and B as the only loaded model, and B's probe answered `model: unsloth/embeddinggemma-2-GGUF` with 768-dim vectors). Same 129 queries, same snapshot, same model-card prefixes for both (`task: search result | query: ` and `title: none | text: `), vectors truncated to the first 512 components and renormalised for the 512 rows.
+
+Quants, from the llama-server logs under `~/.unsloth/studio/logs/llama-server/`: A served `embeddinggemma-300M-Q8_0.gguf`, `print_info: file type   = Q8_0` (`print_info: file size   = 311.91 MiB (8.51 BPW)`, `n_ctx_train = 2048`; log `llama-1791913292-port-60992-try0.log`). B served BF16: `print_info: file type   = BF16` (`print_info: file size   = 517.04 MiB (16.00 BPW)`; log `llama-1791914528-port-49693-try0.log`). Studio's default load of B (no `gguf_variant`) is UD-Q4_K_XL; B was measured that way by mistake first (`print_info: file type   = Q4_K - Medium`, a 175 MB download Studio made): MRR 0.5594 at 512 and 0.5667 at 768, which shows the quant cost is small next to the model gap. The Q4 logs are kept as `beg2-accuracy-B-q4.*` and `beg2-latency-B-{1,2,3}-q4.json`.
+
+Differences between the two arms, none of them chosen: A is Q8_0 with a 2048-token context; B is BF16 with an 8192-token context. Every text is clipped to 6000 characters before embedding for both models, because Studio answers HTTP 500 for text over A's 2048-token window. Config note: `.doug/config.json` `memory.embeddings` today is `{"provider":"openai-compatible","baseUrl":"http://127.0.0.1:11434","model":"embeddinggemma:latest","dims":768}` (Ollama, 768 dims), not the card's "preset unsloth at 512"; the verdict is judged at 768, the shipped config's dims, and 512 is reported too. Shipped and `dense:<m>:recency` rank identically here (the BM25 tail is empty, section 9.2), so each row stands for both [EG2].
+
+| model | dims | MRR | R@8 | paraphrase R@8 |
+|---|---|---|---|---|
+| A (Q8_0) | 512 | 0.6867 | 0.9147 | 0.6875 |
+| B (BF16) | 512 | 0.5628 | 0.8295 | 0.4375 |
+| A (Q8_0) | 768 | 0.6945 | 0.9225 | 0.6250 |
+| B (BF16) | 768 | 0.5696 | 0.8450 | 0.4375 |
+
+MRR by type at 768, A against B: title 0.8139 / 0.6573, goal 0.4998 / 0.3278, paraphrase 0.4054 / 0.1901, time 0.7619 / 0.8179, identifier 0.9000 / 0.9111. R@8 by type at 768: title 1.0000 / 0.9259, goal 0.8667 / 0.7667, paraphrase 0.6250 / 0.4375, time 1.0000 / 1.0000, identifier 1.0000 / 1.0000. B is ahead only on time and identifier MRR (14 and 15 queries). At 512, A against B: title 0.8356 / 0.6505, goal 0.4545 / 0.3301, paraphrase 0.3621 / 0.1777, time 0.7643 / 0.8138, identifier 0.8889 / 0.8889.
+
+Paired bootstrap over per-query reciprocal ranks (rr = 1/rank within k=8, else 0), B minus A, 10,000 iterations, seed 1, 95% interval:
+
+| dims | diff | lo | hi |
+|---|---|---|---|
+| 512 | -0.1239 | -0.1867 | -0.0622 |
+| 768 | -0.1249 | -0.1886 | -0.0627 |
+
+Latency (median of one warm request per query string, 129 requests, three runs): A 15.06, 14.51, 14.38 ms (median of medians 14.51); B (BF16) 19.60, 19.41, 19.85 ms (19.60). B/A = 1.35, under the 1.5 bar. B's p95 is 28.5 to 29.3 ms.
+
+Verdict: no upgrade. The latency bar passes, the accuracy bar fails in the wrong direction: B (BF16) is worse than A at both dims, with an interval entirely below 0, and loses 0.25 paraphrase R@8 at 512 (4 of 16 queries) and 0.1875 at 768 (3 of 16). Nothing in the config changes.
 
 ## Left out, and why
 

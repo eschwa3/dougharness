@@ -10,7 +10,8 @@
 //   autopilot.mjs filed <id> --kind <follow-up|user> [--from <card>] --position "<text>"
 //   autopilot.mjs caps [--usd <n>] [--wall <min>] [--context <pct>]
 //   autopilot.mjs pick [--max <n>]            JSON { launch, needsPlan, held, alone }; a held line per held card on stderr
-//   autopilot.mjs queen-args <id> --kind <flow|hand>   writes .doug/.state/reports/<id>/queen-args.json, prints its path
+//   autopilot.mjs queen-args <id> --kind <flow|hand> [--with <id,id,...>]   writes .doug/.state/reports/<id>/queen-args.json and the per-card queen.js beside it, prints both paths (args, then queen.js)
+//   autopilot.mjs agent-types --kind <flow|hand>   prints the agent types that queen spawns, one per line
 //   autopilot.mjs launched <id> --run <wf_id> --kind <flow|hand> --worktree <abs> --args-file <path>
 //   autopilot.mjs report --run <wf_id> --file <result.json>   saves the queen's report, prints land|resume|ask
 //   autopilot.mjs resumed <id> --run <wf_id>
@@ -18,13 +19,13 @@
 //   autopilot.mjs end
 // --dir <d> names the project (default cwd). Exit 0 done; 1 no run or unknown card; 2 bad usage.
 import { execFileSync } from "node:child_process";
-import { copyFileSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync } from "node:fs";
+import { copyFileSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadModels } from "../lib/models.mjs";
 import { AUTOPILOT_FILE, STEPS, readAutopilot } from "../lib/autopilot-view.mjs";
 import { contextThreshold } from "../lib/context.mjs";
-import { classifyNotification, pickCards, workersMax } from "../lib/coordinator.mjs";
+import { classifyNotification, pickCards, queenLabel, renameQueenMeta, workersMax } from "../lib/coordinator.mjs";
 import { nextReadyCards } from "../lib/board.mjs";
 import { planFor, reportPathFor } from "../lib/plan.mjs";
 
@@ -313,7 +314,39 @@ switch (cmd) {
     const out = join(dir, ".doug/.state/reports", id, "queen-args.json");
     mkdirSync(dirname(out), { recursive: true });
     writeFileSync(out, JSON.stringify(args) + "\n");
-    process.stdout.write(out + "\n");
+    const flying = (readAutopilot(dir)?.cards ?? []).filter((c) => ["running", "done", "landing"].includes(c.state)).map((c) => c.id);
+    const batch = String(opts.with ?? "").split(",").map((x) => x.trim()).filter(Boolean);
+    const srcFile = join(dirname(fileURLToPath(import.meta.url)), "..", "workflows", kind === "hand" ? "card-queen.js" : "doug-implement.js");
+    let renamed;
+    try {
+      renamed = renameQueenMeta(readFileSync(srcFile, "utf8"), { kind, label: queenLabel(id, [...flying, ...batch]) });
+    } catch (e) {
+      fail(`cannot build the per-card queen from ${srcFile}: ${e.message}`);
+    }
+    const script = join(dirname(out), "queen.js");
+    rmSync(script, { force: true });
+    writeFileSync(script, renamed);
+    process.stdout.write(out + "\n" + script + "\n");
+    break;
+  }
+  case "agent-types": {
+    const kind = need("kind");
+    if (kind !== "flow" && kind !== "hand") usage("--kind must be flow or hand");
+    const wf = join(dirname(fileURLToPath(import.meta.url)), "..", "workflows", kind === "hand" ? "card-queen.js" : "doug-implement.js");
+    let src;
+    try {
+      src = readFileSync(wf, "utf8");
+    } catch (e) {
+      fail(`cannot read ${wf}: ${e.message}`);
+    }
+    if (kind === "hand") {
+      const m = src.match(/const AGENT_TYPES = \{([^}]*)\}/);
+      if (!m) fail("AGENT_TYPES not found in card-queen.js");
+      src = m[1];
+    }
+    const types = [...new Set([...src.matchAll(kind === "hand" ? /'(doug-flow:[\w-]+)'/g : /agentType: '([^']+)'/g)].map((x) => x[1]))];
+    if (types.length === 0) fail("no agent types found");
+    process.stdout.write(types.join("\n") + "\n");
     break;
   }
   case "launched": {

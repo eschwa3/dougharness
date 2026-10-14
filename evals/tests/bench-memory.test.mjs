@@ -35,6 +35,7 @@ import {
   syntheticProvider,
   wrrf,
   kwBoost,
+  shippedVariants,
   fts5NoRecency,
   hybridShippedNorecency,
   embedCached,
@@ -477,7 +478,7 @@ describe("checked-in query set", () => {
   it("every line has a valid type, a query, and non-empty expected keys", () => {
     expect(lines.length).toBeGreaterThanOrEqual(40);
     for (const q of lines) {
-      expect(["title", "goal", "paraphrase"]).toContain(q.type);
+      expect(["title", "goal", "paraphrase", "time", "identifier"]).toContain(q.type);
       expect(typeof q.id).toBe("string");
       expect(typeof q.card).toBe("string");
       expect(q.query.trim().length).toBeGreaterThan(0);
@@ -487,8 +488,29 @@ describe("checked-in query set", () => {
     expect(new Set(lines.map((q) => q.id)).size).toBe(lines.length);
   });
   it("has at least 30 title/goal queries and at least 10 paraphrase queries", () => {
-    expect(lines.filter((q) => q.type !== "paraphrase").length).toBeGreaterThanOrEqual(30);
+    expect(lines.filter((q) => q.type === "title" || q.type === "goal").length).toBeGreaterThanOrEqual(30);
     expect(lines.filter((q) => q.type === "paraphrase").length).toBeGreaterThanOrEqual(10);
+  });
+  it("has at least 12 time queries, each naming the older lessons it competes with (never its own expected key)", () => {
+    const time = lines.filter((q) => q.type === "time");
+    expect(time.length).toBeGreaterThanOrEqual(12);
+    for (const q of time) {
+      expect(Array.isArray(q.older), q.id).toBe(true);
+      expect(q.older.length, q.id).toBeGreaterThan(0);
+      for (const o of q.older) {
+        expect(typeof o, q.id).toBe("string");
+        expect(q.expected, q.id).not.toContain(o);
+      }
+    }
+  });
+  it("has at least 12 identifier queries, each carrying a non-empty identifier that occurs in its query text", () => {
+    const ids = lines.filter((q) => q.type === "identifier");
+    expect(ids.length).toBeGreaterThanOrEqual(12);
+    for (const q of ids) {
+      expect(typeof q.identifier, q.id).toBe("string");
+      expect(q.identifier.length, q.id).toBeGreaterThan(0);
+      expect(q.query, q.id).toContain(q.identifier);
+    }
   });
 });
 
@@ -1983,5 +2005,390 @@ describe("review gap 5: framework config options reach the adapter in setup's co
   });
   it("without the option the adapter is not told to prefix", async () => {
     expect((await received({})).prefix).toBeFalsy();
+  });
+});
+
+// =================================================================================================================
+// Card recall-hybrid-tune, tester-first. Contract the coder implements in evals/bench-memory.mjs:
+//
+// QUERY_TYPES                    gains "time" and "identifier" (runAccuracy counts.byType reports them; M6 is pinned
+//                                through runAccuracy's counts.byType, which is built from QUERY_TYPES).
+// shippedVariants({ model, embedder, cache = null, staleDays = STALE_DAYS, taus = [30, 180, 365] })
+//                                -> { retrievers, close }, shaped like denseFamily (a FRESH state per setup()).
+//                                Re-implements recallLessons' hybrid ranking (memory.mjs ~957-983): vectored lessons
+//                                by cosine x (0.5 + 0.5 * exp(-ageDays / tau)), ties by lesson id asc, then the BM25
+//                                hits that have NO vector appended in BM25 order. Names, in order: shipped:<m>
+//                                (tau 90), shipped:<m>:tau<N> per taus, shipped:<m>:norecency (weight 1),
+//                                shipped:<m>:kwboost (shipped:<m> order through kwBoost with the BM25 top 3).
+//                                "No vector" is observable here only as an embedder that returns an EMPTY vector for
+//                                a text: such a lesson is treated as unvectored (tail), never scored as cosine 0.
+// =================================================================================================================
+
+describe("shippedVariants (recall-hybrid-tune)", () => {
+  const model = "bge-m3"; // no prefixes: the fixture embedders see the raw text
+  const now = "2020-01-10T00:00:00.000Z";
+  const names = (g) => g.retrievers.map((r) => r.name);
+  const by = (g, n) => g.retrievers.find((r) => r.name === n);
+  const embedWith = (vectorFor) => async (texts) => texts.map(vectorFor);
+
+  // A: the older lesson (29 days) has cosine 1.0, the newer (0 days) 0.8.
+  //   tau 90 weights .862 / 1.0 -> .862 vs .8: old first. tau 30 weights .690 / 1.0 -> .690 vs .8: new first.
+  //   tau 180 (.926) and tau 365 (.962) and no recency: old first.
+  const lessonsA = [
+    lesson("a-old", "old-landing.md", "Gizmo old.", "2019-12-12T00:00:00.000Z"),
+    lesson("a-new", "new-landing.md", "Gizmo new.", "2020-01-10T00:00:00.000Z"),
+  ];
+  const vecA = (t) => (/^\s*gizmo\s*$/i.test(t) || /old/i.test(t) ? [1, 0] : [0.8, 0.6]);
+
+  // B: three lessons whose recency REVERSES the pure-cosine order at tau 90.
+  //   cosine: old 1.0 (29 days), mid .95 (14 days), new .9 (0 days).
+  //   tau 90 weights .862 / .928 / 1.0 -> .862 / .882 / .900: new, mid, old. Pure cosine: old, mid, new.
+  const lessonsB = [
+    lesson("b-old", "old-landing.md", "Gizmo old.", "2019-12-12T00:00:00.000Z"),
+    lesson("b-mid", "mid-landing.md", "Gizmo mid.", "2019-12-27T00:00:00.000Z"),
+    lesson("b-new", "new-landing.md", "Gizmo new.", "2020-01-10T00:00:00.000Z"),
+  ];
+  const vecB = (t) => {
+    if (/^\s*gizmo\s*$/i.test(t) || /old/i.test(t)) return [1, 0];
+    if (/mid/i.test(t)) return [0.95, Math.sqrt(1 - 0.95 * 0.95)];
+    return [0.9, Math.sqrt(1 - 0.9 * 0.9)];
+  };
+
+  it("names, in order: base, one per tau (default 30/180/365), norecency, kwboost; unique modes; the adapter shape", () => {
+    const g = shippedVariants({ model, embedder: fakeEmbedder() });
+    expect(names(g)).toEqual([
+      `shipped:${model}`, `shipped:${model}:tau30`, `shipped:${model}:tau180`, `shipped:${model}:tau365`,
+      `shipped:${model}:norecency`, `shipped:${model}:kwboost`,
+    ]);
+    expect(new Set(g.retrievers.map((r) => r.mode || r.kind)).size).toBe(6);
+    for (const r of g.retrievers) {
+      expect(typeof r.kind).toBe("string");
+      for (const f of ["setup", "teardown", "search", "meta"]) expect(typeof r[f], `${r.name}.${f}`).toBe("function");
+    }
+    expect(typeof g.close).toBe("function");
+    const custom = shippedVariants({ model, embedder: fakeEmbedder(), taus: [45, 60] });
+    expect(names(custom)).toEqual([
+      `shipped:${model}`, `shipped:${model}:tau45`, `shipped:${model}:tau60`, `shipped:${model}:norecency`, `shipped:${model}:kwboost`,
+    ]);
+  });
+
+  it("shipped:<m> is tau 90: the older lesson with the higher cosine stays first (a /30 base would put the newer first)", async () => {
+    const g = shippedVariants({ model, embedder: embedWith(vecA) });
+    try {
+      expect(await searchWith(by(g, `shipped:${model}`), lessonsA, "gizmo", 8, now)).toEqual(["old-landing.md", "new-landing.md"]);
+    } finally {
+      await g.close();
+    }
+  });
+
+  it(":tau30 puts the newer lesson first where tau 90, 180, 365 and no recency keep the older first", async () => {
+    const g = shippedVariants({ model, embedder: embedWith(vecA) });
+    try {
+      expect(await searchWith(by(g, `shipped:${model}:tau30`), lessonsA, "gizmo", 8, now)).toEqual(["new-landing.md", "old-landing.md"]);
+      for (const n of [`shipped:${model}:tau180`, `shipped:${model}:tau365`, `shipped:${model}:norecency`]) {
+        expect(await searchWith(by(g, n), lessonsA, "gizmo", 8, now), n).toEqual(["old-landing.md", "new-landing.md"]);
+      }
+    } finally {
+      await g.close();
+    }
+  });
+
+  it("taus is a parameter: a custom tau builds its own retriever with that weight", async () => {
+    const g = shippedVariants({ model, embedder: embedWith(vecA), taus: [30, 365] });
+    try {
+      expect(names(g)).toContain(`shipped:${model}:tau365`);
+      expect(names(g)).not.toContain(`shipped:${model}:tau180`);
+      expect(await searchWith(by(g, `shipped:${model}:tau30`), lessonsA, "gizmo", 8, now)).toEqual(["new-landing.md", "old-landing.md"]);
+    } finally {
+      await g.close();
+    }
+  });
+
+  it(":norecency is pure cosine (B: old, mid, new) where the shipped weight reverses it (new, mid, old)", async () => {
+    const g = shippedVariants({ model, embedder: embedWith(vecB) });
+    try {
+      expect(await searchWith(by(g, `shipped:${model}`), lessonsB, "gizmo", 8, now)).toEqual(["new-landing.md", "mid-landing.md", "old-landing.md"]);
+      expect(await searchWith(by(g, `shipped:${model}:norecency`), lessonsB, "gizmo", 8, now)).toEqual(["old-landing.md", "mid-landing.md", "new-landing.md"]);
+    } finally {
+      await g.close();
+    }
+  });
+
+  it("fidelity: shipped:<m> returns the product path's order (hybrid-shipped:<m>), and that order is not the pure-cosine one", async () => {
+    const product = providerRetrievers(fakeProvider(vecB, model));
+    const g = shippedVariants({ model, embedder: embedWith(vecB) });
+    try {
+      const prod = await searchWith(product.retrievers.find((x) => x.name === `hybrid-shipped:${model}`), lessonsB, "gizmo", 8, now);
+      expect(prod).toEqual(["new-landing.md", "mid-landing.md", "old-landing.md"]); // recency changes the order versus cosine
+      expect(await searchWith(by(g, `shipped:${model}`), lessonsB, "gizmo", 8, now)).toEqual(prod);
+    } finally {
+      await product.close();
+      await g.close();
+    }
+  });
+
+  it("equal scores break by lesson id ascending (the product's tie-break), whatever the BM25 order", async () => {
+    const lessons = [
+      // BM25 order is z first (shorter text); id order is a first.
+      lesson("tie-z", "z-landing.md", "Gizmo tie.", now),
+      lesson("tie-a", "a-landing.md", `Gizmo tie${" filler".repeat(6)}.`, now),
+    ];
+    const vec = () => [1, 0]; // both lessons and the query: identical cosine and identical age
+    expect(await bm25Order(lessons, "gizmo")).toEqual(["z-landing.md", "a-landing.md"]); // precondition
+    const product = providerRetrievers(fakeProvider(vec, model));
+    const g = shippedVariants({ model, embedder: embedWith(vec) });
+    try {
+      expect(await searchWith(by(g, `shipped:${model}`), lessons, "gizmo", 8, now)).toEqual(["a-landing.md", "z-landing.md"]);
+      expect(await searchWith(by(g, `shipped:${model}:norecency`), lessons, "gizmo", 8, now)).toEqual(["a-landing.md", "z-landing.md"]);
+      expect(await searchWith(product.retrievers.find((x) => x.name === `hybrid-shipped:${model}`), lessons, "gizmo", 8, now)).toEqual(["a-landing.md", "z-landing.md"]);
+    } finally {
+      await product.close();
+      await g.close();
+    }
+  });
+
+  it("BM25 hits with no vector are appended after every vectored lesson, in BM25 order, even past a negative cosine", async () => {
+    const lessons = [
+      lesson("v-pos", "pos-landing.md", `Gizmo pos${" filler".repeat(8)}.`, now),
+      lesson("v-neg", "neg-landing.md", `Gizmo neg${" filler".repeat(8)}.`, now),
+      // BM25 order among the two unvectored: o-b (short) before o-a (long); id order would put o-a first.
+      lesson("o-a", "orph-a-landing.md", `Gizmo orph${" filler".repeat(4)}.`, now),
+      lesson("o-b", "orph-b-landing.md", "Gizmo orph.", now),
+    ];
+    const vecs = (t) => {
+      if (/orph/i.test(t)) return []; // the embedder produced no vector for this lesson
+      if (/pos/i.test(t)) return [0.6, 0.8];
+      if (/neg/i.test(t)) return [-0.5, Math.sqrt(0.75)];
+      return [1, 0]; // the query
+    };
+    const bm = await bm25Order(lessons, "gizmo");
+    expect(bm.indexOf("orph-b-landing.md")).toBeLessThan(bm.indexOf("orph-a-landing.md")); // precondition
+    const g = shippedVariants({ model, embedder: embedWith(vecs) });
+    try {
+      // A merged sort would score the unvectored (about 1/61) above the negative cosine and put them before neg.
+      const want = ["pos-landing.md", "neg-landing.md", "orph-b-landing.md", "orph-a-landing.md"];
+      expect(await searchWith(by(g, `shipped:${model}`), lessons, "gizmo", 8, now)).toEqual(want);
+      expect(await searchWith(by(g, `shipped:${model}:norecency`), lessons, "gizmo", 8, now)).toEqual(want);
+    } finally {
+      await g.close();
+    }
+  });
+
+  it(":kwboost is the shipped order with the BM25 top 3 lifted to ranks 2-4; shipped itself is untouched", async () => {
+    const f = depthFixture();
+    const g = shippedVariants({ model, embedder: f.embedder });
+    try {
+      // All 24 lessons are 5 days old, so the recency weight is common and the shipped order is the dense order.
+      expect(await searchWith(by(g, `shipped:${model}`), f.lessons, "gizmo", 6, now)).toEqual([23, 22, 21, 20, 19, 18].map((i) => cites(24, i)));
+      expect(await searchWith(by(g, `shipped:${model}:kwboost`), f.lessons, "gizmo", 6, now)).toEqual([23, 0, 1, 2, 22, 21].map((i) => cites(24, i)));
+    } finally {
+      await g.close();
+    }
+  });
+
+  it("every setup() builds its own state; tearing one down leaves the other searchable", async () => {
+    const g = shippedVariants({ model, embedder: embedWith(vecA) });
+    const r = by(g, `shipped:${model}`);
+    try {
+      const s1 = await r.setup(lessonsA, { now });
+      const s2 = await r.setup(lessonsA, { now });
+      expect(s1).not.toBe(s2);
+      await r.teardown(s1);
+      expect(await r.search(s2, "gizmo", 8)).toEqual(["old-landing.md", "new-landing.md"]);
+      await r.teardown(s2);
+    } finally {
+      await g.close();
+    }
+  });
+
+  it("only live lessons inside the recency window are ranked (superseded and out-of-window lessons never appear)", async () => {
+    const lessons = [
+      lesson("w-in", "in-landing.md", "Gizmo in.", "2020-01-05T00:00:00.000Z"),
+      { ...lesson("w-sup", "sup-landing.md", "Gizmo sup.", "2020-01-05T00:00:00.000Z"), superseded_by: "w-in" },
+      lesson("w-old", "stale-landing.md", "Gizmo stale.", "2019-10-01T00:00:00.000Z"),
+    ];
+    const g = shippedVariants({ model, embedder: embedWith(() => [1, 0]) });
+    try {
+      expect(await searchWith(by(g, `shipped:${model}`), lessons, "gizmo", 8, now)).toEqual(["in-landing.md"]);
+    } finally {
+      await g.close();
+    }
+  });
+});
+
+describe("QUERY_TYPES carries time and identifier (runAccuracy counts.byType, M6)", () => {
+  it("a time query and an identifier query are counted and get their own byType entry in every mode", async () => {
+    const snapshot = readSnapshot(snapFile);
+    const t1 = readJsonl(queriesFile).find((q) => q.id === "t1");
+    const queries = [
+      { ...t1, id: "x-time", type: "time", older: ["ancient-landing.md"] },
+      { ...t1, id: "x-ident", type: "identifier", identifier: "quartz" },
+    ];
+    const r = await runAccuracy({ snapshot, queries, k: 3, provider: null });
+    expect(r.counts.byType.time).toBe(1);
+    expect(r.counts.byType.identifier).toBe(1);
+    expect(r.modes.keyword.byType.time.n).toBe(1);
+    expect(r.modes.keyword.byType.identifier.n).toBe(1);
+  });
+});
+
+// bench-embeddinggemma2 (new exports: unslothEmbedder, truncateNormalize, pairedBootstrap)
+import { unslothEmbedder, truncateNormalize, pairedBootstrap } from "../bench-memory.mjs";
+
+function unslothFetch({ model, vectors, status = 200, order = null }) {
+  return vi.fn(async (url, init) => {
+    const body = JSON.parse(init.body);
+    const data = body.input.map((_, index) => ({ index, embedding: vectors ? vectors[index] : [index + 1, 0, 0] }));
+    const shown = order ? order.map((i) => data[i]) : data;
+    return {
+      ok: status >= 200 && status < 300,
+      status,
+      json: async () => ({ model, data: shown }),
+      text: async () => "boom",
+    };
+  });
+}
+
+describe("unslothEmbedder (bench-embeddinggemma2)", () => {
+  const M2 = "unsloth/embeddinggemma-2-GGUF";
+  it("POSTs <baseUrl>/v1/embeddings with {model, input} as JSON", async () => {
+    const f = unslothFetch({ model: M2 });
+    const emb = unslothEmbedder({ baseUrl: "http://studio.test:1", fetchImpl: f });
+    await emb(["a", "b"], { model: M2 });
+    expect(f).toHaveBeenCalledTimes(1);
+    const [url, init] = f.mock.calls[0];
+    expect(url).toBe("http://studio.test:1/v1/embeddings");
+    expect(init.method).toBe("POST");
+    expect(JSON.parse(init.body)).toEqual({ model: M2, input: ["a", "b"] });
+  });
+  it("defaults to http://127.0.0.1:8888", async () => {
+    const f = unslothFetch({ model: M2 });
+    await unslothEmbedder({ fetchImpl: f })(["a"], { model: M2 });
+    expect(f.mock.calls[0][0]).toBe("http://127.0.0.1:8888/v1/embeddings");
+  });
+  it("returns one vector per text in input order, sorted by data[i].index (M5)", async () => {
+    const vectors = [[1, 1], [2, 2], [3, 3]];
+    const f = unslothFetch({ model: M2, vectors, order: [2, 0, 1] });
+    const out = await unslothEmbedder({ fetchImpl: f })(["a", "b", "c"], { model: M2 });
+    expect(out).toEqual(vectors);
+  });
+  it("accepts a response model that identifies the requested model", async () => {
+    const f = unslothFetch({ model: M2 });
+    const out = await unslothEmbedder({ fetchImpl: f })(["a"], { model: "unsloth/embeddinggemma-2-GGUF" });
+    expect(out).toHaveLength(1);
+  });
+  it("refuses a silent fallback: bge-small answering for embeddinggemma-2 throws, naming both models (M1)", async () => {
+    const f = unslothFetch({ model: "unsloth/bge-small-en-v1.5" });
+    const emb = unslothEmbedder({ fetchImpl: f });
+    let err;
+    try {
+      await emb(["a"], { model: M2 });
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeInstanceOf(Error);
+    expect(err.message).toContain(M2);
+    expect(err.message).toContain("unsloth/bge-small-en-v1.5");
+  });
+  it("throws on a non-2xx status with the status in the message", async () => {
+    const f = unslothFetch({ model: M2, status: 503 });
+    await expect(unslothEmbedder({ fetchImpl: f })(["a"], { model: M2 })).rejects.toThrow(/503/);
+  });
+  it("throws when vectors differ in length within one response", async () => {
+    const f = unslothFetch({ model: M2, vectors: [[1, 0, 0], [1, 0]] });
+    await expect(unslothEmbedder({ fetchImpl: f })(["a", "b"], { model: M2 })).rejects.toThrow();
+  });
+  it("counts calls and ms in stats like the Ollama embedder (keyed by model)", async () => {
+    const f = unslothFetch({ model: M2 });
+    const stats = {};
+    const emb = unslothEmbedder({ fetchImpl: f, stats });
+    await emb(["a", "b"], { model: M2 });
+    await emb(["c"], { model: M2 });
+    expect(stats[M2].calls).toBe(2);
+    expect(stats[M2].ms).toBeGreaterThanOrEqual(0);
+    expect(typeof stats[M2].ms).toBe("number");
+  });
+});
+
+describe("truncateNormalize (bench-embeddinggemma2)", () => {
+  const norm = (v) => Math.sqrt(v.reduce((s, x) => s + x * x, 0));
+  it("768 -> 512 keeps the first 512 components scaled to unit norm (M2)", () => {
+    const v = Array.from({ length: 768 }, (_, i) => ((i * 7) % 13) - 6 + 0.5);
+    const out = truncateNormalize(v, 512);
+    expect(out).toHaveLength(512);
+    expect(norm(out)).toBeCloseTo(1, 10);
+    const n512 = norm(v.slice(0, 512));
+    for (const i of [0, 1, 100, 511]) expect(out[i]).toBeCloseTo(v[i] / n512, 10);
+  });
+  it("dims >= length returns a normalized copy of the whole vector", () => {
+    const v = [3, 4];
+    for (const d of [2, 5]) {
+      const out = truncateNormalize(v, d);
+      expect(out).toHaveLength(2);
+      expect(out[0]).toBeCloseTo(0.6, 10);
+      expect(out[1]).toBeCloseTo(0.8, 10);
+    }
+  });
+  it("a zero vector returns zeros, no NaN", () => {
+    const out = truncateNormalize([0, 0, 0, 0], 2);
+    expect(Array.from(out)).toEqual([0, 0]);
+    expect(Array.from(truncateNormalize([0, 0], 5)).every((x) => x === 0)).toBe(true);
+  });
+  it("does not mutate the input", () => {
+    const v = [3, 4, 12];
+    const copy = [...v];
+    truncateNormalize(v, 2);
+    truncateNormalize(v, 10);
+    expect(v).toEqual(copy);
+  });
+});
+
+describe("pairedBootstrap (bench-embeddinggemma2)", () => {
+  const a = [0.1, 0.5, 1, 0.25, 0, 0.5, 1, 0.2, 0.3, 0.9];
+  it("identical inputs give diff 0 and lo = hi = 0", () => {
+    const r = pairedBootstrap(a, [...a]);
+    expect(r.n).toBe(a.length);
+    expect(r.diff).toBeCloseTo(0, 12);
+    expect(r.lo).toBeCloseTo(0, 12);
+    expect(r.hi).toBeCloseTo(0, 12);
+  });
+  it("a constant +0.5 shift gives diff, lo and hi of 0.5", () => {
+    const r = pairedBootstrap(a, a.map((x) => x + 0.5));
+    expect(r.diff).toBeCloseTo(0.5, 10);
+    expect(r.lo).toBeCloseTo(0.5, 10);
+    expect(r.hi).toBeCloseTo(0.5, 10);
+  });
+  it("is deterministic for a seed, and does not use Math.random (M4)", () => {
+    const b = [0.2, 0.4, 1, 0.5, 0.1, 0.5, 0.5, 0.3, 0.3, 1];
+    const spy = vi.spyOn(Math, "random");
+    try {
+      const r1 = pairedBootstrap(a, b, { iterations: 500, seed: 7 });
+      const r2 = pairedBootstrap(a, b, { iterations: 500, seed: 7 });
+      expect(r2).toEqual(r1);
+      expect(spy).not.toHaveBeenCalled();
+      const r3 = pairedBootstrap(a, b, { iterations: 500, seed: 8 });
+      expect(r3.diff).toBeCloseTo(r1.diff, 12);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+  it("resamples the same indices for a and b: a paired shift has a zero-width interval even with spread (M3)", () => {
+    // b = a + per-query constant 0.25 -> every resampled mean difference is exactly 0.25 only if indices are shared
+    const b = a.map((x) => x + 0.25);
+    const r = pairedBootstrap(a, b, { iterations: 2000, seed: 3 });
+    expect(r.hi - r.lo).toBeLessThan(1e-9);
+  });
+  it("lo <= diff <= hi on a mixed case, diff = mean(b) - mean(a)", () => {
+    const b = [0.3, 0.2, 1, 0.5, 0.4, 0.1, 1, 0.2, 0.6, 0.7];
+    const mean = (x) => x.reduce((s, y) => s + y, 0) / x.length;
+    const r = pairedBootstrap(a, b, { iterations: 2000, seed: 5 });
+    expect(r.diff).toBeCloseTo(mean(b) - mean(a), 12);
+    expect(r.lo).toBeLessThanOrEqual(r.diff);
+    expect(r.diff).toBeLessThanOrEqual(r.hi);
+    expect(r.hi - r.lo).toBeGreaterThan(0);
+  });
+  it("throws on a length mismatch and on empty input", () => {
+    expect(() => pairedBootstrap([1, 2], [1])).toThrow();
+    expect(() => pairedBootstrap([], [])).toThrow();
   });
 });

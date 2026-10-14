@@ -41,6 +41,20 @@ claude
 
 Then run `/doug-plan <what you want built>`: it plans, you approve with `/doug-approve`, and `/doug-implement` runs it. See [docs/getting-started.md](docs/getting-started.md) for the global install and the Codex adversary, and [docs/onboarding.md](docs/onboarding.md) for the board and `/doug-next`.
 
+## Feature highlights
+
+- **Two tracks, one board.** A small or risky change is a hand card, a feature is a flow card; `/doug-next` routes each by its track and asks before it starts (`docs/board.md`).
+- **Autopilot with parallel cards.** `/doug-next --auto` runs the Ready queue on one approval, up to `workers.max` cards at once, each under its own queen in its own worktree, with a live pane (`/doug-autopilot`) and the same run on the served board.
+- **Start from an idea.** `/doug-start` walks a new project or a large card through specification, architecture and scope, one committed phase at a time behind a human gate.
+- **New in 1.3.** Crew testers (`crew.testers`) run several verifiers per task to probe edge cases; reflect offers a CLAUDE.md candidate for a lesson with no home; faster lesson recall from an in-process cache; autopilot checks agent types before it launches a queen (`CHANGELOG.md`).
+
+## How-tos
+
+- Your first card, end to end: `doug init`, `doug board add`, `/doug-next`, approve, land. [Guide](docs/how-tos.md#your-first-card)
+- Autopilot: `/doug-next --auto` with caps on cards, wall clock and USD. [Guide](docs/how-tos.md#autopilot)
+- Gates and hooks: what the guardrails block and why. [Guide](docs/how-tos.md#gates-and-hooks)
+- Memory: `doug memory setup` turns on semantic recall of lessons. [Guide](docs/how-tos.md#memory)
+
 ## Docs
 
 - [docs/reference.md#install-from-a-clone](docs/reference.md#install-from-a-clone) — contributing from a clone
@@ -52,6 +66,7 @@ Then run `/doug-plan <what you want built>`: it plans, you approve with `/doug-a
 - [docs/reference.md#the-worker-contract](docs/reference.md#the-worker-contract) — the adapter interface, `codex-review`
 - [docs/reference.md#layout](docs/reference.md#layout) — what lives where in the repo
 - [docs/reference.md#measured](docs/reference.md#measured) — every number Doug has actually measured
+- [docs/how-tos.md](docs/how-tos.md) — first card, autopilot, gates and hooks, memory
 - [docs/getting-started.md](docs/getting-started.md) — the full install and first-run walkthrough
 - [docs/onboarding.md](docs/onboarding.md) — what `doug init` writes and never does
 - [docs/board.md](docs/board.md) — the board's schema

@@ -45,6 +45,8 @@ const CODEX_REVIEW_BIN = join(root, "packages/doug-codex/dist/bin.js");
 //   crew         the fixed pipeline with a crew of two reviewers and two adversaries per task (card crew-sizing)
 //   swarm-crew   swarm on plus a crew of two reviewers and two adversaries (card eval-accuracy): the
 //                queen-plus-two-coders-two-reviewers-two-adversaries shape
+//   testers      swarm on plus two reviewers and two testers (card crew-tester-seat): the
+//                two-coders-two-reviewers-two-testers shape
 //   memory       the fixed pipeline plus recall on (card memory-measure): a bare session has no recall path and
 //                no memoryUsed, so "full plus recall on" can only be measured through the workflow; pipeline is
 //                full plus the workflow, so ablate compares memory against pipeline, not against full directly.
@@ -55,6 +57,7 @@ export const ARMS = {
   crew: { swarm: false, workerModel: "inherit", crew: { reviewers: 2, adversaries: 2 } },
   "swarm-crew": { swarm: true, workerModel: "inherit", crew: { reviewers: 2, adversaries: 2 } },
   memory: { swarm: false, workerModel: "inherit", crew: null, memory: true },
+  testers: { swarm: true, workerModel: "inherit", crew: { reviewers: 2, testers: 2 } },
 };
 const PLUGIN_DIR = join(root, "plugins/doug-flow");
 const PLAN_MJS = join(PLUGIN_DIR, "scripts/plan.mjs");

@@ -26,6 +26,8 @@ import {
   classifyNotification,
   landQueue,
   capsReached,
+  queenLabel,
+  renameQueenMeta,
 } from "../lib/coordinator.mjs";
 import { STOP_REASONS } from "../lib/card-loop.mjs";
 
@@ -478,5 +480,82 @@ describe("coordinator B11 follow-ups", () => {
     const h1 = hand("h1", "Change lib/a.mjs.", "evals");
     const busy = pickCards({ ready: [d, h1], inFlight: [hand("h0", "Change lib/z.mjs.", "cli")], slots: 3, plans: {} });
     expect(busy.launch).toEqual([]);
+  });
+});
+
+// Card queen-run-name: the per-card queen run name (shortened id, collision fallback, meta rewrite).
+describe("coordinator queen run name", () => {
+  const SRC = [
+    "export const meta = {",
+    "  name: 'card-queen',",
+    "  description: 'The queen of one hand-track card: runs the loop.',",
+    "  phases: [{ title: 'Setup' }],",
+    "}",
+    "const other = { name: 'card-queen' }",
+    "log('description: x')",
+    "",
+  ].join("\n");
+  const bodyOf = (s) => s.slice(s.indexOf("}\n", s.indexOf("phases")) + 2);
+
+  it("Q01 queenLabel shortens to the first two hyphen segments; fewer segments stay as is", () => {
+    expect(queenLabel("research-cap-loopback-post", [])).toBe("research-cap");
+    expect(queenLabel("queen-run-name", [])).toBe("queen-run");
+    expect(queenLabel("two-parts", [])).toBe("two-parts");
+    expect(queenLabel("statusline", [])).toBe("statusline");
+    expect(queenLabel("onboarding", ["autopilot"])).toBe("onboarding");
+  });
+
+  it("Q02 queenLabel uses the full id when another id shares the short form", () => {
+    expect(queenLabel("research-cap-loopback-post", ["research-cap-other"])).toBe("research-cap-loopback-post");
+    expect(queenLabel("research-cap-other", ["research-cap-loopback-post"])).toBe("research-cap-other");
+    expect(queenLabel("stop-gate-a", ["x-y", "stop-gate-b", "z"])).toBe("stop-gate-a");
+    expect(queenLabel("research-cap-loopback-post", ["research-other", "stop-gate-x"])).toBe("research-cap");
+  });
+
+  it("Q03 queenLabel does not count the card's own id as a collision", () => {
+    expect(queenLabel("research-cap-loopback-post", ["research-cap-loopback-post"])).toBe("research-cap");
+    expect(queenLabel("research-cap-loopback-post", ["research-cap-loopback-post", "stop-gate-x"])).toBe("research-cap");
+    expect(queenLabel("statusline", ["statusline"])).toBe("statusline");
+  });
+
+  it("Q04 renameQueenMeta names a hand queen '<label> card-queen' and a flow queen '<label> flow-queen'", () => {
+    const hand = renameQueenMeta(SRC, { kind: "hand", label: "research-cap" });
+    expect(hand).toContain("name: 'research-cap card-queen',");
+    const flowSrc = SRC.replace("'card-queen',\n  desc", "'doug-implement',\n  desc");
+    const f = renameQueenMeta(flowSrc, { kind: "flow", label: "research-cap" });
+    expect(f).toContain("name: 'research-cap flow-queen',");
+    expect(f).not.toContain("name: 'doug-implement'");
+  });
+
+  it("Q05 renameQueenMeta prefixes the description with '<label>: ' and keeps the rest of it", () => {
+    const out = renameQueenMeta(SRC, { kind: "hand", label: "research-cap" });
+    expect(out).toContain("description: 'research-cap: The queen of one hand-track card: runs the loop.',");
+  });
+
+  it("Q06 renameQueenMeta changes only the meta literal: everything after it is byte-identical", () => {
+    const out = renameQueenMeta(SRC, { kind: "hand", label: "x-y" });
+    expect(bodyOf(out)).toBe(bodyOf(SRC));
+    expect(out).toContain("const other = { name: 'card-queen' }");
+    expect(out).toContain("log('description: x')");
+    expect(out).toContain("phases: [{ title: 'Setup' }],");
+  });
+
+  it("Q07 renameQueenMeta throws when the meta name or description is missing", () => {
+    expect(() => renameQueenMeta(SRC, { kind: "hand", label: "a-b" })).not.toThrow();
+    expect(() => renameQueenMeta("const a = 1\n", { kind: "hand", label: "a-b" })).toThrow();
+    expect(() => renameQueenMeta("export const meta = {\n  description: 'd',\n}\n", { kind: "hand", label: "a-b" })).toThrow();
+    expect(() => renameQueenMeta("export const meta = {\n  name: 'n',\n}\n", { kind: "hand", label: "a-b" })).toThrow();
+  });
+
+  it("Q08 renameQueenMeta works on both shipped sources and leaves everything after the meta block untouched", () => {
+    const wf = join(HERE, "..", "workflows");
+    for (const [file, kind, suffix] of [["card-queen.js", "hand", "card-queen"], ["doug-implement.js", "flow", "flow-queen"]]) {
+      const src = readFileSync(join(wf, file), "utf8");
+      const out = renameQueenMeta(src, { kind, label: "research-cap" });
+      expect(out).toContain(`name: 'research-cap ${suffix}',`);
+      expect(out).toMatch(/description: 'research-cap: /);
+      const cut = (t) => t.slice(t.indexOf("phases:"));
+      expect(cut(out)).toBe(cut(src));
+    }
   });
 });

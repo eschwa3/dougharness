@@ -30,6 +30,7 @@ const STOP_REASONS = [
   "setup-failed",
   "tester-red-claim-missing",
   "reviewer-blocker-open",
+  "reviewer-major-open",
   "gate-red-twice",
 ];
 // The Models-table row each seat runs on. setup, gate and commit have no sourced row; cheap is a choice.
@@ -101,6 +102,22 @@ const BRIEF_RULES = {
   "no-trailers": {
     text: "Commit without Co-Authored-By or Claude-Session trailers.",
     seats: ["commit"],
+  },
+  "commit-foreground": {
+    text: "Run git commit in the foreground with the Bash tool timeout set to 600000 ms: the pre-commit hook runs the full unit suite and takes over the 2-minute default.",
+    seats: ["commit"],
+  },
+  "commit-no-background": {
+    text: "Never use run_in_background, a Monitor, or a sleep loop for git commit: a background commit dies when your seat ends. Wait for the command to return.",
+    seats: ["commit"],
+  },
+  "commit-sha-from-git-log": {
+    text: "Report the sha only from git log -1 --format=%H after git commit has returned; never report a sha you did not read from it.",
+    seats: ["commit"],
+  },
+  "gate-no-git-writes": {
+    text: "Run the gate commands only. Never run git add, git commit, or any other command that writes to git; the commit seat is the only seat that commits.",
+    seats: ["gate"],
   },
   "leave-plan-anchor-out": {
     text: "Leave .doug/plan.json and .doug/anchor.md out of the commit unless the card is about them.",
@@ -532,6 +549,9 @@ function validate(state, hb) {
     }
     case "gate": {
       checkCmds(hb.commands, "commands", errs, true);
+      if (Array.isArray(hb.commands) && hb.commands.some((c) => c && isStr(c.command) && GIT_WRITE_RE.test(c.command))) {
+        errs.push("gate seat must not run git add or git commit");
+      }
       if (!nonBlank(hb.gateLine)) errs.push("gateLine must be a non-empty string");
       if (hb.lockWaitMs !== undefined && hb.lockWaitMs !== null && !Number.isInteger(hb.lockWaitMs)) {
         errs.push("lockWaitMs must be an integer or null");
@@ -550,6 +570,9 @@ function validate(state, hb) {
 }
 
 // ---- next ----
+
+// git add / git commit at the start of a command or after a shell separator, global options (-C <path>, -c k=v, --flag) allowed before the verb.
+const GIT_WRITE_RE = /(?:^|[;&|(\n]\s*)git(?:\s+(?:-[Cc]\s+(?:"[^"]*"|'[^']*'|\S+)|--[\w-]+(?:=\S+)?))*\s+(?:add|commit)\b/;
 
 function stopWith(s, reason, detail) {
   const seat = s.pending;
@@ -670,12 +693,21 @@ function next(state, handBack) {
         mutations: cp(H.mutationResults),
       };
       const blockers = findings.filter((f) => f.severity === "blocker");
-      if (blockers.length === 0) return advance(s, "gate", "ok", { acc });
+      // An evidenced major gets the same one fix pass; a major without evidence and a minor stay advisory.
+      const majors = findings.filter((f) => f.severity === "major" && nonBlank(f.evidence));
+      if (blockers.length === 0 && majors.length === 0) return advance(s, "gate", "ok", { acc });
       if (s.counters.fixPasses >= 1) {
+        if (blockers.length > 0) {
+          return stopWith(
+            { ...s, acc },
+            "reviewer-blocker-open",
+            "blocker still open after one fix pass: " + blockers.map((f) => f.id).join(", "),
+          );
+        }
         return stopWith(
           { ...s, acc },
-          "reviewer-blocker-open",
-          "blocker still open after one fix pass: " + blockers.map((f) => f.id).join(", "),
+          "reviewer-major-open",
+          "major with evidence still open after one fix pass: " + majors.map((f) => f.id).join(", "),
         );
       }
       return advance(s, buildSeat(s), "blockers", {
@@ -801,7 +833,14 @@ let s = initialState(args.card, args.options)
 let a = currentAction(s)
 while (a.kind === 'seat') {
   phase(PHASE_TITLES[a.seat])
-  const hb = await agent(briefPrompt(a.brief, { repoRoot: args.repoRoot, worktreePath: args.worktreePath }), seatOpts(a.seat, a.brief))
+  let hb
+  try {
+    hb = await agent(briefPrompt(a.brief, { repoRoot: args.repoRoot, worktreePath: args.worktreePath }), seatOpts(a.seat, a.brief))
+  } catch (err) {
+    // The runtime throws after repeated schema-validation failures; a null hand-back lets the contract stop with agent-null.
+    log('card-queen: ' + a.seat + ' seat agent() threw: ' + (err && err.message ? err.message : String(err)))
+    hb = null
+  }
   ;({ state: s, action: a } = next(s, hb))
 }
 return { ...a.report, history: s.history }

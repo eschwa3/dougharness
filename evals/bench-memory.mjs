@@ -60,7 +60,7 @@ const GREP_MAX_LESSONS = 20000;
 const STALE_DAYS = 30;
 const SPEED_SEED = 20261002;
 const SYN_NOW = Date.parse("2026-01-01T00:00:00.000Z");
-const QUERY_TYPES = ["title", "goal", "paraphrase"];
+const QUERY_TYPES = ["title", "goal", "paraphrase", "time", "identifier"];
 const FRAMEWORKS_DIR = join(here, "frameworks");
 const FRAMEWORK_VENV = join(root, ".doug/.state/bench/py");
 const FRAMEWORK_PYTHON = join(FRAMEWORK_VENV, "bin/python");
@@ -527,7 +527,9 @@ export const PREFIXES = {
 
 export function prefixFor(model, kind, { noprefix = false } = {}) {
   if (noprefix) return "";
-  const entry = PREFIXES[String(model ?? "").split(":")[0]];
+  let entry = PREFIXES[String(model ?? "").split(":")[0]];
+  // An HF-style id (org/embeddinggemma-...) matches by its basename, as the shipped provider layer does.
+  if (!entry && String(model ?? "").split(/[/\\]/).pop().toLowerCase().startsWith("embeddinggemma")) entry = PREFIXES.embeddinggemma;
   return entry ? entry[kind === "query" ? "query" : "doc"] : "";
 }
 
@@ -829,6 +831,80 @@ export function denseFamily({ model, embedder, cache = null, noprefix = false, s
   };
 }
 
+// The shipped hybrid ranking (recallLessons, memory.mjs step (e)) re-implemented over the bench's own vectors so
+// its recency half-life can be varied. Vectored lessons are scored by cosine x (0.5 + 0.5 * exp(-ageDays / tau)),
+// sorted by score desc then lesson id asc; then the BM25 hits that have no vector follow in BM25 order (BM25 depth
+// 50, as recallLessons' LIMIT 50). No scope boost (the bench passes no files). An empty vector means "no vector".
+// Retrievers, in order:
+//   shipped:<model>            tau 90, the shipped weight
+//   shipped:<model>:tau<N>     the same with N in place of 90, one per `taus`
+//   shipped:<model>:norecency  weight 1 (pure cosine, then the tail)
+//   shipped:<model>:kwboost    the shipped:<model> order through kwBoost with the BM25 top 3
+// Prefixes, `cache` and `embedder` work as in denseFamily. Every setup() builds its own state.
+export function shippedVariants({ model, embedder, cache = null, staleDays = STALE_DAYS, taus = [30, 180, 365] }) {
+  const qPrefix = prefixFor(model, "query");
+  const dPrefix = prefixFor(model, "doc");
+  const states = new Set();
+  const embedAll = (texts, prefix) => embedCached(texts, prefix, { model, embedder, cache });
+
+  async function build(lessons, ctx = {}) {
+    const docs = eligible(lessons, toMs(ctx.now), staleDays);
+    const vecs = await embedAll(docs.map((l) => l.text), dPrefix);
+    const st = {
+      items: docs.map((l, i) => ({ key: l.id, vec: vecs[i] })).filter((it) => it.vec.length > 0),
+      citation: new Map(docs.map((l) => [l.id, l.citation])),
+      ids: new Set(docs.map((l) => l.id)),
+      age: new Map(docs.map((l) => [l.id, ageDays(l, toMs(ctx.now))])),
+      fts: await fts5.setup(lessons, ctx),
+    };
+    states.add(st);
+    return st;
+  }
+  const freeState = (st) => {
+    if (st.fts) fts5.teardown(st.fts);
+    st.fts = null;
+    states.delete(st);
+  };
+  const cites = (st, ids) => dedupe(ids.map((id) => st.citation.get(id)));
+  // Vectored lessons by weighted cosine, then the unvectored BM25 hits; returns { order, bm25 } as lesson ids.
+  async function rank(st, query, weight) {
+    const q = (await embedAll([String(query)], qPrefix))[0];
+    const scored = cosineTopK(q, st.items, st.items.length).map((r) => ({ key: r.key, score: r.score * weight(st.age.get(r.key)) }));
+    scored.sort((a, b) => b.score - a.score || keyAsc(a, b));
+    const vectored = new Set(st.items.map((it) => it.key));
+    const bm25 = bm25Ids(st.fts.m, query, st.ids, 50);
+    return { order: [...scored.map((r) => r.key), ...bm25.filter((id) => !vectored.has(id))], bm25 };
+  }
+  const tauWeight = (tau) => (age) => 0.5 + 0.5 * Math.exp(-age / tau);
+  const make = (name, weight, post = (r) => r.order) => ({
+    name,
+    kind: "hybrid",
+    mode: name,
+    setup: build,
+    teardown: freeState,
+    async search(st, query, k) {
+      return cites(st, post(await rank(st, query, weight))).slice(0, k);
+    },
+    meta: (st) => ({
+      storageBytes: st.items.length * (st.items.length ? st.items[0].vec.length : 0) * 4 + (st.fts ? dbBytes(st.fts.dir) : 0),
+      embedded: st.items.length,
+      dependency: `${model} via the embedder (model-card prefixes); embedding model and server`,
+    }),
+  });
+  const retrievers = [
+    make(`shipped:${model}`, tauWeight(90)),
+    ...taus.map((n) => make(`shipped:${model}:tau${n}`, tauWeight(n))),
+    make(`shipped:${model}:norecency`, () => 1),
+    make(`shipped:${model}:kwboost`, tauWeight(90), (r) => kwBoost(r.order, r.bm25)),
+  ];
+  return {
+    retrievers,
+    close() {
+      for (const st of [...states]) freeState(st);
+    },
+  };
+}
+
 // The state and query path every provider-backed retriever shares: one scratch store per setup() call with the
 // lessons embedded through `provider` (query vectors cached per text), `queryVector`, and a close().
 function providerCore(provider, { staleDays = STALE_DAYS } = {}) {
@@ -897,6 +973,21 @@ function providerCore(provider, { staleDays = STALE_DAYS } = {}) {
   };
 }
 
+// The child of the cold hybrid measurement: opens the store, recalls once with a provider that hands back the
+// parent's query vector, prints the mode.
+const MEMORY_LIB_URL = pathToFileURL(join(root, "plugins/doug-flow/lib/memory.mjs")).href;
+const COLD_HYBRID_SCRIPT = `
+import { readFileSync } from "node:fs";
+const [libUrl, dir, nowMs, vecFile, model, dims, query] = process.argv.slice(1);
+const { openMemory, recallLessons } = await import(libUrl);
+const vec = Float32Array.from(JSON.parse(readFileSync(vecFile, "utf8")));
+const provider = { name: "bench-cold", model, dims: Number(dims), embed: async () => ({ ok: true, vectors: [vec] }) };
+const m = openMemory(dir);
+const r = await recallLessons(m, query, { now: new Date(Number(nowMs)), provider });
+m.close();
+console.log(JSON.stringify({ mode: r.mode, lessons: r.lessons.length }));
+`;
+
 // semantic (cosine only), hybrid-shipped (the shipped recallLessons with this provider: cosine x recency x scope),
 // rerank (top-50 BM25 reordered by cosine), all through one provider (createProvider). Each setup() call builds its
 // own scratch store and embeds the lessons into it; the factory returns the retrievers and a close().
@@ -922,6 +1013,36 @@ export function providerRetrievers(provider, { staleDays = STALE_DAYS } = {}) {
         const r = await recallLessons(state.built.m, query, { k, now: state.built.now, provider: state.cached });
         if (r.mode !== "hybrid") throw new Error(`hybrid recall fell back to keyword: ${r.reason}`);
         return dedupe(r.lessons.map((l) => l.citation));
+      },
+      // Cold-process hybrid recall (card recall-hybrid-scale): the same recall in a fresh node process per sample,
+      // wall clock including process start, against the bare-node baseline. Every shipped caller is a fresh
+      // process, so this is the figure a user sees; the warm search above is the in-process-cache figure.
+      async speedExtras(state, { queries, opts, tim }) {
+        if (opts.skipColdStart) return;
+        const q = await state.cached.embed([String(queries[0])], { inputType: "query" });
+        if (!q.ok) throw new Error(`query embedding failed: ${q.reason}`);
+        const tmp = mkdtempSync(join(tmpdir(), "bench-cold-"));
+        try {
+          const vecFile = join(tmp, "q.json");
+          writeFileSync(vecFile, JSON.stringify(Array.from(q.vectors[0])));
+          const spawnMs = (args) => {
+            const s = performance.now();
+            const res = spawnSync(process.execPath, args, { encoding: "utf8" });
+            if (res.status !== 0) throw new Error(`cold spawn failed (${res.status}): ${String(res.stderr).slice(0, 200)}`);
+            return { ms: performance.now() - s, out: res.stdout };
+          };
+          const args = ["--input-type=module", "-e", COLD_HYBRID_SCRIPT, MEMORY_LIB_URL, state.built.dir, String(toMs(state.built.now)), vecFile, provider.model, String(provider.dims), String(queries[0])];
+          const n = Math.min(opts.iterations, 10);
+          const samples = await timeLoop(() => {
+            const r = spawnMs(args);
+            if (JSON.parse(r.out).mode !== "hybrid") throw new Error(`cold hybrid recall fell back to keyword: ${r.out.slice(0, 200)}`);
+            return r.ms;
+          }, { iterations: n, budgetMs: opts.budgetMs });
+          const baseline = await timeLoop(() => spawnMs(["-e", "0"]).ms, { iterations: n, budgetMs: opts.budgetMs });
+          (tim.coldStartHybrid ||= {})[`hybrid-shipped:${provider.model}`] = { recall: summarize(samples), nodeBare: summarize(baseline) };
+        } finally {
+          rmSync(tmp, { recursive: true, force: true });
+        }
       },
     },
     {
@@ -1197,6 +1318,74 @@ export async function ollamaDims(model, { baseUrl = OLLAMA_URL, fetchImpl = glob
   }
 }
 
+// POST <baseUrl>/v1/embeddings {model, input} to Unsloth Studio in batches; vectors come back in input order (sorted
+// by data[i].index). Studio answers with its configured embedder (bge-small, 384 dims) when the named model is not
+// resident, with no error, so the response `model` must identify the requested one: the requested id's last path
+// segment, lowercased, with a trailing "-gguf" removed, must occur in the lowercased response `model`.
+// `stats[model]` accumulates { texts, ms, calls } when given.
+export function unslothEmbedder({ baseUrl = "http://127.0.0.1:8888", fetchImpl = globalThis.fetch, batch = 32, stats = null, timeoutMs = 600000 } = {}) {
+  return async (texts, { model }) => {
+    const want = String(model).split(/[/\\]/).pop().toLowerCase().replace(/-gguf$/, "");
+    const out = [];
+    for (let i = 0; i < texts.length; i += batch) {
+      const chunk = texts.slice(i, i + batch);
+      const t0 = performance.now();
+      const res = await fetchImpl(`${baseUrl}/v1/embeddings`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ model, input: chunk }),
+        signal: AbortSignal.timeout(timeoutMs),
+      });
+      if (!res.ok) throw new Error(`unsloth /v1/embeddings HTTP ${res.status} for ${model}: ${String(await res.text()).slice(0, 200)}`);
+      const j = await res.json();
+      if (!String(j.model ?? "").toLowerCase().includes(want)) throw new Error(`unsloth /v1/embeddings answered with model ${j.model} for the requested ${model} (the model is not resident; Studio fell back to its configured embedder)`);
+      if (!Array.isArray(j.data) || j.data.length !== chunk.length) throw new Error(`unsloth /v1/embeddings returned ${j.data && j.data.length} vectors for ${chunk.length} texts (${model})`);
+      const vecs = j.data.slice().sort((a, b) => a.index - b.index).map((d) => d.embedding);
+      if (vecs.some((v) => v.length !== vecs[0].length)) throw new Error(`unsloth /v1/embeddings returned vectors of different lengths (${model})`);
+      if (stats) {
+        const s = (stats[model] ||= { texts: 0, ms: 0, calls: 0 });
+        s.texts += chunk.length;
+        s.ms += performance.now() - t0;
+        s.calls++;
+      }
+      out.push(...vecs);
+    }
+    return out;
+  };
+}
+
+// The first `dims` components of `vec`, L2-renormalized (Matryoshka truncation); a plain array, the input untouched.
+// dims >= vec.length keeps the whole vector; a zero vector stays zeros.
+export function truncateNormalize(vec, dims) {
+  const out = Array.from(vec).slice(0, dims);
+  let n = 0;
+  for (const x of out) n += x * x;
+  n = Math.sqrt(n);
+  return n === 0 ? out : out.map((x) => x / n);
+}
+
+// Paired bootstrap of mean(b) - mean(a) over per-query scores in the same query order: resamples query indices with
+// replacement (the same indices for a and b), `iterations` times, from a seeded PRNG. [lo, hi] is the 2.5th to
+// 97.5th percentile of the resampled differences.
+export function pairedBootstrap(a, b, { iterations = 10000, seed = 1 } = {}) {
+  const n = a.length;
+  if (n === 0 || b.length !== n) throw new Error(`pairedBootstrap needs two equal-length, non-empty arrays (got ${a.length} and ${b.length})`);
+  const rand = mulberry32(seed);
+  const diffs = new Array(iterations);
+  for (let it = 0; it < iterations; it++) {
+    let sa = 0;
+    let sb = 0;
+    for (let j = 0; j < n; j++) {
+      const i = Math.floor(rand() * n);
+      sa += a[i];
+      sb += b[i];
+    }
+    diffs[it] = (sb - sa) / n;
+  }
+  const mean = (x) => x.reduce((s, y) => s + y, 0) / n;
+  return { diff: mean(b) - mean(a), lo: percentile(diffs, 2.5), hi: percentile(diffs, 97.5), n };
+}
+
 const safeName = (s) => String(s).replace(/[^A-Za-z0-9._-]/g, "_");
 
 // Builds the registry for `--ollama`: for each model, dense/rrf/rerank with the model-card prefixes (plus the stage-2
@@ -1219,6 +1408,12 @@ async function buildOllamaRegistry({ models, baseUrl, fetchImpl, stats, vectorsD
       const g = denseFamily({ model, embedder, cache, noprefix, fusion: !noprefix, recency: !noprefix });
       registry.push(...g.retrievers);
       closers.push(() => g.close());
+      if (!noprefix) {
+        // recall-hybrid-tune: the shipped ranking with recency variants, on the same prefixed vector cache.
+        const sv = shippedVariants({ model, embedder, cache });
+        registry.push(...sv.retrievers);
+        closers.push(() => sv.close());
+      }
     }
     if (dims) {
       const provider = createProvider({ embeddings: { provider: "openai-compatible", baseUrl, model, dims } }, { fetch: fetchImpl, timeoutMs: 120000 });
@@ -1239,6 +1434,37 @@ async function buildOllamaRegistry({ models, baseUrl, fetchImpl, stats, vectorsD
     }
   }
   return { registry, synthetic, models: info, close: () => closers.forEach((c) => c()) };
+}
+
+// Builds the registry for `--unsloth`: for each model and each dims, the dense family (with recency) and the shipped
+// variants, with the model-card prefixes. The embedder is unslothEmbedder behind a full-width vector cache per model,
+// truncated to the group's dims after the cache, so one embedding run serves every dims. A group's model label is
+// "<id>@<dims>" (distinct retriever names); the embedder maps it back to the id.
+// One lesson in the snapshot (12120 chars, 3582 tokens) exceeds embeddinggemma-300M's 2048-token window and Studio
+// answers 500 where Ollama truncated it silently; every text is clipped to the same length for every model, which
+// keeps the models comparable (the prefix is at the start, so it survives the clip).
+const UNSLOTH_MAX_CHARS = 6000;
+const clipText = (t) => (t.length > UNSLOTH_MAX_CHARS ? t.slice(0, UNSLOTH_MAX_CHARS) : t);
+
+function buildUnslothRegistry({ models, dimsList, baseUrl, fetchImpl, stats, vectorsDir = VECTORS_DIR }) {
+  // one text per request: Studio's llama-server rejects a request whose texts together exceed its 2048-token physical batch
+  const raw = unslothEmbedder({ baseUrl, fetchImpl, stats, batch: 1 });
+  const registry = [];
+  const closers = [];
+  for (const id of models) {
+    const cache = vectorCache(join(vectorsDir, `unsloth-${safeName(id)}.jsonl`));
+    for (const dims of dimsList) {
+      const embedder = async (texts) => (await embedCached(texts.map(clipText), "", { model: id, embedder: raw, cache })).map((v) => truncateNormalize(v, dims));
+      const model = `${id}@${dims}`;
+      const g = denseFamily({ model, embedder, recency: true });
+      registry.push(...g.retrievers);
+      closers.push(() => g.close());
+      const sv = shippedVariants({ model, embedder });
+      registry.push(...sv.retrievers);
+      closers.push(() => sv.close());
+    }
+  }
+  return { registry, close: () => closers.forEach((c) => c()) };
 }
 
 // Installs the vector-store packages into a scratch directory with its own package.json (never the repo's).
@@ -2002,10 +2228,10 @@ export function subsetScores({ snapshot, every = 8, results }) {
 
 // --- args, provider resolution, output ---------------------------------------------------------------------------
 
-const BOOL_FLAGS = new Set(["json", "ollama", "spend", "skip-cold-start", "help"]);
+const BOOL_FLAGS = new Set(["json", "ollama", "unsloth", "spend", "skip-cold-start", "help"]);
 const VALUE_FLAGS = new Set([
   "snapshot", "queries", "k", "config", "price-per-mtok", "cap", "reports", "last-report", "sizes", "iterations",
-  "store", "out", "budget-ms", "import-files", "model", "dims", "models", "ollama-url", "stores-dir", "stores", "size", "name",
+  "store", "out", "budget-ms", "import-files", "model", "dims", "models", "ollama-url", "unsloth-url", "stores-dir", "stores", "size", "name",
   "frameworks", "framework-python", "framework-dir", "framework-timeout-ms", "framework-config", "vectors-dir",
   "accuracy-json", "a", "b", "every",
 ]);
@@ -2027,6 +2253,7 @@ export const USAGE = `Usage: bench-memory.mjs <snapshot|accuracy|speed|usefulnes
   near-ties      [--sizes 1000,10000] [--dims 768]   mean cosine of a synthetic query's ranks 1 to 11 (why ANN recall is low on the synthetic set)
   derive         --accuracy-json <file>   attribution (recency, prefix, fusion) and fusion tables, computed from an "accuracy --json" output
   subset         --a <accuracy json> --b <accuracy json> [--every 8] [--snapshot <file>]   score two runs on the queries whose expected lesson is in an every-n-th sample
+  --unsloth      (accuracy) [--unsloth-url <url>] --models <id,id> --dims 512,768: the dense (recency) and shipped rankings through Unsloth Studio's /v1/embeddings, truncated to each dims
   provider       --config <dir> | --ollama [--models a,b | --model <m>] [--dims <n>] [--ollama-url <url>]; --ollama runs every
                  model (dense, rrf, rerank, each with and without prefixes, plus hybrid-shipped); a paid provider also needs
                  --spend --price-per-mtok <usd> --cap <usd>`;
@@ -2140,7 +2367,8 @@ function renderSpeed(s) {
     const extra = [`record ${f(t.record)}`, `import ${f(t.import)}`];
     if (t.importFull) extra.push(`full import ${t.importFull.p50 !== undefined ? `${t.importFull.files} files ${f(t.importFull)}` : "not measured"}`);
     if (t.coldStart) extra.push(`cold start ${f(t.coldStart.memoryCliRecall)} vs bare node ${f(t.coldStart.nodeBare)}`);
-    if (t.record) lines.push(`  ${extra.join("; ")}`);
+    for (const [n, v] of Object.entries(t.coldStartHybrid || {})) extra.push(`cold ${n} ${f(v.recall)} vs bare node ${f(v.nodeBare)}`);
+    if (t.record || t.coldStartHybrid) lines.push(`  ${extra.join("; ")}`);
     lines.push(`  storage: ${Object.entries(d.storage).map(([n, v]) => `${n} ${v.storageBytes} B`).join(", ")}`);
   });
   const h = s.deterministic.hooks;
@@ -2371,11 +2599,17 @@ export async function main(argv, io = {}) {
     let providerInfo = { provider: null, reason: null };
     let modelsInfo = null;
     if (wantAccuracy || wantSpeed) {
-      const p = await resolveProvider({ flags, fetchImpl, snapshot: snapshot || { lessons: [] }, queries, say: (s) => stdout(s + "\n") });
+      const p = flags.unsloth ? { provider: null, reason: "--unsloth runs the Studio matrix only" } : await resolveProvider({ flags, fetchImpl, snapshot: snapshot || { lessons: [] }, queries, say: (s) => stdout(s + "\n") });
       if (p.exit) return p.exit;
       providerInfo = p;
       registry = [fts5, fts5NoRecency, ftsVariant("porter"), ftsVariant("trigram"), grep];
-      if (p.provider && flags.ollama) {
+      if (flags.unsloth) {
+        const dimsList = String(flags.dims || "512,768").split(",").map((x) => Number(x.trim()));
+        if (dimsList.some((d) => !Number.isInteger(d) || d <= 0)) throw new UsageError(`--dims must be integers > 0, got ${flags.dims}`);
+        const u = buildUnslothRegistry({ models, dimsList, baseUrl: flags["unsloth-url"] || "http://127.0.0.1:8888", fetchImpl, stats, vectorsDir });
+        registry.push(...u.registry);
+        closers.push(u.close);
+      } else if (p.provider && flags.ollama) {
         const o = await buildOllamaRegistry({ models, baseUrl, fetchImpl, stats, vectorsDir, dimsOverride: flags.dims ? Number(flags.dims) : null });
         registry.push(...o.registry);
         synthetic = o.synthetic;

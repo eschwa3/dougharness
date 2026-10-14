@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach } from "vitest";
-import { writeFileSync, mkdirSync, readFileSync, existsSync, mkdtempSync } from "node:fs";
+import { writeFileSync, appendFileSync, mkdirSync, readFileSync, existsSync, mkdtempSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { join, dirname } from "node:path";
 import { tmpdir } from "node:os";
@@ -1158,5 +1158,88 @@ describe("card verified-tree-record", () => {
     expect(runs(dir), "the command must have really run").toBe(1);
     expect(existsSync(join(dir, "src/changed-by-gate.js")), "the command must have changed the tree").toBe(true);
     expect(readRecord(dir), "a tree that changed across the run must not be recorded").toBeNull();
+  });
+});
+
+// card worktree-count-baseline: a worktree subagent's count check compares the worktree against its own earlier
+// green runs (<wt>/.doug/.state/test-totals.json), never against the main checkout's SessionStart snapshot, and a
+// green worktree run writes its totals to the worktree, leaving main's record alone. A worktree without a dist
+// build skips tests that main (with dist) runs; against main's baseline that read as a rise in skipped.
+describe("card worktree-count-baseline", () => {
+  const CMD = "cat .doug/.state/summary.txt";
+  const REC = ".doug/.state/test-totals.json";
+  const agentType = "doug-flow:implementer";
+  const git = (cwd, ...args) => execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
+  const summary = ({ total, skipped = 0 }) => {
+    const segs = [`${total - skipped} passed`];
+    if (skipped) segs.push(`${skipped} skipped`);
+    return ` Test Files  1 passed (1)\n      Tests  ${segs.join(" | ")} (${total})\n   Duration  242ms\n`;
+  };
+
+  // Main checkout with a baseline of {total 100, skipped 0} taken at SessionStart; a worktree under .claude/worktrees.
+  function makeFixture() {
+    const dir = makeProject({ config: { ...baseConfig, commands: { test: CMD } }, git: true });
+    writeFileSync(join(dir, ".gitignore"), ".doug/.state/\n");
+    mkdirSync(join(dir, "src"));
+    writeFileSync(join(dir, "src/a.ts"), "base");
+    git(dir, "add", "-A");
+    git(dir, "commit", "-q", "-m", "base");
+    mkdirSync(join(dir, ".doug/.state"), { recursive: true });
+    writeFileSync(join(dir, REC), JSON.stringify({ [CMD]: [{ total: 100, skipped: 0, todo: 0 }] }));
+    runHookScript("session-start-baseline", { hook_event_name: "SessionStart", source: "startup" }, { dir });
+    const wt = join(dir, ".claude/worktrees/wt1");
+    git(dir, "worktree", "add", "-q", wt, "-b", "wt1-branch");
+    mkdirSync(join(wt, ".doug/.state"), { recursive: true });
+    return { dir, wt };
+  }
+
+  const traceFile = (dir) => join(dir, ".doug/.state/trace/test-session.jsonl");
+  // One worktree agent's life: it commits a change in the worktree, the command prints `out` there, then it stops.
+  let n = 0;
+  function wtStop(dir, wt, out) {
+    n += 1;
+    const agent = `ag${n}`;
+    const file = join(wt, "src/a.ts");
+    writeFileSync(file, `work ${n}`);
+    git(wt, "add", "src/a.ts");
+    git(wt, "commit", "-q", "-m", `work ${n}`);
+    writeFileSync(join(wt, ".doug/.state/summary.txt"), summary(out));
+    mkdirSync(dirname(traceFile(dir)), { recursive: true });
+    const base = { t: new Date().toISOString(), event: null, session: "test-session", agent, agentType, tool: null, toolUseId: null, detail: null, ok: null, tokens: null, context: null, reason: null };
+    const lines = [
+      { event: "SubagentStart" },
+      { event: "PostToolUse", tool: "Write", ok: true, detail: file },
+      { event: "PostToolUse", tool: "Bash", ok: true, detail: "git add src/a.ts && git commit -m work" },
+    ].map((l) => JSON.stringify({ ...base, ...l }));
+    appendFileSync(traceFile(dir), lines.join("\n") + "\n");
+    runHookScript("edit-loop", { tool_name: "Write", tool_input: { file_path: file }, agent_id: agent }, { dir });
+    return runHookScript("stop-gate", { hook_event_name: "SubagentStop", agent_id: agent, agent_type: agentType }, { dir });
+  }
+  const rec = (d) => JSON.parse(readFileSync(join(d, REC), "utf8"));
+
+  it("WCB1: a worktree run printing skipped 53 against a main baseline of skipped 0, with no record of its own, is allowed", () => {
+    const { dir, wt } = makeFixture();
+    const r = wtStop(dir, wt, { total: 100, skipped: 53 });
+    expect(r.json, JSON.stringify(r.json)).toBeNull();
+  });
+
+  it("WCB2: a worktree whose own record holds skipped 53 and whose run prints skipped 54 is blocked", () => {
+    const { dir, wt } = makeFixture();
+    writeFileSync(join(wt, REC), JSON.stringify({ [CMD]: [{ total: 100, skipped: 53, todo: 0 }] }));
+    const r = wtStop(dir, wt, { total: 100, skipped: 54 });
+    expect(r.json && r.json.decision, JSON.stringify(r.json)).toBe("block");
+    expect(r.json.reason).toContain("test count regressed");
+    expect(r.json.reason).toContain("skipped rose from 53 (baseline) to 54 (now)");
+  });
+
+  it("WCB3: a green worktree run seeds the worktree's own record, leaves main's untouched, and a later rise there blocks", () => {
+    const { dir, wt } = makeFixture();
+    const first = wtStop(dir, wt, { total: 100, skipped: 53 });
+    expect(first.json, JSON.stringify(first.json)).toBeNull();
+    expect(rec(wt)[CMD][0]).toMatchObject({ total: 100, skipped: 53 });
+    expect(rec(dir)[CMD][0], "main's last-green record must not take the worktree's counts").toMatchObject({ total: 100, skipped: 0 });
+    const second = wtStop(dir, wt, { total: 100, skipped: 54 });
+    expect(second.json && second.json.decision, JSON.stringify(second.json)).toBe("block");
+    expect(second.json.reason).toContain("skipped rose from 53 (baseline) to 54 (now)");
   });
 });

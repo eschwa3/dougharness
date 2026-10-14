@@ -6,6 +6,7 @@ import { join, dirname } from "node:path";
 import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
 import { classifyBlocks } from "../lib/board.mjs";
+import { proposeClaudeMd } from "../lib/decisions.mjs";
 import { CODEX_PRICES } from "../lib/cost.mjs";
 import {
   MEMORY_DB_RELPATH,
@@ -28,10 +29,12 @@ import {
   embedLessons,
   checkCitation,
   recallLessons,
+  clearRecallCache,
   topLessons,
   renderLessons,
   unstaleLesson,
   runReflect,
+  claudeMdHome,
   buildReflectPrompt,
   REFLECT_SCHEMA,
   REFLECT_DUPLICATE_JACCARD,
@@ -2658,6 +2661,318 @@ describe("runReflect: proposal filters (C)", () => {
   });
 });
 
+// card reflect-offers-claude-md: after reflect appends a lesson, decide in code whether CLAUDE.md has a home
+// for it and, when it does not, write a candidate edits file (never CLAUDE.md, never learn.mjs apply).
+const GOTCHA_EXISTING = "- Vendored hook files changed mid session leave stale state until the next repair.";
+
+// A small CLAUDE.md: Commands block, a Gotchas section with one bullet, a Models table. `padTo` pads Gotchas
+// with distinct filler bullets until the file is exactly that many lines (the 60-line limit case).
+function claudeMdFixture(padTo = 0) {
+  const build = (filler) => [
+    "# Project instructions",
+    "",
+    "## Commands",
+    "",
+    "```sh",
+    "pnpm build",
+    "```",
+    "",
+    "## Gotchas",
+    "",
+    GOTCHA_EXISTING,
+    ...filler,
+    "",
+    "## Models",
+    "",
+    "| Work | Model | Effort |",
+    "|------|-------|--------|",
+    "| plan | opus  | high   |",
+  ];
+  let filler = [];
+  if (padTo) {
+    const base = build([]).length;
+    filler = Array.from({ length: padTo - base }, (_, i) => `- Filler bullet number ${i} about unrelated topics.`);
+  }
+  return build(filler).join("\n") + "\n";
+}
+
+function setupClaudeMdProject(projDir, claudeMd = claudeMdFixture()) {
+  writeFileSync(join(projDir, "CLAUDE.md"), claudeMd, "utf8");
+  // The vendored copies the running gates are (decisions.mjs HOOK_SCRIPTS_RELDIR), not plugins/doug-gates/scripts.
+  mkdirSync(join(projDir, ".doug/hooks/scripts"), { recursive: true });
+  writeFileSync(join(projDir, ".doug/hooks/scripts/stop-gate.mjs"), "// fixture gate\n", "utf8");
+  return claudeMd;
+}
+
+describe("claudeMdHome (card reflect-offers-claude-md)", () => {
+  const lesson = { text: "A lesson text that names nothing in particular here", kind: "pattern" };
+
+  it("a missing suggestion means no candidate: home true, why 'no suggestion'", () => {
+    setupClaudeMdProject(dir);
+    const r = claudeMdHome({ dir, lesson, suggestion: undefined });
+    expect(r.home).toBe(true);
+    expect(r.why).toBe("no suggestion");
+  });
+
+  it("containment exactly 0.6 is covered, naming the existing line; the denominator is the suggestion's tokens", () => {
+    // Suggestion has 5 content tokens, the existing line shares 3 of them (3/5 = 0.6) and has 7 tokens in all
+    // (3/7 < 0.6, so a denominator on the existing line's count would call it not covered).
+    setupClaudeMdProject(dir, claudeMdFixture().replace(GOTCHA_EXISTING, "- alpha bravo charlie foxtrot golf hotel india"));
+    const r = claudeMdHome({ dir, lesson, suggestion: { heading: "## Gotchas", line: "- alpha bravo charlie delta echo" } });
+    expect(r.home).toBe(true);
+    expect(r.why).toContain("alpha bravo charlie foxtrot golf hotel india");
+  });
+
+  it("containment just under 0.6 (4 of 7) is not covered", () => {
+    setupClaudeMdProject(dir, claudeMdFixture().replace(GOTCHA_EXISTING, "- alpha bravo charlie delta"));
+    const r = claudeMdHome({ dir, lesson, suggestion: { heading: "## Gotchas", line: "- alpha bravo charlie delta echo foxtrot golf" } });
+    expect(r).toEqual({ home: false });
+  });
+
+  it("a gate script named in the lesson text, with or without .mjs, is enforced (home true, why names the script)", () => {
+    setupClaudeMdProject(dir);
+    const novel = { heading: "## Gotchas", line: "- Quartz widgets need fencing before polishing." };
+    const withExt = claudeMdHome({ dir, lesson: { text: "The stop-gate.mjs hook blocks a Stop without evidence" }, suggestion: novel });
+    expect(withExt.home).toBe(true);
+    expect(withExt.why).toContain("stop-gate");
+    const bare = claudeMdHome({ dir, lesson: { text: "The stop-gate hook blocks a Stop without evidence" }, suggestion: novel });
+    expect(bare.home).toBe(true);
+    expect(bare.why).toContain("stop-gate");
+  });
+
+  it("a gate script named only in the suggestion line is enforced too", () => {
+    setupClaudeMdProject(dir);
+    const r = claudeMdHome({ dir, lesson, suggestion: { heading: "## Gotchas", line: "- Quartz widgets must pass stop-gate before polishing." } });
+    expect(r.home).toBe(true);
+    expect(r.why).toContain("stop-gate");
+  });
+
+  it("matches a script as a whole word: stop-gate-x and prestop-gate are not stop-gate", () => {
+    setupClaudeMdProject(dir);
+    const novel = { heading: "## Gotchas", line: "- Quartz widgets need fencing before polishing." };
+    expect(claudeMdHome({ dir, lesson: { text: "The stop-gate-x helper is unrelated to any gate" }, suggestion: novel })).toEqual({ home: false });
+    expect(claudeMdHome({ dir, lesson: { text: "The prestop-gate helper is unrelated to any gate" }, suggestion: novel })).toEqual({ home: false });
+  });
+
+  it("mutation: enforced check reads plugins/doug-gates/scripts instead of .doug/hooks/scripts. A script ONLY under plugins/doug-gates/scripts is not consulted: a candidate", () => {
+    writeFileSync(join(dir, "CLAUDE.md"), claudeMdFixture(), "utf8");
+    mkdirSync(join(dir, "plugins/doug-gates/scripts"), { recursive: true });
+    writeFileSync(join(dir, "plugins/doug-gates/scripts/stop-gate.mjs"), "// plugin-only gate\n", "utf8");
+    expect(existsSync(join(dir, ".doug/hooks/scripts"))).toBe(false);
+    const novel = { heading: "## Gotchas", line: "- Quartz widgets need fencing before polishing." };
+    expect(claudeMdHome({ dir, lesson: { text: "The stop-gate.mjs hook blocks a Stop without evidence" }, suggestion: novel })).toEqual({ home: false });
+  });
+
+  // R6: only a top-level `- ` bullet outside a fenced block counts as an existing home.
+  it("R6: a suggestion 60%+ contained only in a heading, a table row, or a line inside the Commands block is not covered", () => {
+    const md = claudeMdFixture();
+    setupClaudeMdProject(dir, md);
+    const cases = [
+      "- Project instructions", // the `# Project instructions` heading
+      "- Gotchas Commands", // `## ` headings
+      "- Opus plan high", // the Models table row `| plan | opus  | high   |`
+      "- Pnpm build", // the Commands block line `pnpm build`
+    ];
+    for (const line of cases) {
+      expect(claudeMdHome({ dir, lesson, suggestion: { heading: "## Gotchas", line } }), line).toEqual({ home: false });
+    }
+  });
+
+  it("R6: a `- ` line inside the fenced Commands block is not an existing bullet", () => {
+    const md = claudeMdFixture().replace("pnpm build\n", "pnpm build\n- quartz widgets need fencing\n");
+    setupClaudeMdProject(dir, md);
+    expect(claudeMdHome({ dir, lesson, suggestion: { heading: "## Gotchas", line: "- Quartz widgets need fencing." } })).toEqual({ home: false });
+  });
+
+  it("a suggestion line with no content tokens is treated as covered (conservative)", () => {
+    setupClaudeMdProject(dir);
+    const r = claudeMdHome({ dir, lesson, suggestion: { heading: "## Gotchas", line: "- a to of" } });
+    expect(r.home).toBe(true);
+  });
+});
+
+describe("runReflect: CLAUDE.md candidates (card reflect-offers-claude-md)", () => {
+  const CANDIDATES = () => join(dir, ".doug/.state/learn/claude-md-candidates");
+  const NOVEL = { heading: "## Gotchas", line: "- Quartz widgets need fencing before any polishing starts." };
+  let claudeMdBefore;
+
+  beforeEach(() => {
+    m = openMemory(dir);
+    claudeMdBefore = setupClaudeMdProject(dir);
+  });
+
+  function lessonProposal(text, claudeMd, extra = {}) {
+    const p = { kind: "pattern", text, citation: "report:clean-task", task: "clean-task", notDerivableBecause: "not written anywhere", ...extra };
+    if (claudeMd) p.claudeMd = claudeMd;
+    return p;
+  }
+
+  async function reflect(proposals, reportHash, extra = {}) {
+    const result = await runReflect(m, buildReflectReport(), {
+      reportHash,
+      dir,
+      classes: REFLECT_CLASSES,
+      propose: async () => ({ lessons: proposals, sessionId: null, totalCostUsd: null }),
+      ...extra,
+    });
+    // (i) CLAUDE.md is never modified, in every case.
+    expect(readFileSync(join(dir, "CLAUDE.md"), "utf8")).toBe(claudeMdBefore);
+    return result;
+  }
+
+  it("a: an appended lesson with a novel suggestion writes the exact edits candidate, returns the command, and the file passes proposeClaudeMd", async () => {
+    const result = await reflect([lessonProposal("A clean single pass task confirms the spec hash before verifying", NOVEL)], "hash-cm-a");
+    expect(result.appended).toHaveLength(1);
+    const id = result.appended[0];
+    expect(result.claudeMd).toHaveLength(1);
+    const [cand] = result.claudeMd;
+    expect(cand.lessonId).toBe(id);
+    expect(cand.file).toBe(join(CANDIDATES(), `${id}.json`));
+    expect(cand.command).toMatch(/^node .*memory\.mjs claude-md propose --file /);
+    expect(cand.command).toContain(cand.file);
+    expect(result.claudeMdDropped ?? []).toEqual([]);
+
+    const edits = JSON.parse(readFileSync(cand.file, "utf8"));
+    expect(edits).toEqual({
+      note: expect.stringMatching(new RegExp(`^reflect .+: lesson ${id}$`)),
+      add: [{ heading: "## Gotchas", line: NOVEL.line, source: `lesson ${id}` }],
+    });
+
+    const proposed = proposeClaudeMd({ dir, edits });
+    expect(proposed.ok, proposed.reason).toBe(true);
+    expect(readFileSync(join(dir, "CLAUDE.md"), "utf8")).toBe(claudeMdBefore);
+  });
+
+  it("b: a suggestion 60%+ contained in an existing CLAUDE.md bullet makes no candidate and no file", async () => {
+    const covered = { heading: "## Gotchas", line: "- Vendored hook files changed mid session leave stale." };
+    const result = await reflect([lessonProposal("A clean single pass task confirms the spec hash before verifying", covered)], "hash-cm-b");
+    expect(result.appended).toHaveLength(1);
+    expect(result.claudeMd ?? []).toEqual([]);
+    expect(result.claudeMdDropped ?? []).toEqual([]);
+    expect(existsSync(CANDIDATES())).toBe(false);
+  });
+
+  it("c: a lesson text naming a gate script (stop-gate.mjs, or bare stop-gate) makes no candidate", async () => {
+    const result = await reflect(
+      [
+        lessonProposal("The stop-gate.mjs hook reuses the last red when nothing changed since the previous Stop", NOVEL),
+        lessonProposal("Retries inside the stop-gate hook never reset the recorded deferral counter between turns", { heading: "## Gotchas", line: "- Zebra crossings pause every polishing cycle." }),
+      ],
+      "hash-cm-c",
+    );
+    expect(result.appended).toHaveLength(2);
+    expect(result.claudeMd ?? []).toEqual([]);
+    expect(existsSync(CANDIDATES())).toBe(false);
+  });
+
+  it("d: a suggestion under ## Models, or under a heading that does not exist, is dropped with proposeClaudeMd's reason and no file", async () => {
+    const result = await reflect(
+      [
+        lessonProposal("A clean single pass task confirms the spec hash before verifying", { heading: "## Models", line: "- Quartz widgets need fencing before any polishing starts." }),
+        lessonProposal("Verifier findings that are informational only should never block a first pass", { heading: "## Nowhere", line: "- Zebra crossings pause every polishing cycle." }),
+      ],
+      "hash-cm-d",
+    );
+    expect(result.appended).toHaveLength(2);
+    expect(result.claudeMd ?? []).toEqual([]);
+    expect(result.claudeMdDropped).toHaveLength(2);
+    const [first, second] = result.claudeMdDropped;
+    expect(first.lessonId).toBe(result.appended[0]);
+    expect(first.reason).toContain("Models");
+    expect(second.lessonId).toBe(result.appended[1]);
+    expect(second.reason).toContain("## Nowhere");
+    expect(existsSync(CANDIDATES())).toBe(false);
+  });
+
+  it("e: a suggestion that would push CLAUDE.md past 60 lines is dropped with the 60-line reason", async () => {
+    const full = claudeMdFixture(60);
+    expect(full.split("\n").length - 1).toBe(60);
+    claudeMdBefore = setupClaudeMdProject(dir, full);
+    const result = await reflect([lessonProposal("A clean single pass task confirms the spec hash before verifying", NOVEL)], "hash-cm-e");
+    expect(result.claudeMd ?? []).toEqual([]);
+    expect(result.claudeMdDropped).toHaveLength(1);
+    expect(result.claudeMdDropped[0].reason).toContain("60");
+    expect(existsSync(CANDIDATES())).toBe(false);
+  });
+
+  it("f: a rejected or bumped proposal carrying a suggestion makes no candidate", async () => {
+    addLesson(m, { text: "always run pnpm typecheck before every commit to the repo", kind: "pattern", citation: "report:clean-task", source: { agent: "worker" } });
+    const result = await reflect(
+      [
+        // bumped (near-duplicate of the existing lesson)
+        lessonProposal("always run pnpm typecheck before every commit made to the repo", NOVEL),
+        // rejected (a pitfall needs a real-classed block on its task)
+        lessonProposal("Never merge without running the full test suite first", { heading: "## Gotchas", line: "- Zebra crossings pause every polishing cycle." }, { kind: "pitfall" }),
+      ],
+      "hash-cm-f",
+    );
+    expect(result.appended).toHaveLength(0);
+    expect(result.bumped).toHaveLength(1);
+    expect(result.rejected).toHaveLength(1);
+    expect(result.claudeMd ?? []).toEqual([]);
+    expect(result.claudeMdDropped ?? []).toEqual([]);
+    expect(existsSync(CANDIDATES())).toBe(false);
+  });
+
+  it("g: an appended lesson with no suggestion makes no candidate", async () => {
+    const result = await reflect([lessonProposal("A clean single pass task confirms the spec hash before verifying", null)], "hash-cm-g");
+    expect(result.appended).toHaveLength(1);
+    expect(result.claudeMd ?? []).toEqual([]);
+    expect(result.claudeMdDropped ?? []).toEqual([]);
+    expect(existsSync(CANDIDATES())).toBe(false);
+  });
+
+  it("h: --dry-run reports the candidate but writes nothing", async () => {
+    const result = await reflect([lessonProposal("A clean single pass task confirms the spec hash before verifying", NOVEL)], "hash-cm-h", { dryRun: true });
+    expect(result.claudeMd).toHaveLength(1);
+    expect(result.claudeMd[0].command).toMatch(/claude-md propose --file /);
+    expect(existsSync(CANDIDATES())).toBe(false);
+    expect(existsSync(join(dir, ".doug/.state/learn"))).toBe(false);
+  });
+
+  it("fail-open: a claude-md-candidates path that is a plain file does not throw; the lesson and a complete reflections row are written, claudeMd is [], the drop carries the error", async () => {
+    mkdirSync(join(dir, ".doug/.state/learn"), { recursive: true });
+    writeFileSync(CANDIDATES(), "not a directory\n", "utf8");
+    const result = await reflect([lessonProposal("A clean single pass task confirms the spec hash before verifying", NOVEL)], "hash-cm-failopen");
+    expect(result.ok).toBe(true);
+    expect(result.appended).toHaveLength(1);
+    const id = result.appended[0];
+    expect(result.claudeMd).toEqual([]);
+    expect(result.claudeMdDropped).toHaveLength(1);
+    expect(result.claudeMdDropped[0].lessonId).toBe(id);
+    expect(result.claudeMdDropped[0].reason).toMatch(/EEXIST|ENOTDIR|exists|not a directory/i);
+    expect(listLessons(m).map((l) => l.id)).toContain(id);
+    const row = m.prepare("SELECT * FROM reflections WHERE report_hash = ?").get("hash-cm-failopen");
+    expect(row.proposed).toBe(1);
+    expect(JSON.parse(row.appended)).toEqual([id]);
+    expect(row.rejected).not.toBeNull();
+    expect(row.bumped).not.toBeNull();
+  });
+
+  it("a cheap pass that fails still returns claudeMd: [] and claudeMdDropped: []", async () => {
+    const result = await runReflect(m, buildReflectReport(), {
+      reportHash: "hash-cm-passfail",
+      dir,
+      classes: REFLECT_CLASSES,
+      propose: async () => {
+        throw new Error("claude printed no parseable JSON: boom");
+      },
+    });
+    expect(result.ok).toBe(false);
+    expect(result.claudeMd).toEqual([]);
+    expect(result.claudeMdDropped).toEqual([]);
+  });
+
+  it("the cheap pass's schema carries an optional claudeMd { heading, line } on each lesson", () => {
+    const item = REFLECT_SCHEMA.properties.lessons.items;
+    expect(item.properties.claudeMd).toBeDefined();
+    expect(item.properties.claudeMd.properties.heading).toBeDefined();
+    expect(item.properties.claudeMd.properties.line).toBeDefined();
+    expect(item.properties.claudeMd.required).toEqual(expect.arrayContaining(["heading", "line"]));
+    expect(item.required).not.toContain("claudeMd");
+  });
+});
+
 // card recall-scale-row-load: recallLessons must load only the rows the ranking needs, with output unchanged.
 // The golden file was generated from the pre-change code (UPDATE_RECALL_GOLDEN=1 rewrites it; never do that
 // after the change, it would bless whatever the new code returns).
@@ -2802,6 +3117,31 @@ describe("recallLessons: golden equivalence and row load (card recall-scale-row-
     for (const key of Object.keys(golden)) expect(actual[key], key).toEqual(golden[key]);
   });
 
+  // card recall-hybrid-scale: the in-process vector cache must not change any result.
+  it("running the whole matrix twice in one process, cache never cleared, matches the golden file both times", async () => {
+    const golden = JSON.parse(readFileSync(GOLDEN, "utf8"));
+    const first = await run();
+    const second = await run();
+    expect(Object.keys(first)).toEqual(Object.keys(golden));
+    expect(Object.keys(second)).toEqual(Object.keys(golden));
+    for (const key of Object.keys(golden)) {
+      expect(first[key], `first: ${key}`).toEqual(golden[key]);
+      expect(second[key], `second: ${key}`).toEqual(golden[key]);
+    }
+  });
+
+  it("repeated hybrid recalls on one open store give identical results (a warm cache changes nothing)", async () => {
+    const db = openStore(buildMain);
+    const opts = () => ({ now: NOW, provider: qvec(), files: ["src/a.mjs"], k: 20 });
+    const cold = JSON.parse(JSON.stringify(await recallLessons(db, "retry flaky uploads", opts())));
+    const warm = JSON.parse(JSON.stringify(await recallLessons(db, "retry flaky uploads", opts())));
+    const warm2 = JSON.parse(JSON.stringify(await recallLessons(db, "retry flaky uploads", opts())));
+    db.close();
+    expect(cold.mode).toBe("hybrid");
+    expect(warm).toEqual(cold);
+    expect(warm2).toEqual(cold);
+  });
+
   it("the golden file covers the shapes the card names (a guard against a vacuous fixture)", () => {
     const golden = JSON.parse(readFileSync(GOLDEN, "utf8"));
     const g = (k) => golden[k];
@@ -2867,5 +3207,389 @@ describe("recallLessons: golden equivalence and row load (card recall-scale-row-
   it("a provider with no matching vectors reads no embedding blobs either", async () => {
     const sqls = await recordSql(buildMain, { provider: mismatched(), checkoutDir });
     expect(sqls.filter(readsEmbeddingBlob)).toEqual([]);
+  });
+});
+
+// card recall-hybrid-scale: freshness semantics pinned, then the in-process decoded-vector cache.
+const clearCache = () => {
+  if (typeof clearRecallCache === "function") clearRecallCache();
+};
+
+describe("recallLessons: freshness window semantics (card recall-hybrid-scale)", () => {
+  const NOW = new Date("2026-09-30T00:00:00.000Z");
+  const DAY = 86400000;
+  const daysAgo = (n) => new Date(NOW.getTime() - n * DAY).toISOString();
+
+  beforeEach(() => {
+    clearCache();
+    m = openMemory(dir);
+  });
+
+  const build = () => {
+    const mk = (id, created, confirmed) => {
+      addLesson(m, { id, text: `freshword ${id}`, kind: "pattern", source: { agent: "worker" }, created });
+      setLessonEmbedding(m, id, { model: "fake-model", dims: 3, vector: Float32Array.from([1, 0, 0]) });
+      if (confirmed !== undefined) m.prepare("UPDATE lessons SET confirmed = ? WHERE id = ?").run(confirmed, id);
+    };
+    mk("f-garbled", "not-a-date");
+    mk("f-js-old", "Aug 1 2026"); // JS parses it (60 days old); SQLite date functions do not
+    mk("f-js-new", "Sep 25 2026"); // JS parses it (5 days old); SQLite date functions do not
+    mk("f-slash-old", "2026/08/01");
+    mk("f-exact", daysAgo(30));
+    mk("f-over", new Date(NOW.getTime() - 30 * DAY - 60000).toISOString());
+    mk("f-conf-fresh", daysAgo(200), daysAgo(1));
+    mk("f-conf-old", daysAgo(1), daysAgo(200));
+    mk("f-conf-garbled", daysAgo(200), "garbage");
+    mk("f-conf-empty", daysAgo(200), "");
+    mk("f-created-empty", "");
+    mk("f-future", daysAgo(-5));
+  };
+
+  const EXPECTED = ["f-conf-fresh", "f-conf-garbled", "f-created-empty", "f-exact", "f-future", "f-garbled", "f-js-new"];
+
+  it("keyword mode: JS-parse age semantics, unparseable counts as fresh, exactly staleDays is kept, confirmed wins over created", async () => {
+    build();
+    const result = await recallLessons(m, "freshword", { now: NOW, staleDays: 30, k: 50 });
+    expect(result.mode).toBe("keyword-only");
+    expect(result.lessons.map((l) => l.id).sort()).toEqual(EXPECTED);
+  });
+
+  it("hybrid mode: the same lessons, by the same rules", async () => {
+    build();
+    const provider = fakeProvider({ vectorFor: () => [1, 0, 0] });
+    const result = await recallLessons(m, "freshword", { provider, now: NOW, staleDays: 30, k: 50 });
+    expect(result.mode).toBe("hybrid");
+    expect(result.lessons.map((l) => l.id).sort()).toEqual(EXPECTED);
+    expect(result.total).toBe(EXPECTED.length);
+    expect(result.unvectored).toBe(0);
+  });
+
+  it("hybrid mode, vector-only (query matches no text): the same lessons", async () => {
+    build();
+    const provider = fakeProvider({ vectorFor: () => [1, 0, 0] });
+    const result = await recallLessons(m, "zzznomatch", { provider, now: NOW, staleDays: 30, k: 50 });
+    expect(result.mode).toBe("hybrid");
+    expect(result.lessons.map((l) => l.id).sort()).toEqual(EXPECTED);
+  });
+});
+
+describe("recallLessons: in-process vector cache (card recall-hybrid-scale)", () => {
+  const NOW = new Date("2026-09-30T00:00:00.000Z");
+  const created = new Date(NOW.getTime() - 5 * 86400000).toISOString();
+  const MODEL = { model: "fake-model", dims: 3 };
+  const qprov = (over = {}) => fakeProvider({ vectorFor: () => [1, 0, 0], ...over });
+  const put = (db, id, vec, model = MODEL) => {
+    if (!getLesson(db, id)) addLesson(db, { id, text: `cachetext ${id}`, kind: "pattern", source: { agent: "worker" }, created });
+    setLessonEmbedding(db, id, { ...model, vector: Float32Array.from(vec) });
+  };
+  const ids = async (db, provider = qprov()) =>
+    (await recallLessons(db, "nomatchquery", { provider, now: NOW, k: 20 })).lessons.map((l) => l.id);
+  let m2;
+
+  beforeEach(() => {
+    clearCache();
+    m = openMemory(dir);
+    m2 = null;
+    put(m, "ca", [0.9, 0.1, 0]);
+    put(m, "cb", [0.5, 0.5, 0]);
+    put(m, "cc", [0.1, 0.9, 0]);
+  });
+
+  afterEach(() => {
+    if (m2) {
+      try {
+        m2.close();
+      } catch {
+        // already closed
+      }
+    }
+  });
+
+  it("exports clearRecallCache as a function", () => {
+    expect(typeof clearRecallCache).toBe("function");
+    expect(() => clearRecallCache()).not.toThrow();
+  });
+
+  it("baseline order, and a repeat call gives the same order", async () => {
+    expect(await ids(m)).toEqual(["ca", "cb", "cc"]);
+    expect(await ids(m)).toEqual(["ca", "cb", "cc"]);
+  });
+
+  describe("same connection", () => {
+    it("a new embedding on an existing lesson shows on the next recall", async () => {
+      expect(await ids(m)).toEqual(["ca", "cb", "cc"]);
+      setLessonEmbedding(m, "cc", { ...MODEL, vector: Float32Array.from([1, 0, 0]) });
+      expect(await ids(m)).toEqual(["cc", "ca", "cb"]);
+    });
+
+    it("a raw UPDATE of the embedding column shows on the next recall", async () => {
+      expect(await ids(m)).toEqual(["ca", "cb", "cc"]);
+      m.prepare("UPDATE lessons SET embedding = ? WHERE id = ?").run(Buffer.from(Float32Array.from([1, 0, 0]).buffer), "cc");
+      expect(await ids(m)).toEqual(["cc", "ca", "cb"]);
+    });
+
+    it("superseding the top lesson drops it from the next recall", async () => {
+      expect(await ids(m)).toEqual(["ca", "cb", "cc"]);
+      supersedeLesson(m, "ca", "cb");
+      expect(await ids(m)).toEqual(["cb", "cc"]);
+    });
+
+    it("marking a lesson stale drops it, and unstaling brings it back", async () => {
+      expect(await ids(m)).toEqual(["ca", "cb", "cc"]);
+      m.prepare("UPDATE lessons SET stale = ? WHERE id = ?").run(NOW.toISOString(), "ca");
+      expect(await ids(m)).toEqual(["cb", "cc"]);
+      unstaleLesson(m, "ca");
+      expect(await ids(m)).toEqual(["ca", "cb", "cc"]);
+    });
+
+    it("a new embedded lesson shows on the next recall", async () => {
+      expect(await ids(m)).toEqual(["ca", "cb", "cc"]);
+      put(m, "cd", [1, 0, 0]);
+      expect(await ids(m)).toEqual(["cd", "ca", "cb", "cc"]);
+    });
+
+    it("re-embedding a lesson under another model removes it from this model's results", async () => {
+      expect(await ids(m)).toEqual(["ca", "cb", "cc"]);
+      setLessonEmbedding(m, "ca", { model: "other-model", dims: 3, vector: Float32Array.from([1, 0, 0]) });
+      expect(await ids(m)).toEqual(["cb", "cc"]);
+    });
+  });
+
+  describe("a second connection on the same file", () => {
+    beforeEach(() => {
+      m2 = openMemory(dir);
+    });
+
+    it("a changed embedding written there shows on the first connection", async () => {
+      expect(await ids(m)).toEqual(["ca", "cb", "cc"]);
+      setLessonEmbedding(m2, "cc", { ...MODEL, vector: Float32Array.from([1, 0, 0]) });
+      expect(await ids(m)).toEqual(["cc", "ca", "cb"]);
+    });
+
+    it("a supersede written there shows on the first connection", async () => {
+      expect(await ids(m)).toEqual(["ca", "cb", "cc"]);
+      supersedeLesson(m2, "ca", "cb");
+      expect(await ids(m)).toEqual(["cb", "cc"]);
+    });
+
+    it("a stale mark written there shows on the first connection", async () => {
+      expect(await ids(m)).toEqual(["ca", "cb", "cc"]);
+      m2.prepare("UPDATE lessons SET stale = ? WHERE id = ?").run(NOW.toISOString(), "cb");
+      expect(await ids(m)).toEqual(["ca", "cc"]);
+    });
+
+    it("a new embedded lesson written there shows on the first connection", async () => {
+      expect(await ids(m)).toEqual(["ca", "cb", "cc"]);
+      put(m2, "cd", [1, 0, 0]);
+      expect(await ids(m)).toEqual(["cd", "ca", "cb", "cc"]);
+    });
+
+    it("a raw DatabaseSync handle on the file is seen too", async () => {
+      expect(await ids(m)).toEqual(["ca", "cb", "cc"]);
+      const raw = new DatabaseSync(memoryPath(dir));
+      try {
+        raw.prepare("UPDATE lessons SET embedding = ? WHERE id = ?").run(Buffer.from(Float32Array.from([1, 0, 0]).buffer), "cc");
+      } finally {
+        raw.close();
+      }
+      expect(await ids(m)).toEqual(["cc", "ca", "cb"]);
+    });
+
+    it("both connections warm: each sees a write made through the other", async () => {
+      expect(await ids(m)).toEqual(["ca", "cb", "cc"]);
+      expect(await ids(m2)).toEqual(["ca", "cb", "cc"]);
+      setLessonEmbedding(m, "cc", { ...MODEL, vector: Float32Array.from([1, 0, 0]) });
+      expect(await ids(m2)).toEqual(["cc", "ca", "cb"]);
+      supersedeLesson(m2, "cc", "ca");
+      expect(await ids(m)).toEqual(["ca", "cb"]);
+    });
+  });
+
+  describe("keyed by model and dims", () => {
+    it("two models over one database each see only their own vectors, in either call order", async () => {
+      put(m, "xo", [1, 0, 0], { model: "other-model", dims: 3 });
+      const a = qprov();
+      const b = qprov({ model: "other-model" });
+      expect(await ids(m, a)).toEqual(["ca", "cb", "cc"]);
+      expect(await ids(m, b)).toEqual(["xo"]);
+      expect(await ids(m, a)).toEqual(["ca", "cb", "cc"]);
+      expect(await ids(m, b)).toEqual(["xo"]);
+    });
+
+    it("the same model at two dims over one database each see only their own vectors", async () => {
+      put(m, "x4", [1, 0, 0, 0], { model: "fake-model", dims: 4 });
+      const d3 = qprov();
+      const d4 = fakeProvider({ dims: 4, vectorFor: () => [1, 0, 0, 0] });
+      expect(await ids(m, d3)).toEqual(["ca", "cb", "cc"]);
+      expect(await ids(m, d4)).toEqual(["x4"]);
+      expect(await ids(m, d3)).toEqual(["ca", "cb", "cc"]);
+      expect(await ids(m, d4)).toEqual(["x4"]);
+    });
+
+    it("two databases in one process do not share cached vectors", async () => {
+      const dirB = mkdtempSync(join(tmpdir(), "doug-memory-b-"));
+      const mb = openMemory(dirB);
+      try {
+        put(mb, "ca", [0.1, 0.9, 0]);
+        put(mb, "zz", [1, 0, 0]);
+        expect(await ids(m)).toEqual(["ca", "cb", "cc"]);
+        expect(await ids(mb)).toEqual(["zz", "ca"]);
+        expect(await ids(m)).toEqual(["ca", "cb", "cc"]);
+      } finally {
+        mb.close();
+        rmSync(dirB, { recursive: true, force: true });
+      }
+    });
+  });
+
+  describe("blob decode", () => {
+    it("scores identically when the driver hands back blobs at an odd byte offset inside a larger buffer", async () => {
+      const direct = (await recallLessons(m, "nomatchquery", { provider: qprov(), now: NOW, k: 20 })).lessons.map((l) => [l.id, l.score]);
+      clearCache();
+      const prepare = m.prepare.bind(m);
+      const shift = (row) => {
+        if (!row || !row.embedding || typeof row.embedding === "boolean") return row;
+        const bytes = Uint8Array.from(row.embedding);
+        const big = Buffer.alloc(bytes.length + 3);
+        big.set(bytes, 1); // odd offset: a Float32Array view straight onto it would throw
+        return { ...row, embedding: big.subarray(1, 1 + bytes.length) };
+      };
+      m.prepare = (sql) => {
+        const st = prepare(sql);
+        return new Proxy(st, {
+          get(target, prop) {
+            if (prop === "all") return (...a) => target.all(...a).map(shift);
+            if (prop === "get") return (...a) => shift(target.get(...a));
+            const v = target[prop];
+            return typeof v === "function" ? v.bind(target) : v;
+          },
+        });
+      };
+      try {
+        const shifted = (await recallLessons(m, "nomatchquery", { provider: qprov(), now: NOW, k: 20 })).lessons.map((l) => [l.id, l.score]);
+        expect(shifted).toEqual(direct);
+        expect(shifted.length).toBe(3);
+      } finally {
+        m.prepare = prepare;
+      }
+    });
+  });
+});
+
+// card recall-hybrid-scale, seat 4: pins for the cache's own-write patching, the earlier-now reuse guard, the
+// SQL freshness margin (needs a zone behind UTC, so a child process) and a NaN staleDays.
+describe("recallLessons: cache pins (card recall-hybrid-scale)", () => {
+  const NOW = new Date("2026-09-30T00:00:00.000Z");
+  const DAY = 86400000;
+  const daysAgo = (n, from = NOW) => new Date(from.getTime() - n * DAY).toISOString();
+  const MODEL = { model: "fake-model", dims: 3 };
+  const qprov = () => fakeProvider({ vectorFor: () => [1, 0, 0] });
+  const put = (db, id, vec, created, citation) => {
+    addLesson(db, { id, text: `pintext ${id}`, kind: "pattern", citation, source: { agent: "worker" }, created });
+    setLessonEmbedding(db, id, { ...MODEL, vector: Float32Array.from(vec) });
+  };
+  const run = (db, opts = {}) => recallLessons(db, "nomatchquery", { provider: qprov(), now: NOW, k: 20, ...opts });
+
+  beforeEach(() => {
+    clearRecallCache();
+    m = openMemory(dir);
+  });
+
+  it("a lesson recall marks stale (failed citation) is gone from the next recall served by the cache", async () => {
+    const checkoutDir = mkdtempSync(join(tmpdir(), "doug-memory-pin-"));
+    mkdirSync(join(checkoutDir, ".doug"), { recursive: true });
+    mkdirSync(join(checkoutDir, "src"), { recursive: true });
+    writeFileSync(join(checkoutDir, "src", "a.mjs"), "line one\nline two\n", "utf8");
+    try {
+      put(m, "pa", [1, 0, 0], daysAgo(5), 'src/a.mjs:2 "line moved"'); // fails its citation, ranks first
+      put(m, "pb", [0.5, 0.5, 0], daysAgo(5));
+      const first = await run(m, { checkoutDir });
+      expect(first.checked).toBe(true);
+      expect(first.lessons.map((l) => l.id)).toEqual(["pb"]);
+      expect(getLesson(m, "pa").stale).not.toBeNull();
+      // No checkoutDir: nothing re-checks, so only the cached rows can still hold pa.
+      const second = await run(m);
+      expect(second.lessons.map((l) => l.id)).toEqual(["pb"]);
+    } finally {
+      rmSync(checkoutDir, { recursive: true, force: true });
+    }
+  });
+
+  it("a lesson recall confirms is scored with its new confirmed date on the next cached recall", async () => {
+    const checkoutDir = mkdtempSync(join(tmpdir(), "doug-memory-pin-"));
+    mkdirSync(join(checkoutDir, ".doug"), { recursive: true });
+    mkdirSync(join(checkoutDir, "src"), { recursive: true });
+    writeFileSync(join(checkoutDir, "src", "a.mjs"), "line one\nline two\n", "utf8");
+    try {
+      put(m, "pc", [1, 0, 0], daysAgo(80), 'src/a.mjs:2 "line two"');
+      const first = await run(m, { checkoutDir, staleDays: 120 });
+      expect(first.lessons.map((l) => l.id)).toEqual(["pc"]);
+      expect(getLesson(m, "pc").confirmed).toBe(NOW.toISOString());
+      const cached = await run(m, { staleDays: 120 });
+      clearRecallCache();
+      const fresh = await run(m, { staleDays: 120 });
+      expect(fresh.lessons[0].score).toBeGreaterThan(0.99); // age 0 now: recency weight 1
+      expect(cached.lessons.map((l) => [l.id, l.score])).toEqual(fresh.lessons.map((l) => [l.id, l.score]));
+    } finally {
+      rmSync(checkoutDir, { recursive: true, force: true });
+    }
+  });
+
+  it("rows dropped as too old at a later now come back for a call with an earlier now", async () => {
+    put(m, "pd", [1, 0, 0], daysAgo(35));
+    put(m, "pe", [0.5, 0.5, 0], daysAgo(2));
+    const later = await run(m, { staleDays: 30 });
+    expect(later.lessons.map((l) => l.id)).toEqual(["pe"]);
+    const earlierNow = new Date(NOW.getTime() - 10 * DAY); // pd is 25 days old then
+    const earlier = await run(m, { staleDays: 30, now: earlierNow });
+    // pe was created after the earlier now: its age is negative, still fresh.
+    expect(earlier.lessons.map((l) => l.id).sort()).toEqual(["pd", "pe"]);
+  });
+
+  it("the SQL freshness margin keeps a zone-less date-time JS reads as fresh (child process, TZ=Etc/GMT+12)", () => {
+    const memUrl = new URL("../lib/memory.mjs", import.meta.url).href;
+    const script = `
+      import { openMemory, addLesson, setLessonEmbedding, recallLessons } from ${JSON.stringify(memUrl)};
+      const m = openMemory(process.argv[1]);
+      addLesson(m, { id: "tz1", text: "tz", kind: "pattern", source: { agent: "worker" }, created: "2026-08-31T00:00:00" });
+      setLessonEmbedding(m, "tz1", { model: "fake-model", dims: 3, vector: Float32Array.from([1, 0, 0]) });
+      const provider = { name: "fake", model: "fake-model", dims: 3, async embed(t) { return { ok: true, vectors: t.map(() => Float32Array.from([1, 0, 0])) }; } };
+      const now = new Date("2026-09-30T06:00:00.000Z");
+      const r = await recallLessons(m, "nomatchquery", { provider, now, staleDays: 30, k: 5 });
+      console.log(JSON.stringify({ anchorIso: new Date("2026-08-31T00:00:00").toISOString(), mode: r.mode, ids: r.lessons.map((l) => l.id) }));
+      m.close();
+    `;
+    const tzDir = mkdtempSync(join(tmpdir(), "doug-memory-tz-"));
+    try {
+      const res = spawnSync(process.execPath, ["--input-type=module", "-e", script, tzDir], {
+        encoding: "utf8",
+        env: { ...process.env, TZ: "Etc/GMT+12" },
+      });
+      expect(res.status, res.stderr).toBe(0);
+      const out = JSON.parse(res.stdout.trim().split("\n").pop());
+      expect(out.anchorIso).toBe("2026-08-31T12:00:00.000Z"); // the premise: JS reads it 12 hours after SQLite
+      expect(out.mode).toBe("hybrid");
+      expect(out.ids).toEqual(["tz1"]);
+    } finally {
+      rmSync(tzDir, { recursive: true, force: true });
+    }
+  });
+
+  describe("staleDays: NaN keeps nothing, as before the cache", () => {
+    beforeEach(() => {
+      addLesson(m, { id: "nk", text: "nanword alpha", kind: "pattern", source: { agent: "worker" }, created: daysAgo(1) });
+      setLessonEmbedding(m, "nk", { ...MODEL, vector: Float32Array.from([1, 0, 0]) });
+    });
+
+    it("keyword-only mode", async () => {
+      const result = await recallLessons(m, "nanword", { now: NOW, staleDays: NaN });
+      expect(result.mode).toBe("keyword-only");
+      expect(result.lessons).toEqual([]);
+    });
+
+    it("hybrid mode", async () => {
+      const result = await recallLessons(m, "nanword", { provider: qprov(), now: NOW, staleDays: NaN });
+      expect(result.lessons).toEqual([]);
+    });
   });
 });

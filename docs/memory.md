@@ -692,3 +692,17 @@ only the edits file and this doc are tracked. `CLAUDE.md` changes only when the 
 `learn.mjs apply <diff>`, which also appends the applied-proposal ledger line described above. `CLAUDE.md` is
 in neither `proposalPaths` nor `protectedPaths`, so `learn.mjs apply` accepts the diff and no hook blocks it;
 this command adds no new config surface.
+
+**The reflect offer** (card `reflect-offers-claude-md`). After `memory.mjs reflect` (report form or `--hand`, the
+same `runReflect`) appends a lesson, code decides whether CLAUDE.md has a home for it. The cheap pass may attach
+an optional `claudeMd: { heading, line }` suggestion to a lesson (the prompt lists CLAUDE.md's `## ` headings).
+There is no home when a suggestion exists and neither of these holds: an existing `- ` line of CLAUDE.md contains
+at least 60% of the suggestion's words (3+ letters; the denominator is the suggestion's), or the lesson text or
+suggestion names a script in `.doug/hooks/scripts/` as a whole word, with or without `.mjs` (a hook
+already enforces it). Rejected and bumped proposals never get a candidate. For a lesson with no home, reflect
+checks the edits object with `proposeClaudeMd(..., { dryRun: true })`; when it passes, the edits file goes to
+`.doug/.state/learn/claude-md-candidates/<lesson id>.json` (nothing is written under `--dry-run`) and reflect
+prints `claude-md candidate for lesson <id>: node .../memory.mjs claude-md propose --file <file>`. A refusal (a
+Models or Commands change, a missing heading, over 60 lines) is dropped and printed as
+`claude-md candidate for lesson <id> dropped: <reason>`. `--json` carries `claudeMd` and `claudeMdDropped`.
+Reflect never writes CLAUDE.md and never runs `learn.mjs apply`; running the printed command only makes a diff.

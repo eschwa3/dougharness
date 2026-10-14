@@ -265,7 +265,7 @@ async function attachCodeContext(plan, dir, provider) {
   }
 }
 
-const SETTABLE = ["install", "baseBranch", "integrationBranch", "integrationWorktree", "adversary.command", "adversary.fallback", "card", "fixAttempts", "swarm", "workerCheck"];
+const SETTABLE = ["install", "baseBranch", "integrationBranch", "integrationWorktree", "adversary.command", "adversary.fallback", "card", "fixAttempts", "swarm", "workerCheck", "crew.testers"];
 
 const [cmd, ...argsRaw] = process.argv.slice(2);
 // --card=<id> is the same as --card <id>.
@@ -520,6 +520,10 @@ switch (cmd) {
       // Card swarm-topology (candidate 3): a deterministic per-worker check before the merge, behind the swarm opt-in.
       if (!/^(on|off|true|false)$/i.test(value.trim())) fail(`plan.mjs set workerCheck: the value must be on or off, got ${JSON.stringify(value)}`, 2);
       next.workerCheck = /^(on|true)$/i.test(value.trim());
+    } else if (key === "crew.testers") {
+      // Card crew-tester-seat: how many verifier seats run in parallel per full-shape task.
+      if (!/^[1-9]\d*$/.test(value.trim())) fail(`plan.mjs set crew.testers: the value must be a positive integer, got ${JSON.stringify(value)}`, 2);
+      next.crew = { ...(plan.crew && typeof plan.crew === "object" && !Array.isArray(plan.crew) ? plan.crew : {}), testers: Number(value.trim()) };
     } else if (key === "fixAttempts") {
       if (!/^\d+$/.test(value)) fail(`plan.mjs set fixAttempts: the value must be a non-negative integer, got ${JSON.stringify(value)}`, 2);
       next.fixAttempts = Number(value);

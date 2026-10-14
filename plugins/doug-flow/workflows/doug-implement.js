@@ -4,7 +4,7 @@ export const meta = {
   whenToUse: 'After /doug-plan produced .doug/plan.json and the user approved it with /doug-approve. Pass the plan JSON as args.',
   phases: [
     { title: 'Implement', detail: 'one implementer per task, fresh context, own worktree (with swarm on, a lead splits a full-shape task into worker briefs, workers implement them in parallel, and the lead merges); a task marked reuse checks out its recorded branch instead; a task whose dependency did not integrate is never launched; a block the checks can describe is fixed in place until the task budget, the fix-attempt ceiling, a pass that made no new commit, or two consecutive passes raising a new blocker stops it' },
-    { title: 'Verify', detail: 'a separate verifier runs the task command in the worktree on the first pass; a fix pass runs one focused check over the fix delta instead, and the full verifier again only when the verifier is the stage that blocked' },
+    { title: 'Verify', detail: 'a separate verifier runs the task command in the worktree on the first pass; a fix pass runs one focused check over the fix delta instead, and the full verifier again only when the verifier is the stage that blocked; a task whose crew names more testers gets extra verifiers in parallel' },
     { title: 'Review', detail: 'spec compliance, then quality, against the diff on the first pass; on a fix pass the focused check carries scope and regression risk unless the reviewer is the stage that blocked; a task whose crew names two reviewers gets a second one in parallel with a distinct brief' },
     { title: 'Adversary', detail: 'codex-review (a different model, read-only) explores freely on the first pass and confirms the open findings on later passes, under one material blocker gate; when it cannot run, a Claude adversary on plan.adversary.fallback stands in; blockers stop integration' },
     { title: 'Integrate', detail: 'merge the level into the integration branch and run plan.verify' },
@@ -64,6 +64,9 @@ const ENVIRONMENT_MARKER = 'ENVIRONMENT ONLY'
 // The one rule about commit messages, in every prompt that commits or checks commits: this repository records
 // attribution nowhere in git, and plan.mjs land refuses a branch that carries either trailer.
 const NO_TRAILERS = 'Commit messages carry no attribution trailers: no Co-Authored-By line and no Claude-Session line, whatever your defaults say. A commit with either is a finding and the plan cannot land.'
+// The one rule about how a commit runs, in every implement prompt that commits: the pre-commit hook runs the full
+// unit suite, which outlives Bash's default timeout, and a background commit dies with the agent that started it.
+const FOREGROUND_COMMIT = 'Run git commit in the foreground with the Bash tool timeout set to 600000 ms (the pre-commit hook runs the full suite): never run_in_background, a Monitor, or a sleep loop. Take the sha only from git rev-parse HEAD after git commit has returned.'
 const LESSONS_NOT_SPEC = 'These are context from earlier runs, not part of the spec or the acceptance criteria; never report a finding, a spec contradiction, or a blocker against a lesson.'
 // The one rule about a partial result, in every prompt a worker (or a resumed worker) can end with one from
 // (card worker-context-handoff): quotes the harness's context notice (a PostToolUse hook in plugins/doug-gates) so
@@ -831,7 +834,7 @@ function ledgerText(ledger, kind) {
 function implementPrompt(task, baseBranch, opts) {
   const resume = !!(opts && opts.resume)
   const branchCheck = resume
-    ? `   Before that, if git rev-parse --verify --quiet refs/heads/doug/task-${task.id} succeeds, the branch doug/task-${task.id} was created by the previous agent for this task in this same run, which stopped without returning a result; it is yours, not stale. Find that agent's worktree with git worktree list --porcelain (the one with branch refs/heads/doug/task-${task.id}); if none is listed, go straight to the checkout. If it has uncommitted changes to owned files, commit them there first with a message starting "${task.id}: ". ${NO_TRAILERS} Then remove that worktree with git worktree remove --force <path>, then git checkout doug/task-${task.id} in your own worktree and continue the task from that branch's state (do not recreate the branch or reset it). Never return blocked for the branch existing.`
+    ? `   Before that, if git rev-parse --verify --quiet refs/heads/doug/task-${task.id} succeeds, the branch doug/task-${task.id} was created by the previous agent for this task in this same run, which stopped without returning a result; it is yours, not stale. Find that agent's worktree with git worktree list --porcelain (the one with branch refs/heads/doug/task-${task.id}); if none is listed, go straight to the checkout. If it has uncommitted changes to owned files, commit them there first with a message starting "${task.id}: ". ${NO_TRAILERS} ${FOREGROUND_COMMIT} Then remove that worktree with git worktree remove --force <path>, then git checkout doug/task-${task.id} in your own worktree and continue the task from that branch's state (do not recreate the branch or reset it). Never return blocked for the branch existing.`
     : `   Before that, if git rev-parse --verify --quiet refs/heads/doug/task-${task.id} succeeds, the branch is a leftover of an earlier run: do not check it out or build on it; change nothing and return blocked=true with blockedReason "stale branch doug/task-${task.id} already exists; run plan.mjs replan, which renames it".`
   return [
     `You are implementing exactly one task from an approved plan. Work only in your own git worktree.`,
@@ -854,7 +857,7 @@ function implementPrompt(task, baseBranch, opts) {
     `   A fresh worktree has no installed dependencies: if the verification command needs them, run the project's install command first${plan.install ? ` (${plan.install})` : ''}. Installing is not a file change you own; do not commit lockfile changes it makes.`,
     `2. Touch no file outside your owned list. If the task cannot be done without another file, stop and report blocked=true with the reason.`,
     `3. Run the verification command before finishing and report each command with its real exit status. Never report a command you did not run.`,
-    `4. Commit your work on the branch with a message starting "${task.id}: ". ${NO_TRAILERS}`,
+    `4. Commit your work on the branch with a message starting "${task.id}: ". ${NO_TRAILERS} ${FOREGROUND_COMMIT}`,
     `5. Return the structured result. filesTouched must come from git, not memory, and commit must be the output of git rev-parse HEAD in your worktree after that commit.`,
     `6. ${PARTIAL_RULE}`,
   ].join('\n')
@@ -885,7 +888,7 @@ function reusePrompt(task, baseBranch) {
 function leadPrompt(task, baseBranch, opts) {
   const resume = !!(opts && opts.resume)
   const branchCheck = resume
-    ? `   Before that, if git rev-parse --verify --quiet refs/heads/doug/task-${task.id} succeeds, the branch doug/task-${task.id} was created by the previous agent for this task in this same run, which stopped without returning a result; it is yours, not stale. Find that agent's worktree with git worktree list --porcelain (the one with branch refs/heads/doug/task-${task.id}); if none is listed, go straight to the checkout. If it has uncommitted changes to owned files, commit them there first with a message starting "${task.id}: ". ${NO_TRAILERS} Then remove that worktree with git worktree remove --force <path>, then git checkout doug/task-${task.id} in your own worktree and continue the task from that branch's state (do not recreate the branch or reset it). Never return blocked for the branch existing.`
+    ? `   Before that, if git rev-parse --verify --quiet refs/heads/doug/task-${task.id} succeeds, the branch doug/task-${task.id} was created by the previous agent for this task in this same run, which stopped without returning a result; it is yours, not stale. Find that agent's worktree with git worktree list --porcelain (the one with branch refs/heads/doug/task-${task.id}); if none is listed, go straight to the checkout. If it has uncommitted changes to owned files, commit them there first with a message starting "${task.id}: ". ${NO_TRAILERS} ${FOREGROUND_COMMIT} Then remove that worktree with git worktree remove --force <path>, then git checkout doug/task-${task.id} in your own worktree and continue the task from that branch's state (do not recreate the branch or reset it). Never return blocked for the branch existing.`
     : `   Before that, if git rev-parse --verify --quiet refs/heads/doug/task-${task.id} succeeds, the branch is a leftover of an earlier run: do not check it out or build on it; change nothing and return blocked=true with blockedReason "stale branch doug/task-${task.id} already exists; run plan.mjs replan, which renames it".`
   return [
     `You are the lead of a swarm for exactly one task of an approved plan. You split the task into worker briefs; you do not implement anything and you edit no file. Work only in your own git worktree.`,
@@ -944,7 +947,7 @@ function workerPrompt(task, brief, n, lead) {
     `   A fresh worktree has no installed dependencies: if the verification command needs them, run the project's install command first${plan.install ? ` (${plan.install})` : ''}. Installing is not a file change you own; do not commit lockfile changes it makes.`,
     `2. Touch no file outside your owned list. If the brief cannot be done without another file, stop and report blocked=true with a blockedReason that names exactly what you need - the file, the symbol or interface, or the decision - because the lead may re-brief you once on it; a vague reason wastes that chance.`,
     `3. Run the verification command before finishing and report each command with its real exit status. Never report a command you did not run.`,
-    `4. Commit your work on the branch with a message starting "${task.id}: w${n} ". ${NO_TRAILERS}`,
+    `4. Commit your work on the branch with a message starting "${task.id}: w${n} ". ${NO_TRAILERS} ${FOREGROUND_COMMIT}`,
     `5. Return the structured result. filesTouched must come from git diff --name-only ${lead.branch}...HEAD, and commit must be the output of git rev-parse HEAD in your worktree after that commit.`,
     `6. ${PARTIAL_RULE}`,
   ].join('\n')
@@ -1048,7 +1051,7 @@ function fixPrompt(task, r, pass, baseBranch, ledger, brief) {
   lines.push(`1. Touch no file outside your owned list. If a finding can only be met by changing another file, stop and return blocked=true with the reason.`)
   lines.push(`2. Do not delete, skip, or weaken any test to make a check pass; make the code satisfy it. If that is impossible within the spec, return blocked=true and say why.`)
   lines.push(`3. Run the verification command before finishing; it must pass. Report every command with its real exit status and never one you did not run.`)
-  lines.push(`4. Commit on ${r.impl.branch} with a message starting "${task.id}: fix ". Do not amend or rewrite earlier commits. A pass that ends with no new commit stops the task. ${NO_TRAILERS}`)
+  lines.push(`4. Commit on ${r.impl.branch} with a message starting "${task.id}: fix ". Do not amend or rewrite earlier commits. A pass that ends with no new commit stops the task. ${NO_TRAILERS} ${FOREGROUND_COMMIT}`)
   lines.push(`5. Return the structured result with taskId="${task.id}", branch="${r.impl.branch}", worktreePath${r.worktreeGone ? ' = the absolute path of your worktree (git rev-parse --show-toplevel)' : `="${r.impl.worktreePath}"`}, filesTouched from git diff --name-only ${baseBranch}...HEAD, commit from git rev-parse HEAD after your commit, blocked=false.`)
   lines.push(`6. ${PARTIAL_RULE}`)
   return lines.join('\n')
@@ -1081,7 +1084,7 @@ function resumePrompt(task, prev, handoff, baseBranch, brief) {
     `Rules:`,
     `1. Touch no file outside your owned list. If the work cannot be done without another file, stop and report blocked=true with the reason.`,
     `2. Run the verification command before finishing and report each command with its real exit status. Never report a command you did not run.`,
-    `3. Commit your work on ${prev.branch} with a message starting "${task.id}: resume ". ${NO_TRAILERS}`,
+    `3. Commit your work on ${prev.branch} with a message starting "${task.id}: resume ". ${NO_TRAILERS} ${FOREGROUND_COMMIT}`,
     `4. ${PARTIAL_RULE}`,
     `5. Return the structured result. filesTouched must come from git diff --name-only ${baseBranch}...HEAD, and commit must be the output of git rev-parse HEAD in your worktree after that commit.`,
   ].join('\n')
@@ -1125,9 +1128,10 @@ function supervisePrompt(task, r, attempts, ledger, signals) {
   ].join('\n')
 }
 
-function verifyPrompt(task, impl, baseBranch) {
+function verifyPrompt(task, impl, baseBranch, seat = 1) {
   return [
     `You are a verifier. You did not write this code. Your job is to run it, not to read and approve it.`,
+    ...(seat > 1 ? [`You are crew seat ${seat} of ${crewOf(task).testers} on this task: another verifier runs the same checks at the same time. Run the verification and acceptance commands yourself, and beyond them probe the behavior the spec implies that those commands may not cover: edge cases (empty, missing, boundary, and repeated input) and error paths (invalid input, a failing dependency). A defect you find is a finding even when every command passes.`] : []),
     ``,
     `Task ${task.id}: ${task.title}`,
     `Spec:`,
@@ -1990,13 +1994,41 @@ async function runAdversary(task, impl, pass, baseBranch, ledger, launch, stages
 }
 
 // ---- Crew (card crew-sizing) ---------------------------------------------------
-// A task (or the plan) declares how many reviewers and adversaries read it; default one each. More coders is a
+// A task (or the plan) declares how many reviewers, adversaries and testers read it; default one each. More coders is a
 // split into more tasks, never a shared worktree, so the crew has no coders row. Researchers run before planning
 // (the research skill) and are not launched here.
 function crewOf(task) {
   const src = { ...((plan.crew && typeof plan.crew === 'object') ? plan.crew : {}), ...((task && task.crew && typeof task.crew === 'object') ? task.crew : {}) }
   const n = v => (Number.isInteger(v) && v > 0 ? v : 1)
-  return { reviewers: n(src.reviewers), adversaries: n(src.adversaries) }
+  return { reviewers: n(src.reviewers), adversaries: n(src.adversaries), testers: n(src.testers) }
+}
+
+// One verification out of several tester seats (card crew-tester-seat): passed only when every seat that returned
+// passed, findings and commands concatenated so the ledger's fingerprint collapses a duplicate, and an acceptance
+// criterion (matched by text) ok only when every seat reporting it ok. A seat that returned nothing is dropped; when
+// no seat returned anything the stage returned nothing; one seat comes back unchanged.
+function mergeVerifies(seats) {
+  const got = seats.filter(Boolean)
+  if (!got.length) return null
+  if (got.length === 1 && seats.length === 1) return got[0]
+  const acceptance = []
+  for (const v of got) {
+    for (const a of (v.acceptance || [])) {
+      const at = acceptance.findIndex(x => x.text === a.text)
+      if (at < 0) acceptance.push({ ...a })
+      else if (acceptance[at].ok && !a.ok) acceptance[at] = { ...a }
+    }
+  }
+  return {
+    taskId: got[0].taskId,
+    passed: got.every(v => v.passed),
+    commandsRun: got.flatMap(v => v.commandsRun || []),
+    findings: got.flatMap(v => v.findings || []),
+    findingFiles: got.flatMap(v => v.findingFiles || []),
+    acceptance,
+    head: got[0].head,
+    seats: got.length,
+  }
 }
 
 // One review out of several: every seat must approve, and every seat's issues are kept, so a finding one reviewer
@@ -2159,19 +2191,21 @@ async function runChecks(task, impl, pass, baseBranch, ctx) {
     // The verifier, the reviewer, and the adversary are read-only and none reads another's result, so a first pass
     // launches them together; a null from any (skipped, or dead after retries) is that stage returning nothing.
     stages.push('verify')
-    stages.push('review')
     const crew = crewOf(task)
+    for (let seat = 2; seat <= crew.testers; seat++) stages.push(`verify-${seat}`)
+    stages.push('review')
     for (let seat = 2; seat <= crew.reviewers; seat++) stages.push(`review-${seat}`)
     const withAdversary = adversaryRequired(task)
     const advStages = []
     const pair = await parallel([
       () => launch(verifyPrompt(task, impl, baseBranch), agentOpts('verify', task, { label: `verify:${task.id}`, phase: 'Verify', agentType: 'doug-flow:verifier', schema: VERIFY_SCHEMA })),
+      ...Array.from({ length: crew.testers - 1 }, (_, i) => () => launch(verifyPrompt(task, impl, baseBranch, i + 2), agentOpts('verify', task, { label: `verify-${i + 2}:${task.id}`, phase: 'Verify', agentType: 'doug-flow:verifier', schema: VERIFY_SCHEMA }))),
       () => launch(reviewPrompt(task, impl, baseBranch), agentOpts('review', task, { label: `review:${task.id}`, phase: 'Review', agentType: 'doug-flow:reviewer', schema: REVIEW_SCHEMA })),
       ...Array.from({ length: crew.reviewers - 1 }, (_, i) => () => launch(reviewPrompt(task, impl, baseBranch, i + 2), agentOpts('review', task, { label: `review-${i + 2}:${task.id}`, phase: 'Review', agentType: 'doug-flow:reviewer', schema: REVIEW_SCHEMA }))),
       ...(withAdversary ? [() => runAdversaryCrew(task, impl, pass, baseBranch, ledger, launch, advStages)] : []),
     ])
-    ver = (pair && pair[0]) || null
-    rev = pair ? mergeReviews(pair.slice(1, 1 + crew.reviewers)) : null
+    ver = pair ? mergeVerifies(pair.slice(0, crew.testers)) : null
+    rev = pair ? mergeReviews(pair.slice(crew.testers, crew.testers + crew.reviewers)) : null
     stageResults.verify = ver
     stageResults.review = rev
     // The adversary no longer waits for verify and review (card flow-adversary-parallel, 2026-10-07): waiting
@@ -2179,7 +2213,7 @@ async function runChecks(task, impl, pass, baseBranch, ctx) {
     // integration still needs all three verdicts (isReady), and the ledger reads each stage's findings.
     if (withAdversary) {
       stages.push(...advStages)
-      adv = (pair && pair[1 + crew.reviewers]) || null
+      adv = (pair && pair[crew.testers + crew.reviewers]) || null
       stageResults.adversary = adv
     }
     blockingStage = !(ver && ver.passed) ? 'verify' : !(rev && rev.approve) ? 'review' : adversaryBlocked(adv) ? 'adversary' : null
@@ -2187,7 +2221,13 @@ async function runChecks(task, impl, pass, baseBranch, ctx) {
     const first = c.blocking || 'verify'
     if (first === 'verify') {
       stages.push('verify')
-      ver = await launch(verifyPrompt(task, impl, baseBranch), agentOpts('verify', task, { label: `verify:${task.id}${suffix}`, phase: 'Verify', agentType: 'doug-flow:verifier', schema: VERIFY_SCHEMA }))
+      const testers = crewOf(task).testers
+      for (let seat = 2; seat <= testers; seat++) stages.push(`verify-${seat}`)
+      const verifyOpts = seat => agentOpts('verify', task, { label: `verify${seat > 1 ? `-${seat}` : ''}:${task.id}${suffix}`, phase: 'Verify', agentType: 'doug-flow:verifier', schema: VERIFY_SCHEMA })
+      if (testers > 1) {
+        const seats = await parallel(Array.from({ length: testers }, (_, i) => () => launch(verifyPrompt(task, impl, baseBranch, i + 1), verifyOpts(i + 1))))
+        ver = mergeVerifies(seats || [])
+      } else ver = await launch(verifyPrompt(task, impl, baseBranch), verifyOpts(1))
       stageResults.verify = ver
       if (!(ver && ver.passed)) blockingStage = 'verify'
     } else if (first === 'review') {
@@ -2422,7 +2462,7 @@ async function runTask(task, baseBranch, resume) {
     const fellBack = (r.stages || []).includes('adversary-fallback')
     const crew = crewOf(task)
     const advAgents = adversaryRequired(task) ? (fellBack ? 1 : 0) + crew.adversaries : 0
-    const firstStage = blocking === 'adversary' ? advAgents : blocking === 'review' ? crew.reviewers : 1
+    const firstStage = blocking === 'adversary' ? advAgents : blocking === 'review' ? crew.reviewers : blocking === 'verify' ? crew.testers : 1
     const nextStages = firstStage + (blocking === 'check' ? 0 : 1) + (blocking === 'adversary' ? 0 : advAgents)
     const spent = measure()
     const passesDone = attempts.length
