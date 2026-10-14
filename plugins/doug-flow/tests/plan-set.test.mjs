@@ -317,6 +317,24 @@ describe("plan.mjs set swarm", () => {
   });
 });
 
+describe("plan.mjs set crew.testers (card crew-tester-seat)", () => {
+  it("writes crew.testers as an integer, keeps the rest of the crew, shows it, and refuses non-positive or non-integer values", () => {
+    const dir = project();
+    expect(run(["set", "crew.testers", "2"], dir).status).toBe(0);
+    expect(loadPlan(dir).crew).toEqual({ testers: 2 });
+    expect(run(["show"], dir).stdout).toContain("testers 2");
+    savePlan(dir, { ...loadPlan(dir), crew: { reviewers: 2, testers: 2 } });
+    expect(run(["set", "crew.testers", "3"], dir).status).toBe(0);
+    expect(loadPlan(dir).crew).toEqual({ reviewers: 2, testers: 3 });
+    for (const bad of ["0", "-1", "1.5", "two", "2x"]) {
+      const r = run(["set", "crew.testers", bad], dir);
+      expect(r.status, `crew.testers ${bad}`).toBe(2);
+      expect(r.stderr, `crew.testers ${bad}`).toContain("crew.testers");
+      expect(loadPlan(dir).crew, `crew.testers ${bad} left the plan alone`).toEqual({ reviewers: 2, testers: 3 });
+    }
+  });
+});
+
 describe("plan.mjs set workerCheck", () => {
   it("sets workerCheck on or off, shows it, and refuses other values", () => {
     const dir = project();

@@ -24,7 +24,7 @@ export const SIZES = ["S", "M", "L"];
 export const GATES = ["auto", "human"];
 // Crew per role (card crew-sizing): researchers before planning, reviewers and adversaries after implementation,
 // default one each. More coders is a split into more tasks, so there is no coders row.
-export const CREW_ROLES = ["researchers", "reviewers", "adversaries"];
+export const CREW_ROLES = ["researchers", "reviewers", "adversaries", "testers"];
 
 // Error strings for a crew object at `where` (the plan or a task); [] when valid or absent.
 function crewErrors(crew, where) {

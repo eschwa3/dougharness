@@ -802,10 +802,24 @@ function waiverSources(dir, baselineHead) {
   return sources;
 }
 
+// A tree's own last-green record, read live; null when absent or unreadable (card worktree-count-baseline).
+function readLastGreen(dir) {
+  try {
+    const parsed = JSON.parse(readFileSync(join(dir, LAST_GREEN_RELPATH), "utf8"));
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
 // The count check for the commands that ran green by exit code. Returns { problems, parsed }: `problems` are
 // block reasons, `parsed` the per-command summary lists of every run that was counted (for the last-green
 // record). A missing or unparseable summary, or no baseline, is a trace line and no check.
-function countCheck(dir, cfg, state, input, ran) {
+function countCheck(dir, cfg, state, input, ran, vdir) {
+  // card worktree-count-baseline: a worktree run compares against its own earlier green runs, never main's record
+  // (a worktree can lack the dist build main has, so its skipped count differs). No record yet means no check.
+  const inWorktree = typeof vdir === "string" && vdir !== dir;
+  const baseline = inWorktree ? readLastGreen(vdir) : state.testTotals;
   const problems = [];
   const parsed = {};
   // The note carries its own event name, never the stop event's: a decision-less SubagentStop line would read to
@@ -829,7 +843,7 @@ function countCheck(dir, cfg, state, input, ran) {
         note(`count check did not run for \`${command}\`: no test summary in its output`);
         continue;
       }
-      const all = state.testTotals && typeof state.testTotals === "object" ? state.testTotals : null;
+      const all = baseline && typeof baseline === "object" ? baseline : null;
       const baseList = all ? readSummaries(all[command]) : null;
       if (!baseList) {
         parsed[command] = summaries;
@@ -1991,7 +2005,7 @@ runHook("stop-gate", async (input) => {
   const evidenceProblemAdded = problems.length > postCommandProblems;
 
   // 3c. Test-count ratchet (card test-count-ratchet): its own kind of problem, not a failed command.
-  const counted = countCheck(dir, cfg, state, input, ranGreen);
+  const counted = countCheck(dir, cfg, state, input, ranGreen, vdir);
   problems.push(...counted.problems);
   const countProblemAdded = counted.problems.length > 0;
 
@@ -2012,7 +2026,7 @@ runHook("stop-gate", async (input) => {
   // A read-only-turn skip verified nothing: it leaves lastRed (and stopBlocks, below) as they were.
   if (skipReason !== "read-only-turn") state.lastRed = null; // card stop-gate-no-change-restop: re-set at the final block below when it qualifies
   if (problems.length === 0 && !skipVerification && !targeted) state.verified = verifiedCandidate;
-  if (problems.length === 0 && !skipVerification) writeLastGreen(dir, counted.parsed); // empty when nothing really ran
+  if (problems.length === 0 && !skipVerification) writeLastGreen(vdir || dir, counted.parsed); // empty when nothing really ran
   if (problems.length === 0 && subagent) {
     // A subagent's green gate: its counter resets; the checkpoint, if any, belongs to the session's own Stop.
     state.agentBlocks = { ...(state.agentBlocks || {}), [subagent.id]: 0 };

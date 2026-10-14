@@ -403,6 +403,146 @@ describe("memory.mjs reflect", () => {
   });
 });
 
+describe("memory.mjs reflect: CLAUDE.md candidates (card reflect-offers-claude-md)", () => {
+  function claudeMdProject() {
+    const dir = tempDir();
+    writeFileSync(
+      join(dir, "CLAUDE.md"),
+      "# Project instructions\n\n## Gotchas\n\n- Vendored hook files changed mid session leave stale state.\n\n## Models\n\n| Work | Model | Effort |\n|---|---|---|\n| plan | opus | high |\n",
+      "utf8",
+    );
+    return dir;
+  }
+  const lesson = (text, claudeMd) => ({
+    kind: "pitfall",
+    text,
+    citation: "report:agents-generator/F1",
+    task: "agents-generator",
+    notDerivableBecause: "not written anywhere in the repo today",
+    claudeMd,
+  });
+  const envelope = (lessons) => ({ structured_output: { lessons }, session_id: "sess-cm", total_cost_usd: 0.01, is_error: false });
+
+  it("prints one line per candidate and per drop, --json carries both arrays, and the prompt asks for claudeMd with the CLAUDE.md headings", () => {
+    const dir = claudeMdProject();
+    const promptFile = join(dir, "prompt.txt");
+    const claudeBin = writeFakeClaudeCapturingPrompt(
+      dir,
+      envelope([
+        lesson("The adversary needs owned files listed exactly or retriable checks fail silently", { heading: "## Gotchas", line: "- Quartz widgets need fencing before any polishing starts." }),
+        lesson("A reviewer pass that edits tests must state a reason or the lead sends it back", { heading: "## Nowhere", line: "- Zebra crossings pause every polishing cycle." }),
+      ]),
+      promptFile,
+    );
+    const args = ["reflect", fixtureReport, dir, "--adversary", "F1=real: confirmed by fix", "--claude-bin", claudeBin];
+    const res = run(args, dir);
+    expect(res.status, res.stderr).toBe(0);
+    expect(res.stdout).toMatch(/claude-md candidate for lesson [0-9a-f]+: node .*memory\.mjs claude-md propose --file .*\.json/);
+    expect(res.stdout).toMatch(/claude-md candidate for lesson [0-9a-f]+ dropped: .*## Nowhere/);
+    const prompt = readFileSync(promptFile, "utf8");
+    expect(prompt).toContain("claudeMd");
+    expect(prompt).toContain("## Gotchas");
+
+    // the printed command actually turns the candidate into a diff
+    const cmd = res.stdout.match(/claude-md candidate for lesson [0-9a-f]+: (node .*)$/m)[1];
+    const parts = cmd.split(" ");
+    const file = parts[parts.length - 1];
+    expect(existsSync(file)).toBe(true);
+    const proposed = run(["claude-md", "propose", "--file", file, dir], dir);
+    expect(proposed.status, proposed.stderr).toBe(0);
+  });
+
+  it("--json carries claudeMd and claudeMdDropped", () => {
+    const dir = claudeMdProject();
+    const claudeBin = writeFakeClaudeSuccess(
+      dir,
+      envelope([
+        lesson("The adversary needs owned files listed exactly or retriable checks fail silently", { heading: "## Gotchas", line: "- Quartz widgets need fencing before any polishing starts." }),
+        lesson("A reviewer pass that edits tests must state a reason or the lead sends it back", { heading: "## Models", line: "- Zebra crossings pause every polishing cycle." }),
+      ]),
+    );
+    const res = run(["reflect", fixtureReport, dir, "--adversary", "F1=real: confirmed by fix", "--claude-bin", claudeBin, "--json"], dir);
+    expect(res.status, res.stderr).toBe(0);
+    const json = JSON.parse(res.stdout);
+    expect(json.claudeMd).toHaveLength(1);
+    expect(json.claudeMd[0]).toMatchObject({ lessonId: expect.any(String), file: expect.stringContaining("claude-md-candidates"), command: expect.stringContaining("claude-md propose --file") });
+    expect(json.claudeMdDropped).toHaveLength(1);
+    expect(json.claudeMdDropped[0].reason).toContain("Models");
+  });
+});
+
+describe("memory.mjs reflect: CLAUDE.md candidate fixes (card reflect-offers-claude-md)", () => {
+  const NOVEL = { heading: "## Gotchas", line: "- Quartz widgets need fencing before any polishing starts." };
+  function claudeMdProject() {
+    const dir = tempDir();
+    writeFileSync(
+      join(dir, "CLAUDE.md"),
+      "# Project instructions\n\n## Gotchas\n\n- Vendored hook files changed mid session leave stale state.\n\n## Models\n\n| Work | Model | Effort |\n|---|---|---|\n| plan | opus | high |\n",
+      "utf8"
+    );
+    return dir;
+  }
+  const handLesson = (claudeMd) => ({
+    kind: "pattern",
+    text: "uploads retry with jittered backoff",
+    citation: "report:c1",
+    task: "c1",
+    notDerivableBecause: "learned only from this landing",
+    claudeMd,
+  });
+  const envelope = (lessons) => ({ structured_output: { lessons }, session_id: "sess-cm2", total_cost_usd: 0.01, is_error: false });
+  function seedHand(dir) {
+    const base = join(dir, ".doug", ".state", "reports", "c1");
+    mkdirSync(join(base, "briefs"), { recursive: true });
+    mkdirSync(join(base, "reviews"), { recursive: true });
+    writeFileSync(join(base, "lessons.json"), JSON.stringify({ card: "c1", query: "q", mode: "keyword", reason: null, ids: [], text: "x", recalledAt: "2026-10-07T00:00:00.000Z" }), "utf8");
+    writeFileSync(join(base, "briefs", "1-coder.md"), "BRIEF", "utf8");
+    writeFileSync(join(base, "reviews", "1.md"), "REVIEW", "utf8");
+  }
+
+  it("reflect --hand with claude-md-candidates a plain file: exit 0, the lesson is appended, the drop line is printed, no stack", () => {
+    const dir = claudeMdProject();
+    try {
+      seedHand(dir);
+      mkdirSync(join(dir, ".doug/.state/learn"), { recursive: true });
+      writeFileSync(join(dir, ".doug/.state/learn/claude-md-candidates"), "plain file\n", "utf8");
+      const claudeBin = writeFakeClaudeSuccess(dir, envelope([handLesson(NOVEL)]));
+      const res = run(["reflect", "--hand", "c1", dir, "--commit", "abc1234", "--claude-bin", claudeBin], dir);
+      expect(res.status, res.stderr).toBe(0);
+      expect(res.stdout).toMatch(/claude-md candidate for lesson [0-9a-f]+ dropped: .*(EEXIST|ENOTDIR|exists|not a directory)/i);
+      const lessons = JSON.parse(run(["lessons", dir, "--json"], dir).stdout);
+      expect(lessons.filter((l) => l.source_agent === "reflect")).toHaveLength(1);
+      const m = openMemory(dir);
+      try {
+        const row = m.prepare("SELECT * FROM reflections").get();
+        expect(row.proposed).toBe(1);
+        expect(row.rejected).not.toBeNull();
+      } finally {
+        m.close();
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("--dry-run says the candidate was not written and prints no `propose --file` command for the unwritten file", () => {
+    const dir = claudeMdProject();
+    try {
+      const claudeBin = writeFakeClaudeSuccess(
+        dir,
+        envelope([{ kind: "pitfall", text: "The adversary needs owned files listed exactly or retriable checks fail silently", citation: "report:agents-generator/F1", task: "agents-generator", notDerivableBecause: "not written anywhere in the repo today", claudeMd: NOVEL }])
+      );
+      const res = run(["reflect", fixtureReport, dir, "--adversary", "F1=real: confirmed by fix", "--claude-bin", claudeBin, "--dry-run"], dir);
+      expect(res.status, res.stderr).toBe(0);
+      expect(res.stdout).toMatch(/claude-md candidate for lesson [0-9a-f]+ \(dry run, not written\)/);
+      expect(res.stdout).not.toContain("claude-md propose --file");
+      expect(existsSync(join(dir, ".doug/.state/learn/claude-md-candidates"))).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("memory.mjs reflect --harmful (card reflect-harmful-irrelevant-lessons)", () => {
   const counters = (dir, id) => {
     const m = openMemory(dir);

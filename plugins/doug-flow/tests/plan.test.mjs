@@ -401,19 +401,35 @@ import { crewOf, CREW_ROLES } from "../lib/plan.mjs";
 describe("crew", () => {
   const t = (extra = {}) => ({ id: "a", title: "A", spec: "a spec that is long enough to pass", files: ["a.ts"], ...extra });
   it("defaults to one per role, lets a task override the plan, and validates the shape", () => {
-    expect(CREW_ROLES).toEqual(["researchers", "reviewers", "adversaries"]);
-    expect(crewOf(plan(), t())).toEqual({ researchers: 1, reviewers: 1, adversaries: 1 });
-    expect(crewOf(plan({ crew: { reviewers: 2 } }), t())).toEqual({ researchers: 1, reviewers: 2, adversaries: 1 });
-    expect(crewOf(plan({ crew: { reviewers: 2 } }), t({ crew: { reviewers: 3, adversaries: 2 } }))).toEqual({ researchers: 1, reviewers: 3, adversaries: 2 });
+    expect(CREW_ROLES).toEqual(["researchers", "reviewers", "adversaries", "testers"]);
+    expect(crewOf(plan(), t())).toEqual({ researchers: 1, reviewers: 1, adversaries: 1, testers: 1 });
+    expect(crewOf(plan({ crew: { reviewers: 2 } }), t())).toEqual({ researchers: 1, reviewers: 2, adversaries: 1, testers: 1 });
+    expect(crewOf(plan({ crew: { reviewers: 2 } }), t({ crew: { reviewers: 3, adversaries: 2 } }))).toEqual({ researchers: 1, reviewers: 3, adversaries: 2, testers: 1 });
     expect(validatePlan(plan({ crew: { reviewers: 2, adversaries: 2 }, tasks: [t({ crew: { researchers: 2 } })] }))).toEqual([]);
-    expect(validatePlan(plan({ crew: [] }))).toEqual(["crew must be an object with researchers, reviewers, adversaries when present"]);
-    expect(validatePlan(plan({ crew: { coders: 2 } }))).toEqual(["crew.coders is not a crew role (researchers, reviewers, adversaries)"]);
+    expect(validatePlan(plan({ crew: [] }))).toEqual(["crew must be an object with researchers, reviewers, adversaries, testers when present"]);
+    expect(validatePlan(plan({ crew: { coders: 2 } }))).toEqual(["crew.coders is not a crew role (researchers, reviewers, adversaries, testers)"]);
     expect(validatePlan(plan({ crew: { reviewers: 0 } }))).toEqual(["crew.reviewers must be a positive integer"]);
     expect(validatePlan(plan({ tasks: [t({ crew: { adversaries: "2" } })] }))).toEqual(["tasks[0].crew.adversaries must be a positive integer"]);
   });
+  it("accepts crew.testers as a positive integer on the plan or a task (card crew-tester-seat), defaulting to one", () => {
+    expect(crewOf(plan({ crew: { testers: 2 } }), t())).toMatchObject({ testers: 2 });
+    expect(crewOf(plan({ crew: { testers: 2 } }), t({ crew: { testers: 3 } }))).toMatchObject({ testers: 3 });
+    expect(crewOf(plan(), t()).testers).toBe(1);
+    expect(validatePlan(plan({ crew: { testers: 2 }, tasks: [t({ crew: { testers: 3 } })] }))).toEqual([]);
+    for (const bad of [0, -1, 1.5, "2"]) {
+      expect(validatePlan(plan({ crew: { testers: bad } })), `plan crew.testers ${JSON.stringify(bad)}`).toEqual(["crew.testers must be a positive integer"]);
+      expect(validatePlan(plan({ tasks: [t({ crew: { testers: bad } })] })), `task crew.testers ${JSON.stringify(bad)}`).toEqual(["tasks[0].crew.testers must be a positive integer"]);
+    }
+  });
+  it("shows testers above one in the plan crew line and a task's crew line (card crew-tester-seat)", () => {
+    const text = renderPlan(plan({ crew: { testers: 2 }, tasks: [t(), t({ id: "b", files: ["b.ts"], crew: { testers: 3 } })] }));
+    expect(text).toContain("Crew per task: researchers 1, reviewers 1, adversaries 1, testers 2 (a task's own crew overrides)");
+    expect(text).toContain("      crew: testers 2\n");
+    expect(text).toContain("      crew: testers 3");
+  });
   it("renders the plan crew and a task's crew above one, and says a size-S task runs the focused check", () => {
     const text = renderPlan(plan({ crew: { reviewers: 2 }, tasks: [t(), t({ id: "b", files: ["b.ts"], crew: { adversaries: 2 }, size: "S" })] }));
-    expect(text).toContain("Crew per task: researchers 1, reviewers 2, adversaries 1 (a task's own crew overrides)");
+    expect(text).toContain("Crew per task: researchers 1, reviewers 2, adversaries 1, testers 1 (a task's own crew overrides)");
     expect(text).toContain("  a: A\n      owns: a.ts\n      size: unsized (full shape: implement, verify and review together, adversary)\n      crew: reviewers 2\n");
     expect(text).toContain("      crew: reviewers 2, adversaries 2 (a size-S task runs one focused check; the crew applies to the full shape)");
     expect(renderPlan(plan())).not.toContain("crew");

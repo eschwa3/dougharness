@@ -250,8 +250,9 @@ function commandsBlockText(text) {
 // writes it - only ever calls writeOne/writeProposals (learn.mjs), which writes under .doug/.state/learn/. Every
 // refusal returns { ok:false, reason } with nothing written; `edits` can be ANY value JSON.parse can produce
 // (null, an array, a string, a number, or an object whose fields are the wrong shape) and this never throws -
-// every field is type-checked before use (lesson 1ee7d426432aca82).
-export function proposeClaudeMd({ dir, edits, now = new Date() } = {}) {
+// every field is type-checked before use (lesson 1ee7d426432aca82). With `dryRun: true` every check still runs
+// and the result is { ok:true, reason, diff } with nothing written (card reflect-offers-claude-md).
+export function proposeClaudeMd({ dir, edits, now = new Date(), dryRun = false } = {}) {
   const target = join(dir, CLAUDE_MD_RELPATH);
   if (!existsSync(target)) return { ok: false, reason: `${CLAUDE_MD_RELPATH} does not exist under ${dir}` };
 
@@ -310,5 +311,6 @@ export function proposeClaudeMd({ dir, edits, now = new Date() } = {}) {
     lines: { before, after },
   };
   const proposal = { id: "01", kind: "claude-md", target: CLAUDE_MD_RELPATH, reason, rationale, diff: diffResult.diff };
+  if (dryRun) return { ok: true, reason, diff: diffResult.diff };
   return writeOne(proposal, { dir, now });
 }
