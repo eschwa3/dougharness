@@ -6,7 +6,8 @@ import { fileURLToPath } from "node:url";
 import { spawn, spawnSync } from "node:child_process";
 import { request as httpRequest } from "node:http";
 import { runBoard } from "../src/board.js";
-import { renderBoardPage } from "../src/board-page.js";
+import { renderBoardPage, buildBoardPage } from "../src/board-page.js";
+import { DEFAULT_LABEL_GROUPS, rollup as rollupOf } from "@dougharness/flow/lib/board.mjs";
 import { startBoardServer } from "../src/board-serve.js";
 import { localListenerDenied } from "./listen-probe.js";
 
@@ -1531,7 +1532,18 @@ function queryAll(root: DomNode, selector: string): DomNode[] {
 
 // A live element view over a DomNode: mutations (classList, hidden, textContent, innerHTML) write
 // straight through to the node, so state set by one query is visible to the next.
+// One wrapper per node, so identity checks such as Array.indexOf work as they do on real elements.
+const wrapped = new WeakMap<DomNode, any>();
 function wrapNode(node: DomNode): any {
+  let w = wrapped.get(node);
+  if (!w) {
+    w = makeWrapper(node);
+    wrapped.set(node, w);
+  }
+  return w;
+}
+
+function makeWrapper(node: DomNode): any {
   return {
     tagName: node.tag.toUpperCase(),
     get id() {
@@ -1600,7 +1612,20 @@ function wrapNode(node: DomNode): any {
     set value(v: string) {
       node.attrs.value = v;
     },
-    addEventListener: () => {},
+    addEventListener: (type: string, fn: (e: any) => unknown) => {
+      const l = ((node as any).__l ??= {});
+      (l[type] ??= []).push(fn);
+    },
+    __drops: () => ((node as any).__l?.drop ?? []) as Array<(e: any) => unknown>,
+    focus: () => {},
+    before: () => {},
+    after: () => {},
+    appendChild: () => {},
+    prepend: () => {},
+    getBoundingClientRect: () => ({ top: 0, height: 40 }),
+    get options() {
+      return queryAll(node, "option").map(wrapNode);
+    },
     querySelector: (sel: string) => {
       const r = queryAll(node, sel);
       return r[0] ? wrapNode(r[0]) : null;
@@ -1609,7 +1634,7 @@ function wrapNode(node: DomNode): any {
     closest: (sel: string) => {
       let n: DomNode | null = node;
       while (n) {
-        if (n !== node.parent && matchesSelectorList(n, sel)) return wrapNode(n);
+        if (matchesSelectorList(n, sel)) return wrapNode(n);
         n = n.parent;
       }
       return null;
@@ -1629,7 +1654,11 @@ function buildDocument(html: string): any {
       return r[0] ? wrapNode(r[0]) : null;
     },
     querySelectorAll: (sel: string) => queryAll(root, sel).map(wrapNode),
-    addEventListener: () => {},
+    activeElement: null as any,
+    __l: {} as Record<string, Array<(e: any) => unknown>>,
+    addEventListener(type: string, fn: (e: any) => unknown) {
+      (this.__l[type] ??= []).push(fn);
+    },
     get body() {
       const b = descendants(root).find((n) => n.tag === "body");
       return wrapNode(b || root);
@@ -1641,11 +1670,13 @@ function buildDocument(html: string): any {
 // renderBoardPage() output, so the connectLive wiring and the live-update wiring are both exercised
 // exactly as a browser would exercise them, not through a hand-rolled fake.
 describe("app() against real renderBoardPage() markup", () => {
-  async function setUp(autopilot: unknown = null) {
+  async function setUp(autopilot: unknown = null, plan = false) {
     const dir = fresh();
     await twoCardBoard(dir);
-    const board = readBoard(dir);
-    const html = renderBoardPage(board, { mode: "local", record: ".doug/board.json" });
+    const board = plan ? rmBoard() : readBoard(dir);
+    const html = plan
+      ? renderBoardPage(board, { mode: "local", record: ".doug/board.json", rollup: rollupOf(board) } as any)
+      : renderBoardPage(board, { mode: "local", record: ".doug/board.json" });
     const doc = buildDocument(html);
     const instances: FakeEventSource[] = [];
     class Recording extends FakeEventSource {
@@ -1695,6 +1726,64 @@ describe("app() against real renderBoardPage() markup", () => {
       expect(pending).toHaveLength(1);
       pending[0]();
       expect(instances).toHaveLength(2);
+    } finally {
+      restore();
+    }
+  });
+
+  it("a rollup event rewrites #milestones through app()", async () => {
+    const { instances, doc, board, restore } = await setUp(null, true);
+    try {
+      expect(doc.getElementById("milestones").innerHTML).toContain("1/3 done");
+      const next = rollupOf({ ...board, cards: board.cards.map((c: any) => (c.id === "b" ? { ...c, column: "done" } : c)) });
+      instances[0].fire("rollup", { data: JSON.stringify(next) });
+      expect(doc.getElementById("milestones").innerHTML).toContain("2/3 done");
+    } finally {
+      restore();
+    }
+  });
+
+  // The fake DOM's addEventListener is a no-op, so a saved filter value is applied through the restore path.
+  async function withSaved(saved: Record<string, string>) {
+    const prev = (globalThis as any).localStorage;
+    (globalThis as any).localStorage = {
+      getItem: (k: string) => (k in saved ? saved[k] : null),
+      setItem: () => {},
+    };
+    try {
+      const s = await setUp(null, true);
+      const hiddenIds = s.doc.querySelectorAll(".card").filter((c: any) => c.hidden).map((c: any) => c.dataset.id);
+      return { hiddenIds, note: s.doc.getElementById("filter-note").textContent as string, restore: s.restore };
+    } finally {
+      (globalThis as any).localStorage = prev;
+    }
+  }
+
+  it("a saved epic filter hides the other epics' cards and counts in the note", async () => {
+    const { hiddenIds, note, restore } = await withSaved({ "doug-board-epic-filter": "ep" });
+    try {
+      expect(hiddenIds.sort()).toEqual(["b", "d", "e"]);
+      expect(note).toBe("showing 2 of 5 cards");
+    } finally {
+      restore();
+    }
+  });
+
+  it("a saved milestone filter hides the other milestones' cards and counts in the note", async () => {
+    const { hiddenIds, note, restore } = await withSaved({ "doug-board-milestone-filter": "evals" });
+    try {
+      expect(hiddenIds.sort()).toEqual(["a", "b", "c"]);
+      expect(note).toBe("showing 2 of 5 cards");
+    } finally {
+      restore();
+    }
+  });
+
+  it("with no saved epic or milestone filter every card shows and the note is empty", async () => {
+    const { hiddenIds, note, restore } = await withSaved({});
+    try {
+      expect(hiddenIds).toEqual([]);
+      expect(note).toBe("");
     } finally {
       restore();
     }
@@ -1824,6 +1913,12 @@ describe("autopilot panel in the page", () => {
     ],
     current: { id: "one", step: "coder", since: "10:05" },
     caps: { usd: "$12.50 / $96.78", wall: "80 / 1054 min", context: "21% / 60%" },
+    groups: [
+      { title: "Running", cards: [{ id: "one", state: "running", mark: "▶", status: "setup ✓ lead ✓ coder ▶ 4m" }] },
+      { title: "Queued", cards: [{ id: "two", state: "queued", mark: "·", status: "" }] },
+      { title: "Landed", cards: [{ id: "three", state: "landed", mark: "✓", status: "abc1234" }] },
+    ],
+    spend: "$12.40 / $35.66, 94 / 564 min, ctx 31%",
     filed: [{ id: "fu-card", kind: "follow-up", from: "one", position: "backlog bottom" }],
   };
   const panelOf = (doc: any) => doc.getElementById("autopilot");
@@ -1844,11 +1939,21 @@ describe("autopilot panel in the page", () => {
       const html = el.innerHTML as string;
       expect(html).toContain("Autopilot");
       for (const id of ["one", "two", "three"]) expect(html).toContain(id);
-      expect(html).toContain("coder since 10:05");
+      // M17: the grouped view, not the flat card list
+      expect(html).toContain("Running");
+      expect(html).toContain("Queued");
+      expect(html).toContain("Landed");
+      expect(html.indexOf("Running")).toBeLessThan(html.indexOf("Queued"));
+      expect(html.indexOf("Queued")).toBeLessThan(html.indexOf("Landed"));
+      expect(html).not.toContain("Stopped");
+      expect(html.indexOf(">one<")).toBeGreaterThan(html.indexOf("Running"));
+      expect(html.indexOf(">one<")).toBeLessThan(html.indexOf("Queued"));
+      expect(html.indexOf(">three<")).toBeGreaterThan(html.indexOf("Landed"));
+      expect(html).toContain("setup ✓ lead ✓ coder ▶ 4m");
       expect(html).toContain("abc1234");
-      expect(html).toContain("$12.50 / $96.78");
-      expect(html).toContain("80 / 1054 min");
-      expect(html).toContain("21% / 60%");
+      expect(html).toContain("$12.40 / $35.66, 94 / 564 min, ctx 31%");
+      expect(html).not.toContain("First card");
+      expect(html).not.toContain("coder since 10:05");
       expect(html).toContain("fu-card");
       expect(html).toContain("backlog bottom");
     } finally {
@@ -1871,7 +1976,7 @@ describe("autopilot panel in the page", () => {
     try {
       instances[0].fire("autopilot", { data: JSON.stringify(view) });
       expect(showing(panelOf(doc))).toBe(true);
-      expect(panelOf(doc).innerHTML).toContain("coder since 10:05");
+      expect(panelOf(doc).innerHTML).toContain("setup ✓ lead ✓ coder ▶ 4m");
       instances[0].fire("autopilot", { data: "null" });
       const el = panelOf(doc);
       expect(el === null || el.hidden || el.innerHTML.trim() === "").toBe(true);
@@ -1923,14 +2028,17 @@ describe("autopilot panel escaping (F2)", () => {
     mode: "running",
     header: "Autopilot running since 10:00",
     cards: [{ id: "one", title: "First card", size: "M", class: "code", state: "stopped", detail: "gate red" }],
+    groups: [{ title: "Stopped", cards: [{ id: "one", state: "stopped", mark: "✗", status: "gate red" }] }],
+    spend: "$1.00 / $2.00, 1 / 2 min, ctx 1%",
     current: null,
     caps: { usd: "$1.00 / $2.00", wall: "1 / 2 min", context: "1% / 2%" },
     filed: [{ id: "fu-card", kind: "follow-up", from: "one", position: "backlog bottom" }],
   });
   const cases: Record<string, (v: any) => void> = {
-    "card title (F2)": (v) => (v.cards[0].title = HOSTILE),
-    "stop reason detail (F2)": (v) => (v.cards[0].detail = HOSTILE),
-    "card id (F2)": (v) => (v.cards[0].id = HOSTILE),
+    "card status, the seat history or stop reason (M18)": (v) => (v.groups[0].cards[0].status = HOSTILE),
+    "group title (M18)": (v) => (v.groups[0].title = HOSTILE),
+    "spend line (M18)": (v) => (v.spend = HOSTILE),
+    "card id (F2)": (v) => (v.groups[0].cards[0].id = HOSTILE),
     "filed id (F2)": (v) => (v.filed[0].id = HOSTILE),
     "filed position (F2)": (v) => (v.filed[0].position = HOSTILE),
     "filed from (F2)": (v) => (v.filed[0].from = HOSTILE),
@@ -1950,4 +2058,295 @@ describe("autopilot panel escaping (F2)", () => {
       }
     });
   }
+});
+
+// ---- card board-page-roadmap: the milestone strip on the served page (ADR 0016) ----
+
+function rmCard(id: string, column: string, size: string, extra: Record<string, unknown>) {
+  return { id, column, title: `T ${id}`, goal: "g", deps: [], size, track: "flow", tags: [], ...extra };
+}
+
+function rmBoard(): any {
+  return {
+    version: 2,
+    updated: "2026-01-01",
+    columns: COLUMNS,
+    components: [],
+    labelGroups: DEFAULT_LABEL_GROUPS,
+    tags: DEFAULT_LABEL_GROUPS.flatMap((g: any) => g.labels.map((l: any) => l.name)),
+    epics: [{ id: "ep", title: "Epic one", goal: "g", status: "active" }],
+    milestones: [
+      { id: "m14", title: "1.4", goal: "g", status: "active", target: { version: "1.4" } },
+      { id: "evals", title: "Evals", goal: "g", status: "planned", target: { date: "2026-12-01" } },
+    ],
+    cards: [
+      rmCard("a", "done", "S", { class: "code", milestone: "m14", epic: "ep" }),
+      rmCard("b", "ready", "M", { class: "code", milestone: "m14" }),
+      rmCard("c", "backlog", "S", { class: "docs", milestone: "m14", epic: "ep" }),
+      rmCard("d", "done", "L", { milestone: "evals" }),
+      rmCard("e", "flow", "S", { milestone: "evals" }),
+    ],
+  };
+}
+
+const RM_LIVE_RUNS = [
+  "## 2026-10-01, a: A",
+  "",
+  "| Field | Value |",
+  "|---|---|",
+  "| Wall clock | 40 min |",
+  "| Cost | $2.50 |",
+  "",
+  "## 2026-10-02, d: D",
+  "",
+  "| Field | Value |",
+  "|---|---|",
+  "| Wall clock | 150 min |",
+  "",
+].join("\n");
+
+function rmDir(liveRuns: string | null): string {
+  const dir = fresh();
+  mkdirSync(join(dir, ".doug"), { recursive: true });
+  writeFileSync(join(dir, ".doug/board.json"), JSON.stringify(rmBoard(), null, 2) + "\n");
+  if (liveRuns !== null) {
+    mkdirSync(join(dir, "docs"), { recursive: true });
+    writeFileSync(join(dir, "docs/live-runs.md"), liveRuns);
+  }
+  return dir;
+}
+
+function rmStrip(html: string): string[] {
+  return [...html.split("<script")[0].matchAll(/<li class="milestone" data-milestone="[^"]*">([^<]*)<\/li>/g)].map((m) => m[1]);
+}
+
+describe("buildBoardPage milestone strip", () => {
+  it("buildBoardPage with docs/live-runs.md shows measured cost and wall with coverage", () => {
+    const strip = rmStrip(buildBoardPage(rmDir(RM_LIVE_RUNS)).html);
+    expect(strip).toHaveLength(2);
+    expect(strip[0]).toContain("$2.50 over 1 of 1 Done cards");
+    expect(strip[0]).toContain("40 min wall over 1 of 1 Done cards");
+    expect(strip[1]).toContain("$0.00 over 0 of 1 Done cards");
+    expect(strip[1]).toContain("150 min wall over 1 of 1 Done cards");
+  });
+
+  it("buildBoardPage without docs/live-runs.md shows no measured parts", () => {
+    const strip = rmStrip(buildBoardPage(rmDir(null)).html);
+    expect(strip).toEqual([
+      "1.4 · target 1.4 · active · 1/3 done · 28% weighted",
+      "Evals · target 2026-12-01 · planned · 1/2 done · 77% weighted",
+    ]);
+    for (const line of strip) {
+      expect(line).not.toContain("Done cards");
+      expect(line).not.toContain("$");
+    }
+  });
+
+  it("buildBoardPage returns the roll-up it rendered", () => {
+    const built = buildBoardPage(rmDir(RM_LIVE_RUNS)) as any;
+    expect(built.rollup.milestones.map((m: any) => [m.id, m.done, m.total])).toEqual([["m14", 1, 3], ["evals", 1, 2]]);
+    expect(built.rollup.epics.map((e: any) => [e.id, e.done, e.total])).toEqual([["ep", 1, 2]]);
+  });
+
+  it("a version 1 board built from disk has no strip", async () => {
+    const dir = fresh();
+    await twoCardBoard(dir);
+    const html = buildBoardPage(dir).html;
+    expect(html.split("<script")[0]).not.toContain('id="milestones"');
+  });
+});
+
+describe.skipIf(listenDenied !== "")(`doug board serve rollup${listenDenied ? ` (${listenDenied})` : ""}`, () => {
+  it(
+    "serve pushes a rollup event after a move changes a milestone",
+    async () => {
+      const dir = rmDir(null);
+      const server = await startBoardServer(dir, { port: 0 });
+      try {
+        const res = await fetch(server.url + "api/events");
+        const state = eventReaderFor(res);
+        const first = await readEvents(state, 2);
+        expect(first.map((e) => e.event)).toEqual(["board", "rollup"]);
+        const r1 = JSON.parse(first[1].data);
+        expect(r1.milestones.map((m: any) => [m.id, m.done])).toEqual([["m14", 1], ["evals", 1]]);
+
+        expect((await run(["move", "b", "done", dir])).code).toBe(0);
+        const second = await readEvents(state, 2);
+        expect(second.map((e) => e.event)).toEqual(["board", "rollup"]);
+        const r2 = JSON.parse(second[1].data);
+        expect(r2.milestones.find((m: any) => m.id === "m14").done).toBe(2);
+      } finally {
+        await server.close();
+      }
+    },
+    30000,
+  );
+});
+
+describe("milestone strip in the open page", () => {
+  const { connectLive: connectRm, applyRollup } = new Function(
+    templateSource + "\nreturn { connectLive, applyRollup: typeof applyRollup === 'function' ? applyRollup : undefined };",
+  )() as { connectLive: (opts: any) => { close(): void }; applyRollup: (rollup: any, doc: any) => void };
+
+  it("connectLive calls onRollup for a rollup event", () => {
+    const instances: FakeEventSource[] = [];
+    class Recording extends FakeEventSource {
+      constructor(url: string) {
+        super(url);
+        instances.push(this);
+      }
+    }
+    const got: unknown[] = [];
+    const conn = connectRm({
+      EventSource: Recording,
+      url: "/api/events",
+      setTimeout: () => 0,
+      onBoard: () => {},
+      onState: () => {},
+      onRollup: (r: unknown) => got.push(r),
+    });
+    instances[0].fire("rollup", { data: JSON.stringify({ epics: [], milestones: [{ id: "x" }] }) });
+    expect(got).toEqual([{ epics: [], milestones: [{ id: "x" }] }]);
+    expect(() => instances[0].fire("rollup", { data: "not json" })).not.toThrow();
+    conn.close();
+  });
+
+  it("applyRollup rewrites #milestones", () => {
+    const board = rmBoard();
+    const html = renderBoardPage(board, { mode: "local", record: ".doug/board.json" } as any);
+    const doc = buildDocument(renderBoardPage(board, { mode: "local", record: ".doug/board.json", rollup: rollupOf(board) } as any));
+    expect(html).toBeTruthy();
+    const next = rollupOf({ ...board, cards: board.cards.map((c: any) => (c.id === "b" ? { ...c, column: "done" } : c)) });
+    expect(doc.getElementById("milestones").innerHTML).toContain("1/3 done");
+    expect(() => applyRollup(next, doc)).not.toThrow();
+    const inner = doc.getElementById("milestones").innerHTML;
+    expect(inner).toContain("2/3 done");
+    expect(inner).not.toContain("1/3 done");
+  });
+
+  it("applyRollup does nothing on a page with no strip", () => {
+    const v1 = { version: 1, updated: "2026-01-01", columns: COLUMNS, components: [], cards: [] };
+    const doc = buildDocument(renderBoardPage(v1 as any, { mode: "local", record: "r" }));
+    expect(() => applyRollup({ epics: [], milestones: [{ id: "x", title: "X", status: "active", target: null, done: 0, total: 0, progress: 0, measured: { usd: null, doneCards: 0 } }] }, doc)).not.toThrow();
+    expect(doc.getElementById("milestones")).toBeNull();
+  });
+});
+
+// ---- card board-ready-priority-reorder: Ready reorders only within a priority band ----
+
+describe("app() Ready priority bands (drag and Alt+Arrow)", () => {
+  const { READY_BAND_HINT } = new Function(
+    templateSource + "\nreturn { READY_BAND_HINT: typeof READY_BAND_HINT === 'string' ? READY_BAND_HINT : undefined };",
+  )() as { READY_BAND_HINT: string | undefined };
+
+  function bandCard(id: string, column: string, tags: string[]) {
+    return { id, column, title: `T ${id}`, goal: "g", deps: [], size: "S", track: "any", tags };
+  }
+
+  // Ready renders as r2, r3 (high) then r1 (low); b1 waits in Backlog tagged low.
+  async function bandSetUp() {
+    const board: any = {
+      version: 2,
+      updated: "2026-01-01",
+      columns: COLUMNS,
+      components: [],
+      labelGroups: DEFAULT_LABEL_GROUPS,
+      cards: [
+        bandCard("r1", "ready", ["low"]),
+        bandCard("r2", "ready", ["high"]),
+        bandCard("r3", "ready", ["high"]),
+        bandCard("b1", "backlog", ["low"]),
+      ],
+    };
+    const html = renderBoardPage(board, { mode: "local", record: ".doug/board.json" });
+    const doc = buildDocument(html);
+    const puts: Array<{ url: string; body: any }> = [];
+    const saved = {
+      document: (globalThis as any).document,
+      window: (globalThis as any).window,
+      fetch: (globalThis as any).fetch,
+      location: (globalThis as any).location,
+    };
+    (globalThis as any).document = doc;
+    (globalThis as any).window = { EventSource: FakeEventSource, setTimeout: () => 0, clearTimeout: () => {} };
+    (globalThis as any).fetch = async (url: string, init?: any) => {
+      if (url === "/api/board") return { status: 200, json: async () => board, headers: { get: () => null } };
+      if (url === "/api/autopilot") return { status: 200, json: async () => null, headers: { get: () => null } };
+      if (url.startsWith("/api/cards/") && init?.method === "PUT") {
+        puts.push({ url, body: JSON.parse(init.body) });
+        return { status: 200, json: async () => board, headers: { get: () => null } };
+      }
+      throw new Error("unexpected fetch " + url);
+    };
+    (globalThis as any).location = { reload: () => {} };
+    const restore = () => {
+      (globalThis as any).document = saved.document;
+      (globalThis as any).window = saved.window;
+      (globalThis as any).fetch = saved.fetch;
+      (globalThis as any).location = saved.location;
+    };
+    app();
+    await new Promise((r) => setTimeout(r, 0));
+    const fire = (type: string, e: any) => {
+      for (const fn of doc.__l[type] ?? []) fn(e);
+    };
+    const cardEl = (id: string) => doc.querySelector(`.card[data-id="${id}"]`);
+    const status = () => doc.getElementById("status").textContent;
+    return { doc, puts, restore, fire, cardEl, status };
+  }
+
+  const alt = (key: string) => ({ altKey: true, key, preventDefault: () => {} });
+
+  it("exposes the band hint as a string that names priority", () => {
+    expect(typeof READY_BAND_HINT).toBe("string");
+    expect(READY_BAND_HINT).toContain("priority");
+  });
+
+  it("Alt+Up on a Ready card whose previous card is another priority sends no PUT and sets #status to READY_BAND_HINT", async () => {
+    const t = await bandSetUp();
+    try {
+      t.doc.activeElement = t.cardEl("r1");
+      t.fire("keydown", alt("ArrowUp"));
+      await new Promise((r) => setTimeout(r, 0));
+      expect(t.puts).toEqual([]);
+      expect(typeof READY_BAND_HINT).toBe("string");
+      expect(t.status()).toBe(READY_BAND_HINT);
+    } finally {
+      t.restore();
+    }
+  });
+
+  it("Alt+Up within a band PUTs {column:'ready', before:<prev id>}", async () => {
+    const t = await bandSetUp();
+    try {
+      t.doc.activeElement = t.cardEl("r3");
+      t.fire("keydown", alt("ArrowUp"));
+      await new Promise((r) => setTimeout(r, 0));
+      expect(t.puts).toEqual([{ url: "/api/cards/r3", body: { column: "ready", before: "r2" } }]);
+    } finally {
+      t.restore();
+    }
+  });
+
+  it("dragstart, dragover and drop from Backlog onto a Ready card of another priority PUTs {column:'ready'} with no before or after key", async () => {
+    const t = await bandSetUp();
+    try {
+      const dataTransfer = { effectAllowed: "", setData: () => {}, getData: () => "b1" };
+      t.fire("dragstart", { target: t.cardEl("b1"), dataTransfer });
+      t.fire("dragover", { target: t.cardEl("r2"), clientY: 5, preventDefault: () => {} });
+      // the col node is re-wrapped per query; its drop listeners live on the DomNode behind the wrapper
+      const colNode = t.doc.querySelectorAll(".col").find((c: any) => c.dataset.column === "ready");
+      expect(colNode).toBeTruthy();
+      const drops = (colNode as any).__drops();
+      expect(drops.length).toBeGreaterThan(0);
+      for (const fn of drops) fn({ preventDefault: () => {}, dataTransfer });
+      await new Promise((r) => setTimeout(r, 0));
+      expect(t.puts).toHaveLength(1);
+      expect(t.puts[0].url).toBe("/api/cards/b1");
+      expect(t.puts[0].body).toEqual({ column: "ready" });
+      expect(Object.keys(t.puts[0].body)).toEqual(["column"]);
+    } finally {
+      t.restore();
+    }
+  });
 });

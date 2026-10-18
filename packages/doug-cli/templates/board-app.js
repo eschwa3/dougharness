@@ -48,12 +48,18 @@ footer{padding:0 24px 24px;font-size:12px;color:var(--ink-soft)}
 #autopilot{margin:14px 24px 0;padding:10px 14px;background:var(--surface);border:1px solid var(--rule-strong)}
 #autopilot[hidden]{display:none}
 #autopilot h2{font-family:"IBM Plex Mono",Menlo,monospace;font-size:12px;letter-spacing:.06em;text-transform:uppercase;font-weight:500;margin:0 0 6px}
+#autopilot h3{font-family:"IBM Plex Mono",Menlo,monospace;font-size:11px;letter-spacing:.06em;text-transform:uppercase;font-weight:500;color:var(--ink-soft);margin:8px 0 0}
 #autopilot ul{list-style:none;margin:4px 0;padding:0;font-size:13px}
 #autopilot li{display:flex;gap:8px;flex-wrap:wrap;align-items:baseline}
-#autopilot .st{font-family:"IBM Plex Mono",Menlo,monospace;font-size:11px;text-transform:uppercase;color:var(--ink-soft);min-width:5.5em}
+#autopilot .st{font-family:"IBM Plex Mono",Menlo,monospace;font-size:11px;text-transform:uppercase;color:var(--ink-soft);min-width:1.5em}
 #autopilot .st.running{color:var(--accent);font-weight:600}
 #autopilot .st.stopped,#autopilot .st.interrupted{color:var(--c-decision)}
 #autopilot .caps,#autopilot .filed{font-size:12px;color:var(--ink-soft);margin-top:4px}
+#milestones{margin:14px 24px 0;padding:10px 14px;background:var(--surface);border:1px solid var(--rule-strong)}
+#milestones h2{font-family:"IBM Plex Mono",Menlo,monospace;font-size:12px;letter-spacing:.06em;text-transform:uppercase;font-weight:500;margin:0 0 6px}
+#milestones ol{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:4px;font-size:13px}
+#milestones li{overflow-wrap:anywhere}
+@media (max-width:720px){#milestones{margin:14px 12px 0}}
 @media (max-width:720px){.board{grid-auto-columns:minmax(85vw,1fr)}}
 `;
 
@@ -61,17 +67,91 @@ const FONTS = '<link rel="stylesheet" href="https://fonts.googleapis.com/css2?fa
 
 function esc(s) { return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;"); }
 
-function cardHtml(c, columns) {
+// WCAG relative luminance of a #rrggbb colour.
+function relLuminance(hex) {
+  const ch = [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16) / 255).map((v) => (v <= 0.04045 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4)));
+  return 0.2126 * ch[0] + 0.7152 * ch[1] + 0.0722 * ch[2];
+}
+
+// WCAG contrast ratio of two #rrggbb colours, in either order.
+function contrastRatio(a, b) {
+  const la = relLuminance(a);
+  const lb = relLuminance(b);
+  return (Math.max(la, lb) + 0.05) / (Math.min(la, lb) + 0.05);
+}
+
+// Black or white, whichever contrasts more with the label colour (the better is always >= 4.5:1).
+function chipTextColor(bg) {
+  return contrastRatio(bg, "#000000") >= contrastRatio(bg, "#ffffff") ? "#000000" : "#ffffff";
+}
+
+// Label name -> colour across a board's label groups; empty for a version 1 board.
+function labelColors(labelGroups) {
+  const colors = {};
+  for (const g of labelGroups || []) for (const l of g.labels || []) colors[l.name] = l.color;
+  return colors;
+}
+
+const PRIORITY_LABELS = ["urgent", "high", "medium", "low"];
+
+const READY_BAND_HINT = "Priority sets the order in Ready; a card moves only among cards of its own priority.";
+const READY_COL_HINT = "by priority; reorder within a priority";
+
+function hasPriorityGroup(labelGroups) {
+  return (labelGroups || []).some((g) => g.id === "priority");
+}
+
+// A card's priority band: the lowest PRIORITY_LABELS index among its tags, none last.
+function priorityRank(c) {
+  const idx = (c.tags || []).map((t) => PRIORITY_LABELS.indexOf(t)).filter((i) => i >= 0);
+  return idx.length ? Math.min.apply(null, idx) : PRIORITY_LABELS.length;
+}
+
+// Ready in the order `next` picks it: priority label rank (none last), then board order. Only a board with a
+// priority group ranks; without one the order is record order. Never mutates its input.
+function readyOrder(cards, labelGroups) {
+  if (!hasPriorityGroup(labelGroups)) return cards;
+  return cards.map((c, i) => ({ c, i, r: priorityRank(c) })).sort((a, b) => a.r - b.r || a.i - b.i).map((x) => x.c);
+}
+
+// What a placement next to targetId in `column` may do. "place": as asked. "refuse": a Ready card dropped among
+// another priority band (Ready is sorted, so the move would snap back). "column": a card from another column
+// dropped among another band; it joins Ready, and the sort picks its slot.
+function priorityBandMove(cards, labelGroups, id, column, targetId) {
+  if (column !== "ready" || !hasPriorityGroup(labelGroups)) return "place";
+  const card = cards.find((c) => c.id === id);
+  const target = cards.find((c) => c.id === targetId);
+  if (!card || !target || priorityRank(card) === priorityRank(target)) return "place";
+  return card.column === "ready" ? "refuse" : "column";
+}
+
+// The cards of a column in display order: Done newest first, Ready by priority, the rest in record order.
+function orderedCards(col, cards, labelGroups) {
+  const mine = cards.filter((c) => c.column === col.id);
+  if (col.id === "done") return [...mine].reverse();
+  if (col.id === "ready") return readyOrder(mine, labelGroups);
+  return mine;
+}
+
+// The Done column shows only its newest DONE_SHOWN cards until "show all"; the record keeps every card.
+const DONE_SHOWN = 20;
+
+function cardHtml(c, columns, colors) {
   const deps = (c.deps || []).length ? `<div class="meta">after <code>${c.deps.map(esc).join("</code> <code>")}</code></div>` : "";
   const opts = columns.map((col) => `<option value="${col.id}"${col.id === c.column ? " selected" : ""}>${esc(col.title)}</option>`).join("");
   const chip = c.component ? `<span class="chip" style="color:var(--c-${esc(c.component)})">${esc(c.component)}</span>` : "";
   // A hand-track card is a gated by-hand change; the chip says so at a glance.
   const hand = c.track === "hand" ? `<span class="chip hand" title="hand track: a gated by-hand change">by hand</span>` : "";
-  const tags = c.tags && c.tags.length ? c.tags.map((t) => `<span class="chip tag">${esc(t)}</span>`).join("") : "";
+  const tags = c.tags && c.tags.length ? c.tags.map((t) => {
+    const bg = colors && /^#[0-9a-fA-F]{6}$/.test(colors[t] || "") ? colors[t] : "";
+    return bg ? `<span class="chip tag" style="background:${bg};color:${chipTextColor(bg)};border-color:${bg}">${esc(t)}</span>` : `<span class="chip tag">${esc(t)}</span>`;
+  }).join("") : "";
   const cls = c.class ? `<span class="chip class" title="class">${esc(c.class)}</span>` : "";
   const compAttr = c.component ? ` data-component="${esc(c.component)}"` : "";
   const tagsAttr = c.tags && c.tags.length ? ` data-tags="${esc(c.tags.join(" "))}"` : "";
-  return `<article class="card" draggable="true" tabindex="0" data-id="${esc(c.id)}"${compAttr} data-column="${esc(c.column)}"${tagsAttr}>
+  const epicAttr = c.epic ? ` data-epic="${esc(c.epic)}"` : "";
+  const milestoneAttr = c.milestone ? ` data-milestone="${esc(c.milestone)}"` : "";
+  return `<article class="card" draggable="true" tabindex="0" data-id="${esc(c.id)}"${compAttr} data-column="${esc(c.column)}"${tagsAttr}${epicAttr}${milestoneAttr}>
 <div class="top">${chip}${hand}${tags}${cls}<span class="size">${esc(c.size || "")}</span></div>
 <div class="title">${esc(c.title)}</div>
 <div class="meta"><code>${esc(c.id)}</code>${c.source ? ` · ${esc(c.source)}` : ""}</div>
@@ -81,16 +161,34 @@ ${c.goal ? `<details><summary>goal</summary><p class="goal">${esc(c.goal)}</p></
 </article>`;
 }
 
+// The inner HTML of a column's .cards: its cards in display order. Collapsed Done keeps the newest DONE_SHOWN
+// and ends with a "show all <total>" button; expanded Done, and every other column, renders all of them.
+function columnCardsHtml(col, cards, columns, labelGroups, expanded) {
+  const ordered = orderedCards(col, cards, labelGroups);
+  const colors = labelColors(labelGroups);
+  const capped = col.id === "done" && !expanded && ordered.length > DONE_SHOWN;
+  const shown = capped ? ordered.slice(0, DONE_SHOWN) : ordered;
+  const html = shown.map((c) => cardHtml(c, columns, colors)).join("\n");
+  return capped ? `${html}\n<button type="button" class="show-all" data-show-all="done">show all ${ordered.length}</button>` : html;
+}
+
+// How many Done cards beyond the newest DONE_SHOWN pass the filters: the ones a collapsed column does not render.
+function doneHiddenCount(cards, filters) {
+  const older = orderedCards({ id: "done" }, cards, []).slice(DONE_SHOWN);
+  return older.filter((c) => cardMatches(c, filters)).length;
+}
+
 // Done reads newest first: a card moves to Done long after it was added, so record order would bury the latest
-// landing at the bottom of the longest column. Every other column keeps record order, which is priority.
-function columnHtml(col, cards, columns) {
+// landing at the bottom of the longest column. Ready is sorted by priority (readyOrder) on a board with a priority
+// group; every other column, and Ready without one, keeps record order.
+function columnHtml(col, cards, columns, labelGroups) {
   const mine = cards.filter((c) => c.column === col.id);
-  const ordered = col.id === "done" ? [...mine].reverse() : mine;
-  const hint = col.id === "done" ? `${col.hint || ""}${col.hint ? " · " : ""}newest first` : col.hint || "";
+  const suffix = col.id === "done" ? "newest first" : col.id === "ready" && hasPriorityGroup(labelGroups) ? READY_COL_HINT : "";
+  const hint = suffix ? `${col.hint || ""}${col.hint ? " · " : ""}${suffix}` : col.hint || "";
   return `<section class="col" data-column="${esc(col.id)}">
 <div class="col-head"><h2>${esc(col.title)}</h2><span class="n">${mine.length}</span></div>
 <div class="col-hint">${esc(hint)}</div>
-<div class="cards">${ordered.map((c) => cardHtml(c, columns)).join("\n")}</div>
+<div class="cards">${columnCardsHtml(col, cards, columns, labelGroups, false)}</div>
 </section>`;
 }
 
@@ -178,6 +276,12 @@ function connectLive(opts) {
       try { view = JSON.parse(e.data); } catch (_) {}
       opts.onAutopilot(view);
     });
+    es.addEventListener("rollup", (e) => {
+      if (source !== es || !opts.onRollup) return;
+      let roll = null;
+      try { roll = JSON.parse(e.data); } catch (_) {}
+      opts.onRollup(roll);
+    });
   }
   open();
 
@@ -201,7 +305,12 @@ function columnShape(board) {
 
 // Sorted component list and sorted tag list, compared to decide whether the filters need a reload.
 function componentAndTagShape(board) {
-  return JSON.stringify({ components: [...board.components].sort(), tags: tagOptions(board.cards).sort() });
+  return JSON.stringify({ components: [...board.components].sort(), tags: tagOptions(board.cards).sort(), labelGroups: board.labelGroups, epics: planIds(board.epics), milestones: planIds(board.milestones) });
+}
+
+// [id, title] of each epic or milestone, in record order; a change reloads the page (filter options, strip).
+function planIds(entries) {
+  return (Array.isArray(entries) ? entries : []).map((e) => [e.id, e.title]);
 }
 
 // The header's counts-and-record line: how many cards, how many done, when the record was last
@@ -231,9 +340,7 @@ function applyLiveBoard(board, next, config, opts) {
     for (const col of next.columns) {
       const container = doc.querySelector('.col[data-column="' + CSS_escape(col.id) + '"] .cards');
       if (!container) continue;
-      const mine = next.cards.filter((c) => c.column === col.id);
-      const ordered = col.id === "done" ? [...mine].reverse() : mine;
-      container.innerHTML = ordered.map((c) => cardHtml(c, next.columns)).join("\n");
+      container.innerHTML = columnCardsHtml(col, next.cards, next.columns, next.labelGroups, !!opts.doneExpanded);
     }
     const sub = doc.querySelector("header .sub");
     if (sub) sub.innerHTML = headerSubHtml(next, config);
@@ -258,6 +365,14 @@ function cardMatches(card, filters) {
     const tags = card.tags || [];
     if (!tags.includes(tag)) return false;
   }
+  const epic = (filters && filters.epic) || "";
+  const milestone = (filters && filters.milestone) || "";
+  if (epic && card.epic !== epic) return false;
+  if (milestone && card.milestone !== milestone) return false;
+  const groups = (filters && filters.groups) || {};
+  for (const id of Object.keys(groups)) {
+    if (groups[id] && !(card.tags || []).includes(groups[id])) return false;
+  }
   return true;
 }
 
@@ -265,17 +380,16 @@ function cardMatches(card, filters) {
 // "" for no view, which leaves the panel hidden.
 function autopilotHtml(view) {
   if (!view || typeof view !== "object") return "";
-  const cards = Array.isArray(view.cards) ? view.cards : [];
+  const groups = Array.isArray(view.groups) ? view.groups : [];
   const filed = Array.isArray(view.filed) ? view.filed : [];
-  const caps = view.caps || {};
-  const items = cards.map((c) => {
-    const shape = [c.size, c.class].filter(Boolean).join("/");
-    return `<li><span class="st ${esc(c.state)}">${esc(c.state)}</span><code>${esc(c.id)}</code>${c.title ? `<span>${esc(c.title)}</span>` : ""}${shape ? `<span class="meta">${esc(shape)}</span>` : ""}${c.detail ? `<span class="meta">${esc(c.detail)}</span>` : ""}</li>`;
+  const sections = groups.map((g) => {
+    const items = (Array.isArray(g.cards) ? g.cards : []).map((c) => `<li><span class="st ${esc(c.state)}">${esc(c.mark)}</span><code>${esc(c.id)}</code>${c.status ? `<span class="meta">${esc(c.status)}</span>` : ""}</li>`).join("");
+    return `<h3>${esc(g.title)}</h3><ul>${items}</ul>`;
   }).join("");
   const filedHtml = filed.length
     ? `<div class="filed">filed: ${filed.map((f) => `<code>${esc(f.id)}</code> (${esc(f.kind)}${f.from ? " from " + esc(f.from) : ""}) ${esc(f.position || "")}`).join("; ")}</div>`
     : "";
-  return `<h2>${esc(view.header || "Autopilot")}</h2><ul>${items}</ul><div class="caps">usd ${esc(caps.usd || "")} · wall ${esc(caps.wall || "")} · context ${esc(caps.context || "")}</div>${filedHtml}`;
+  return `<h2>${esc(view.header || "Autopilot")}</h2>${sections}<div class="caps">${esc(view.spend || "")}</div>${filedHtml}`;
 }
 
 // Shows a view in the #autopilot container, or hides the container for none.
@@ -288,12 +402,57 @@ function applyAutopilot(view, doc) {
   el.hidden = html === "";
 }
 
+// One milestone's strip line: title, target, status, done out of total, weighted progress, and, when the roll-up
+// measured it (docs/live-runs.md present), cost and wall with the Done-card coverage.
+function milestoneText(m) {
+  const t = m.target;
+  const target = t ? [t.version, t.date].filter(Boolean).join(", ") : "";
+  const parts = [m.title];
+  if (target) parts.push("target " + target);
+  parts.push(m.status, `${m.done}/${m.total} done`, `${Math.round(m.progress * 100)}% weighted`);
+  const k = m.measured;
+  if (k && k.usd !== null && k.usd !== undefined) {
+    parts.push(`$${k.usd.toFixed(2)} over ${k.usdCards} of ${k.doneCards} Done cards`);
+    parts.push(`${k.wallMinutes} min wall over ${k.wallCards} of ${k.doneCards} Done cards`);
+  }
+  return parts.join(" · ");
+}
+
+function milestoneStripInner(milestones) {
+  return `<h2>Milestones</h2><ol>${milestones.map((m) => `<li class="milestone" data-milestone="${esc(m.id)}">${esc(milestoneText(m))}</li>`).join("")}</ol>`;
+}
+
+// The milestone strip; "" for a board with no milestones (a version 1 board).
+function milestoneStripHtml(rollup) {
+  if (!rollup || !Array.isArray(rollup.milestones) || rollup.milestones.length === 0) return "";
+  return `<section id="milestones" aria-label="Milestones">${milestoneStripInner(rollup.milestones)}</section>\n`;
+}
+
+// Rewrites the strip from a pushed roll-up; does nothing without the element or a milestones array.
+function applyRollup(rollup, doc) {
+  try {
+    doc = doc !== undefined ? doc : (typeof document !== "undefined" ? document : null);
+    const el = doc && doc.getElementById("milestones");
+    if (!el || !rollup || !Array.isArray(rollup.milestones)) return;
+    el.innerHTML = milestoneStripInner(rollup.milestones);
+  } catch (_) {}
+}
+
+function planFilterHtml(id, label, entries) {
+  if (!Array.isArray(entries) || entries.length === 0) return "";
+  return `<label for="${id}">${label}</label><select id="${id}"><option value="">all</option>${entries.map((e) => `<option value="${esc(e.id)}">${esc(e.title)}</option>`).join("")}</select>`;
+}
+
 // The complete document for a given board state; `doug board serve` renders it from the record on
 // every request.
-function renderDoc(board, appSource, config) {
+function renderDoc(board, appSource, config, rollup) {
   const comps = board.components.map((c) => `<option value="${esc(c)}">${esc(c)}</option>`).join("");
   const tags = tagOptions(board.cards);
-  const tagFilter = tags.length
+  const hasGroups = Array.isArray(board.labelGroups);
+  const groupFilters = hasGroups
+    ? board.labelGroups.map((g) => `<label for="group-filter-${esc(g.id)}">${esc(g.title)}</label><select id="group-filter-${esc(g.id)}" data-group="${esc(g.id)}"><option value="">all</option>${g.labels.map((l) => `<option value="${esc(l.name)}">${esc(l.name)}</option>`).join("")}</select>`).join("\n")
+    : "";
+  const tagFilter = hasGroups ? groupFilters : tags.length
     ? `<label for="tag-filter">tag</label><select id="tag-filter"><option value="">all</option>${tags.map((t) => `<option value="${esc(t)}">${esc(t)}</option>`).join("")}</select>`
     : "";
   const head = `<!doctype html>\n<html lang="en">\n<head>\n<meta charset="utf-8">\n<meta name="viewport" content="width=device-width, initial-scale=1">\n<title>Doug Board</title>\n${FONTS}\n<style>${CSS}</style>\n</head>\n<body>\n`;
@@ -302,14 +461,14 @@ function renderDoc(board, appSource, config) {
 <div><h1>Doug Board</h1><div class="sub">${headerSubHtml(board, config)}</div></div>
 <div class="tools">
 <label for="filter">component</label><select id="filter"><option value="">all</option>${comps}</select>
-${tagFilter ? tagFilter + "\n" : ""}<span class="status" id="filter-note"></span>
+${tagFilter ? tagFilter + "\n" : ""}${planFilterHtml("epic-filter", "epic", board.epics)}${planFilterHtml("milestone-filter", "milestone", board.milestones)}<span class="status" id="filter-note"></span>
 <button type="button" id="copy">Copy board JSON</button>
 <span class="status" id="status"></span>
 </div>
 </header>
 <section id="autopilot" aria-label="Autopilot" hidden></section>
-<main class="board" id="board">
-${board.columns.map((col) => columnHtml(col, board.cards, board.columns)).join("\n")}
+${milestoneStripHtml(rollup)}<main class="board" id="board">
+${board.columns.map((col) => columnHtml(col, board.cards, board.columns, board.labelGroups)).join("\n")}
 </main>
 ${footerHtml(config)}
 <script type="application/json" id="board-config">${JSON.stringify(config).replace(/</g, "\\u003c")}<\/script>
@@ -325,6 +484,8 @@ function app() {
   const status = document.getElementById("status");
   // In local mode the page stays read-only until `doug board serve` answers for it.
   let readOnly = local;
+  let doneExpanded = false;
+  let currentFilters = {};
 
   const say = (m) => { status.textContent = m; };
   const setReadOnly = (why) => { readOnly = true; document.body.classList.add("ro"); say(why); };
@@ -352,6 +513,11 @@ function app() {
     const card = board.cards.find((c) => c.id === id);
     if (!card) return;
     if (readOnly) { say("This view is read-only; the move was not saved."); return; }
+    if (column === "ready") {
+      const rule = priorityBandMove(board.cards, board.labelGroups, id, column, targetId);
+      if (rule === "refuse") { say(READY_BAND_HINT); return; }
+      if (rule === "column") { moveCard(id, column); return; }
+    }
     if (card.column !== column) card.column = column;
     const el = document.querySelector(`.card[data-id="${CSS_escape(id)}"]`);
     const targetEl = document.querySelector(`.card[data-id="${CSS_escape(targetId)}"]`);
@@ -363,7 +529,9 @@ function app() {
 
   function refreshCounts() {
     for (const col of document.querySelectorAll(".col")) {
-      col.querySelector(".n").textContent = col.querySelectorAll(".card:not([hidden])").length;
+      // A collapsed Done column does not render its older cards; add the ones the filters let through.
+      const extra = col.dataset.column === "done" && !doneExpanded ? doneHiddenCount(board.cards, currentFilters) : 0;
+      col.querySelector(".n").textContent = col.querySelectorAll(".card:not([hidden])").length + extra;
     }
   }
 
@@ -499,7 +667,27 @@ function app() {
   // A tag itself may contain spaces (e.g. "needs review"), and data-tags joins every tag on the card
   // with a single space, so a naive split cannot tell a two-word tag from two one-word tags. Reconstruct
   // against the known tag options instead, matching the longest known tag first.
-  const knownTags = tagFilter ? Array.from(tagFilter.options).map((o) => o.value).filter((v) => v) : [];
+  const epicFilter = document.getElementById("epic-filter");
+  const milestoneFilter = document.getElementById("milestone-filter");
+  for (const [sel, key] of [[epicFilter, "doug-board-epic-filter"], [milestoneFilter, "doug-board-milestone-filter"]]) {
+    if (!sel) continue;
+    try {
+      const saved = localStorage.getItem(key);
+      if (saved && Array.from(sel.options).some((o) => o.value === saved)) sel.value = saved;
+    } catch (_) {}
+  }
+  const groupSelects = [];
+  for (const g of board.labelGroups || []) {
+    const sel = document.getElementById("group-filter-" + g.id);
+    if (!sel) continue;
+    groupSelects.push({ id: g.id, sel: sel });
+    try {
+      const saved = localStorage.getItem("doug-board-group-filter-" + g.id);
+      if (saved && g.labels.some((l) => l.name === saved)) sel.value = saved;
+    } catch (_) {}
+  }
+  const knownTags = tagFilter ? Array.from(tagFilter.options).map((o) => o.value).filter((v) => v)
+    : (board.labelGroups || []).flatMap((g) => g.labels.map((l) => l.name));
   const sortedKnownTags = [...knownTags].sort((a, b) => b.split(" ").length - a.split(" ").length);
   const parseCardTags = (attr) => {
     if (!attr) return [];
@@ -519,20 +707,41 @@ function app() {
   const applyFilter = () => {
     const component = filter.value;
     const tag = tagFilter ? tagFilter.value : "";
+    const epic = epicFilter ? epicFilter.value : "";
+    const milestone = milestoneFilter ? milestoneFilter.value : "";
+    const groups = {};
+    for (const gs of groupSelects) groups[gs.id] = gs.sel.value;
+    const anyGroup = Object.keys(groups).some((k) => groups[k]);
+    currentFilters = { component: component, tag: tag, groups: groups, epic: epic, milestone: milestone };
     for (const card of document.querySelectorAll(".card")) {
-      const shape = { component: card.dataset.component || "", tags: parseCardTags(card.dataset.tags) };
-      card.hidden = !cardMatches(shape, { component: component, tag: tag });
+      const shape = { component: card.dataset.component || "", tags: parseCardTags(card.dataset.tags), epic: card.dataset.epic || "", milestone: card.dataset.milestone || "" };
+      card.hidden = !cardMatches(shape, currentFilters);
     }
     refreshCounts();
     // A saved filter is easy to forget; say what it hides so the column counts are not mistaken for the board.
     const all = document.querySelectorAll(".card").length;
     const shown = document.querySelectorAll(".card:not([hidden])").length;
-    document.getElementById("filter-note").textContent = component || tag ? `showing ${shown} of ${all} cards` : "";
+    document.getElementById("filter-note").textContent = component || tag || anyGroup || epic || milestone ? `showing ${shown} of ${all} cards` : "";
     try { localStorage.setItem("doug-board-filter", component); } catch (_) {}
     if (tagFilter) { try { localStorage.setItem("doug-board-tag-filter", tag); } catch (_) {} }
+    if (epicFilter) { try { localStorage.setItem("doug-board-epic-filter", epic); } catch (_) {} }
+    if (milestoneFilter) { try { localStorage.setItem("doug-board-milestone-filter", milestone); } catch (_) {} }
+    for (const gs of groupSelects) { try { localStorage.setItem("doug-board-group-filter-" + gs.id, gs.sel.value); } catch (_) {} }
   };
   filter.addEventListener("change", applyFilter);
+  document.addEventListener("click", (e) => {
+    const btn = e.target && e.target.closest ? e.target.closest("[data-show-all]") : null;
+    if (!btn) return;
+    doneExpanded = true;
+    const container = document.querySelector('.col[data-column="done"] .cards');
+    const doneCol = board.columns.find((c) => c.id === "done");
+    if (container && doneCol) container.innerHTML = columnCardsHtml(doneCol, board.cards, board.columns, board.labelGroups, true);
+    applyFilter();
+  });
   if (tagFilter) tagFilter.addEventListener("change", applyFilter);
+  if (epicFilter) epicFilter.addEventListener("change", applyFilter);
+  if (milestoneFilter) milestoneFilter.addEventListener("change", applyFilter);
+  for (const gs of groupSelects) gs.sel.addEventListener("change", applyFilter);
   applyFilter();
 
   document.getElementById("copy").addEventListener("click", async () => {
@@ -562,8 +771,9 @@ function app() {
         setTimeout: window.setTimeout.bind(window),
         clearTimeout: window.clearTimeout.bind(window),
         onAutopilot: (view) => applyAutopilot(view),
+        onRollup: (r) => applyRollup(r),
         onBoard: (next) => {
-          const updated = applyLiveBoard(board, next, config);
+          const updated = applyLiveBoard(board, next, config, { doneExpanded: doneExpanded });
           if (updated) {
             board = updated;
             refreshCounts();

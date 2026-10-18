@@ -6,6 +6,11 @@
       "provider": null,
       "checked": false,
       "degraded": true,
+      "hidden": {
+        "count": 2,
+        "total": 15,
+        "oldestDays": 90
+      },
       "lessons": [
         {
           "id": "r-good",
@@ -294,6 +299,11 @@
       "provider": null,
       "checked": true,
       "degraded": true,
+      "hidden": {
+        "count": 2,
+        "total": 13,
+        "oldestDays": 90
+      },
       "lessons": [
         {
           "id": "r-good",
@@ -582,6 +592,11 @@
       "provider": null,
       "checked": true,
       "degraded": true,
+      "hidden": {
+        "count": 2,
+        "total": 15,
+        "oldestDays": 90
+      },
       "lessons": [
         {
           "id": "r-scoped",
@@ -751,6 +766,11 @@
       "provider": null,
       "checked": true,
       "degraded": true,
+      "hidden": {
+        "count": 3,
+        "total": 13,
+        "oldestDays": 90
+      },
       "lessons": [
         {
           "id": "r-good",
@@ -1039,6 +1059,11 @@
       "provider": null,
       "checked": false,
       "degraded": true,
+      "hidden": {
+        "count": 2,
+        "total": 15,
+        "oldestDays": 90
+      },
       "lessons": []
     },
     "table": [
@@ -1138,6 +1163,11 @@
       "degraded": false,
       "total": 13,
       "unvectored": 5,
+      "hidden": {
+        "count": 2,
+        "total": 15,
+        "oldestDays": 90
+      },
       "lessons": [
         {
           "id": "r-bad1",
@@ -1433,6 +1463,11 @@
       "degraded": false,
       "total": 13,
       "unvectored": 5,
+      "hidden": {
+        "count": 2,
+        "total": 14,
+        "oldestDays": 90
+      },
       "lessons": [
         {
           "id": "r-veconly",
@@ -1729,6 +1764,11 @@
       "degraded": false,
       "total": 13,
       "unvectored": 5,
+      "hidden": {
+        "count": 2,
+        "total": 14,
+        "oldestDays": 90
+      },
       "lessons": [
         {
           "id": "r-veconly",
@@ -1878,6 +1918,11 @@
       "degraded": false,
       "total": 13,
       "unvectored": 5,
+      "hidden": {
+        "count": 2,
+        "total": 14,
+        "oldestDays": 90
+      },
       "lessons": [
         {
           "id": "r-veconly",
@@ -2001,6 +2046,11 @@
       "degraded": false,
       "total": 13,
       "unvectored": 5,
+      "hidden": {
+        "count": 2,
+        "total": 15,
+        "oldestDays": 90
+      },
       "lessons": [
         {
           "id": "r-bad1",
@@ -2413,6 +2463,11 @@
       "degraded": false,
       "total": 13,
       "unvectored": 5,
+      "hidden": {
+        "count": 2,
+        "total": 14,
+        "oldestDays": 90
+      },
       "lessons": [
         {
           "id": "r-veconly",
@@ -2634,6 +2689,11 @@
       "degraded": false,
       "total": 13,
       "unvectored": 5,
+      "hidden": {
+        "count": 2,
+        "total": 15,
+        "oldestDays": 90
+      },
       "lessons": [
         {
           "id": "r-good",
@@ -3046,6 +3106,11 @@
       "degraded": false,
       "total": 12,
       "unvectored": 4,
+      "hidden": {
+        "count": 3,
+        "total": 15,
+        "oldestDays": 90
+      },
       "lessons": [
         {
           "id": "r-bad1",
@@ -3435,6 +3500,11 @@
       "degraded": false,
       "total": 13,
       "unvectored": 5,
+      "hidden": {
+        "count": 2,
+        "total": 15,
+        "oldestDays": 90
+      },
       "lessons": [
         {
           "id": "r-bad1",
@@ -3721,6 +3791,11 @@
       "provider": "fake",
       "checked": true,
       "degraded": true,
+      "hidden": {
+        "count": 2,
+        "total": 13,
+        "oldestDays": 90
+      },
       "lessons": [
         {
           "id": "r-good",
@@ -4009,6 +4084,11 @@
       "provider": "fake",
       "checked": true,
       "degraded": true,
+      "hidden": {
+        "count": 2,
+        "total": 13,
+        "oldestDays": 90
+      },
       "lessons": [
         {
           "id": "r-good",
@@ -4297,6 +4377,11 @@
       "provider": null,
       "checked": true,
       "degraded": true,
+      "hidden": {
+        "count": 2,
+        "total": 13,
+        "oldestDays": 90
+      },
       "lessons": [
         {
           "id": "r-good",
@@ -4585,6 +4670,11 @@
       "provider": null,
       "checked": true,
       "degraded": true,
+      "hidden": {
+        "count": 1,
+        "total": 3,
+        "oldestDays": 90
+      },
       "lessons": [
         {
           "id": "o-fresh1",
@@ -4659,6 +4749,11 @@
       "provider": "fake",
       "checked": true,
       "degraded": true,
+      "hidden": {
+        "count": 1,
+        "total": 3,
+        "oldestDays": 90
+      },
       "lessons": [
         {
           "id": "o-fresh1",
@@ -4733,6 +4828,11 @@
       "provider": "fake",
       "checked": true,
       "degraded": true,
+      "hidden": {
+        "count": 1,
+        "total": 3,
+        "oldestDays": 90
+      },
       "lessons": [
         {
           "id": "o-fresh1",
@@ -4807,6 +4907,11 @@
       "provider": null,
       "checked": true,
       "degraded": false,
+      "hidden": {
+        "count": 0,
+        "total": 2,
+        "oldestDays": null
+      },
       "lessons": [
         {
           "id": "n-1",
@@ -4876,6 +4981,11 @@
       "provider": "fake",
       "checked": true,
       "degraded": true,
+      "hidden": {
+        "count": 0,
+        "total": 2,
+        "oldestDays": null
+      },
       "lessons": [
         {
           "id": "n-1",
@@ -4945,6 +5055,11 @@
       "provider": null,
       "checked": true,
       "degraded": false,
+      "hidden": {
+        "count": 0,
+        "total": 2,
+        "oldestDays": null
+      },
       "lessons": [
         {
           "id": "d-live1",
@@ -5024,6 +5139,11 @@
       "provider": null,
       "checked": false,
       "degraded": false,
+      "hidden": {
+        "count": 0,
+        "total": 2,
+        "oldestDays": null
+      },
       "lessons": [
         {
           "id": "d-live1",
@@ -5103,6 +5223,11 @@
       "provider": "fake",
       "checked": true,
       "degraded": true,
+      "hidden": {
+        "count": 0,
+        "total": 2,
+        "oldestDays": null
+      },
       "lessons": [
         {
           "id": "d-live1",

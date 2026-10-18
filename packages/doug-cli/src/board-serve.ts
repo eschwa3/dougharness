@@ -5,9 +5,9 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { watch as fsWatch, watchFile, unwatchFile, type FSWatcher } from "node:fs";
 import { basename, dirname, join } from "node:path";
-import { autopilotView, readAutopilot, AUTOPILOT_FILE } from "@dougharness/flow/lib/autopilot-view.mjs";
-import { boardPath, findCard, loadBoard, moveCard, readyCapWarning, reorderCard, saveBoard } from "@dougharness/flow/lib/board.mjs";
-import { buildBoardPage } from "./board-page.js";
+import { autopilotView, readAutopilot, readRuns, AUTOPILOT_FILE } from "@dougharness/flow/lib/autopilot-view.mjs";
+import { boardPath, findCard, type Board, loadBoard, moveCard, readyCapWarning, reorderCard, saveBoard } from "@dougharness/flow/lib/board.mjs";
+import { boardRollup, buildBoardPage } from "./board-page.js";
 
 const HOST = "127.0.0.1";
 const CARDS_PREFIX = "/api/cards/";
@@ -25,13 +25,26 @@ interface EventClient {
   res: ServerResponse;
   lastSent: string | null;
   lastAutopilot: string;
+  lastRollup: string;
+}
+
+const EMPTY_ROLLUP = '{"epics":[],"milestones":[]}';
+
+// The roll-up of a loaded board as JSON; a failure yields null so the event is skipped.
+function rollupJson(dir: string, board: Board): string | null {
+  try {
+    return JSON.stringify(boardRollup(dir, board));
+  } catch {
+    return null;
+  }
 }
 
 // The autopilot panel's view as the page receives it: the JSON of autopilotView, or "null" with no run, a file that
 // does not parse, or any failure reading it. Never throws.
 function autopilotJson(dir: string): string {
   try {
-    return JSON.stringify(autopilotView(readAutopilot(dir), new Date()));
+    const state = readAutopilot(dir);
+    return JSON.stringify(autopilotView(state, new Date(), readRuns(state)));
   } catch {
     return "null";
   }
@@ -231,11 +244,17 @@ function handleEvents(dir: string, clients: Set<EventClient>, req: IncomingMessa
     "cache-control": "no-store",
     connection: "keep-alive",
   });
-  const client: EventClient = { res, lastSent: null, lastAutopilot: "null" };
+  const client: EventClient = { res, lastSent: null, lastAutopilot: "null", lastRollup: EMPTY_ROLLUP };
   try {
-    const serialized = JSON.stringify(loadBoard(dir));
+    const board = loadBoard(dir);
+    const serialized = JSON.stringify(board);
     client.lastSent = serialized;
     res.write(`event: board\ndata: ${serialized}\n\n`);
+    const roll = rollupJson(dir, board);
+    if (roll !== null && roll !== client.lastRollup) {
+      client.lastRollup = roll;
+      res.write(`event: rollup\ndata: ${roll}\n\n`);
+    }
   } catch {
     // A record that fails to load sends nothing; the client still gets later changes.
   }
@@ -302,16 +321,24 @@ export function startBoardServer(dir: string, opts: { port: number; watch?: "fs"
     });
     const onRecordChange = (): void => {
       let serialized: string;
+      let roll: string | null;
       try {
-        serialized = JSON.stringify(loadBoard(dir));
+        const board = loadBoard(dir);
+        serialized = JSON.stringify(board);
+        roll = rollupJson(dir, board);
       } catch {
         // Mid-write or invalid; keep watching and try again on the next change.
         return;
       }
       for (const client of clients) {
-        if (client.lastSent === serialized) continue;
-        client.lastSent = serialized;
-        client.res.write(`event: board\ndata: ${serialized}\n\n`);
+        if (client.lastSent !== serialized) {
+          client.lastSent = serialized;
+          client.res.write(`event: board\ndata: ${serialized}\n\n`);
+        }
+        if (roll !== null && client.lastRollup !== roll) {
+          client.lastRollup = roll;
+          client.res.write(`event: rollup\ndata: ${roll}\n\n`);
+        }
       }
     };
     const onAutopilotChange = (): void => {

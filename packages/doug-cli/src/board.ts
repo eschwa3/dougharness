@@ -16,6 +16,15 @@ import {
 } from "./board-serve-process.js";
 import {
   addCard,
+  addEpic,
+  addMilestone,
+  checkFilters,
+  labelContrastFailures,
+  rollup,
+  LIVE_RUNS_RELPATH,
+  editEpic,
+  editMilestone,
+  initLabelGroups,
   boardPath,
   boardTags,
   editCard,
@@ -36,6 +45,7 @@ import {
   type Board,
   type BoardCard,
   type EditFields,
+  type PlanEntryFields,
 } from "@dougharness/flow/lib/board.mjs";
 import { loadPlan, unwrapReport } from "@dougharness/flow/lib/plan.mjs";
 
@@ -46,12 +56,21 @@ export interface BoardIo {
 
 export const BOARD_USAGE = `Usage:
   doug board init [dir]
-  doug board add <id> --title <t> --goal <g> [--component <c>] [--size S|M|L] [--track flow|hand] [--class <c>] [--deps a,b] [--tag a,b] [--column <col>] [dir]
-  doug board list [dir] [--column <id>] [--tag <t>] [--json]
-  doug board next [dir] [--track flow|hand] [--batch <n>] [--tag <t>]
+  doug board add <id> --title <t> --goal <g> [--component <c>] [--size S|M|L] [--track flow|hand] [--class <c>] [--deps a,b] [--tag a,b] [--epic <id>] [--milestone <id>] [--column <col>] [dir]
+  doug board list [dir] [--column <id>] [--tag <t>] [--epic <id>] [--milestone <id>] [--json]
+  doug board next [dir] [--track flow|hand] [--batch <n>] [--tag <t>] [--epic <id>] [--milestone <id>]
   doug board reorder <id> [dir] --before <other> | --after <other> | --top | --bottom
   doug board move <id> <column> [dir] [--source <text>]
-  doug board edit <id> [dir] [--title <t>] [--goal <g> | --goal-file <path>] [--size S|M|L] [--component <c>] [--track flow|hand] [--class <c>] [--deps a,b] [--tag a,b] [--source <s>] [--force]
+  doug board edit <id> [dir] [--title <t>] [--goal <g> | --goal-file <path>] [--size S|M|L] [--component <c>] [--track flow|hand] [--class <c>] [--deps a,b] [--tag a,b] [--source <s>] [--epic <id>] [--milestone <id>] [--force]
+  doug board epic add <id> --title <t> --goal <g> [dir] [--version <v>] [--date YYYY-MM-DD]
+  doug board epic edit <id> [dir] [--title <t>] [--goal <g>] [--version <v>] [--date YYYY-MM-DD] [--status planned|active|done] [--force]
+  doug board epic list [dir] [--json]
+  doug board milestone add <id> --title <t> --goal <g> [dir] [--version <v>] [--date YYYY-MM-DD]
+  doug board milestone edit <id> [dir] [--title <t>] [--goal <g>] [--version <v>] [--date YYYY-MM-DD] [--status planned|active|done] [--force]
+  doug board milestone list [dir] [--json]
+  doug board labels init [dir]
+  doug board labels --check [dir]
+  doug board rollup [dir] [--epic <id> | --milestone <id>] [--from <live-runs>]
   doug board remove <id> [dir] [--force]
   doug board record <id> <report.json> [dir] --summary "<one sentence>" [--cost <usd>] [--codex-cost <usd>] [--shared-cost <usd>] [--wall <text>] [--commit <sha>] [--adversary "<id>=<class>[: <reason>]"]...
   doug board record <id> --hand [dir] --summary "<one sentence>" [--commit <sha>] [--wall <text>] [--gate <text>] [--note <text>]
@@ -69,8 +88,8 @@ cost and --shared-cost the shared integration agents', counted once; summary --c
 added to --cost.
 `;
 
-const BOOLEAN_FLAGS = new Set(["json", "help", "hand", "top", "bottom", "force", "open", "detach", "stop"]);
-const EDIT_FIELD_ORDER = ["title", "goal", "size", "component", "track", "class", "tags", "deps", "source"] as const;
+const BOOLEAN_FLAGS = new Set(["json", "help", "hand", "top", "bottom", "force", "open", "detach", "stop", "check"]);
+const EDIT_FIELD_ORDER = ["title", "goal", "size", "component", "track", "class", "tags", "deps", "source", "epic", "milestone"] as const;
 const REPEATABLE_FLAGS = new Set(["adversary"]);
 const DEFAULT_PORT = 8787;
 
@@ -78,16 +97,24 @@ const DEFAULT_PORT = 8787;
 // `record` has two forms (--hand or not) with different allowed sets, handled separately below.
 const SUBCOMMAND_FLAGS: Record<string, string[]> = {
   init: [],
-  add: ["title", "goal", "component", "size", "track", "class", "deps", "tag", "column"],
-  list: ["column", "tag", "json"],
-  next: ["track", "batch", "tag"],
+  add: ["title", "goal", "component", "size", "track", "class", "deps", "tag", "epic", "milestone", "column"],
+  list: ["column", "tag", "epic", "milestone", "json"],
+  next: ["track", "batch", "tag", "epic", "milestone"],
   reorder: ["before", "after", "top", "bottom"],
   move: ["source"],
-  edit: ["title", "goal", "goal-file", "size", "component", "track", "class", "deps", "tag", "source", "force"],
+  edit: ["title", "goal", "goal-file", "size", "component", "track", "class", "deps", "tag", "source", "epic", "milestone", "force"],
   remove: ["force"],
+  labels: ["check"],
+  rollup: ["epic", "milestone", "from"],
   summary: ["summary", "cost", "codex-cost", "wall", "commit", "card"],
   build: ["out"],
   serve: ["port", "open", "detach", "stop"],
+};
+// epic and milestone: `<kind> add|edit|list`, each action with its own allowed flags.
+const PLAN_ACTION_FLAGS: Record<string, string[]> = {
+  add: ["title", "goal", "version", "date"],
+  edit: ["title", "goal", "version", "date", "status", "force"],
+  list: ["json"],
 };
 const RECORD_HAND_FLAGS = ["summary", "hand", "commit", "wall", "gate", "note"];
 const RECORD_REPORT_FLAGS = ["summary", "cost", "codex-cost", "shared-cost", "commit", "wall", "adversary"];
@@ -180,6 +207,20 @@ export async function runBoard(argv: string[], io?: BoardIo): Promise<number> {
     return 2;
   };
 
+  if (cmd === "epic" || cmd === "milestone") {
+    const action = rest[0];
+    if (action === undefined || !Object.prototype.hasOwnProperty.call(PLAN_ACTION_FLAGS, action)) {
+      out.stderr(subcommandUsage(cmd));
+      return 2;
+    }
+    const unknown = [...Object.keys(opts), ...Object.keys(repeated)].find((name) => !PLAN_ACTION_FLAGS[action].includes(name));
+    if (unknown !== undefined) {
+      out.stderr(`unknown option --${unknown} for doug board ${cmd}\n`);
+      out.stderr(subcommandUsage(cmd));
+      return 2;
+    }
+  }
+
   if (cmd === "record" || (cmd !== undefined && Object.prototype.hasOwnProperty.call(SUBCOMMAND_FLAGS, cmd))) {
     const unknown = unknownFlagFor(cmd, opts, repeated);
     if (unknown !== undefined) {
@@ -239,6 +280,8 @@ export async function runBoard(argv: string[], io?: BoardIo): Promise<number> {
           class: stringOpt(opts, "class"),
           deps,
           tags,
+          epic: stringOpt(opts, "epic") || undefined,
+          milestone: stringOpt(opts, "milestone") || undefined,
           column: stringOpt(opts, "column"),
         });
         saveBoard(dir, board);
@@ -266,9 +309,15 @@ export async function runBoard(argv: string[], io?: BoardIo): Promise<number> {
           out.stderr(`unknown tag "${tagOpt}"; tags are ${boardTags(board).join(", ")}\n`);
           return 1;
         }
+        const epicOpt = stringOpt(opts, "epic");
+        const milestoneOpt = stringOpt(opts, "milestone");
+        checkFilters(board, { epic: epicOpt, milestone: milestoneOpt });
         const filtered = (cards: BoardCard[]): BoardCard[] =>
           (columnId === undefined ? cards : cards.filter((c) => c.column === columnId)).filter(
-            (c) => tagOpt === undefined || (c.tags || []).includes(tagOpt),
+            (c) =>
+              (tagOpt === undefined || (c.tags || []).includes(tagOpt)) &&
+              (epicOpt === undefined || c.epic === epicOpt) &&
+              (milestoneOpt === undefined || c.milestone === milestoneOpt),
           );
         if (opts.json === true) {
           out.stdout(JSON.stringify(filtered(board.cards), null, 2) + "\n");
@@ -295,7 +344,10 @@ export async function runBoard(argv: string[], io?: BoardIo): Promise<number> {
           return 2;
         }
         const board = loadBoard(dir);
-        const picked = batch === null ? nextReadyCard(board, { track, tag: tagOpt }) : nextReadyCards(board, { track, batch, tag: tagOpt });
+        const picked =
+          batch === null
+            ? nextReadyCard(board, { track, tag: tagOpt, epic: stringOpt(opts, "epic"), milestone: stringOpt(opts, "milestone") })
+            : nextReadyCards(board, { track, batch, tag: tagOpt, epic: stringOpt(opts, "epic"), milestone: stringOpt(opts, "milestone") });
         const skipped = picked.skipped;
         const card = "card" in picked ? picked.card : picked.cards.length ? picked.cards : null;
         for (const s of skipped) {
@@ -385,6 +437,10 @@ export async function runBoard(argv: string[], io?: BoardIo): Promise<number> {
         if (tagOpt !== undefined) fields.tags = tagOpt.split(",").map((t) => t.trim()).filter(Boolean);
         const source = stringOpt(opts, "source");
         if (source !== undefined) fields.source = source;
+        const epicOpt = stringOpt(opts, "epic");
+        if (epicOpt !== undefined) fields.epic = epicOpt === "" ? null : epicOpt;
+        const milestoneOpt = stringOpt(opts, "milestone");
+        if (milestoneOpt !== undefined) fields.milestone = milestoneOpt === "" ? null : milestoneOpt;
         const changed = EDIT_FIELD_ORDER.filter((k) => Object.prototype.hasOwnProperty.call(fields, k));
         if (!changed.length) return usage();
         const dir = dirFrom(rest, 1);
@@ -393,6 +449,89 @@ export async function runBoard(argv: string[], io?: BoardIo): Promise<number> {
         saveBoard(dir, board);
         for (const w of warnings) out.stderr(`warning: ${w}\n`);
         out.stdout(`Edited ${id} (${changed.join(", ")}) in ${relpathOf(dir, boardPath(dir))}.\n`);
+        return 0;
+      }
+      case "labels": {
+        if (opts.check === true) {
+          for (const l of labelContrastFailures(loadBoard(dirFrom(rest, 0)))) out.stdout(`${l}\n`);
+          return 0;
+        }
+        if (rest[0] !== "init") return usage();
+        const dir = dirFrom(rest, 1);
+        saveBoard(dir, initLabelGroups(loadBoard(dir)));
+        out.stdout(`Added label groups type and priority to ${relpathOf(dir, boardPath(dir))}.\n`);
+        return 0;
+      }
+      case "rollup": {
+        const epicOpt = stringOpt(opts, "epic");
+        const milestoneOpt = stringOpt(opts, "milestone");
+        if (epicOpt !== undefined && milestoneOpt !== undefined) return usage();
+        const dir = dirFrom(rest, 0);
+        const board = loadBoard(dir);
+        checkFilters(board, { epic: epicOpt, milestone: milestoneOpt });
+        const from = stringOpt(opts, "from");
+        let live: string | null = null;
+        if (from !== undefined) {
+          try {
+            live = readFileSync(resolve(from), "utf8");
+          } catch {
+            throw new Error(`cannot read --from file ${from}`);
+          }
+        } else if (existsSync(resolve(dir, LIVE_RUNS_RELPATH))) live = readFileSync(resolve(dir, LIVE_RUNS_RELPATH), "utf8");
+        const all = rollup(board, live);
+        const result = epicOpt !== undefined ? all.epics.find((e) => e.id === epicOpt) : milestoneOpt !== undefined ? all.milestones.find((m) => m.id === milestoneOpt) : all;
+        out.stdout(JSON.stringify(result, null, 2) + "\n");
+        return 0;
+      }
+      case "epic":
+      case "milestone": {
+        const [action, id] = rest;
+        const edit = cmd === "epic" ? editEpic : editMilestone;
+        const add = cmd === "epic" ? addEpic : addMilestone;
+        if (action === "list") {
+          const board = loadBoard(dirFrom(rest, 1));
+          const entries = (cmd === "epic" ? board.epics : board.milestones) || [];
+          if (opts.json === true) out.stdout(JSON.stringify(entries, null, 2) + "\n");
+          else {
+            for (const e of entries) {
+              const t = e.target ? [e.target.version, e.target.date].filter(Boolean).join(" ") : "";
+              out.stdout(`${e.id}  ${e.status}  ${e.title}${t ? `  [${t}]` : ""}\n`);
+            }
+          }
+          return 0;
+        }
+        if (!id) return usage();
+        const title = stringOpt(opts, "title");
+        const goal = stringOpt(opts, "goal");
+        if (action === "add") {
+          if (!title || !goal) return usage();
+          const dir = dirFrom(rest, 2);
+          const version = stringOpt(opts, "version");
+          const date = stringOpt(opts, "date");
+          const target: { version?: string; date?: string } = {};
+          if (version) target.version = version;
+          if (date) target.date = date;
+          saveBoard(dir, add(loadBoard(dir), { id, title, goal, ...(Object.keys(target).length ? { target } : {}) }));
+          out.stdout(`Added ${cmd} ${id} in ${relpathOf(dir, boardPath(dir))}.\n`);
+          return 0;
+        }
+        const fields: PlanEntryFields = {};
+        if (title !== undefined) fields.title = title;
+        if (goal !== undefined) fields.goal = goal;
+        const status = stringOpt(opts, "status");
+        if (status !== undefined) fields.status = status;
+        const target: { version?: string | null; date?: string | null } = {};
+        const version = stringOpt(opts, "version");
+        const date = stringOpt(opts, "date");
+        if (version !== undefined) target.version = version === "" ? null : version;
+        if (date !== undefined) target.date = date === "" ? null : date;
+        if (Object.keys(target).length) fields.target = target;
+        if (!Object.keys(fields).length) return usage();
+        const dir = dirFrom(rest, 2);
+        const { board, warnings } = edit(loadBoard(dir), id, fields, { force: opts.force === true });
+        saveBoard(dir, board);
+        for (const w of warnings) out.stderr(`warning: ${w}\n`);
+        out.stdout(`Edited ${cmd} ${id} (${Object.keys(fields).join(", ")}) in ${relpathOf(dir, boardPath(dir))}.\n`);
         return 0;
       }
       case "remove": {

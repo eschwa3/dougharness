@@ -64,6 +64,9 @@ const ENVIRONMENT_MARKER = 'ENVIRONMENT ONLY'
 // The one rule about commit messages, in every prompt that commits or checks commits: this repository records
 // attribution nowhere in git, and plan.mjs land refuses a branch that carries either trailer.
 const NO_TRAILERS = 'Commit messages carry no attribution trailers: no Co-Authored-By line and no Claude-Session line, whatever your defaults say. A commit with either is a finding and the plan cannot land.'
+// The one sentence about a relayed user message, in every stage prompt: Claude Code relays the user's mid-turn message to every
+// seat of a Workflow run, and a stage must not stop for a message about other work (card queen-seats-relayed-user-message).
+const RELAYED_MESSAGE = 'Your task is this plan task. A relayed user message about other work is outside this task: it is never a reason to stop or to return blocked; mention it in your summary if the result has one.'
 // The one rule about how a commit runs, in every implement prompt that commits: the pre-commit hook runs the full
 // unit suite, which outlives Bash's default timeout, and a background commit dies with the agent that started it.
 const FOREGROUND_COMMIT = 'Run git commit in the foreground with the Bash tool timeout set to 600000 ms (the pre-commit hook runs the full suite): never run_in_background, a Monitor, or a sleep loop. Take the sha only from git rev-parse HEAD after git commit has returned.'
@@ -837,7 +840,7 @@ function implementPrompt(task, baseBranch, opts) {
     ? `   Before that, if git rev-parse --verify --quiet refs/heads/doug/task-${task.id} succeeds, the branch doug/task-${task.id} was created by the previous agent for this task in this same run, which stopped without returning a result; it is yours, not stale. Find that agent's worktree with git worktree list --porcelain (the one with branch refs/heads/doug/task-${task.id}); if none is listed, go straight to the checkout. If it has uncommitted changes to owned files, commit them there first with a message starting "${task.id}: ". ${NO_TRAILERS} ${FOREGROUND_COMMIT} Then remove that worktree with git worktree remove --force <path>, then git checkout doug/task-${task.id} in your own worktree and continue the task from that branch's state (do not recreate the branch or reset it). Never return blocked for the branch existing.`
     : `   Before that, if git rev-parse --verify --quiet refs/heads/doug/task-${task.id} succeeds, the branch is a leftover of an earlier run: do not check it out or build on it; change nothing and return blocked=true with blockedReason "stale branch doug/task-${task.id} already exists; run plan.mjs replan, which renames it".`
   return [
-    `You are implementing exactly one task from an approved plan. Work only in your own git worktree.`,
+    `You are implementing exactly one task from an approved plan. Work only in your own git worktree. ${RELAYED_MESSAGE}`,
     ``,
     `Plan: ${plan.title}`,
     `Goal: ${plan.goal}`,
@@ -865,7 +868,7 @@ function implementPrompt(task, baseBranch, opts) {
 
 function reusePrompt(task, baseBranch) {
   return [
-    `You are starting a task from a branch that already passed verification, review, and the adversary on an earlier pass of this plan. Do not implement anything and do not edit any file; the checks run again on this branch after you.`,
+    `You are starting a task from a branch that already passed verification, review, and the adversary on an earlier pass of this plan. Do not implement anything and do not edit any file; the checks run again on this branch after you. ${RELAYED_MESSAGE}`,
     ``,
     `Plan: ${plan.title}`,
     `Task ${task.id}: ${task.title}`,
@@ -891,7 +894,7 @@ function leadPrompt(task, baseBranch, opts) {
     ? `   Before that, if git rev-parse --verify --quiet refs/heads/doug/task-${task.id} succeeds, the branch doug/task-${task.id} was created by the previous agent for this task in this same run, which stopped without returning a result; it is yours, not stale. Find that agent's worktree with git worktree list --porcelain (the one with branch refs/heads/doug/task-${task.id}); if none is listed, go straight to the checkout. If it has uncommitted changes to owned files, commit them there first with a message starting "${task.id}: ". ${NO_TRAILERS} ${FOREGROUND_COMMIT} Then remove that worktree with git worktree remove --force <path>, then git checkout doug/task-${task.id} in your own worktree and continue the task from that branch's state (do not recreate the branch or reset it). Never return blocked for the branch existing.`
     : `   Before that, if git rev-parse --verify --quiet refs/heads/doug/task-${task.id} succeeds, the branch is a leftover of an earlier run: do not check it out or build on it; change nothing and return blocked=true with blockedReason "stale branch doug/task-${task.id} already exists; run plan.mjs replan, which renames it".`
   return [
-    `You are the lead of a swarm for exactly one task of an approved plan. You split the task into worker briefs; you do not implement anything and you edit no file. Work only in your own git worktree.`,
+    `You are the lead of a swarm for exactly one task of an approved plan. You split the task into worker briefs; you do not implement anything and you edit no file. Work only in your own git worktree. ${RELAYED_MESSAGE}`,
     ``,
     `Plan: ${plan.title}`,
     `Goal: ${plan.goal}`,
@@ -923,7 +926,7 @@ function workerPrompt(task, brief, n, lead) {
   // to and what is not its business; the task it belongs to still owns only the files its own brief lists below.
   const siblings = (Array.isArray(lead.briefs) ? lead.briefs : []).filter(b => b.id !== brief.id)
   return [
-    `You are worker ${n} of a swarm implementing one part of task ${task.id} from an approved plan. You get one brief, the files it owns, and a verification command; the other parts are other workers' business. Work only in your own git worktree.`,
+    `You are worker ${n} of a swarm implementing one part of task ${task.id} from an approved plan. You get one brief, the files it owns, and a verification command; the other parts are other workers' business. Work only in your own git worktree. ${RELAYED_MESSAGE}`,
     ``,
     `Plan: ${plan.title}`,
     `Goal: ${plan.goal}`,
@@ -958,7 +961,7 @@ function workerPrompt(task, brief, n, lead) {
 // left an orphan - it defaults to `workers` for the plain, no-rebrief case where the two are the same list.
 function leadMergePrompt(task, lead, workers, baseBranch, allWorkers = workers) {
   return [
-    `You are the lead of the swarm for task ${task.id}. The workers have committed; merge their branches into the task branch and hand it to the checks. Work only in the git worktree you were started in, on branch ${lead.branch}, and never edit anything under the repository root. The lead's worktree (${lead.worktreePath}) may have been removed, so do not cd into it. First git checkout ${lead.branch} there; if git refuses because the branch is checked out in another worktree, that worktree is a leftover under .claude/worktrees: find it with git worktree list --porcelain, remove it with git worktree remove --force <path>, and check out again. If the branch does not exist, create it from ${baseBranch} with git checkout -b ${lead.branch} ${baseBranch} (the lead commits nothing, so the task branch is the base).`,
+    `You are the lead of the swarm for task ${task.id}. The workers have committed; merge their branches into the task branch and hand it to the checks. Work only in the git worktree you were started in, on branch ${lead.branch}, and never edit anything under the repository root. The lead's worktree (${lead.worktreePath}) may have been removed, so do not cd into it. First git checkout ${lead.branch} there; if git refuses because the branch is checked out in another worktree, that worktree is a leftover under .claude/worktrees: find it with git worktree list --porcelain, remove it with git worktree remove --force <path>, and check out again. If the branch does not exist, create it from ${baseBranch} with git checkout -b ${lead.branch} ${baseBranch} (the lead commits nothing, so the task branch is the base). ${RELAYED_MESSAGE}`,
     PARTIAL_NEVER_MERGED,
     ``,
     `Task ${task.id}: ${task.title}`,
@@ -985,7 +988,7 @@ function leadMergePrompt(task, lead, workers, baseBranch, allWorkers = workers) 
 function leadRebriefPrompt(task, lead, workers, blockedWorkers) {
   const finished = workers.filter(w => !w.blocked)
   return [
-    `You are the lead of the swarm for task ${task.id}. One or more workers are blocked; you get one chance to re-brief the unfinished pieces. You implement nothing and edit no file. Work read-only from the repository root you were started in. Do not cd into the lead's worktree (it may have been removed), create no branch, and edit nothing. Read a finished worker's committed files with \`git show <commit>:<path>\` or \`git show <commit>\`.`,
+    `You are the lead of the swarm for task ${task.id}. One or more workers are blocked; you get one chance to re-brief the unfinished pieces. You implement nothing and edit no file. Work read-only from the repository root you were started in. Do not cd into the lead's worktree (it may have been removed), create no branch, and edit nothing. Read a finished worker's committed files with \`git show <commit>:<path>\` or \`git show <commit>\`. ${RELAYED_MESSAGE}`,
     ``,
     `Plan: ${plan.title}`,
     `Goal: ${plan.goal}`,
@@ -1020,7 +1023,7 @@ function fixPrompt(task, r, pass, baseBranch, ledger, brief) {
     ? `Work only in the git worktree you were started in, on branch ${r.impl.branch}: the task's earlier worktree (${r.impl.worktreePath}) was removed when its level integrated. First run git checkout ${r.impl.branch} there; if git refuses because the branch is checked out in another worktree, that worktree is a leftover under .claude/worktrees: find it with git worktree list --porcelain, remove it with git worktree remove --force <path>, and check out again. Create no branch, and never edit anything under the repository root.`
     : `Work only in the existing worktree ${r.impl.worktreePath} on branch ${r.impl.branch}: cd there first, create no worktree and no branch, and never edit anything under the repository root.`
   const lines = [
-    `You are fixing your own task after its checks blocked it. This is fix attempt ${pass - 1} of ${fixAttempts} for task ${task.id}. ${where}`,
+    `You are fixing your own task after its checks blocked it. This is fix attempt ${pass - 1} of ${fixAttempts} for task ${task.id}. ${where} ${RELAYED_MESSAGE}`,
     ``,
     `Plan: ${plan.title}`,
     `Task ${task.id}: ${task.title}`,
@@ -1068,7 +1071,7 @@ function resumePrompt(task, prev, handoff, baseBranch, brief) {
   const completed = (Array.isArray(handoff.completed) ? handoff.completed : []).join('; ') || '(none)'
   const remaining = (Array.isArray(handoff.remaining) ? handoff.remaining : []).join('; ')
   return [
-    `You are resuming ${who} after the previous worker stopped partway through at the harness's context notice. Work only in the existing worktree ${prev.worktreePath} on branch ${prev.branch}: cd there first, create no worktree and no branch, and never edit anything under the repository root.`,
+    `You are resuming ${who} after the previous worker stopped partway through at the harness's context notice. Work only in the existing worktree ${prev.worktreePath} on branch ${prev.branch}: cd there first, create no worktree and no branch, and never edit anything under the repository root. ${RELAYED_MESSAGE}`,
     ``,
     `Plan: ${plan.title}`,
     brief ? `Brief ${brief.id}: ${brief.title}` : `Task ${task.id}: ${task.title}`,
@@ -1104,7 +1107,7 @@ function supervisePrompt(task, r, attempts, ledger, signals) {
     ].join('\n')
   })
   return [
-    `You are the supervisor of task ${task.id}'s fix loop. The loop is stalled: ${stalls.join('; ')}. Read the passes and the ledger below and write a brief for the next fix pass: what was tried, what failed each time, and two or three alternative directions drawn from this evidence, each different from what the passes tried.`,
+    `You are the supervisor of task ${task.id}'s fix loop. The loop is stalled: ${stalls.join('; ')}. Read the passes and the ledger below and write a brief for the next fix pass: what was tried, what failed each time, and two or three alternative directions drawn from this evidence, each different from what the passes tried. ${RELAYED_MESSAGE}`,
     ``,
     `Plan: ${plan.title}`,
     `Task ${task.id}: ${task.title}`,
@@ -1130,7 +1133,7 @@ function supervisePrompt(task, r, attempts, ledger, signals) {
 
 function verifyPrompt(task, impl, baseBranch, seat = 1) {
   return [
-    `You are a verifier. You did not write this code. Your job is to run it, not to read and approve it.`,
+    `You are a verifier. You did not write this code. Your job is to run it, not to read and approve it. ${RELAYED_MESSAGE}`,
     ...(seat > 1 ? [`You are crew seat ${seat} of ${crewOf(task).testers} on this task: another verifier runs the same checks at the same time. Run the verification and acceptance commands yourself, and beyond them probe the behavior the spec implies that those commands may not cover: edge cases (empty, missing, boundary, and repeated input) and error paths (invalid input, a failing dependency). A defect you find is a finding even when every command passes.`] : []),
     ``,
     `Task ${task.id}: ${task.title}`,
@@ -1164,7 +1167,7 @@ function verifyPrompt(task, impl, baseBranch, seat = 1) {
 function checkPrompt(task, impl, prevCommit, baseBranch, ledger) {
   const open = ledgerText(ledger, 'open')
   return [
-    `You are the single check on a fix pass for task ${task.id}. You did not write this code. The full verifier and reviewer already ran on an earlier pass, so your job is to run the commands again and to read only what the fix changed.`,
+    `You are the single check on a fix pass for task ${task.id}. You did not write this code. The full verifier and reviewer already ran on an earlier pass, so your job is to run the commands again and to read only what the fix changed. ${RELAYED_MESSAGE}`,
     ``,
     `Task ${task.id}: ${task.title}`,
     `Spec:`,
@@ -1198,7 +1201,7 @@ function checkPrompt(task, impl, prevCommit, baseBranch, ledger) {
 // The one check of a size-S task: the verifier's job and the reviewer's job in one agent on the verify row.
 function sizeCheckPrompt(task, impl, baseBranch) {
   return [
-    `You are the one check on size-S task ${task.id}: the verifier's job and the reviewer's job in one pass. You did not write this code. Run it, then read the diff ${baseBranch}...${impl.branch}. No separate verifier, reviewer, or adversary runs for this task; the adversary reviews the level's S tasks together on the integration branch after the merge, so what you miss reaches it.`,
+    `You are the one check on size-S task ${task.id}: the verifier's job and the reviewer's job in one pass. You did not write this code. Run it, then read the diff ${baseBranch}...${impl.branch}. No separate verifier, reviewer, or adversary runs for this task; the adversary reviews the level's S tasks together on the integration branch after the merge, so what you miss reaches it. ${RELAYED_MESSAGE}`,
     ``,
     `Task ${task.id}: ${task.title}`,
     `Spec:`,
@@ -1249,7 +1252,7 @@ function levelAdversaryPrompt(li, sReady, levelBase, confirming) {
     `DOUG_SPEC_EOF`,
   ].join('\n')
   return [
-    `Run the adversarial reviewer for level ${li} of the plan (its size-S tasks, merged on ${integrationBranch}) and relay its verdict. Do not review the code yourself and do not edit anything.`,
+    `Run the adversarial reviewer for level ${li} of the plan (its size-S tasks, merged on ${integrationBranch}) and relay its verdict. Do not review the code yourself and do not edit anything. ${RELAYED_MESSAGE}`,
     ``,
     `Run exactly this command with the Bash tool from the repository root (it pipes the spec on stdin; the timeout is ${adversary.timeoutMs} ms, so set the tool timeout at least that high):`,
     '```',
@@ -1265,7 +1268,7 @@ function levelAdversaryPrompt(li, sReady, levelBase, confirming) {
 function levelFallbackAdversaryPrompt(li, sReady, levelBase, why, confirming) {
   // Same scope as levelAdversaryPrompt (card flow-fallback-verify-scope): no verify list, the suite already ran at integrate.
   return [
-    `You are the adversarial reviewer for level ${li} of plan "${plan.title}", standing in for codex-review, which could not run (${why}). The size-S tasks below were merged into ${integrationBranch} with one focused check each and no adversary of their own. Your job is to refute them together, in worktree ${INTEGRATION_WORKTREE} (relative to the repository root); the diff is ${levelBase}...${integrationBranch}.`,
+    `You are the adversarial reviewer for level ${li} of plan "${plan.title}", standing in for codex-review, which could not run (${why}). The size-S tasks below were merged into ${integrationBranch} with one focused check each and no adversary of their own. Your job is to refute them together, in worktree ${INTEGRATION_WORKTREE} (relative to the repository root); the diff is ${levelBase}...${integrationBranch}. ${RELAYED_MESSAGE}`,
     ``,
     ...levelSpecLines(sReady),
     `Plan acceptance criteria:`,
@@ -1288,7 +1291,7 @@ function levelFallbackAdversaryPrompt(li, sReady, levelBase, why, confirming) {
 // reviewer reading spec line by line is likely to miss, so two reviewers do not file the same finding twice.
 function reviewPrompt(task, impl, baseBranch, seat = 1) {
   return [
-    `You are a reviewer. Review the diff ${baseBranch}...${impl.branch} in worktree ${impl.worktreePath} against the task spec. Two passes: spec compliance first, then quality. ${baseBranch} is this branch's base (an integration branch when the task follows an earlier level); files that already exist there are not this task's changes.`,
+    `You are a reviewer. Review the diff ${baseBranch}...${impl.branch} in worktree ${impl.worktreePath} against the task spec. Two passes: spec compliance first, then quality. ${baseBranch} is this branch's base (an integration branch when the task follows an earlier level); files that already exist there are not this task's changes. ${RELAYED_MESSAGE}`,
     ...(seat > 1 ? [
       ``,
       `You are reviewer ${seat} of ${seat}: another reviewer is reading this diff at the same time with the standard brief and will check the spec sentence by sentence and the owned-file list. Do not repeat that work. Concentrate on what a first reviewer is likely to miss: behavior on inputs the spec does not name, a test that passes for the wrong reason or asserts less than its name says, error paths and partial failure, concurrency and ordering, a call site elsewhere in the repository that the change silently breaks, and anything the spec implies but does not state. File only what you have shown; your findings are merged with the other reviewer's, and a duplicate collapses to one entry.`,
@@ -1350,7 +1353,7 @@ function adversaryPrompt(task, impl, baseBranch, pass, ledger) {
     `DOUG_SPEC_EOF`,
   ].join('\n')
   return [
-    `Run the adversarial reviewer for task ${task.id} and relay its verdict. Do not review the code yourself and do not edit anything.`,
+    `Run the adversarial reviewer for task ${task.id} and relay its verdict. Do not review the code yourself and do not edit anything. ${RELAYED_MESSAGE}`,
     ``,
     `Run exactly this command with the Bash tool (it pipes the spec on stdin; the timeout is ${adversary.timeoutMs} ms, so set the tool timeout at least that high):`,
     '```',
@@ -1398,7 +1401,7 @@ function fallbackAdversaryPrompt(task, impl, baseBranch, why, pass, ledger) {
   // Same scope as adversaryPrompt's Codex seat (card flow-fallback-verify-scope): the task's own verify only, not plan.verify.
   const verify = [task.verify].filter(Boolean)
   return [
-    `You are the adversarial reviewer for task ${task.id}, standing in for codex-review, which could not run (${why}). Your job is to refute the change on branch ${impl.branch} in worktree ${impl.worktreePath}; the diff is ${baseBranch}...${impl.branch}. ${baseBranch} is this branch's base (an integration branch when the task follows an earlier level); files that already exist there are not this task's changes. Do not edit any file.`,
+    `You are the adversarial reviewer for task ${task.id}, standing in for codex-review, which could not run (${why}). Your job is to refute the change on branch ${impl.branch} in worktree ${impl.worktreePath}; the diff is ${baseBranch}...${impl.branch}. ${baseBranch} is this branch's base (an integration branch when the task follows an earlier level); files that already exist there are not this task's changes. Do not edit any file. ${RELAYED_MESSAGE}`,
     ``,
     `Task ${task.id}: ${task.title}`,
     `Spec:`,
@@ -1429,7 +1432,7 @@ function integratePrompt(levelIndex, results, baseBranch, isLastLevel, keepWorkt
   const branches = results.map(r => r.impl.branch)
   const worktrees = results.map(r => r.impl.worktreePath)
   return [
-    `You are the integration owner for level ${levelIndex} of plan "${plan.title}".`,
+    `You are the integration owner for level ${levelIndex} of plan "${plan.title}". ${RELAYED_MESSAGE}`,
     `Integration branch: ${integrationBranch}. Never check it out in the user's main working tree; use a dedicated worktree so the user's checkout is left exactly as it was.`,
     PARTIAL_NEVER_MERGED,
     `Merge these task branches into it, in this order: ${branches.join(', ')}.`,

@@ -1,7 +1,7 @@
 {
   "name": "doug-flow",
   "displayName": "Doug Flow",
-  "version": "1.3.0",
+  "version": "1.4.0",
   "description": "Plan, approve, implement one task per worktree, verify, review. A deterministic Workflow-tool template plus planner, implementer, verifier, and reviewer subagents. The plan is a file; nothing is implemented until you approve it.",
   "author": {
     "name": "Doug contributors"

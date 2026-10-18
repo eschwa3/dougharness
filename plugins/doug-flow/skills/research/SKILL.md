@@ -33,7 +33,7 @@ Write the findings to `.doug/.state/research/<card-id>.md` (session state, ignor
 
 A fact the design depends on is marked verified only when it is quoted verbatim from the raw source with its line number, fetched and searched (for example `curl -sL <url>` then `grep -n`) by the plugin's researcher agent or by a claude-code-guide asked for exact quotes; a guide answer that paraphrases, or cannot give the line, stays `unverified` in the note. The confirming fetch counts against the same research.maxFetches budget. On 2026-10-01 a guide answer quoted a sentence the raw sub-agents page does not contain, and only the grep caught it.
 
-The note is written under the card's id, not the question's, because the id is also the promotion key: a note for a card that lands is promoted to `docs/research/<card-id>.md`, `board.mjs record` copying it there when it records the landing so a commit that cites the note has something to read afterward. A note for a card that never lands (dropped, replanned under another id) stays in state and is eventually swept with the rest of `.doug/.state/`.
+The note is written under the card's id, not the question's, because the id is also the promotion key: a note for a card that lands is promoted to `docs/research/<card-id>.md`, `board.mjs record` copying it there when it records the landing so a commit that cites the note has something to read afterward. A queen run's inline note rides the queen report as `researchNote`; `autopilot.mjs report` writes it to `.doug/.state/research/<card-id>.md` so record promotes it as for a by-hand card. A note for a card that never lands (dropped, replanned under another id) stays in state and is eventually swept with the rest of `.doug/.state/`.
 
 Then hand it on:
 

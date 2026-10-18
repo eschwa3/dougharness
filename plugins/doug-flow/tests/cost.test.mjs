@@ -290,7 +290,7 @@ describe("card adversary-usage-in-report", () => {
     // No --report flag: <projectDir>/.doug/.state/last-report.json is read when it exists.
     const projectDir = mkdtempSync(join(tmpdir(), "doug-cost-proj-"));
     mkdirSync(join(projectDir, ".doug", ".state"), { recursive: true });
-    writeFileSync(join(projectDir, ".doug", ".state", "last-report.json"), JSON.stringify(sampleReport()));
+    writeFileSync(join(projectDir, ".doug", ".state", "last-report.json"), JSON.stringify({ ...sampleReport(), runId: "wf_7092b963-6a5" }));
     const defaultRun = run(["wf_7092b963-6a5", projectDir, "--claude-dir", fixture, "--json"]);
     expect(defaultRun.status, defaultRun.stderr).toBe(0);
     expect(JSON.parse(defaultRun.stdout).codex, "U5: with no --report flag, the default last-report.json path must still be read when it exists").toMatchObject({ reviews: 2 });
@@ -313,10 +313,61 @@ describe("card adversary-usage-in-report", () => {
     // No --report flag: the default <projectDir>/.doug/.state/last-report.json, wrapped, must also unwrap.
     const projectDir = mkdtempSync(join(tmpdir(), "doug-cost-wrapped-proj-"));
     mkdirSync(join(projectDir, ".doug", ".state"), { recursive: true });
-    writeFileSync(join(projectDir, ".doug", ".state", "last-report.json"), JSON.stringify({ summary: "x", agentCount: 1, logs: [], result: sampleReport() }));
+    writeFileSync(join(projectDir, ".doug", ".state", "last-report.json"), JSON.stringify({ summary: "x", agentCount: 1, logs: [], result: { ...sampleReport(), runId: "wf_7092b963-6a5" } }));
     const defaultRun = run(["wf_7092b963-6a5", projectDir, "--claude-dir", fixture, "--json"]);
     expect(defaultRun.status, defaultRun.stderr).toBe(0);
     expect(JSON.parse(defaultRun.stdout).codex, "M4: with no --report flag, a wrapped default last-report.json must also be unwrapped").toMatchObject({ reviews: 2 });
+  });
+
+  // Card cost-run-codex-line-mismatch: the Codex line attaches only to the run the report belongs to.
+  describe("card cost-run-codex-line-mismatch", () => {
+    const RUN = "wf_7092b963-6a5";
+    const OTHER = "wf_a19ecd25-e45";
+    const relay = "2 adversary agents relayed codex-review; Codex's own tokens are not in local transcripts and are not priced";
+    const viaDefault = (report) => {
+      const projectDir = mkdtempSync(join(tmpdir(), "doug-cost-rid-proj-"));
+      mkdirSync(join(projectDir, ".doug", ".state"), { recursive: true });
+      writeFileSync(join(projectDir, ".doug", ".state", "last-report.json"), JSON.stringify(report));
+      return [run([RUN, projectDir, "--claude-dir", fixture, "--json"]), run([RUN, projectDir, "--claude-dir", fixture])];
+    };
+    const viaNamed = (report) => {
+      const f = join(mkdtempSync(join(tmpdir(), "doug-cost-rid-named-")), "report.json");
+      writeFileSync(f, JSON.stringify(report));
+      return [run([RUN, project, "--claude-dir", fixture, "--report", f, "--json"]), run([RUN, project, "--claude-dir", fixture, "--report", f])];
+    };
+    const expectNone = (pair, why) => {
+      const [j, t] = pair;
+      expect(j.status, j.stderr).toBe(0);
+      const parsed = JSON.parse(j.stdout);
+      expect(parsed.codex, why).toBeNull();
+      expect(parsed.notes, why + " (relay note stays)").toContain(relay);
+      expect(t.stdout, why).not.toMatch(/^Codex:/m);
+    };
+    const expectAttached = (pair, why) => {
+      const [j, t] = pair;
+      expect(j.status, j.stderr).toBe(0);
+      expect(JSON.parse(j.stdout).codex, why).toMatchObject({ reviews: 2 });
+      expect(t.stdout, why).toMatch(/^Codex:/m);
+    };
+
+    it("C1: a default last-report.json whose runId differs from the run asked for prints no Codex line", () => {
+      expectNone(viaDefault({ ...sampleReport(), runId: OTHER }), "C1: a default report of another run must not be attached");
+    });
+    it("C2: a default last-report.json whose runId matches prints the Codex line", () => {
+      expectAttached(viaDefault({ ...sampleReport(), runId: RUN }), "C2: a matching default report must be attached");
+    });
+    it("C3: a default last-report.json with no runId prints no Codex line", () => {
+      expectNone(viaDefault(sampleReport()), "C3: a default report with no runId is not provably this run's");
+    });
+    it("C4: a named --report whose runId differs prints no Codex line", () => {
+      expectNone(viaNamed({ ...sampleReport(), runId: OTHER }), "C4: a named report of another run must not be attached");
+    });
+    it("C5: a named --report with no runId prints the Codex line", () => {
+      expectAttached(viaNamed(sampleReport()), "C5: the caller names the file, so a report without runId is attached");
+    });
+    it("C6: a named --report whose runId matches prints the Codex line", () => {
+      expectAttached(viaNamed({ ...sampleReport(), runId: RUN }), "C6: a matching named report must be attached");
+    });
   });
 
   it("R6: a truncated default last-report.json is ignored (exit 0, codex: null), but an explicit --report to the same bad file still exits 1 (round 2 fragility)", () => {

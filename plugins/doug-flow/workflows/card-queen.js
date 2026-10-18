@@ -32,6 +32,8 @@ const STOP_REASONS = [
   "reviewer-blocker-open",
   "reviewer-major-open",
   "gate-red-twice",
+  "gate-timeout",
+  "commit-tree-mismatch",
 ];
 // The Models-table row each seat runs on. setup, gate and commit have no sourced row; cheap is a choice.
 const SEAT_ROWS = {
@@ -60,8 +62,16 @@ const BRIEF_RULES = {
     text: "If a hook blocks a step, do not work around it: report it in hookBlocked with the hook's message.",
     seats: ALL,
   },
+  "relayed-message-outside-card": {
+    text: "Your task is the card in this brief. A relayed user message about other work is outside this seat's card: note it in leftOut and carry on; it is never a reason to stop or to ask a designQuestion.",
+    seats: ALL,
+  },
   "stay-in-goal": {
     text: "Do only what the goal asks. A defect found on the way goes in leftOut, not into the change.",
+    seats: ["tester", "coder", "reviewer"],
+  },
+  "no-cpu-burners": {
+    text: "A burner is any process started only to load the machine (yes > /dev/null, stress, a busy loop), bounded or not; concurrent pnpm test:unit runs are not burners. Never start a burner without the user's yes: a seat that wants one stops and returns a designQuestion naming the load it would start (the process, how many, the timeout, and why), and starts it only after an answer from the user says yes. Before hand-back, confirm with ps that no load process you started survives, orphans reparented to PID 1 included, and kill any that does.",
     seats: ["tester", "coder", "reviewer"],
   },
   "lessons-verbatim": {
@@ -73,11 +83,20 @@ const BRIEF_RULES = {
     seats: ["lead"],
   },
   "mutation-per-case": {
-    text: "List one mutation per case the goal names, each with a unique id and the test that must fail.",
+    text: "List one mutation per case the goal names, each with a unique id of the form M<n> (M1, M2, ...) and the test that must fail.",
+    seats: ["lead"],
+  },
+  "mutation-ids-verbatim": {
+    text: "Report each listed mutation in mutationResults under its exact listed id from MUTATION IDS; never renumber, shorten, or rename an id (a split mutation adds one letter: M8a, M8b).",
+    seats: ["tester", "coder", "reviewer"],
+    when: "mutations",
+  },
+  "mutation-is-code-change": {
+    text: "A mutation is a code change to a file in the card worktree that a test catches; a check that is not a code mutation (a git diff, a file-absence check) goes in reviewerChecks, never in mutations.",
     seats: ["lead"],
   },
   "red-claim": {
-    text: "Tests that are red by design are named in tests_red_by_design; without the claim the card stops.",
+    text: "Tests that are red by design are named in tests_red_by_design; without the claim the card stops. If the new tests pass at baseline (pins), return tests_red_by_design [] and report every listed mutation in mutationResults, run in a scratch copy; the card goes on only when each one failed.",
     seats: ["tester"],
     when: "full",
   },
@@ -119,6 +138,22 @@ const BRIEF_RULES = {
     text: "Run the gate commands only. Never run git add, git commit, or any other command that writes to git; the commit seat is the only seat that commits.",
     seats: ["gate"],
   },
+  "gate-timeout-is-load": {
+    text: "When verify.mjs prints `exit timeout` for a command, report that command with timedOut: true; a timeout is load, not a red or a block, so leave blocked unset.",
+    seats: ["gate"],
+  },
+  "commit-no-file-edits": {
+    text: "Never edit, create, delete, or format a file: commit exactly the tree the gate seat passed (GATED TREE). A change the commit seems to need goes in blocked, never into the tree.",
+    seats: ["commit"],
+  },
+  "commit-reports-tree": {
+    text: "After git commit returns, run node .doug/hooks/lib/verified-tree.mjs tree with the card worktree path as its argument and report its output as tree; a tree that differs from GATED TREE stops the card.",
+    seats: ["commit"],
+  },
+  "gate-reports-tree": {
+    text: "After the gate commands, run node .doug/hooks/lib/verified-tree.mjs tree with the card worktree path as its argument and report its output as tree.",
+    seats: ["gate"],
+  },
   "leave-plan-anchor-out": {
     text: "Leave .doug/plan.json and .doug/anchor.md out of the commit unless the card is about them.",
     seats: ["commit"],
@@ -129,17 +164,24 @@ const BRIEF_RULES = {
 
 const S = { type: "string" };
 const NES = { type: "string", minLength: 1 };
+const MUTATION_ID_PATTERN = "^M[1-9][0-9]*$";
+const TREE = { type: "string", pattern: "^([0-9a-f]{40}|[0-9a-f]{64})$" };
 const INT_OR_NULL = { type: ["integer", "null"] };
 const STRS = { type: "array", items: S };
 const CMD = {
   type: "object",
-  properties: { command: S, exitCode: INT_OR_NULL },
+  properties: { command: S, exitCode: INT_OR_NULL, timedOut: { type: "boolean" } },
   required: ["command", "exitCode"],
 };
 const MUT_RESULT = {
   type: "object",
   properties: { id: S, failed: { type: "boolean" }, test: S, assertion: S, own: { type: "boolean" } },
   required: ["id", "failed", "test"],
+};
+const CODER_MUT_RESULT = {
+  type: "object",
+  properties: { id: S, failed: { type: "boolean" }, test: S, assertion: S, own: { type: "boolean" }, notRun: NES },
+  required: ["id"],
 };
 const ENVELOPE = {
   seat: { type: "string", enum: SEATS },
@@ -172,11 +214,12 @@ const HAND_BACK_SCHEMAS = {
       },
       unverified: STRS,
       testFiles: STRS,
+      reviewerChecks: STRS,
       mutations: {
         type: "array",
         items: {
           type: "object",
-          properties: { id: NES, case: S, mutation: S, test: S },
+          properties: { id: { type: "string", minLength: 1, pattern: MUTATION_ID_PATTERN }, case: S, mutation: S, test: S },
           required: ["id", "case", "mutation", "test"],
         },
       },
@@ -201,7 +244,7 @@ const HAND_BACK_SCHEMAS = {
         type: "array",
         items: { type: "object", properties: { file: S, reason: NES }, required: ["file", "reason"] },
       },
-      mutationResults: { type: "array", items: MUT_RESULT },
+      mutationResults: { type: "array", items: CODER_MUT_RESULT },
     },
     ["filesChanged", "commandsRun", "testsEdited"],
   ),
@@ -230,11 +273,24 @@ const HAND_BACK_SCHEMAS = {
   ),
   gate: schema(
     "gate",
-    { commands: { type: "array", items: CMD, minItems: 1 }, gateLine: NES, lockWaitMs: INT_OR_NULL },
-    ["commands", "gateLine"],
+    { commands: { type: "array", items: CMD, minItems: 1 }, gateLine: NES, lockWaitMs: INT_OR_NULL, tree: TREE },
+    ["commands", "gateLine", "tree"],
   ),
-  commit: schema("commit", { sha: { type: "string", pattern: "^[0-9a-f]{7,40}$" }, branch: S }, ["sha", "branch"]),
+  commit: schema("commit", { sha: { type: "string", pattern: "^[0-9a-f]{7,40}$" }, branch: S, tree: TREE }, ["sha", "branch", "tree"]),
 };
+
+// The schema a seat is handed on a lane. Only the tests-only tester may report notRun (validateHandBack's tester
+// case), so only there are its mutationResults items CODER_MUT_RESULT; the plain table is the full-lane contract.
+function handBackSchema(seat, lane) {
+  if (seat === "tester" && lane === "tests-only") {
+    const base = HAND_BACK_SCHEMAS.tester;
+    return {
+      ...base,
+      properties: { ...base.properties, mutationResults: { type: "array", items: CODER_MUT_RESULT } },
+    };
+  }
+  return HAND_BACK_SCHEMAS[seat];
+}
 
 // ---- small helpers ----
 
@@ -259,14 +315,25 @@ function checkCmds(list, path, errs, needOne) {
   });
 }
 
-function checkMutResults(list, path, errs) {
+// A reported id covers listed id L when it is L or L plus one lowercase letter (a split such as M1a, M1b).
+function coversId(reported, listed) {
+  if (reported === listed) return true;
+  return typeof reported === "string" && reported.length === listed.length + 1 && reported.startsWith(listed) && /[a-z]$/.test(reported);
+}
+
+function checkMutResults(list, path, errs, allowNotRun = false) {
   if (!Array.isArray(list)) {
     errs.push(path + " must be an array");
     return false;
   }
   let good = true;
   list.forEach((m, i) => {
-    if (!isObj(m) || !nonBlank(m.id) || typeof m.failed !== "boolean" || !isStr(m.test)) {
+    if (allowNotRun && isObj(m) && m.notRun !== undefined) {
+      if (!nonBlank(m.id) || !nonBlank(m.notRun)) {
+        errs.push(`${path}[${i}] notRun needs id and a non-empty reason string`);
+        good = false;
+      }
+    } else if (!isObj(m) || !nonBlank(m.id) || typeof m.failed !== "boolean" || !isStr(m.test)) {
       errs.push(`${path}[${i}] needs id, failed (boolean) and test`);
       good = false;
     }
@@ -283,6 +350,21 @@ function laneFor(card) {
   return "full";
 }
 
+// options.answers: the user's answers to design questions, { seat, question, answer, round?, run? } each.
+function checkAnswers(answers) {
+  if (answers === undefined || answers === null) return [];
+  const bad = (why) => new TypeError("options.answers " + why);
+  if (!Array.isArray(answers)) throw bad("must be an array");
+  return answers.map((a, i) => {
+    if (!isObj(a)) throw bad(`[${i}] must be an object`);
+    if (!SEATS.includes(a.seat)) throw bad(`[${i}].seat must be one of the seats`);
+    if (!isStr(a.question)) throw bad(`[${i}].question must be a string`);
+    if (!nonBlank(a.answer)) throw bad(`[${i}].answer must be a non-blank string`);
+    if (a.round !== undefined && !(Number.isInteger(a.round) && a.round > 0)) throw bad(`[${i}].round must be a positive integer`);
+    return { ...a };
+  });
+}
+
 function initialState(card, options = {}) {
   if (!isObj(card) || !nonBlank(card.id) || !isStr(card.goal)) {
     throw new TypeError("card needs an id and a goal string");
@@ -290,6 +372,7 @@ function initialState(card, options = {}) {
   const o = isObj(options) ? options : {};
   return {
     version: 1,
+    answers: checkAnswers(o.answers),
     card: {
       id: card.id,
       title: card.title ?? null,
@@ -306,13 +389,15 @@ function initialState(card, options = {}) {
     base: o.base ?? "main",
     worktree: null,
     researchNote: null,
-    material: { lessons: "", facts: [], unverified: [], testFiles: [], mutations: [] },
+    material: { lessons: "", facts: [], unverified: [], testFiles: [], mutations: [], reviewerChecks: [] },
+    notRun: [],
     redTests: [],
     counters: { coderRounds: 0, fixPasses: 0, redGates: 0 },
     seatRuns: {},
     fixFor: null,
     lastFindings: [],
     lastGate: null,
+    gateTree: null,
     pending: "setup",
     outcome: null,
     history: [],
@@ -362,21 +447,27 @@ function buildBrief(s) {
     unverified: cp(s.material.unverified),
     testFiles: cp(s.material.testFiles),
     mutations: cp(effectiveMutations(s)),
+    reviewerChecks: seat === "reviewer" ? cp(s.material.reviewerChecks || []) : [],
+    notRun: seat === "reviewer" ? cp(s.notRun || []) : [],
     rules: Object.entries(BRIEF_RULES)
       .filter(([, r]) => ruleApplies(r, seat, s))
       .map(([id, r]) => ({ id, text: r.text })),
     findings: fixing && s.fixFor === "review" ? cp(s.lastFindings) : [],
     gate: fixing && s.fixFor === "gate" ? cp(s.lastGate) : null,
     redTests: cp(s.redTests),
+    answers: (s.answers || [])
+      .filter((a) => a.seat === seat && (a.round === undefined || a.round <= (s.seatRuns[seat] || 0) + 1))
+      .map((a) => ({ question: a.question, answer: a.answer })),
     writeTestsFirst: seat === "coder" && s.counters.coderRounds === 0 && (s.lane === "lean" || !s.testerAgent),
     researchNote: s.researchNote,
-    handBack: cp(HAND_BACK_SCHEMAS[seat]),
+    handBack: cp(handBackSchema(seat, s.lane)),
   };
   if (seat === "setup") {
     brief.install = s.install;
     brief.base = s.base;
   }
   if (seat === "gate" || seat === "reviewer") brief.gateCommand = s.gateCommand;
+  if (seat === "commit") brief.gateTree = s.gateTree;
   return brief;
 }
 
@@ -402,6 +493,7 @@ function buildReport(s) {
     testsEdited: cp(s.acc.testsEdited),
     filesChanged: cp(s.acc.filesChanged),
     followUps: cp(s.acc.followUps),
+    researchNote: s.researchNote ?? null,
     cost: null,
   };
 }
@@ -446,8 +538,8 @@ function validate(state, hb) {
   const muts = effectiveMutations(state);
   const needCover = (list, path, ids) => {
     if (!Array.isArray(list)) return;
-    const have = new Set(list.filter(isObj).map((m) => m.id));
-    for (const id of ids) if (!have.has(id)) errs.push(`${path} is missing listed mutation ${id}`);
+    const have = list.filter(isObj).map((m) => m.id);
+    for (const id of ids) if (!have.some((h) => coversId(h, id))) errs.push(`${path} is missing listed mutation ${id}`);
   };
   const first = state.counters.coderRounds === 0;
 
@@ -462,7 +554,7 @@ function validate(state, hb) {
       break;
     }
     case "research":
-      if (!isAbs(hb.note)) errs.push("note must be an absolute path");
+      if (!nonBlank(hb.note)) errs.push("note must be the researcher's cited note text or a path, not blank");
       break;
     case "lead": {
       if (!isStr(hb.lessons)) errs.push("lessons must be a string");
@@ -474,6 +566,7 @@ function validate(state, hb) {
       }
       if (!strArr(hb.unverified)) errs.push("unverified must be an array of strings");
       if (!strArr(hb.testFiles)) errs.push("testFiles must be an array of strings");
+      if (hb.reviewerChecks !== undefined && !strArr(hb.reviewerChecks)) errs.push("reviewerChecks must be an array of strings");
       if (!Array.isArray(hb.mutations)) errs.push("mutations must be an array");
       else {
         const ids = new Set();
@@ -481,6 +574,7 @@ function validate(state, hb) {
           if (!isObj(m) || !nonBlank(m.id) || !isStr(m.case) || !isStr(m.mutation) || !isStr(m.test)) {
             errs.push(`mutations[${i}] needs id, case, mutation and test`);
           } else if (ids.has(m.id)) errs.push(`mutations[${i}] repeats id ${m.id}`);
+          else if (!new RegExp(MUTATION_ID_PATTERN).test(m.id)) errs.push(`mutations[${i}] id ${m.id} must have the form M<n> (M1, M2, ...)`);
           else ids.add(m.id);
         });
       }
@@ -494,7 +588,14 @@ function validate(state, hb) {
         errs.push("tests_red_by_design must be an array of strings");
       }
       let shaped = true;
-      if (hb.mutationResults !== undefined) shaped = checkMutResults(hb.mutationResults, "mutationResults", errs);
+      if (hb.mutationResults !== undefined) shaped = checkMutResults(hb.mutationResults, "mutationResults", errs, state.lane === "tests-only");
+      if (state.lane === "tests-only" && shaped && Array.isArray(hb.mutationResults)) {
+        hb.mutationResults.forEach((m, i) => {
+          if (isObj(m) && m.notRun !== undefined && !muts.some((x) => x.id === m.id)) {
+            errs.push(`mutationResults[${i}] notRun id ${m.id} is not a listed mutation`);
+          }
+        });
+      }
       if (state.lane === "tests-only" && first && muts.length > 0) {
         if (hb.mutationResults === undefined) errs.push("mutationResults is required on the first run");
         else if (shaped) needCover(hb.mutationResults, "mutationResults", muts.map((m) => m.id));
@@ -511,7 +612,14 @@ function validate(state, hb) {
         });
       }
       let shaped = true;
-      if (hb.mutationResults !== undefined) shaped = checkMutResults(hb.mutationResults, "mutationResults", errs);
+      if (hb.mutationResults !== undefined) shaped = checkMutResults(hb.mutationResults, "mutationResults", errs, true);
+      if (shaped && Array.isArray(hb.mutationResults)) {
+        hb.mutationResults.forEach((m, i) => {
+          if (isObj(m) && m.notRun !== undefined && !muts.some((x) => x.id === m.id)) {
+            errs.push(`mutationResults[${i}] notRun id ${m.id} is not a listed mutation`);
+          }
+        });
+      }
       if (first && muts.length > 0) {
         if (hb.mutationResults === undefined) errs.push("mutationResults is required on the first round");
         else if (shaped) needCover(hb.mutationResults, "mutationResults", muts.map((m) => m.id));
@@ -538,11 +646,16 @@ function validate(state, hb) {
       }
       if (hb.verdict === "pass" && blocker) errs.push("verdict pass contradicts an evidenced blocker");
       checkCmds(hb.commandsRun, "commandsRun", errs, false);
+      if (Array.isArray(hb.mutationResults)) {
+        hb.mutationResults.forEach((m, i) => {
+          if (isObj(m) && m.notRun !== undefined) errs.push(`mutationResults[${i}] notRun is not allowed for the reviewer`);
+        });
+      }
       if (checkMutResults(hb.mutationResults, "mutationResults", errs)) {
         const listed = muts.map((m) => m.id);
         needCover(hb.mutationResults, "mutationResults", listed);
         for (const m of hb.mutationResults) {
-          if (!listed.includes(m.id) && m.own !== true) errs.push(`mutationResults id ${m.id} is not listed and not marked own`);
+          if (!listed.some((l) => coversId(m.id, l)) && m.own !== true) errs.push(`mutationResults id ${m.id} is not listed and not marked own`);
         }
       }
       break;
@@ -553,6 +666,7 @@ function validate(state, hb) {
         errs.push("gate seat must not run git add or git commit");
       }
       if (!nonBlank(hb.gateLine)) errs.push("gateLine must be a non-empty string");
+      if (!(isStr(hb.tree) && TREE_RE.test(hb.tree))) errs.push("tree must be 40 or 64 lowercase hex characters");
       if (hb.lockWaitMs !== undefined && hb.lockWaitMs !== null && !Number.isInteger(hb.lockWaitMs)) {
         errs.push("lockWaitMs must be an integer or null");
       }
@@ -561,6 +675,7 @@ function validate(state, hb) {
     case "commit": {
       if (!(isStr(hb.sha) && /^[0-9a-f]{7,40}$/.test(hb.sha))) errs.push("sha must be 7 to 40 lowercase hex characters");
       if (!nonBlank(hb.branch)) errs.push("branch must be a non-empty string");
+      if (!(isStr(hb.tree) && TREE_RE.test(hb.tree))) errs.push("tree must be 40 or 64 lowercase hex characters");
       break;
     }
     default:
@@ -570,6 +685,8 @@ function validate(state, hb) {
 }
 
 // ---- next ----
+
+const TREE_RE = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
 
 // git add / git commit at the start of a command or after a shell separator, global options (-C <path>, -c k=v, --flag) allowed before the verb.
 const GIT_WRITE_RE = /(?:^|[;&|(\n]\s*)git(?:\s+(?:-[Cc]\s+(?:"[^"]*"|'[^']*'|\S+)|--[\w-]+(?:=\S+)?))*\s+(?:add|commit)\b/;
@@ -620,6 +737,9 @@ function next(state, handBack) {
   // C3 .. C6
   if (isObj(H.hookBlocked) && nonBlank(H.hookBlocked.message)) return stopWith(s, "hook-blocked", H.hookBlocked.message);
   if (nonBlank(H.designQuestion)) return stopWith(s, "design-decision", H.designQuestion);
+  if (P === "gate" && Array.isArray(H.commands) && H.commands.some((c) => isObj(c) && c.timedOut === true)) {
+    return stopWith({ ...s, lastGate: { commands: cp(H.commands), gateLine: H.gateLine } }, "gate-timeout", typeof H.gateLine === "string" ? H.gateLine : "a gate command timed out");
+  }
   if (nonBlank(H.blocked)) return stopWith(s, "seat-blocked", H.blocked);
   const errs = validateHandBack(s, H);
   if (errs.length > 0) return stopWith(s, "hand-back-invalid", errs.join("; "));
@@ -640,6 +760,7 @@ function next(state, handBack) {
         unverified: cp(H.unverified),
         testFiles: cp(H.testFiles),
         mutations: cp(H.mutations),
+        reviewerChecks: strArr(H.reviewerChecks) ? cp(H.reviewerChecks) : [],
       };
       const to = s.lane === "lean" || !s.testerAgent ? "coder" : "tester";
       return advance(s, to, "ok", { material });
@@ -648,13 +769,41 @@ function next(state, handBack) {
       const acc = { ...s.acc, filesChanged: union(s.acc.filesChanged, H.files) };
       if (Array.isArray(H.mutationResults) && s.lane === "tests-only") acc.mutations = cp(H.mutationResults);
       if (s.lane === "tests-only") {
+        const seenT = new Set((s.notRun || []).map((n) => n.id));
+        const notRunT = [...(s.notRun || [])];
+        for (const m of Array.isArray(H.mutationResults) ? H.mutationResults : []) {
+          if (isObj(m) && m.notRun !== undefined && !seenT.has(m.id)) {
+            seenT.add(m.id);
+            notRunT.push({ id: m.id, reason: m.notRun });
+          }
+        }
         return advance(s, "reviewer", "ok", {
           acc,
+          notRun: notRunT,
           fixFor: null,
           counters: { ...s.counters, coderRounds: s.counters.coderRounds + 1 },
         });
       }
       const claim = H.tests_red_by_design;
+      if (Array.isArray(claim) && claim.length === 0) {
+        // Pin-only card: the new tests pass at baseline. Go on only when every listed mutation was run and failed.
+        const listed = effectiveMutations(s).map((m) => m.id);
+        const results = Array.isArray(H.mutationResults) ? H.mutationResults.filter(isObj) : [];
+        const bad = listed.filter((id) => {
+          const cov = results.filter((m) => coversId(m.id, id));
+          return cov.length === 0 || cov.some((m) => m.failed !== true);
+        });
+        if (listed.length > 0 && bad.length === 0) {
+          return advance(s, "coder", "ok", { acc, redTests: [] });
+        }
+        return stopWith(
+          s,
+          "tester-red-claim-missing",
+          listed.length === 0
+            ? "the tester returned an empty tests_red_by_design claim and no mutation is listed to show the pins bite"
+            : `the tester returned an empty tests_red_by_design claim but mutation ${bad.join(", ")} was not run or survived`,
+        );
+      }
       if (!(Array.isArray(claim) && claim.length > 0 && claim.every(nonBlank))) {
         return stopWith(s, "tester-red-claim-missing", "the tester returned no tests_red_by_design claim");
       }
@@ -666,8 +815,17 @@ function next(state, handBack) {
         filesChanged: union(s.acc.filesChanged, H.filesChanged),
         testsEdited: [...s.acc.testsEdited, ...H.testsEdited.map((t) => ({ round, file: t.file, reason: t.reason }))],
       };
+      const seen = new Set((s.notRun || []).map((n) => n.id));
+      const notRun = [...(s.notRun || [])];
+      for (const m of Array.isArray(H.mutationResults) ? H.mutationResults : []) {
+        if (isObj(m) && m.notRun !== undefined && !seen.has(m.id)) {
+          seen.add(m.id);
+          notRun.push({ id: m.id, reason: m.notRun });
+        }
+      }
       return advance(s, "reviewer", "ok", {
         acc,
+        notRun,
         fixFor: null,
         counters: { ...s.counters, coderRounds: s.counters.coderRounds + 1 },
       });
@@ -722,7 +880,7 @@ function next(state, handBack) {
       const waited = { ...s.acc, lockWaitMs: (s.acc.lockWaitMs || 0) + (Number.isInteger(H.lockWaitMs) ? H.lockWaitMs : 0) };
       s.acc = waited;
       if (H.commands.every((c) => c.exitCode === 0)) {
-        return advance(s, "commit", "ok", { lastGate, acc: { ...waited, gateLine: H.gateLine } });
+        return advance(s, "commit", "ok", { lastGate, gateTree: H.tree, acc: { ...waited, gateLine: H.gateLine } });
       }
       const redGates = s.counters.redGates + 1;
       const counters = { ...s.counters, redGates };
@@ -731,6 +889,9 @@ function next(state, handBack) {
     }
     default: {
       // commit
+      if (H.tree !== s.gateTree) {
+        return stopWith(s, "commit-tree-mismatch", `commit ${H.sha} tree ${H.tree} differs from the gated tree ${s.gateTree}`);
+      }
       const state = {
         ...s,
         pending: null,
@@ -753,6 +914,9 @@ function briefPrompt(brief, { repoRoot, worktreePath } = {}) {
   out.push(`SEAT: ${b.seat} (round ${b.round}, lane ${b.lane}, model row ${b.row})`);
   out.push(`CARD ${b.card.id}${b.card.title ? ": " + b.card.title : ""}`);
   out.push("GOAL:\n" + b.card.goal);
+  if (b.answers && b.answers.length > 0) {
+    out.push("ANSWERS FROM THE USER (to your design questions; build on them):\n" + bullets(b.answers.map((a) => `Q: ${a.question} A: ${a.answer}`)));
+  }
   out.push("WORKTREE: " + worktreePath);
   if (b.seat === "setup") {
     out.push(
@@ -763,14 +927,23 @@ function briefPrompt(brief, { repoRoot, worktreePath } = {}) {
           : "There is no install command; skip the install and report install as null."),
     );
   }
-  if (b.researchNote) out.push("RESEARCH NOTE: " + b.researchNote);
+  if (b.researchNote) out.push("RESEARCH NOTE:" + (b.researchNote.includes("\n") ? "\n" : " ") + b.researchNote);
   if (b.lessons) out.push("LESSONS BLOCK verbatim:\n" + b.lessons);
   if (b.facts.length > 0) out.push("FACTS (with sources):\n" + bullets(b.facts.map((f) => `${f.text} [${f.source}]`)));
   if (b.unverified.length > 0) out.push("UNVERIFIED:\n" + bullets(b.unverified));
   if (b.testFiles.length > 0) out.push("TEST FILES:\n" + bullets(b.testFiles));
   if (b.mutations.length > 0) {
     out.push("MUTATIONS:\n" + bullets(b.mutations.map((m) => `${m.id} (${m.case}): ${m.mutation}; test that must fail: ${m.test}`)));
+    if ((b.rules || []).some((r) => r.id === "mutation-ids-verbatim")) {
+      out.push("MUTATION IDS (report each verbatim in mutationResults): " + b.mutations.map((m) => m.id).join(", "));
+    }
   }
+  if (b.notRun && b.notRun.length > 0) {
+    out.push(
+      "NOT RUN BY THE CODER (report each with failed true or false):\n" + bullets(b.notRun.map((n) => `${n.id}: ${n.reason}`)),
+    );
+  }
+  if (b.reviewerChecks && b.reviewerChecks.length > 0) out.push("REVIEWER CHECKS:\n" + bullets(b.reviewerChecks));
   if (b.redTests.length > 0) out.push("TESTS RED BY DESIGN:\n" + bullets(b.redTests));
   if (b.writeTestsFirst) out.push("Write the test first, in the file that covers the module, then the change.");
   if (b.findings.length > 0) {
@@ -788,6 +961,7 @@ function briefPrompt(brief, { repoRoot, worktreePath } = {}) {
     );
   }
   if (b.gateCommand) out.push("GATE COMMAND: " + b.gateCommand);
+  if (b.gateTree) out.push("GATED TREE: " + b.gateTree);
   out.push("RULES:\n" + bullets(b.rules.map((r) => r.text)));
   out.push("HAND-BACK: return JSON matching this schema:\n" + JSON.stringify(b.handBack, null, 2));
   return out.join("\n\n") + "\n";
@@ -820,7 +994,7 @@ function seatOpts(seat, brief) {
   const row = SEAT_ROWS[seat]
   const src = (models.roles && models.roles[row]) || (models.tiers && models.tiers[row]) || {}
   const opts = {
-    schema: HAND_BACK_SCHEMAS[seat],
+    schema: brief.handBack,
     label: seat + ':' + args.card.id + ':' + brief.round,
     agentType: AGENT_TYPES[seat],
   }

@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach } from "vitest";
-import { writeFileSync, appendFileSync, mkdirSync, readFileSync, existsSync, mkdtempSync } from "node:fs";
+import { writeFileSync, appendFileSync, mkdirSync, readFileSync, existsSync, mkdtempSync, rmSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { join, dirname } from "node:path";
 import { tmpdir } from "node:os";
@@ -163,13 +163,12 @@ describe("card test-count-ratchet (end to end)", () => {
       green(stop(dir));
       expect(traceReasons(dir).some((x) => /count check/i.test(x) && /baseline/i.test(x))).toBe(true);
     });
-    it("a session cannot lower its own bar: the gate compares against state, not the last-green file", () => {
+    it("a main-checkout run compares against the last-green record, not the session-start copy (card ratchet-stale-session-baseline)", () => {
       const dir = makeCountProject({ lastGreen: { [CMD]: T }, output: summary({ total: 131 }) });
-      // Another session goes green at 131 after this one started and rewrites the shared record.
+      // Another seat goes green at 131 after this session started and rewrites the shared record: 131 is not a drop from it.
       writeFileSync(join(dir, LAST_GREEN), JSON.stringify({ [CMD]: { total: 131, skipped: 0, todo: 0 } }));
-      const reason = blocked(stop(dir));
-      expect(reason).toContain("137");
-      expect(sessionState(dir).testTotals).toEqual({ [CMD]: T });
+      green(stop(dir));
+      expect(sessionState(dir).testTotals).toEqual({ [CMD]: T }); // the session copy itself is untouched
     });
   });
 
@@ -1241,5 +1240,178 @@ describe("card worktree-count-baseline", () => {
     const second = wtStop(dir, wt, { total: 100, skipped: 54 });
     expect(second.json && second.json.decision, JSON.stringify(second.json)).toBe("block");
     expect(second.json.reason).toContain("skipped rose from 53 (baseline) to 54 (now)");
+  });
+});
+
+// card ratchet-stale-session-baseline: a main-checkout run compares against the live last-green record (as a
+// worktree run does), a seat that edited no file is never blocked by a count change, a real drop still blocks.
+describe("card ratchet-stale-session-baseline", () => {
+  const CMD = "cat summary.txt";
+  const LAST_GREEN = ".doug/.state/test-totals.json";
+  const WAIVERS = ".doug/.state/test-count-waivers";
+  const summary = ({ total, skipped = 0, todo = 0 }) => {
+    const segs = [];
+    if (total - skipped - todo > 0) segs.push(`${total - skipped - todo} passed`);
+    if (skipped) segs.push(`${skipped} skipped`);
+    if (todo) segs.push(`${todo} todo`);
+    return ` Test Files  1 passed (1)\n      Tests  ${segs.join(" | ")} (${total})\n   Start at  08:34:30\n   Duration  242ms\n`;
+  };
+  const rec = (total, skipped = 0) => ({ [CMD]: { total, skipped, todo: 0 } });
+
+  // Session start with `startRec`, then the shared record becomes `nowRec` (another seat's green) and the run prints `out`.
+  function makeProj({ startRec, nowRec, out, waiverFile }) {
+    const dir = makeProject({ config: { ...baseConfig, commands: { test: CMD }, trace: { enabled: true } }, git: true });
+    writeFileSync(join(dir, ".gitignore"), ".doug/.state/\n");
+    mkdirSync(join(dir, "src"));
+    writeFileSync(join(dir, "src/a.ts"), "base");
+    writeFileSync(join(dir, "src/b.ts"), "base");
+    execFileSync("git", ["add", "-A"], { cwd: dir });
+    execFileSync("git", ["commit", "-q", "-m", "base"], { cwd: dir });
+    mkdirSync(join(dir, ".doug/.state"), { recursive: true });
+    if (startRec) writeFileSync(join(dir, LAST_GREEN), JSON.stringify(startRec));
+    runHookScript("session-start-baseline", { hook_event_name: "SessionStart", source: "startup" }, { dir });
+    if (nowRec) writeFileSync(join(dir, LAST_GREEN), JSON.stringify(nowRec));
+    if (waiverFile !== undefined) writeFileSync(join(dir, WAIVERS), waiverFile);
+    writeFileSync(join(dir, "src/a.ts"), "edited this session");
+    runHookScript("edit-loop", { tool_name: "Edit", tool_input: { file_path: "src/a.ts" } }, { dir });
+    writeFileSync(join(dir, "summary.txt"), out);
+    return dir;
+  }
+  const mainStop = (dir) => runHookScript("stop-gate", { hook_event_name: "Stop" }, { dir });
+  const ids = (id, type) => ({ agent_id: id, agent_type: type });
+  const fireStart = (dir, id, type) => runHookScript("trace", { hook_event_name: "SubagentStart", ...ids(id, type) }, { dir });
+  const fireBash = (dir, id, type) =>
+    runHookScript("trace", { hook_event_name: "PreToolUse", tool_name: "Bash", tool_input: { command: "ls" }, tool_use_id: "tu1", ...ids(id, type) }, { dir });
+  const fireEdit = (dir, id, type) => {
+    const e = { tool_name: "Edit", tool_input: { file_path: "src/a.ts" }, tool_use_id: "tu2", ...ids(id, type) };
+    runHookScript("trace", { hook_event_name: "PreToolUse", ...e }, { dir });
+    runHookScript("trace", { hook_event_name: "PostToolUse", tool_response: { success: true }, ...e }, { dir });
+  };
+  const subStop = (dir, id, type) => runHookScript("stop-gate", { hook_event_name: "SubagentStop", ...ids(id, type) }, { dir });
+  const isBlock = (r) => r.json && r.json.decision === "block";
+
+  it("M1: skipped moved 0 -> 53 at session start, record now 53: a main Stop printing 53 skipped passes", () => {
+    const dir = makeProj({ startRec: rec(100, 0), nowRec: rec(100, 53), out: summary({ total: 100, skipped: 53 }) });
+    const r = mainStop(dir);
+    expect(isBlock(r), JSON.stringify(r.json)).toBeFalsy();
+  });
+
+  it("M3: a main Stop printing a drop below the last-green record (137 -> 135) blocks and names 137", () => {
+    const dir = makeProj({ startRec: rec(131), nowRec: rec(137), out: summary({ total: 135 }) });
+    const r = mainStop(dir);
+    expect(isBlock(r), JSON.stringify(r.json)).toBe(true);
+    expect(r.json.reason).toContain("total dropped from 137 (baseline) to 135 (now)");
+  });
+
+  it("M6: with no readable record, the session-start copy still gates a main Stop", () => {
+    const dir = makeProj({ startRec: rec(137), out: summary({ total: 131 }) });
+    rmSync(join(dir, LAST_GREEN), { force: true });
+    const r = mainStop(dir);
+    expect(isBlock(r), JSON.stringify(r.json)).toBe(true);
+    expect(r.json.reason).toContain("137");
+  });
+
+  it("M7: the waiver file works against the last-green record (delta relative to 137)", () => {
+    const dir = makeProj({
+      startRec: rec(131),
+      nowRec: rec(137),
+      out: summary({ total: 135 }),
+      waiverFile: "test-count-waiver: total=-2 skipped=0 todo=0; removed the obsolete suite\n",
+    });
+    const r = mainStop(dir);
+    expect(isBlock(r), JSON.stringify(r.json)).toBeFalsy();
+  });
+
+  it("M2: a read-only seat (Bash only, no Edit-type call, tree changed by another seat) with a changed count is not blocked", () => {
+    const dir = makeProj({ startRec: rec(100, 0), out: summary({ total: 100, skipped: 53 }) });
+    fireStart(dir, "ag1", "doug-flow:lead");
+    fireBash(dir, "ag1", "doug-flow:lead");
+    writeFileSync(join(dir, "src/b.ts"), "another seat edited the main checkout"); // defeats tree-unchanged
+    const r = subStop(dir, "ag1", "doug-flow:lead");
+    expect(isBlock(r), JSON.stringify(r.json)).toBeFalsy();
+  });
+
+  it("M4: that exempted stop does not lower the bar: the record is untouched and a later main Stop still blocks", () => {
+    const dir = makeProj({ startRec: rec(100, 0), out: summary({ total: 100, skipped: 53 }) });
+    fireStart(dir, "ag1", "doug-flow:lead");
+    fireBash(dir, "ag1", "doug-flow:lead");
+    writeFileSync(join(dir, "src/b.ts"), "another seat edited the main checkout");
+    expect(isBlock(subStop(dir, "ag1", "doug-flow:lead"))).toBeFalsy();
+    expect(JSON.parse(readFileSync(join(dir, LAST_GREEN), "utf8"))).toEqual(rec(100, 0));
+    const r = mainStop(dir);
+    expect(isBlock(r), JSON.stringify(r.json)).toBe(true);
+    expect(r.json.reason).toContain("skipped rose from 0 (baseline) to 53 (now)");
+  });
+
+  it("M5: a seat with a successful Edit in its own trace is still blocked by a count regression", () => {
+    const dir = makeProj({ startRec: rec(100, 0), out: summary({ total: 100, skipped: 53 }) });
+    fireStart(dir, "ag1", "coder");
+    fireEdit(dir, "ag1", "coder");
+    const r = subStop(dir, "ag1", "coder");
+    expect(isBlock(r), JSON.stringify(r.json)).toBe(true);
+    expect(r.json.reason).toContain("test count regressed");
+  });
+});
+
+// card block-ledger-failing-output: a block whose only problem is the test-count ratchet is classed
+// "test-count" (not real, not race), with failures []; any other problem alongside keeps the other class.
+describe("card block-ledger-failing-output (test-count class)", () => {
+  const CMD = "cat summary.txt";
+  const LEDGER = ".doug/.state/blocks.jsonl";
+  const summary = (total) =>
+    ` Test Files  1 passed (1)\n      Tests  ${total} passed (${total})\n   Start at  08:34:30\n   Duration  242ms\n`;
+  function project(extraCommands) {
+    const commands = { test: CMD, ...extraCommands };
+    const dir = makeProject({ config: { ...baseConfig, commands }, git: true });
+    writeFileSync(join(dir, ".gitignore"), ".doug/.state/\n");
+    mkdirSync(join(dir, "src"));
+    writeFileSync(join(dir, "src/a.ts"), "base");
+    execFileSync("git", ["add", "-A"], { cwd: dir });
+    execFileSync("git", ["commit", "-q", "-m", "base"], { cwd: dir });
+    mkdirSync(join(dir, ".doug/.state"), { recursive: true });
+    writeFileSync(join(dir, ".doug/.state/test-totals.json"), JSON.stringify({ [CMD]: { total: 137, skipped: 0, todo: 0 } }));
+    runHookScript("session-start-baseline", { hook_event_name: "SessionStart", source: "startup" }, { dir });
+    if (extraCommands) {
+      writeFileSync(
+        join(dir, ".doug/config.json"),
+        JSON.stringify({
+          ...baseConfig,
+          commands,
+          stopGate: { commands: Object.keys(commands), onlyIfEdited: true, maxBlocks: 3, timeoutMs: 10000, requireEvidence: false },
+        }),
+      );
+    }
+    writeFileSync(join(dir, "src/a.ts"), "edited this session");
+    runHookScript("edit-loop", { tool_name: "Edit", tool_input: { file_path: "src/a.ts" } }, { dir });
+    writeFileSync(join(dir, "summary.txt"), summary(131));
+    return dir;
+  }
+  const ledgerOf = (dir) =>
+    readFileSync(join(dir, LEDGER), "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l));
+
+  it("a dropped-test block's ledger line has class test-count and failures []", () => {
+    const dir = project();
+    const r = runHookScript("stop-gate", { hook_event_name: "Stop" }, { dir });
+    expect(r.json.decision).toBe("block");
+    expect(r.json.reason).toContain("131");
+    const lines = ledgerOf(dir);
+    expect(lines.length).toBe(1);
+    expect(lines[0].class).toBe("test-count");
+    expect(lines[0].failures).toEqual([]);
+    expect(lines[0].cwd).toBe(dir);
+    expect(lines[0].tree).toBe(computeTree(dir));
+  });
+
+  it("a count regression plus a failing second command is classed real, not test-count, and failures names the failing command", () => {
+    const dir = project({ other: "echo other-broke; exit 1" });
+    const r = runHookScript("stop-gate", { hook_event_name: "Stop" }, { dir });
+    expect(r.json.decision).toBe("block");
+    expect(r.json.reason).toContain("131");
+    expect(r.json.reason).toContain("failed (exit");
+    const line = ledgerOf(dir)[0];
+    expect(line.class).not.toBe("test-count");
+    expect(line.failures).toHaveLength(1);
+    expect(line.failures[0].command).toBe("echo other-broke; exit 1");
+    expect(line.failures[0].tail).toContain("other-broke");
   });
 });

@@ -14,13 +14,14 @@
 //     --claude-dir <path> where ~/.claude lives (tests point it at a fixture)
 //     --report <path>     a saved workflow report (card adversary-usage-in-report): prices its adversary relays'
 //                         Codex usage as a separate line/`codex` key, never mixed into the Claude total; default
-//                         <dir>/REPORT_RELPATH (the last report any run wrote there, not necessarily this run's -
-//                         the report carries no run id) when no --report is given and that file is readable
+//                         <dir>/REPORT_RELPATH when no --report is given and that file is readable. A report is
+//                         attached only when its top-level runId equals the run asked for; a report with no runId
+//                         is attached only when named with --report (card cost-run-codex-line-mismatch)
 // Exit 1 when the run's journal cannot be found, or an explicit --report cannot be read/parsed; the text output ends
 // with the run total and any unpriced agent. An unreadable/invalid default report is ignored, not a usage error.
 import { readFileSync } from "node:fs";
 import { resolve, join } from "node:path";
-import { costRun, costSession, renderSession, renderCost, costByCard, renderCostByCard } from "../lib/cost.mjs";
+import { reportForRun, costRun, costSession, renderSession, renderCost, costByCard, renderCostByCard } from "../lib/cost.mjs";
 import { planFor, REPORT_RELPATH, unwrapReport } from "../lib/plan.mjs";
 
 const argv = process.argv.slice(2);
@@ -81,6 +82,8 @@ try {
       reportPath = null;
     }
   }
+  report = reportForRun(report, runId, { named: Boolean(opts.report) });
+  if (!report) reportPath = null;
   const result = costRun({ runId, projectDir, claudeDir: opts["claude-dir"] ? resolve(opts["claude-dir"]) : undefined, report, reportPath });
   const byCard = opts["by-card"] ? costByCard(result, planFor(projectDir, opts.card)) : null;
   if (opts.json) process.stdout.write(JSON.stringify(byCard ? { ...result, byCard } : result, null, 2) + "\n");

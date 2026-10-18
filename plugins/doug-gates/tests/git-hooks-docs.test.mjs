@@ -333,4 +333,32 @@ describe("docs named by tests (card gate-docs-skip-unless-named)", () => {
       expectFull(cwd, await commitA(cwd));
     }
   });
+
+  // card docs-gate-comment-mentions: in a code file outside tests/ a doc counts as named only by its full repo-relative path.
+  const COMMENT = `// a note about 0005-two-tracks.md\n`;
+
+  it("D28 (comment): a basename-only mention in a code file outside tests/ and no test naming the doc -> skipped", async () => {
+    const cwd = await docsRepo({ tests: { [OTHER]: "it('x');\n" }, extra: { "plugins/doug-flow/lib/board.mjs": COMMENT } });
+    await stage(cwd, ADR);
+    const { status, out } = await commitA(cwd);
+    expect(status, out).toBe(0);
+    expect(out).toContain(SKIP_LINE);
+    expect(typechecked(out)).toBe(false);
+    expect(readArgv(cwd)).toEqual([]);
+  });
+
+  it("D29 (comment): a basename-only mention in source plus a test naming the doc by its path -> only that test runs", async () => {
+    const cwd = await docsRepo({ extra: { "plugins/doug-flow/lib/board.mjs": COMMENT } });
+    await stage(cwd, ADR);
+    const { status, out } = await commitA(cwd);
+    expect(status, out).toBe(0);
+    expect(readArgv(cwd)).toEqual([[NAMER]]);
+    expect(typechecked(out)).toBe(false);
+  });
+
+  it("D30 (helper): a non-test helper under tests/ naming the doc only by basename segments -> the full gate (doubt fails closed)", async () => {
+    const cwd = await docsRepo({ tests: { [OTHER]: "it('x');\n" }, extra: { "plugins/doug-flow/tests/helpers.mjs": SEGMENTS } });
+    await stage(cwd, ADR);
+    expectFull(cwd, await commitA(cwd));
+  });
 });

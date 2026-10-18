@@ -63,7 +63,7 @@ async function run() {
   // Checked before anything opens it: a missing database is never created here.
   if (!existsSync(join(dir, ".doug", ".state", "memory", "memory.db"))) return;
 
-  const { openMemory, recallLessons, topLessons, renderLessons, degradedReason } = await import("../lib/memory.mjs");
+  const { openMemory, recallLessons, topLessons, renderLessons, degradedReason, windowHidden, windowNote } = await import("../lib/memory.mjs");
   const { readMemoryConfig, readMemoryStaleDays, createProvider } = await import("../lib/embeddings.mjs");
   const { loadBoard } = await import("../lib/board.mjs");
 
@@ -78,6 +78,7 @@ async function run() {
   let lessons;
   let header;
   let scope;
+  let hidden = null;
   try {
     if (cards.length) {
       const query = cards.map((c) => `${c.title}\n${c.goal || ""}`).join("\n");
@@ -101,10 +102,12 @@ async function run() {
           ? `recall: hybrid via ${result.provider} ${provider.model}/${provider.dims}`
           : `recall: keyword-only (${degradedReason(result)})`;
       lessons = result.lessons;
+      hidden = result.hidden;
     } else {
       scope = "the repository: top by helpful-harmful";
       header = null;
       lessons = topLessons(m, { k: K, staleDays });
+      hidden = windowHidden(m, { staleDays });
     }
   } finally {
     // A raced-out hybrid recall may still be running; closing the handle makes it fail into its catch.
@@ -115,10 +118,14 @@ async function run() {
     }
   }
   const rendered = renderLessons(lessons);
-  if (rendered.text === null) return;
+  const note = windowNote(hidden, staleDays);
+  if (rendered.text === null && !note) return;
   const additionalContext =
-    `[doug] Lessons from this repository's memory (${header ? `${header}; ` : ""}${scope}):\n${rendered.text}\n` +
-    "Each line is [lesson id] text (citation). When you brief an agent, paste the lessons that apply and list their ids as memoryUsed.";
+    rendered.text === null
+      ? `[doug] ${note}`
+      : `[doug] Lessons from this repository's memory (${header ? `${header}; ` : ""}${scope}):\n${rendered.text}\n` +
+        (note ? `${note}\n` : "") +
+        "Each line is [lesson id] text (citation). When you brief an agent, paste the lessons that apply and list their ids as memoryUsed.";
   await write({ hookSpecificOutput: { hookEventName: "SessionStart", additionalContext } });
 }
 

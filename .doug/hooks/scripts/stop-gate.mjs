@@ -85,13 +85,13 @@ import { runCommand, failureSummary } from "../lib/run.mjs";
 import { loadScopePlan, scopeViolations, describeViolations, PLAN_RELPATH } from "../lib/scope.mjs";
 import { checkpoint, describeCheckpoint } from "../lib/checkpoint.mjs";
 import { verificationEvidence, describeMissingEvidence } from "../lib/evidence.mjs";
-import { changedFiles, captureBaseline, sinceBaseline, headAt, committedSince, walkProposalPathFiles, fileIdentity, treeFingerprint, sameTree, readAgentStart, readTurnStart, turnTreeStatus, onlyNoTestPathsChanged, movedSinceVerified } from "../lib/baseline.mjs";
+import { changedFiles, captureBaseline, sinceBaseline, headAt, committedSince, walkProposalPathFiles, fileIdentity, treeFingerprint, sameTree, readAgentStart, readTurnStart, turnTreeStatus, turnTreeStatusHeadMoved, onlyNoTestPathsChanged, movedSinceVerified } from "../lib/baseline.mjs";
 import { tracePath, readTrace, traceLine, appendTrace, agentLabel } from "../lib/trace.mjs";
 import { isAppliedContent } from "../lib/proposals.mjs";
 import { gitHead, mergeSnapshot, readDecisions, readPlanSummary, readPlanSummaries, snapshotSection } from "../lib/anchor.mjs";
 import { contextReading, recordAgentContext } from "../lib/agent-context.mjs";
 import { parseTotals, readSummaries, sumTotals, compareTotals, deltaTotals, waiverCovers } from "../lib/test-totals.mjs";
-import { failingTestFilesFrom, nonTestTscPathsFrom, classifyFinalBlock, appendBlockLine } from "../lib/block-ledger.mjs";
+import { failingTestFilesFrom, nonTestTscPathsFrom, classifyFinalBlock, appendBlockLine, outputTail, redactText } from "../lib/block-ledger.mjs";
 import { docsGateDecision } from "../lib/docs-gate.mjs";
 import { gateLockPath, readGateLock, pidIsLive, writeGateLock, takeOverGateLock, resolveHookTimeoutSec, lockStaleByAge, normalizedTimeoutMs, lockWaitBoundMs } from "../lib/gate-lock.mjs";
 import { resolveCommands, computeTree, readRecord, writeRecord as writeTreeRecord, removeRecord as removeTreeRecord, creditable } from "../lib/verified-tree.mjs";
@@ -468,6 +468,21 @@ function countingInFlight(dir, cfg, sessionId, inFlight) {
 // and whose ok is not exactly false (a null ok counts as success — conservative). No change found -> true.
 //
 // Without trace evidence, true only when subagent.type is in READ_ONLY_AGENT_TYPES.
+// card ratchet-stale-session-baseline: true only when the trace vouches for the agent's whole life (its
+// SubagentStart line is there) and shows no successful Edit-type PostToolUse of its own. Bash does not count.
+function agentMadeNoEditCalls(dir, cfg, sessionId, subagent) {
+  try {
+    if (!subagent || !cfg.trace || cfg.trace.enabled === false) return false;
+    const file = tracePath(dir, sessionId);
+    if (!existsSync(file)) return false;
+    const lines = readTrace(file);
+    if (!lines.some((l) => l.event === "SubagentStart" && l.agent === subagent.id)) return false;
+    return !lines.some((l) => l.agent === subagent.id && l.event === "PostToolUse" && CHANGE_TOOLS.has(l.tool) && l.ok !== false);
+  } catch {
+    return false;
+  }
+}
+
 function agentMadeNoChanges(dir, cfg, sessionId, subagent) {
   try {
     if (!subagent) return false;
@@ -819,7 +834,15 @@ function countCheck(dir, cfg, state, input, ran, vdir) {
   // card worktree-count-baseline: a worktree run compares against its own earlier green runs, never main's record
   // (a worktree can lack the dist build main has, so its skipped count differs). No record yet means no check.
   const inWorktree = typeof vdir === "string" && vdir !== dir;
-  const baseline = inWorktree ? readLastGreen(vdir) : state.testTotals;
+  // card ratchet-stale-session-baseline: a main-checkout run compares against the main tree's live last-green
+  // record too (per command), not the session-start copy; the copy is the fallback when the record has no
+  // readable entry for the command, so a deleted record does not remove the check.
+  const worktreeBaseline = inWorktree ? readLastGreen(vdir) : null;
+  const mainRecord = inWorktree ? null : readLastGreen(dir);
+  const baselineFor = (command) => {
+    if (inWorktree) return worktreeBaseline;
+    return mainRecord && readSummaries(mainRecord[command]) ? mainRecord : state.testTotals;
+  };
   const problems = [];
   const parsed = {};
   // The note carries its own event name, never the stop event's: a decision-less SubagentStop line would read to
@@ -843,6 +866,7 @@ function countCheck(dir, cfg, state, input, ran, vdir) {
         note(`count check did not run for \`${command}\`: no test summary in its output`);
         continue;
       }
+      const baseline = baselineFor(command);
       const all = baseline && typeof baseline === "object" ? baseline : null;
       const baseList = all ? readSummaries(all[command]) : null;
       if (!baseList) {
@@ -1209,8 +1233,8 @@ runHook("stop-gate", async (input) => {
     traceSubagentDecision("allow", traceReason, extra);
     return allow();
   };
-  const blockStopDecided = (reason) => {
-    traceSubagentDecision("block", null);
+  const blockStopDecided = (reason, extra) => {
+    traceSubagentDecision("block", null, extra);
     return blockStop(reason);
   };
   const systemMessageDecided = (message, traceReason, extra) => {
@@ -1220,8 +1244,19 @@ runHook("stop-gate", async (input) => {
   // Card stop-gate-block-ledger: one ledger line per block/stand-down below, written synchronously right
   // before the blockStop/systemMessage call it belongs to (those call process.exit(0) themselves, so
   // nothing queued after them ever runs). appendBlockLine never throws.
-  const logBlock = (reason, cls) =>
-    appendBlockLine(dir, { hook: subagent ? "subagent-stop" : "stop-gate", agent: subagent ? subagent.type : null, reason, class: cls, session: input.session_id });
+  const logBlock = (reason, cls, record) =>
+    appendBlockLine(dir, { hook: subagent ? "subagent-stop" : "stop-gate", agent: subagent ? subagent.type : null, reason, class: cls, session: input.session_id, record });
+  // card block-ledger-failing-output: a main Stop verification block has no decision trace line of its own;
+  // append one carrying the record. A SubagentStop's line comes from traceSubagentDecision. Never throws.
+  const traceMainBlock = (record) => {
+    if (subagent) return;
+    try {
+      if (!cfg.trace || cfg.trace.enabled === false) return;
+      appendTrace(dir, { ...traceLine(input, { now: new Date() }), event: "Stop", decision: "block", reason: null, ...record });
+    } catch {
+      // never block the real exit on a trace failure
+    }
+  };
   // Card block-ledger-stood-down-repeats: a stood-down line is written at most once per session per
   // cause, so a session standing down at its cap does not append a fresh identical line on every later
   // Stop/SubagentStop past it. Cause key: "turn-budget" (lead only), or "block-cap:<lead|agent id>" — the
@@ -1418,7 +1453,10 @@ runHook("stop-gate", async (input) => {
     let readOnly = null;
     try {
       const start = readTurnStart(dir, input.session_id);
-      const status = turnTreeStatus(cfg, start, treeFingerprint(dir, cfg, changed));
+      const currentFp = treeFingerprint(dir, cfg, changed);
+      let status = turnTreeStatus(cfg, start, currentFp);
+      // A turn that only committed noTestPaths files moved HEAD but changed no code (card stop-gate-read-only-turn-commits).
+      if (status && !status.same) status = turnTreeStatusHeadMoved(dir, cfg, start, currentFp) || status;
       if (status && status.same) {
         let editedThisTurn = false;
         if (cfg.trace && cfg.trace.enabled !== false) {
@@ -1723,8 +1761,14 @@ runHook("stop-gate", async (input) => {
         [...treeProblems, lastRed.summary].join("\n\n");
       const reuseClass = typeof lastRed.class === "string" ? lastRed.class : "real";
       const capped = deferralCapNote && !subagent ? `${deferralCapNote}\n\n${reason}` : reason;
-      logBlock(reason, reuseClass);
-      return blockStopDecided(capped);
+      const reuseRecord = {
+        failures: Array.isArray(lastRed.failures) ? lastRed.failures : [],
+        cwd: typeof lastRed.cwd === "string" ? lastRed.cwd : null,
+        tree: typeof lastRed.tree === "string" ? lastRed.tree : null,
+      };
+      logBlock(reason, reuseClass, reuseRecord);
+      traceMainBlock(reuseRecord);
+      return blockStopDecided(capped, reuseRecord);
     }
   }
 
@@ -1869,9 +1913,9 @@ runHook("stop-gate", async (input) => {
     if (deferralCapNote && !subagent) return systemMessageDecided(deferralCapNote, traceReason, extra);
     return allowDecided(traceReason, extra);
   };
-  const blockStopReleasing = (reason) => {
+  const blockStopReleasing = (reason, extra) => {
     releaseLock();
-    return blockStopDecided(deferralCapNote && !subagent ? `${deferralCapNote}\n\n${reason}` : reason);
+    return blockStopDecided(deferralCapNote && !subagent ? `${deferralCapNote}\n\n${reason}` : reason, extra);
   };
   const systemMessageReleasing = (message, traceReason, extra) => {
     releaseLock();
@@ -1906,6 +1950,19 @@ runHook("stop-gate", async (input) => {
   // One entry per failed command, `{ command, output }` (stderr + stdout, untruncated), for the
   // tests_red_by_design coverage check below (design point 2, card subagent-stop-gate-tester-red).
   const commandFailures = [];
+  // card block-ledger-failing-output: the failing commands, the directory and the tree this block verified.
+  const buildBlockRecord = () => {
+    try {
+      const failures = commandFailures.map((cf, i) => {
+        const r = failedRuns[i] || {};
+        return { command: redactText(cf.command, cfg.secrets), exit: typeof r.status === "number" ? r.status : null, timedOut: !!r.timedOut, tail: outputTail(cf.output, cfg.secrets) };
+      });
+      return { failures, cwd: vdir, tree: treeBefore ?? null };
+    } catch {
+      return { failures: [], cwd: vdir, tree: null }; // the line is written without the failures; the decision is unchanged
+    }
+  };
+  const failedRuns = []; // parallel to commandFailures: { status, timedOut } of each failed run (card block-ledger-failing-output)
   const ranGreen = []; // count check input: { command, stdout } of each command that really ran and exited 0, plus { command, result } of each credited pre-commit command whose recorded totals are readable
   // card stop-gate-credits-pre-commit: a passing pre-commit record for this exact tree and command set
   // stands in for actually running them — see preCommitCredit above. Every other check below (evidence,
@@ -1953,6 +2010,7 @@ runHook("stop-gate", async (input) => {
         // commandFailures below keeps the untruncated output for the tests_red_by_design coverage check.
         problems.push(`\`${command}\` failed (${why}):\n${failureSummary(output, 40)}`);
         commandFailures.push({ command, output });
+        failedRuns.push({ status: r.status, timedOut: r.timedOut });
       }
     }
   }
@@ -2006,8 +2064,17 @@ runHook("stop-gate", async (input) => {
 
   // 3c. Test-count ratchet (card test-count-ratchet): its own kind of problem, not a failed command.
   const counted = countCheck(dir, cfg, state, input, ranGreen, vdir);
-  problems.push(...counted.problems);
-  const countProblemAdded = counted.problems.length > 0;
+  // card ratchet-stale-session-baseline: a seat with no Edit-type call is never blocked by a count change it did
+  // not cause. Its count problems become one trace note, and that stop writes neither the record nor state.verified.
+  const countExempt = counted.problems.length > 0 && !!subagent && agentMadeNoEditCalls(dir, cfg, input.session_id, subagent);
+  if (countExempt) {
+    try {
+      if (cfg.trace && cfg.trace.enabled !== false) appendTrace(dir, { ...traceLine(input, { now: new Date() }), event: "CountCheck", reason: `count change not blocking a seat that made no Edit-type call: ${counted.problems[0].split("\n")[0].slice(0, 300)}` });
+    } catch {
+      // logging must never fail the gate
+    }
+  } else problems.push(...counted.problems);
+  const countProblemAdded = !countExempt && counted.problems.length > 0;
 
   // A main Stop's skip has no decision-tagged exit line like a SubagentStop's (allowReleasing folds the reason
   // into that); record the reason here so the trace carries it (card stop-gate-no-test-paths).
@@ -2025,8 +2092,8 @@ runHook("stop-gate", async (input) => {
   // (card stop-gate-read-only-subagent-skip): nothing was actually verified.
   // A read-only-turn skip verified nothing: it leaves lastRed (and stopBlocks, below) as they were.
   if (skipReason !== "read-only-turn") state.lastRed = null; // card stop-gate-no-change-restop: re-set at the final block below when it qualifies
-  if (problems.length === 0 && !skipVerification && !targeted) state.verified = verifiedCandidate;
-  if (problems.length === 0 && !skipVerification) writeLastGreen(vdir || dir, counted.parsed); // empty when nothing really ran
+  if (problems.length === 0 && !skipVerification && !targeted && !countExempt) state.verified = verifiedCandidate;
+  if (problems.length === 0 && !skipVerification && !countExempt) writeLastGreen(vdir || dir, counted.parsed); // empty when nothing really ran
   if (problems.length === 0 && subagent) {
     // A subagent's green gate: its counter resets; the checkpoint, if any, belongs to the session's own Stop.
     state.agentBlocks = { ...(state.agentBlocks || {}), [subagent.id]: 0 };
@@ -2126,6 +2193,7 @@ runHook("stop-gate", async (input) => {
                   summary: problems.slice(preVerificationProblems, postCommandProblems).join("\n\n"),
                   class: redClass,
                   who,
+                  ...buildBlockRecord(),
                 };
               }
             } catch {
@@ -2164,6 +2232,8 @@ runHook("stop-gate", async (input) => {
     let finalClass = "real";
     try {
       finalClass = classifyFinalBlock({
+        countProblems: countExempt ? 0 : counted.problems.length,
+        totalProblems: problems.length,
         preVerificationProblems,
         evidenceProblemAdded,
         commandFailures,
@@ -2177,6 +2247,7 @@ runHook("stop-gate", async (input) => {
     } catch {
       finalClass = "real";
     }
+    const blockRecord = buildBlockRecord();
     // card stop-gate-no-change-restop: record this red for reuse only when every configured command really
     // ran (not credited, none dropped for budget or timed out) and at least one failed, every failure by a
     // numeric non-zero exit outside 129..192 (a signal kill has status null, a shell-reported one 128+signal; both load-suspect). Stored with the block's ledger
@@ -2200,14 +2271,16 @@ runHook("stop-gate", async (input) => {
           summary: problems.slice(preVerificationProblems, postCommandProblems).join("\n\n"),
           class: finalClass,
           who,
+          ...blockRecord,
         };
         saveState(dir, input.session_id, state);
       }
     } catch {
       state.lastRed = null;
     }
-    logBlock(reason, finalClass);
-    return blockStopReleasing(reason);
+    logBlock(reason, finalClass, blockRecord);
+    traceMainBlock(blockRecord);
+    return blockStopReleasing(reason, blockRecord);
   };
 
   return runVerification();

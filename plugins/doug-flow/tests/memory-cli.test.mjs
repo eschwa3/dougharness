@@ -3573,3 +3573,222 @@ describe("memory.mjs record --hand --cost (card usd-budget-size-class)", () => {
     rmSync(dir, { recursive: true, force: true });
   });
 });
+
+// card recall-window-report: the stale window reports what it hid.
+describe("recall window report (card recall-window-report)", () => {
+  const DAY = 86400000;
+  const ago = (n) => new Date(Date.now() - n * DAY - 3600000).toISOString();
+  const NOTE = (hid, total, days, oldest) => `window: hid ${hid} of ${total} live lessons older than ${days} days (oldest ${oldest} days)`;
+  const NO_OLLAMA = { DOUG_OLLAMA_BASE_URL: "http://127.0.0.1:1" };
+  const hookScript = join(here, "..", "scripts", "session-recall.mjs");
+  const lessonsFile = (dir) => join(dir, ".doug", ".state", "reports", "c1", "lessons.json");
+  const card = { id: "c1", title: "Retry flaky uploads", goal: "make upload retries robust against flaky networks", column: "flow" };
+
+  function seedRows(dir, rows) {
+    const m = openMemory(dir);
+    for (const [text, created] of rows) addLesson(m, { kind: "pattern", source: { agent: "worker" }, text, created });
+    m.close();
+  }
+  function writeBoard(dir) {
+    mkdirSync(join(dir, ".doug"), { recursive: true });
+    const board = { version: 1, updated: "2026-10-07", columns: [{ id: "ready", title: "Ready" }, { id: "flow", title: "In flow" }], components: [], tags: [], cards: [card] };
+    writeFileSync(join(dir, ".doug", "board.json"), JSON.stringify(board), "utf8");
+  }
+  function hook(dir) {
+    return new Promise((resolvePromise) => {
+      const child = spawn(process.execPath, [hookScript], { cwd: dir, env: { ...process.env, CLAUDE_PROJECT_DIR: dir, DOUG_SESSION_RECALL: "", ...NO_OLLAMA } });
+      let stdout = "";
+      let stderr = "";
+      child.stdout.on("data", (d) => (stdout += d));
+      child.stderr.on("data", (d) => (stderr += d));
+      child.on("close", (status) => resolvePromise({ status, stdout, stderr }));
+      child.stdin.on("error", () => {});
+      child.stdin.end(JSON.stringify({ hook_event_name: "SessionStart", source: "startup", cwd: dir }));
+    });
+  }
+  const ctx = (res) => JSON.parse(res.stdout).hookSpecificOutput.additionalContext;
+  const FRESH = "upload retries need exponential backoff on flaky networks";
+
+  it("recall with one fresh and one 100-day-old lesson prints the window line as line 2", () => {
+    const dir = mkdtempSync(join(tmpdir(), "doug-memory-cli-"));
+    try {
+      seedRows(dir, [[FRESH, ago(1)], ["old upload retries note", ago(100)]]);
+      const res = run(["recall", "upload retries", dir], dir);
+      expect(res.status, res.stderr).toBe(0);
+      expect(res.stdout.split("\n")[1]).toBe(NOTE(1, 2, 30, 100));
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("recall --json has hidden.count 1, hidden.total 2, hidden.oldestDays 100", () => {
+    const dir = mkdtempSync(join(tmpdir(), "doug-memory-cli-"));
+    try {
+      seedRows(dir, [[FRESH, ago(1)], ["old upload retries note", ago(100)]]);
+      const res = run(["recall", "upload retries", dir, "--json"], dir);
+      expect(res.status, res.stderr).toBe(0);
+      expect(JSON.parse(res.stdout).hidden).toEqual({ count: 1, total: 2, oldestDays: 100 });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("recall with memory.staleDays 10 and a 20-day-old lesson names 10 days in the window line", () => {
+    const dir = mkdtempSync(join(tmpdir(), "doug-memory-cli-"));
+    try {
+      mkdirSync(join(dir, ".doug"), { recursive: true });
+      writeFileSync(join(dir, ".doug", "config.json"), JSON.stringify({ memory: { staleDays: 10 } }), "utf8");
+      seedRows(dir, [[FRESH, ago(1)], ["old upload retries note", ago(20)]]);
+      const res = run(["recall", "upload retries", dir], dir);
+      expect(res.status, res.stderr).toBe(0);
+      expect(res.stdout.split("\n")[1]).toBe(NOTE(1, 2, 10, 20));
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("brief-lessons with memory.staleDays 10 and a 20-day-old lesson names 10 days in the window line before memoryUsed", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "doug-memory-cli-"));
+    try {
+      writeBoard(dir);
+      writeFileSync(join(dir, ".doug", "config.json"), JSON.stringify({ memory: { staleDays: 10 } }), "utf8");
+      seedRows(dir, [[FRESH, ago(1)], ["old upload retries note", ago(20)]]);
+      const res = await runAsync(["brief-lessons", "c1", dir], dir, NO_OLLAMA);
+      expect(res.status, res.stderr).toBe(0);
+      const lines = res.stdout.split("\n");
+      const w = lines.indexOf(NOTE(1, 2, 10, 20));
+      const u = lines.findIndex((l) => l.startsWith("memoryUsed: "));
+      expect(w).toBeGreaterThan(-1);
+      expect(u).toBeGreaterThan(w);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("recall with memory.staleDays 10 and a 20-day-old lesson names 10 days in the window line", () => {
+    const dir = mkdtempSync(join(tmpdir(), "doug-memory-cli-"));
+    try {
+      mkdirSync(join(dir, ".doug"), { recursive: true });
+      writeFileSync(join(dir, ".doug", "config.json"), JSON.stringify({ memory: { staleDays: 10 } }), "utf8");
+      seedRows(dir, [[FRESH, ago(1)], ["old upload retries note", ago(20)]]);
+      const res = run(["recall", "upload retries", dir], dir);
+      expect(res.status, res.stderr).toBe(0);
+      expect(res.stdout.split("\n")[1]).toBe(NOTE(1, 2, 10, 20));
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("brief-lessons with memory.staleDays 10 and a 20-day-old lesson names 10 days in the window line before memoryUsed", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "doug-memory-cli-"));
+    try {
+      writeBoard(dir);
+      writeFileSync(join(dir, ".doug", "config.json"), JSON.stringify({ memory: { staleDays: 10 } }), "utf8");
+      seedRows(dir, [[FRESH, ago(1)], ["old upload retries note", ago(20)]]);
+      const res = await runAsync(["brief-lessons", "c1", dir], dir, NO_OLLAMA);
+      expect(res.status, res.stderr).toBe(0);
+      const lines = res.stdout.split("\n");
+      const w = lines.indexOf(NOTE(1, 2, 10, 20));
+      const u = lines.findIndex((l) => l.startsWith("memoryUsed: "));
+      expect(w).toBeGreaterThan(-1);
+      expect(u).toBeGreaterThan(w);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("brief-lessons with a matching fresh lesson and an old lesson prints the window line before memoryUsed and lessons.json.hidden.count is 1", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "doug-memory-cli-"));
+    try {
+      writeBoard(dir);
+      seedRows(dir, [[FRESH, ago(1)], ["old upload retries note", ago(100)]]);
+      const res = await runAsync(["brief-lessons", "c1", dir], dir, NO_OLLAMA);
+      expect(res.status, res.stderr).toBe(0);
+      const lines = res.stdout.split("\n");
+      const w = lines.indexOf(NOTE(1, 2, 30, 100));
+      const u = lines.findIndex((l) => l.startsWith("memoryUsed: "));
+      expect(w).toBeGreaterThan(-1);
+      expect(u).toBeGreaterThan(w);
+      expect(JSON.parse(readFileSync(lessonsFile(dir), "utf8")).hidden.count).toBe(1);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("brief-lessons whose only lesson is 100 days old prints `No lessons recalled for c1.` then the window line", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "doug-memory-cli-"));
+    try {
+      writeBoard(dir);
+      seedRows(dir, [["old upload retries note", ago(100)]]);
+      const res = await runAsync(["brief-lessons", "c1", dir], dir, NO_OLLAMA);
+      expect(res.status, res.stderr).toBe(0);
+      const lines = res.stdout.split("\n");
+      const n = lines.findIndex((l) => l.includes("No lessons recalled for c1."));
+      expect(n).toBeGreaterThan(-1);
+      expect(lines[n + 1]).toBe(NOTE(1, 1, 30, 100));
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("recall and brief-lessons with only fresh lessons print no line starting `window:`", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "doug-memory-cli-"));
+    try {
+      writeBoard(dir);
+      seedRows(dir, [[FRESH, ago(1)]]);
+      const r = run(["recall", "upload retries", dir], dir);
+      expect(r.stdout.split("\n").filter((l) => l.startsWith("window:"))).toEqual([]);
+      const b = await runAsync(["brief-lessons", "c1", dir], dir, NO_OLLAMA);
+      expect(b.stdout).toContain("memoryUsed: ");
+      expect(b.stdout.split("\n").filter((l) => l.startsWith("window:"))).toEqual([]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("session-recall with a flow card, a matching fresh lesson and an old lesson -> additionalContext contains the window line", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "doug-memory-cli-"));
+    try {
+      writeBoard(dir);
+      seedRows(dir, [[FRESH, ago(1)], ["old upload retries note", ago(100)]]);
+      const res = await hook(dir);
+      expect(res.status, res.stderr).toBe(0);
+      const c = ctx(res);
+      expect(c).toContain(FRESH);
+      expect(c.split("\n")).toContain(NOTE(1, 2, 30, 100));
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("session-recall with no flow card, memory.staleDays 10, one fresh and one 20-day-old lesson -> additionalContext contains the window line at 10 days", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "doug-memory-cli-"));
+    try {
+      mkdirSync(join(dir, ".doug"), { recursive: true });
+      writeFileSync(join(dir, ".doug", "config.json"), JSON.stringify({ memory: { staleDays: 10 } }), "utf8");
+      seedRows(dir, [[FRESH, ago(1)], ["twenty day old note", ago(20)]]);
+      const res = await hook(dir);
+      expect(res.status, res.stderr).toBe(0);
+      const c = ctx(res);
+      expect(c).toContain(FRESH);
+      expect(c).toContain(NOTE(1, 2, 10, 20));
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("session-recall whose only lesson is 100 days old emits additionalContext containing the window line", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "doug-memory-cli-"));
+    try {
+      writeBoard(dir);
+      seedRows(dir, [["old upload retries note", ago(100)]]);
+      const res = await hook(dir);
+      expect(res.status, res.stderr).toBe(0);
+      const c = ctx(res);
+      expect(c.startsWith("[doug] ")).toBe(true);
+      expect(c).toContain(NOTE(1, 1, 30, 100));
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});

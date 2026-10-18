@@ -1,5 +1,24 @@
 # Changelog
 
+## 1.4.0
+
+- Board v2: the record is version 2 with epics, milestones, label groups and a priority order. `doug board labels init` migrates a v1 board (`type` holds its tags, `priority` is added), and `epic` and `milestone` take `add|edit|list` in both board CLIs.
+- `doug board rollup` reports progress per epic and per milestone, and `labels --check` flags cards whose labels break the groups.
+- The served board page shows coloured label chips, a milestone strip, epic, milestone and label-group filters, a priority-sorted Ready column, and a Done column that shows the latest 20 cards with a show all button.
+- Ready reorders only within a priority band, with a hint when a move would cross one.
+- `--milestone` on `autopilot.mjs pick` and `/doug-next` limits a run to one milestone.
+- `autopilot.mjs answer` records an answer for any stop that asks, and `report` prints the resume with that answer; a stopped design-decision queen resumes with the answer.
+- A gate seat that times out under load stops as `gate-timeout` and reruns alone; `autopilot.mjs end` refuses while a card is In flow and not resumed.
+- The autopilot pane clears at a new `--auto`, groups short lines, shows each card's seat history, and shows spend against the caps.
+- `queen-args` takes `--research on|off` and uses the project's current branch as base; `autopilot.mjs report` accepts a queen result saved with its task-output wrapper, and a queen's inline research note is written to `.doug/.state/research/<card id>.md` so `record` promotes it.
+- Card loop: mutation ids are `M<n>` and seats echo the listed ids verbatim; each seat gets the hand-back schema its lane's validator accepts; the full lane accepts an empty `tests_red_by_design` when every listed mutation fails; unrunnable mutations, including a tests-only tester's, carry to the reviewer; a mutation id the lead did not list is refused, split ids `<id>a` and `<id>b` cover the listed id, and `autopilot.mjs report` prints the resume with an answer only when the answer is for the stopping seat.
+- Card loop: the commit seat commits only the gated tree and stops on a commit-tree mismatch; a relayed user message about other work stays outside the seat's card.
+- Card seats may not start a CPU burner for a loaded proof without human approval.
+- Stop gate: the main checkout's test-count baseline is the last green record, and read-only seats are not blocked by count changes; a turn that only commits non-test paths counts as read-only; a doc named only by its basename in a comment in non-test code no longer forces the full unit suite on a docs-only Stop or pre-commit.
+- The block ledger records the failing command, exit code, output tail, cwd and tree of a blocked stop, and gains a test-count class.
+- `recall`, `brief-lessons` and the SessionStart line report what the stale window hid.
+- `doug cost` attaches a report's Codex line only to the run it belongs to.
+
 ## 1.3.0
 
 - Crew testers: `plan.mjs set crew.testers <n>` (default 1) runs that many verifier agents in parallel per full-shape task; seats 2 and up probe edge cases and error paths, a criterion any seat fails fails, and size S keeps one check.

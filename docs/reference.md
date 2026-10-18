@@ -181,11 +181,20 @@ doug board record <id> --hand --summary "<one sentence>"  # appends a run entry 
 doug board summary <report.json> --summary "<one sentence>"  # prints the three-line run summary for a workflow report
 doug board build   # renders the page to stdout or --out
 doug board serve   # the live board page: --open opens a browser, --detach backgrounds it, --stop ends it
+doug board epic add <id> --title <t> --goal <g> [dir] [--version <v>] [--date YYYY-MM-DD]
+doug board epic edit <id> [dir] [--title <t>] [--goal <g>] [--version <v>] [--date YYYY-MM-DD] [--status planned|active|done] [--force]
+doug board epic list [dir] [--json]
+doug board milestone add <id> --title <t> --goal <g> [dir] [--version <v>] [--date YYYY-MM-DD]
+doug board milestone edit <id> [dir] [--title <t>] [--goal <g>] [--version <v>] [--date YYYY-MM-DD] [--status planned|active|done] [--force]
+doug board milestone list [dir] [--json]
+doug board labels --check [dir]  # one line per label colour under 3:1 contrast against the card surfaces; exits 0
+doug board rollup [dir] [--epic <id> | --milestone <id>] [--from <live-runs>]  # JSON per epic and milestone, each with a cards array of member ids
+doug board labels init [dir]  # migrates a board with no label groups: type holds the existing tags, a fixed priority group is added, the record becomes version 2; refused when groups exist
 ```
 
 `add`, `edit`, `list`, and `next` take `--tag <name>` to set or filter by a card's tag from the board's closed vocabulary; `list --tag` and `next --tag` filter to cards carrying that tag, and `next --tag` does it silently, with no "skipping" line.
 
-`plugins/doug-flow/scripts/board.mjs` is the plugin-only equivalent for sessions that have only the plugin, not the CLI: `next`, `card`, `move`, `edit`, `remove`, `reorder`, `record`, and `summary`, matching the CLI's subcommands of the same names (it has no `init`, `add`, `list`, `build`, or `serve` — those stay CLI-only). It and the CLI share `plugins/doug-flow/lib/board.mjs`, which validates the file (unique ids, known columns and components, dependencies that exist); the two `record` command layers do not otherwise share an implementation, but both call `lib/board.mjs`'s `recordLanding` for the record step itself — promoting a card's research note from `.doug/.state/research/` to `docs/research/` before appending the run entry — so that step cannot drift between them again. The CLI's `record` still lacks the plugin's `--rehearsal <scenario>` flag (both forms) and, on the run form (report-driven) only, `--note <text>`. A static snapshot is `doug board build --out <file>`. `/doug-next` and `/doug-hand` no longer invoke it after a board change: the loops leave a card's move uncommitted, the page served by `doug board serve` shows it live, and the record lands in the card's landing commit.
+`plugins/doug-flow/scripts/board.mjs` is the plugin-only equivalent for sessions that have only the plugin, not the CLI: `next`, `card`, `move`, `edit`, `remove`, `reorder`, `record`, and `summary`, matching the CLI's subcommands of the same names, plus `epic`, `milestone`, `labels`, `rollup`, and `budgets` (the CLI has `rollup` and `labels --check` too) (it has no `init`, `add`, `list`, `build`, or `serve` — those stay CLI-only). It and the CLI share `plugins/doug-flow/lib/board.mjs`, which validates the file (unique ids, known columns and components, dependencies that exist); the two `record` command layers do not otherwise share an implementation, but both call `lib/board.mjs`'s `recordLanding` for the record step itself — promoting a card's research note from `.doug/.state/research/` to `docs/research/` before appending the run entry — so that step cannot drift between them again. The CLI's `record` still lacks the plugin's `--rehearsal <scenario>` flag (both forms) and, on the run form (report-driven) only, `--note <text>`. A static snapshot is `doug board build --out <file>`. `/doug-next` and `/doug-hand` no longer invoke it after a board change: the loops leave a card's move uncommitted, the page served by `doug board serve` shows it live, and the record lands in the card's landing commit.
 
 `/doug-next [card-id]` chains plan, approval, implement, land, and the board move for one card at a time, stopping at approval and again to ask before taking the next card. A card with `track: "hand"` is skipped by `board next`, and `/doug-next <id>` routes it to the `doug-hand` loop, which does the work directly without the workflow. `/doug-next <id> <id>...` or `/doug-next --batch <n>` plans several cards together into one merged plan, one approval, and one land; `/doug-hand <id> <id>...` or `/doug-hand --batch <n>` does the same for hand-track cards, swarm-only.
 
@@ -194,7 +203,7 @@ doug board serve   # the live board page: --open opens a browser, --detach backg
 `doug init` proposes `"statusLine": { "type": "command", "command": "node .doug/hooks/scripts/statusline.mjs" }` in `.claude/settings.json`. The script reads the status-line JSON on stdin and prints one line, e.g.:
 
 ```
-Doug 1.3.0 · Opus · main · ctx 8%
+Doug 1.4.0 · Opus · main · ctx 8%
 ```
 
 The segments are the product name from `.doug/config.json`, the installed `doug-gates` version (`.doug/hooks/VERSION`, falling back to config `doug.version`), `model.display_name`, the current git branch, and the used context-window percentage. Fallbacks: `ctx --` before the first API call or after `/compact`, no branch segment outside a git repo, and the bare line `Doug` on any error. Always exits 0. Tests in `plugins/doug-gates/tests/statusline.test.mjs`.

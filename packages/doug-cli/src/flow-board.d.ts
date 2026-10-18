@@ -20,6 +20,29 @@ declare module "@dougharness/flow/lib/board.mjs" {
     goal: string;
     source?: string;
     tags?: string[];
+    epic?: string;
+    milestone?: string;
+  }
+
+  export interface BoardLabel {
+    name: string;
+    color: string;
+    description?: string;
+  }
+
+  export interface BoardLabelGroup {
+    id: string;
+    title: string;
+    exclusive: boolean;
+    labels: BoardLabel[];
+  }
+
+  export interface BoardPlanEntry {
+    id: string;
+    title: string;
+    goal: string;
+    target?: { version?: string; date?: string };
+    status: "planned" | "active" | "done";
   }
 
   export interface Board {
@@ -28,6 +51,9 @@ declare module "@dougharness/flow/lib/board.mjs" {
     columns: BoardColumn[];
     components: string[];
     tags?: string[];
+    labelGroups?: BoardLabelGroup[];
+    epics?: BoardPlanEntry[];
+    milestones?: BoardPlanEntry[];
     cards: BoardCard[];
   }
 
@@ -42,6 +68,8 @@ declare module "@dougharness/flow/lib/board.mjs" {
     deps?: string[];
     column?: string;
     tags?: string[];
+    epic?: string;
+    milestone?: string;
   }
 
   export interface RunReport {
@@ -60,6 +88,8 @@ declare module "@dougharness/flow/lib/board.mjs" {
   export const RESEARCH_DOCS_DIR: string;
   export const DEFAULT_COLUMNS: BoardColumn[];
   export const DEFAULT_TAGS: string[];
+  export const PRIORITY_LABELS: string[];
+  export const DEFAULT_LABEL_GROUPS: BoardLabelGroup[];
   export function boardTags(board: Board): string[];
   export function promoteResearchNote(dir: string, id: string): string | null;
 
@@ -68,8 +98,8 @@ declare module "@dougharness/flow/lib/board.mjs" {
   export function saveBoard(dir: string, board: Board): void;
   export function findCard(board: Board, id: string): BoardCard;
   export type SkippedCard = { id: string; waitingOn: string[] } | { id: string; hand: true } | { id: string; flow: true };
-  export function nextReadyCard(board: Board, opts?: { track?: "flow" | "hand" | "any"; tag?: string }): { card: BoardCard | null; skipped: SkippedCard[] };
-  export function nextReadyCards(board: Board, opts: { track?: "flow" | "hand" | "any"; batch: number; tag?: string }): { cards: BoardCard[]; skipped: SkippedCard[] };
+  export function nextReadyCard(board: Board, opts?: { track?: "flow" | "hand" | "any"; tag?: string; epic?: string; milestone?: string }): { card: BoardCard | null; skipped: SkippedCard[] };
+  export function nextReadyCards(board: Board, opts: { track?: "flow" | "hand" | "any"; batch: number; tag?: string; epic?: string; milestone?: string }): { cards: BoardCard[]; skipped: SkippedCard[] };
   export function filterReportForCard(report: RunReport, cardId: string, taskIds?: string[]): RunReport;
   export function moveCard(board: Board, id: string, column: string, opts?: { source?: string; date?: string }): Board;
   export interface EditFields {
@@ -82,6 +112,8 @@ declare module "@dougharness/flow/lib/board.mjs" {
     deps?: string[];
     source?: string;
     tags?: string[];
+    epic?: string | null;
+    milestone?: string | null;
   }
   export function editCard(
     board: Board,
@@ -100,6 +132,45 @@ declare module "@dougharness/flow/lib/board.mjs" {
   export function newBoard(opts?: { date?: string }): Board;
   export function addCard(board: Board, card: NewCard, opts?: { date?: string }): Board;
   export function validateBoard(board: unknown): string[];
+  export function addEpic(board: Board, entry: { id: string; title: string; goal: string; target?: { version?: string; date?: string }; status?: string }, opts?: { date?: string }): Board;
+  export function addMilestone(board: Board, entry: { id: string; title: string; goal: string; target?: { version?: string; date?: string }; status?: string }, opts?: { date?: string }): Board;
+  export interface PlanEntryFields {
+    title?: string;
+    goal?: string;
+    status?: string;
+    target?: { version?: string | null; date?: string | null } | null;
+  }
+  export function editEpic(board: Board, id: string, fields: PlanEntryFields, opts?: { force?: boolean; date?: string }): { board: Board; warnings: string[] };
+  export function editMilestone(board: Board, id: string, fields: PlanEntryFields, opts?: { force?: boolean; date?: string }): { board: Board; warnings: string[] };
+  export interface RollupEntry {
+    id: string;
+    title: string;
+    status: string;
+    target: { version?: string; date?: string } | null;
+    columns: Record<string, number>;
+    done: number;
+    total: number;
+    progress: number;
+    measured: {
+      usd: number | null;
+      usdCards: number | null;
+      wallMinutes: number | null;
+      wallCards: number | null;
+      doneCards: number;
+    };
+    budget: unknown;
+    cards: string[];
+  }
+  export interface Rollup {
+    epics: RollupEntry[];
+    milestones: RollupEntry[];
+  }
+  export const LIVE_RUNS_RELPATH: string;
+  export function rollup(board: Board, liveRunsText: string | null): Rollup;
+  export function labelContrastFailures(board: Board): string[];
+  export function checkFilters(board: Board, filters: { tag?: string; epic?: string; milestone?: string }): void;
+  export function initLabelGroups(board: Board, opts?: { date?: string }): Board;
+  export function addLabelGroup(board: Board, group: BoardLabelGroup, opts?: { date?: string }): Board;
   export interface AdversaryClass {
     id: string;
     class: "real" | "marginal" | "false";
@@ -255,5 +326,6 @@ declare module "@dougharness/flow/lib/plan.mjs" {
 declare module "@dougharness/flow/lib/autopilot-view.mjs" {
   export const AUTOPILOT_FILE: string;
   export function readAutopilot(dir: string): Record<string, unknown> | null;
-  export function autopilotView(state: Record<string, unknown> | null, now?: Date | number): unknown;
+  export function autopilotView(state: Record<string, unknown> | null, now?: Date | number, run?: Record<string, unknown>): unknown;
+  export function readRuns(state: Record<string, unknown> | null): Record<string, unknown>;
 }
