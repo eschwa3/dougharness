@@ -323,3 +323,26 @@ export function turnTreeStatus(cfg, start, current) {
     return null;
   }
 }
+
+// card stop-gate-read-only-turn-commits: turnTreeStatus for a turn that moved HEAD. Applies only when every path
+// committed between the record's head and HEAD is on preCommit.noTestPaths (same match rule as turnTreeStatus),
+// and then compares the remaining code paths as if HEAD had not moved. Fails closed (null: the caller verifies)
+// on a missing, empty or malformed list, a record head that is not a plausible sha or not an ancestor of HEAD
+// (rewritten history), a git failure, an empty committed set, or any committed path off the list. Never throws.
+export function turnTreeStatusHeadMoved(dir, cfg, start, current) {
+  try {
+    if (!start || !current || typeof start !== "object" || typeof current !== "object") return null;
+    const list = cfg && cfg.preCommit && cfg.preCommit.noTestPaths;
+    if (!Array.isArray(list) || list.length === 0 || !list.every((e) => typeof e === "string" && e !== "")) return null;
+    if (typeof start.head !== "string" || !GIT_SHA_RE.test(start.head)) return null;
+    if (typeof current.head !== "string" || !GIT_SHA_RE.test(current.head) || start.head === current.head) return null;
+    execFileSync("git", ["merge-base", "--is-ancestor", start.head, current.head], { cwd: dir, stdio: "ignore", timeout: 5000 }); // throws on exit != 0
+    const committed = committedSince(dir, start.head);
+    if (!Array.isArray(committed) || committed.length === 0) return null;
+    if (!committed.every((p) => list.some((e) => (e.endsWith("/") ? p.startsWith(e) : p === e)))) return null;
+    const status = turnTreeStatus(cfg, start, { ...current, head: start.head });
+    return status ? { ...status, exact: false } : null;
+  } catch {
+    return null;
+  }
+}

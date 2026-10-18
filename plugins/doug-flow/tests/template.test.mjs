@@ -16,6 +16,8 @@ const source = readFileSync(join(root, "workflows/doug-implement.js"), "utf8");
 // The prompt slices below are evaluated on their own, so the one constant they share comes along.
 // NO_TRAILERS, PARTIAL_RULE, and PARTIAL_NEVER_MERGED (card worker-context-handoff), declared together in the source.
 const CONSTS = source.slice(source.indexOf("const NO_TRAILERS = "), source.indexOf("\n", source.indexOf("const PARTIAL_NEVER_MERGED = ")) + 1);
+// Prompt slices evaluated without CONSTS still interpolate RELAYED_MESSAGE (card queen-seats-relayed-user-message); expose it as a global for them.
+globalThis.RELAYED_MESSAGE = new Function(CONSTS + "return RELAYED_MESSAGE;")();
 // adversaryOk calls adversaryBlocking, defined immediately above it: an isolated eval of adversaryOk alone needs
 // both together.
 const adversaryOkSource = () => source.slice(source.indexOf("function adversaryBlocking("), source.indexOf("\n}\n", source.indexOf("function adversaryOk(")) + 3);
@@ -7431,6 +7433,12 @@ describe("card run-report-codex-cost: the Codex cost sentences and flag are docu
     expect(text, "plugins/doug-flow/skills/run-report/SKILL.md step 1 must contain the pinned sentence").toContain(T1_SENTENCE);
   });
 
+  it("C7: run-report names the report file in both step 1 forms so a sequential run keeps its Codex line", () => {
+    const text = readFileSync(join(root, "skills/run-report/SKILL.md"), "utf8");
+    expect(text, "workflow-form step 1 must pass --report <report.json>").toContain('scripts/cost.mjs" <run-id> --report <report.json>`:');
+    expect(text, "batch-form step 1 must pass --report <report.json> before --by-card").toContain('scripts/cost.mjs" <run-id> --report <report.json> --by-card');
+  });
+
   it("T2: the batch form's step 1 carries the pinned first-card-only sentence", () => {
     const text = readFileSync(join(root, "skills/run-report/SKILL.md"), "utf8");
     expect(text, "plugins/doug-flow/skills/run-report/SKILL.md batch step 1 must contain the pinned sentence").toContain(T2_SENTENCE);
@@ -8026,6 +8034,7 @@ describe("card autopilot: doug-next and doug-hand skill text", () => {
     "cost measured on every queen notification": "On every queen notification the lead measures the session's cost with cost.mjs --session <id> and checks every cap.",
     "stop: design decision": "It stops and asks when a card needs a design decision its goal does not answer.",
     "stop: gate red twice": "It stops and asks when the gate is red twice on one card.",
+    "stop: gate timeout with no other queen": "It stops and asks when a gate seat times out with no other queen in flight, or times out again on its rerun alone.",
     "stop: hook blocks": "It stops and asks when a hook blocks a step.",
     "stop: reviewer blocker": "It stops and asks when a reviewer blocker stays open after one fix pass.",
     "stop: cap reached": "It stops and asks when a cap is reached.",
@@ -8042,6 +8051,17 @@ describe("card autopilot: doug-next and doug-hand skill text", () => {
       expect(autoSection(nextText()), `missing from the Autopilot section: ${sentence}`).toContain(sentence);
     });
   }
+  it("the before-ending resume rule sits on its own line between the context ending and the anchor handoff (autopilot-no-stuck-in-flow)", () => {
+    const auto = autoSection(nextText());
+    const line = "Before it ends, every card of the run still In flow is resumed once, alone, from its saved `queen-args.json` (after `autopilot.mjs rerun-alone <id>` unless it stopped agent-null); only when that resume also stops does it ask, and the user's choice to leave a card In flow is recorded with `autopilot.mjs leave <id> --reason \"<the user's answer>\"`.";
+    const lines = auto.split("\n").map((l) => l.replace(/^\s*(?:[-*]\s+)?/, ""));
+    expect(lines.some((l) => l.startsWith(line)), "before-ending line").toBe(true);
+    expect(auto.split("\n").some((l) => l.startsWith("- " + line)), "before-ending line has its own bullet marker").toBe(true);
+    const at = auto.indexOf(line);
+    expect(at).toBeGreaterThan(auto.indexOf(pinned["ends: context at the threshold"]));
+    expect(at).toBeLessThan(auto.indexOf(pinned["ends: the anchor handoff"]));
+    expect(line.startsWith("It ends")).toBe(false);
+  });
   it("the old fixed default of 7 cards is gone (card autopilot-unlimited)", () => {
     expect(autoSection(nextText())).not.toContain("Without n, n is 7, the Ready cap.");
   });
@@ -8139,8 +8159,10 @@ describe("card parallel-card-queens: doug-next Parallel cards paragraph", () => 
     "agent-types preflight before a queen launch": "Before any queen launch, main runs `node \"" + A + "/scripts/autopilot.mjs\" agent-types --kind <flow|hand>`, which prints the agent types that queen spawns, one per line, and compares each name with the agent types its own session lists; when one is missing it launches no queen and tells the user to run /reload-plugins or restart.",
     "launch: queen-args, the Workflow call, launched": 'To launch a queen, main runs `node "' + A + '/scripts/autopilot.mjs" queen-args <id> --kind <flow|hand> --with <the other ids launched in the same message>`, which writes `.doug/.state/reports/<id>/queen-args.json` and the per-card `.doug/.state/reports/<id>/queen.js`, whose run name is `<short id> card-queen` or `<short id> flow-queen`, and prints both paths; then `Workflow({ scriptPath: <the queen.js path>, args })` with that file\'s JSON as args; then `autopilot.mjs launched <id> --run <wf_id> --kind <flow|hand> --worktree <abs> --args-file <path>`, the flow worktree being `<repoRoot>/<the plan\'s integrationWorktree>`, because that value is relative.',
     "launches in one message, main never briefs": "Main starts all the Workflow calls in one message, and it never briefs, builds, or reviews a queen card.",
-    "reports arrive in the task-notification": "Each queen's report arrives in that run's task-notification `<result>`, not in the Workflow tool's return, and main pipes it through `autopilot.mjs report --run <wf_id> --file .doug/.state/briefs/<id>-result.json`, the queen's result saved there, which prints land, resume, or ask.",
+    "reports arrive in the task-notification": "Each queen's report arrives in that run's task-notification `<result>`, not in the Workflow tool's return, and main pipes it through `autopilot.mjs report --run <wf_id> --file .doug/.state/briefs/<id>-result.json`, the queen's result saved there, which prints land, resume, rerun alone, or ask.",
     "the report's answer maps to land, resume, ask": "Land means the landing steps below; resume relaunches the same `.doug/.state/reports/<id>/queen.js` with `resumeFromRunId` and the saved `queen-args.json`, then runs `autopilot.mjs resumed <id> --run <new wf_id>`, once, and a second resume is ask; ask stops that card and asks the user.",
+    "resume with the answer": "For any asking stop with a stoppedAt seat (a design-decision, seat-blocked, or reviewer-major-open stop among them), main asks the user, records the answer with `autopilot.mjs answer <id> --answer \"<the user's answer>\"`, which adds it to `options.answers` in the saved `queen-args.json`, and `autopilot.mjs report` then prints resume with the answer: main relaunches the same queen.js with `resumeFromRunId` and that `queen-args.json` and runs `autopilot.mjs resumed`; the seats before the asking seat replay from the cache, the asking seat re-runs with the answer in its brief, and a second stop from that seat stops the card again.",
+    "a gate timeout is load, rerun alone": "A gate-timeout stop is load, not a red, when another queen is in flight: `autopilot.mjs report` then prints rerun alone, and main launches no new queen, waits until no other queen is running, runs `autopilot.mjs rerun-alone <id>`, which adds a rerun answer for the gate seat to the saved `queen-args.json`, relaunches the same queen.js with `resumeFromRunId` and that `queen-args.json`, and runs `autopilot.mjs resumed`; that is the card's one resume, so a second gate timeout is ask.",
     "land one card at a time": "Main lands one card at a time: a flow card with `plan.mjs done --card <id>` then `plan.mjs land --card <id>`, a hand card with `plan.mjs land-card <id> --branch card/<id> --worktree <abs>`.",
     "after each landing": "After each landing main runs `board.mjs move`, the run-report skill with `cost.mjs <wf_id> --report <per-card report path>`, which is `.doug/.state/reports/<id>/last-report.json` for a flow card and `.doug/.state/reports/<id>/card-report.json` for a hand card, and `autopilot.mjs lock-wait <id> --ms <n>`, where n is the `lockWaitMs` line that `plan.mjs land` or `land-card` printed, and the landing commit carries the card's plan `.doug/plans/<id>.json`.",
     "a resume never replans": "A resume never replans.",
@@ -8154,6 +8176,10 @@ describe("card parallel-card-queens: doug-next Parallel cards paragraph", () => 
       expect(sliceFrom(nextText(), "## Autopilot (--auto)"), `missing from the Autopilot section: ${sentence}`).toContain(sentence);
     });
   }
+  it("the Autopilot section tells main to pass --research on for a hand card that needs research (queen-args-research)", () => {
+    const sentence = "When a hand card's goal depends on a fact outside the repository (a Claude Code hook contract, a CLI's output format, a third-party API), main adds `--research on` to its queen-args line, so its queen runs the research seat before the lead seat; queen-args takes the queen's base branch from the current branch, or main when there is none.";
+    expect(sliceFrom(nextText(), "## Autopilot (--auto)")).toContain(sentence);
+  });
   it("the sentences sit in the paragraph in the brief's order", () => {
     const auto = sliceFrom(nextText(), "## Autopilot (--auto)");
     let prev = auto.indexOf("Parallel cards: up to `workers.max` cards (default 3)");
@@ -8163,6 +8189,10 @@ describe("card parallel-card-queens: doug-next Parallel cards paragraph", () => 
       expect(at, name).toBeGreaterThan(prev);
       prev = at;
     }
+  });
+  it("the Autopilot section no longer limits autopilot.mjs answer to design-decision stops", () => {
+    const auto = sliceFrom(nextText(), "## Autopilot (--auto)");
+    expect(auto).not.toContain("For a design-decision stop, main asks the user");
   });
   it("the Autopilot section no longer defines a queen by registered name or the shared card-queen.js", () => {
     const auto = sliceFrom(nextText(), "## Autopilot (--auto)");
@@ -8844,11 +8874,28 @@ describe("doug-next autopilot state-file writer calls", () => {
       expect(section).toMatch(new RegExp('scripts/autopilot\\.mjs" ' + sub + "\\b"));
     });
   }
+  it("the end bullet says end refuses while a card of the run is In flow and was neither resumed nor answered (autopilot-no-stuck-in-flow)", () => {
+    expect(section).toContain("- `node \"${CLAUDE_PLUGIN_ROOT}/scripts/autopilot.mjs\" end` at the closing summary; it refuses while a card of the run is In flow and was neither resumed nor answered, naming each such card.");
+  });
+  for (const sub of ["rerun-alone", "leave"]) {
+    it(`names the ${sub} call (autopilot-no-stuck-in-flow)`, () => {
+      expect(section).toMatch(new RegExp('scripts/autopilot\\.mjs" ' + sub + "\\b"));
+    });
+  }
   it("names all seven step values for the step call", () => {
     for (const step of ["research", "tester", "coder", "reviewer", "gate", "commit", "record"]) expect(section).toContain("`" + step + "`");
   });
   it("says how to open the pane", () => {
     expect(section).toMatch(/\bpane\b/i);
+  });
+  it("M4: names the clear call, run before the queue approval question", () => {
+    const m = section.match(/scripts\/autopilot\.mjs" clear\b/);
+    expect(m, "the section names the clear call").not.toBeNull();
+    const at = section.indexOf(m[0]);
+    const clearSentence = section.slice(Math.max(0, at - 400), at + 400);
+    expect(clearSentence).toMatch(/before the (queue )?approval/i);
+    const startCall = section.search(/scripts\/autopilot\.mjs" start\b/);
+    expect(at).toBeLessThan(startCall);
   });
 });
 
@@ -8955,5 +9002,22 @@ describe("card doug-start-l-card-offer: L-card feature-mode offer", () => {
     const o = t.indexOf(HAND_OFFER);
     expect(o).toBeGreaterThan(i);
     expect(o).toBeLessThan(j);
+  });
+  it("tells every doug-implement stage prompt that a relayed user message about other work is outside the task (card queen-seats-relayed-user-message)", () => {
+    // Claude Code relays the user's mid-turn message to every seat of a Workflow run; a stage must not stop for it.
+    const SENTENCE = "Your task is this plan task. A relayed user message about other work is outside this task: it is never a reason to stop or to return blocked; mention it in your summary if the result has one.";
+    const { RELAYED_MESSAGE } = new Function(CONSTS + "return { RELAYED_MESSAGE };")();
+    expect(RELAYED_MESSAGE).toBe(SENTENCE);
+    const names = [...source.matchAll(/^function ([A-Za-z]*Prompt)\(/gm)].map((m) => m[1]);
+    expect(names.length).toBe(18);
+    for (const fn of names) {
+      const start = source.indexOf(`function ${fn}(`);
+      const body = source.slice(start, source.indexOf("\n}\n", start));
+      expect(body, fn).toContain("${RELAYED_MESSAGE}");
+    }
+    const start = source.indexOf("function implementPrompt(");
+    const slice = source.slice(start, source.indexOf("\n}\n", start) + 3);
+    const text = new Function("plan", CONSTS + slice + "\nreturn implementPrompt;")({ title: "P", install: null })({ id: "a", title: "A", spec: "do a", files: ["x.ts"] }, "main");
+    expect(text).toContain(SENTENCE);
   });
 });

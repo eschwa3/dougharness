@@ -2,7 +2,8 @@
 // (.githooks/pre-commit). A changed docs/**/*.md file does not by itself run the suite. When every changed path
 // is on preCommit.noTestPaths or is a docs .md (and at least one is a docs .md not on the list), the tracked
 // test files whose text names that doc (its repo-relative path, or its basename, which also covers a
-// join("docs", "decisions", "<basename>") spelling) decide: none -> { kind: "skip" }; some -> { kind:
+// join("docs", "decisions", "<basename>") spelling) decide; non-test code outside a tests/ directory counts a
+// doc as named only by its full repo-relative path (a basename in a comment is ignored): none -> { kind: "skip" }; some -> { kind:
 // "targeted", files } (repo-relative, sorted). Anything else, or any doubt, returns null: run the full gate.
 // Never throws (a throw would reach runHook, which fails open and would skip the gate).
 // CLI (used by .githooks/pre-commit): staged paths on stdin, the config JSON in DOUG_NO_TEST_CONFIG, cwd =
@@ -34,7 +35,8 @@ function validList(cfg) {
 // -> sorted test files naming any of `docs`, or null (unreadable tree, or a file that cannot be mapped to test
 // files names a doc).
 function namingTests(dir, docs, tracked) {
-  const needles = [...new Set(docs.flatMap((d) => [d, basename(d)]))];
+  const pathNeedles = [...new Set(docs)];
+  const wideNeedles = [...new Set(docs.flatMap((d) => [d, basename(d)]))];
   const found = [];
   for (const f of tracked) {
     const isTest = TEST_FILE.test(f);
@@ -43,6 +45,8 @@ function namingTests(dir, docs, tracked) {
     if (!isTest && !underTests && !code) continue;
     if (f.startsWith("docs/")) continue;
     const text = readFileSync(join(dir, f), "utf8");
+    // code outside tests/ names a doc only by its full repo-relative path; tests and test helpers also by basename
+    const needles = isTest || underTests ? wideNeedles : pathNeedles;
     if (!needles.some((n) => text.includes(n))) continue;
     if (!isTest) return null; // a helper or source file reads the doc: cannot be mapped to test files
     found.push(f);

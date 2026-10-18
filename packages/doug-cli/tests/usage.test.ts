@@ -18,6 +18,15 @@ describe("doug help usage text", () => {
     }
   });
 
+  it("card board-v2-docs-reference: docs/reference.md names every board subcommand and the epic, milestone and labels init forms", () => {
+    const names = [...boardSrc.matchAll(/case "([a-z]+)":/g)].map((m) => m[1]);
+    for (const name of names) {
+      expect(referenceDoc, `reference.md must mention doug board ${name}`).toContain(`doug board ${name}`);
+    }
+    expect(referenceDoc).toContain("doug board labels init");
+    expect(referenceDoc).toContain("--status planned|active|done");
+  });
+
   it("lists the ablate budget and judge flags", () => {
     expect(binSrc).toContain("--max-budget-usd");
     expect(binSrc).toContain("--judge auto|codex|claude|off");

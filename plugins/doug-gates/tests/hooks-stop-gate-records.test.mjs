@@ -10,6 +10,8 @@ import { makeProject, runHookScript } from "./helpers.mjs";
 // set to diff the test's own changedAtStart fixture against.
 import { classifyFinalBlock } from "../lib/block-ledger.mjs";
 import { changedFiles } from "../lib/baseline.mjs";
+import * as ledger from "../lib/block-ledger.mjs";
+import { computeTree } from "../lib/verified-tree.mjs";
 // card stop-gate-skips-orphan-subagent-stops: the state file the test seeds directly is written/read through
 // loadState/saveState (the module's own default shape), never a guessed JSON literal.
 import { loadState, saveState } from "../lib/state.mjs";
@@ -1883,5 +1885,223 @@ describe("stop-gate reuses its last red on an unchanged tree (card stop-gate-no-
       expect(rB.json.decision).toBe("block");
       expect(rB.json.reason).not.toMatch(/nothing changed/i);
     });
+  });
+});
+
+// card block-ledger-failing-output: a blocked stop that ran verification records, in its blocks.jsonl line AND
+// its session trace line, failures (one { command, exit, timedOut, tail } per command that ran and failed),
+// cwd (the directory the gate ran in) and tree (the tree hash it verified). The tail is the last 40 lines of
+// the command's stderr + "\n" + stdout, capped at 4096 UTF-8 bytes, secret-scanned. Fixtures that need a
+// secret build it by concatenation (the secret-scan hook denies a Write holding a whole token).
+describe("card block-ledger-failing-output", () => {
+  const LEDGER = ".doug/.state/blocks.jsonl";
+  const TRACE = ".doug/.state/trace/test-session.jsonl";
+  const readJsonl = (dir, rel) => {
+    const file = join(dir, rel);
+    if (!existsSync(file)) return [];
+    return readFileSync(file, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l));
+  };
+  const cfgFor = (commands, timeoutMs = 10000) => ({
+    ...baseConfig,
+    commands,
+    stopGate: { commands: Object.keys(commands), onlyIfEdited: true, maxBlocks: 3, timeoutMs, requireEvidence: false },
+  });
+  function editedProject(commands, { timeoutMs, agent = {}, files = {} } = {}) {
+    const dir = makeProject({ config: cfgFor(commands, timeoutMs), git: true });
+    for (const [name, body] of Object.entries(files)) writeFileSync(join(dir, name), body);
+    writeFileSync(join(dir, "a.ts"), "x");
+    runHookScript("edit-loop", { tool_name: "Edit", tool_input: { file_path: "a.ts" }, ...agent }, { dir });
+    return dir;
+  }
+  const stop = (dir) => runHookScript("stop-gate", { hook_event_name: "Stop" }, { dir });
+  const subStop = (dir) =>
+    runHookScript("stop-gate", { hook_event_name: "SubagentStop", agent_id: "ag1", agent_type: "coder" }, { dir });
+  const AG = { agent_id: "ag1", agent_type: "coder" };
+  const node = process.execPath;
+  const HEX = /^[0-9a-f]{40}([0-9a-f]{24})?$/;
+
+  it("a blocked main Stop's ledger line keeps its six fields and carries failures[0].command, exit, timedOut, tail, cwd and tree", () => {
+    const cmd = `${node} -e "console.error('boom-err');console.log('boom-out');process.exit(3)"`;
+    const dir = editedProject({ test: cmd });
+    const r = stop(dir);
+    expect(r.json.decision).toBe("block");
+    const lines = readJsonl(dir, LEDGER);
+    expect(lines.length).toBe(1);
+    const line = lines[0];
+    expect(line.hook).toBe("stop-gate");
+    expect(line.session).toBe("test-session");
+    expect(line.reason).toBe(r.json.reason.split("\n")[0]);
+    expect(line.failures).toHaveLength(1);
+    expect(line.failures[0].command).toBe(cmd);
+    expect(line.failures[0].exit).toBe(3);
+    expect(line.failures[0].timedOut).toBe(false);
+    expect(line.failures[0].tail).toContain("boom-err");
+    expect(line.failures[0].tail).toContain("boom-out");
+    expect(line.cwd).toBe(dir);
+    expect(line.tree).toMatch(HEX);
+    expect(line.tree).toBe(computeTree(dir));
+  });
+
+  it("a blocked SubagentStop's ledger line carries the same failures, cwd and tree", () => {
+    const cmd = `${node} -e "console.log('sub-boom');process.exit(2)"`;
+    const dir = editedProject({ test: cmd }, { agent: AG });
+    const r = subStop(dir);
+    expect(r.json.decision).toBe("block");
+    const line = readJsonl(dir, LEDGER).find((l) => l.hook === "subagent-stop");
+    expect(line, "expected a subagent-stop line").toBeTruthy();
+    expect(line.agent).toBe("coder");
+    expect(line.failures).toHaveLength(1);
+    expect(line.failures[0]).toMatchObject({ command: cmd, exit: 2, timedOut: false });
+    expect(line.failures[0].tail).toContain("sub-boom");
+    expect(line.cwd).toBe(dir);
+    expect(line.tree).toBe(computeTree(dir));
+  });
+
+  it("a command that exits 3 records exit 3 and timedOut false", () => {
+    const dir = editedProject({ test: "exit 3" });
+    stop(dir);
+    const f = readJsonl(dir, LEDGER)[0].failures[0];
+    expect(f.exit).toBe(3);
+    expect(f.timedOut).toBe(false);
+  });
+
+  it("a timed-out command records timedOut true and exit null", () => {
+    const dir = editedProject({ slow: `${node} -e "setTimeout(() => {}, 10000)"` }, { timeoutMs: 1500 });
+    const r = stop(dir);
+    expect(r.json.decision).toBe("block");
+    const line = readJsonl(dir, LEDGER)[0];
+    expect(line.failures).toHaveLength(1);
+    expect(line.failures[0].timedOut).toBe(true);
+    expect(line.failures[0].exit).toBeNull();
+  });
+
+  it("a 100-line output records a tail of exactly the last 40 lines (line 61..line 100)", () => {
+    const dir = editedProject(
+      { test: `${node} gen.js` },
+      { files: { "gen.js": "for (let i = 1; i <= 100; i++) console.log('line ' + i);\nprocess.exit(1);\n" } },
+    );
+    stop(dir);
+    const expected = Array.from({ length: 40 }, (_, i) => "line " + (61 + i)).join("\n");
+    expect(readJsonl(dir, LEDGER)[0].failures[0].tail).toBe(expected);
+  });
+
+  it("40 lines of 200 characters record a tail of at most 4096 bytes that ends with the output's last line and equals the last 4096 bytes of the 40-line tail", () => {
+    const dir = editedProject(
+      { test: `${node} gen.js` },
+      {
+        files: {
+          "gen.js":
+            "const L = []; for (let i = 1; i <= 40; i++) L.push(String(i).padStart(3, '0') + 'x'.repeat(197));\nconsole.log(L.join('\\n'));\nprocess.exit(1);\n",
+        },
+      },
+    );
+    stop(dir);
+    const lines = Array.from({ length: 40 }, (_, i) => String(i + 1).padStart(3, "0") + "x".repeat(197));
+    const full = lines.join("\n");
+    const tail = readJsonl(dir, LEDGER)[0].failures[0].tail;
+    expect(Buffer.byteLength(tail, "utf8")).toBeLessThanOrEqual(4096);
+    expect(tail.endsWith(lines[39])).toBe(true);
+    expect(tail).toBe(Buffer.from(full, "utf8").subarray(-4096).toString("utf8"));
+  });
+
+  it("outputTail: last 40 lines, 4096-byte cap that never splits a character, never throws", () => {
+    expect(typeof ledger.outputTail).toBe("function");
+    const hundred = Array.from({ length: 100 }, (_, i) => "l" + (i + 1)).join("\n") + "\n";
+    expect(ledger.outputTail(hundred, { enabled: false }).split("\n")).toEqual(Array.from({ length: 40 }, (_, i) => "l" + (61 + i)));
+    const multi = ledger.outputTail("é".repeat(3000), { enabled: false });
+    expect(Buffer.byteLength(multi, "utf8")).toBeLessThanOrEqual(4096);
+    expect(multi).not.toContain("\uFFFD");
+    expect(multi).toBe("é".repeat(2048));
+    expect(() => ledger.outputTail(undefined, {})).not.toThrow();
+    expect(() => ledger.outputTail(null, undefined)).not.toThrow();
+  });
+
+  it("with one passing and one failing command, failures holds only the failing command", () => {
+    const dir = editedProject({ ok: `${node} -e "console.log('fine');process.exit(0)"`, bad: "exit 1" });
+    const r = stop(dir);
+    expect(r.json.decision).toBe("block");
+    const line = readJsonl(dir, LEDGER)[0];
+    expect(line.failures).toHaveLength(1);
+    expect(line.failures[0].command).toBe("exit 1");
+  });
+
+  it("two failing commands are recorded in run order", () => {
+    const dir = editedProject({ one: "exit 4", two: "exit 5" });
+    stop(dir);
+    const f = readJsonl(dir, LEDGER)[0].failures;
+    expect(f.map((x) => [x.command, x.exit])).toEqual([["exit 4", 4], ["exit 5", 5]]);
+  });
+
+  it("the SubagentStop decision:block trace line carries the same failures, cwd and tree as the ledger line", () => {
+    const dir = editedProject({ test: `${node} -e "console.log('trace-boom');process.exit(7)"` }, { agent: AG });
+    subStop(dir);
+    const ledgerLine = readJsonl(dir, LEDGER).find((l) => l.hook === "subagent-stop");
+    const tl = readJsonl(dir, TRACE).filter((l) => l.event === "SubagentStop" && l.decision === "block");
+    expect(tl.length).toBe(1);
+    expect(tl[0].failures).toEqual(ledgerLine.failures);
+    expect(tl[0].failures[0].exit).toBe(7);
+    expect(tl[0].cwd).toBe(dir);
+    expect(tl[0].tree).toBe(ledgerLine.tree);
+    expect(tl[0].detail).toBeNull();
+  });
+
+  it("a main Stop block appends one trace line with event Stop, decision block, and the ledger line's failures, cwd and tree", () => {
+    const dir = editedProject({ test: `${node} -e "console.log('main-trace');process.exit(9)"` });
+    stop(dir);
+    const ledgerLine = readJsonl(dir, LEDGER)[0];
+    const tl = readJsonl(dir, TRACE).filter((l) => l.event === "Stop" && l.decision === "block");
+    expect(tl.length).toBe(1);
+    expect(tl[0].reason).toBeNull();
+    expect(tl[0].detail).toBeNull();
+    expect(tl[0].failures).toEqual(ledgerLine.failures);
+    expect(tl[0].failures[0].exit).toBe(9);
+    expect(tl[0].cwd).toBe(dir);
+    expect(tl[0].tree).toBe(ledgerLine.tree);
+  });
+
+  it("a trace file path that is a directory still blocks with exit 0 and the Verification failed reason, and blocks.jsonl still gets its line with failures", () => {
+    const dir = editedProject({ test: "exit 1" });
+    mkdirSync(join(dir, TRACE), { recursive: true });
+    const r = stop(dir);
+    expect(r.status).toBe(0);
+    expect(r.json && r.json.decision).toBe("block");
+    expect(r.json.reason).toContain("Verification failed");
+    const lines = readJsonl(dir, LEDGER);
+    expect(lines.length).toBe(1);
+    expect(lines[0].failures).toHaveLength(1);
+    expect(lines[0].failures[0].exit).toBe(1);
+  });
+
+  it("a second stop on an unchanged tree reuses the red and its ledger line carries the first block's failures, cwd and tree", () => {
+    const cmd = `${node} -e "console.log('REUSE-ME');process.exit(1)"`;
+    const dir = editedProject({ test: cmd });
+    const r1 = stop(dir);
+    expect(r1.json.decision).toBe("block");
+    const r2 = stop(dir);
+    expect(r2.json.reason).toMatch(/nothing changed/i);
+    const lines = readJsonl(dir, LEDGER);
+    expect(lines.length).toBe(2);
+    expect(lines[1].failures).toEqual(lines[0].failures);
+    expect(lines[1].failures[0].tail).toContain("REUSE-ME");
+    expect(lines[1].cwd).toBe(lines[0].cwd);
+    expect(lines[1].cwd).toBe(dir);
+    expect(lines[1].tree).toBe(lines[0].tree);
+    expect(lines[1].tree).toMatch(HEX);
+  });
+
+  it("a command printing an AWS key id (built by concatenation) records tail [redacted: awsKeyId] and no 6-character window of the key appears in blocks.jsonl or the trace file", () => {
+    const parts = ["AKIA", "IOSF", "ODNN", "7EXA", "MPLE"];
+    const key = parts.join("");
+    const dir = editedProject(
+      { test: `${node} gen.js` },
+      { files: { "gen.js": `console.log(${JSON.stringify(parts)}.join(''));\nprocess.exit(1);\n` } },
+    );
+    stop(dir);
+    const f = readJsonl(dir, LEDGER)[0].failures[0];
+    expect(f.tail).toBe("[redacted: awsKeyId]");
+    const files = [LEDGER, TRACE].map((rel) => (existsSync(join(dir, rel)) ? readFileSync(join(dir, rel), "utf8") : ""));
+    for (const text of files) {
+      for (let i = 0; i + 6 <= key.length; i++) expect(text, `leaks "${key.slice(i, i + 6)}"`).not.toContain(key.slice(i, i + 6));
+    }
   });
 });

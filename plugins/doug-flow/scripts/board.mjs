@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 // CLI for the development board, used by the /doug-next and doug-hand skills. Deterministic; no agents.
-//   board.mjs next [dir] [--track flow|hand|any] [--tag <tag>]
+//   board.mjs next [dir] [--track flow|hand|any] [--tag <tag>] [--epic <id>] [--milestone <id>]
 //                                                 the first Ready card on that track (default flow) whose deps are
 //                                                 Done, as JSON (exit 1 if none); --tag filters to cards carrying it
-//   board.mjs next --batch <n> [dir] [--track flow|hand|any] [--tag <tag>]
+//   board.mjs next --batch <n> [dir] [--track flow|hand|any] [--tag <tag>] [--epic <id>] [--milestone <id>]
 //                                                 the first n runnable Ready cards, in board order, as a JSON array
 //                                                 (exit 1 if none): the cards /doug-next plans together; stderr also
 //                                                 carries a `wall cap: <m> min` line (the cards' budgets from the size x class table)
@@ -14,16 +14,25 @@
 //                                                 Wall clock rows joined to the board, one line per cell and a final
 //                                                 `table:` line; writes nothing (replace WALL_BUDGET_MIN by hand). --usd does the same for the usd
 //                                                 table (USD_BUDGET) from the Cost rows of flow and hand entries
+//   board.mjs rollup [dir] [--epic <id> | --milestone <id>] [--from <live-runs file>]
+//                                                 per epic and milestone: columns, done/total, size-weighted progress,
+//                                                 measured cost and wall of Done cards, not-Done budget, as JSON; --from
+//                                                 defaults to docs/live-runs.md when present (else measured is null)
+//   board.mjs labels --check [dir]                one line per label colour under 3:1 against #ffffff or #1c2022; exit 0
 //   board.mjs card <id> [dir]                     one card as JSON
 //   board.mjs reorder <id> [dir] --before <other> | --after <other> | --top | --bottom
 //                                                 reorder a card within its column
 //   board.mjs move <id> <column> [dir] [--source <text>]
 //                                                 move a card
 //   board.mjs edit <id> [dir] [--title <t>] [--goal <g> | --goal-file <path>] [--size S|M|L] [--component <c>]
-//                     [--track flow|hand] [--class <c>] [--deps a,b] [--tag a,b] [--source <s>] [--force]
+//                     [--track flow|hand] [--class <c>] [--deps a,b] [--tag a,b] [--source <s>] [--epic <id>] [--milestone <id>] [--force]
 //                                                 changes a card's fields through the record's own validation
 //                                                 (never the id or the column; move stays the way to change that);
-//                                                 --tag "" clears a card's tags
+//                                                 --tag "" clears a card's tags; --epic "" / --milestone "" clear those
+//   board.mjs epic add <id> --title <t> --goal <g> [dir] [--version <v>] [--date YYYY-MM-DD]
+//   board.mjs epic edit <id> [dir] [--title <t>] [--goal <g>] [--version <v>] [--date <d>] [--status planned|active|done] [--force]
+//   board.mjs epic list [dir]                     epics as a JSON array; milestone add|edit|list takes the same flags.
+//                                                 --status done is refused while a member card is not Done (--force sets it, with a warning)
 //   board.mjs remove <id> [dir] [--force]         removes a card from the record: refused always when another card
 //                                                 lists it in deps; refused without --force when it is done, in
 //                                                 flow, or named by .doug/plan.json (each with --force removes it
@@ -49,29 +58,42 @@
 
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
 import { join, relative, resolve } from "node:path";
-import { loadBoard, saveBoard, findCard, nextReadyCard, nextReadyCards, moveCard, editCard, removeCard, reorderCard, readyCapWarning, wallCapMinutes, WALL_BUDGET_MIN, WALL_BUDGET_MIN_N, parseLiveRunWalls, wallBudgetTable, USD_BUDGET, USD_BUDGET_MIN_N, usdCapDollars, parseLiveRunCosts, usdBudgetTable, runEntry, handEntry, handWallVerdict, runSummary, boardPath, parseAdversaryClasses, filterReportForCard, recordLanding } from "../lib/board.mjs";
+import { loadBoard, saveBoard, findCard, nextReadyCard, nextReadyCards, moveCard, editCard, editEpic, editMilestone, initLabelGroups, addEpic, addMilestone, removeCard, reorderCard, readyCapWarning, wallCapMinutes, WALL_BUDGET_MIN, WALL_BUDGET_MIN_N, parseLiveRunWalls, wallBudgetTable, USD_BUDGET, USD_BUDGET_MIN_N, usdCapDollars, parseLiveRunCosts, usdBudgetTable, rollup, checkFilters, labelContrastFailures, LIVE_RUNS_RELPATH, runEntry, handEntry, handWallVerdict, runSummary, boardPath, parseAdversaryClasses, filterReportForCard, recordLanding } from "../lib/board.mjs";
 import { loadPlan, planFor, unwrapReport, DEFAULT_BUDGET } from "../lib/plan.mjs";
 import { wallForRun } from "../lib/cost.mjs";
 
-const EDIT_FIELD_ORDER = ["title", "goal", "size", "component", "track", "class", "tags", "deps", "source"];
-const EDIT_USAGE = "usage: board.mjs edit <id> [dir] [--title <t>] [--goal <g> | --goal-file <path>] [--size S|M|L] [--component <c>] [--track flow|hand] [--class <c>] [--tag a,b] [--deps a,b] [--source <s>] [--force]";
+const EDIT_FIELD_ORDER = ["title", "goal", "size", "component", "track", "class", "tags", "deps", "source", "epic", "milestone"];
+const EDIT_USAGE = "usage: board.mjs edit <id> [dir] [--title <t>] [--goal <g> | --goal-file <path>] [--size S|M|L] [--component <c>] [--track flow|hand] [--class <c>] [--tag a,b] [--deps a,b] [--source <s>] [--epic <id>] [--milestone <id>] [--force]";
 
 const argv = process.argv.slice(2);
-const FLAGS = new Set(["hand", "top", "bottom", "force", "usd"]);
+const FLAGS = new Set(["hand", "top", "bottom", "force", "usd", "check"]);
 const REPEATABLE = new Set(["adversary"]);
 
 // Each subcommand's allowed flags, derived from what that case actually reads (card board-cli-unknown-flags).
 // `record` has two forms (--hand or not) with different allowed sets, handled separately below.
 const SUBCOMMAND_FLAGS = {
-  next: ["track", "batch", "tag"],
+  next: ["track", "batch", "tag", "epic", "milestone"],
   card: [],
   move: ["source"],
-  edit: ["title", "goal", "goal-file", "size", "component", "track", "class", "deps", "tag", "source", "force"],
+  edit: ["title", "goal", "goal-file", "size", "component", "track", "class", "deps", "tag", "source", "epic", "milestone", "force"],
   remove: ["force"],
   reorder: ["before", "after", "top", "bottom"],
   budgets: ["from", "usd"],
+  rollup: ["epic", "milestone", "from"],
+  labels: ["check"],
   summary: ["summary", "cost", "codex-cost", "wall", "commit", "card", "run", "claude-dir", "note"],
 };
+// epic and milestone: `<kind> add|edit|list`, each action with its own allowed flags.
+const PLAN_ACTION_FLAGS = {
+  add: ["title", "goal", "version", "date"],
+  edit: ["title", "goal", "version", "date", "status", "force"],
+  list: [],
+};
+const planUsage = (kind) => [
+  `usage: board.mjs ${kind} add <id> --title <t> --goal <g> [dir] [--version <v>] [--date YYYY-MM-DD]`,
+  `       board.mjs ${kind} edit <id> [dir] [--title <t>] [--goal <g>] [--version <v>] [--date YYYY-MM-DD] [--status planned|active|done] [--force]`,
+  `       board.mjs ${kind} list [dir]`,
+].join("\n");
 const RECORD_HAND_FLAGS = ["summary", "hand", "commit", "wall", "gate", "note", "rehearsal", "rehearsal-outcome", "cost"];
 const RECORD_REPORT_FLAGS = ["summary", "cost", "codex-cost", "wall", "commit", "adversary", "shared-cost", "note", "rehearsal", "rehearsal-outcome", "run", "claude-dir"];
 const opts = {};
@@ -98,13 +120,15 @@ function fail(msg, code = 1) {
 }
 
 const USAGE_FOR = {
-  next: "usage: board.mjs next [dir] [--track flow|hand|any] [--batch <n>] [--tag <tag>]",
+  next: "usage: board.mjs next [dir] [--track flow|hand|any] [--batch <n>] [--tag <tag>] [--epic <id>] [--milestone <id>]",
   card: "usage: board.mjs card <id> [dir]",
   move: "usage: board.mjs move <id> <column> [dir] [--source <text>]",
   edit: EDIT_USAGE,
   remove: "usage: board.mjs remove <id> [dir] [--force]",
   reorder: "usage: board.mjs reorder <id> [dir] --before <other> | --after <other> | --top | --bottom",
   budgets: "usage: board.mjs budgets [dir] [--usd] [--from <live-runs file>]",
+  rollup: "usage: board.mjs rollup [dir] [--epic <id> | --milestone <id>] [--from <live-runs file>]",
+  labels: "usage: board.mjs labels --check [dir] | labels init [dir]",
   summary: "usage: board.mjs summary <report.json> --summary \"<one sentence>\" [--cost <usd>] [--codex-cost <usd>] [--wall <text>] [--commit <sha>] [--card <id>] [--run <run-id>] [--claude-dir <dir>] [--note <text>]",
 };
 const RECORD_HAND_USAGE = "usage: board.mjs record <id> --hand [dir] --summary \"<one sentence>\" [--commit <sha>] [--wall <text>] [--gate <text>] [--note <text>] [--rehearsal <scenario> --rehearsal-outcome <passed|failed>] [--cost <usd>]";
@@ -124,6 +148,12 @@ function dirFrom(args, n) {
   return resolve(process.env.CLAUDE_PROJECT_DIR || args[n] || process.cwd());
 }
 
+if (cmd === "epic" || cmd === "milestone") {
+  const action = rest[0];
+  if (!Object.prototype.hasOwnProperty.call(PLAN_ACTION_FLAGS, action)) fail(planUsage(cmd), 2);
+  const unknown = Object.keys(opts).find((name) => !PLAN_ACTION_FLAGS[action].includes(name));
+  if (unknown !== undefined) fail(`unknown option --${unknown} for board.mjs ${cmd}\n${planUsage(cmd)}`, 2);
+}
 if (cmd === "record" || Object.prototype.hasOwnProperty.call(SUBCOMMAND_FLAGS, cmd)) {
   const unknown = unknownFlagFor(cmd, opts);
   if (unknown !== undefined) {
@@ -198,7 +228,7 @@ try {
       if (batch !== null && !(Number.isInteger(batch) && batch > 0)) fail(`--batch must be a positive integer, got ${JSON.stringify(opts.batch)}`, 2);
       if (opts.tag !== undefined && opts.tag.includes(",")) fail(`--tag takes one tag here; got "${opts.tag}"`, 2);
       const board = loadBoard(dir);
-      const { card, cards, skipped } = batch === null ? nextReadyCard(board, { track, tag: opts.tag }) : nextReadyCards(board, { track, batch, tag: opts.tag });
+      const { card, cards, skipped } = batch === null ? nextReadyCard(board, { track, tag: opts.tag, epic: opts.epic, milestone: opts.milestone }) : nextReadyCards(board, { track, batch, tag: opts.tag, epic: opts.epic, milestone: opts.milestone });
       for (const s of skipped) process.stderr.write(s.hand ? `skipping ${s.id}: hand track (a by-hand card; /doug-next ${s.id} takes it)\n` : s.flow ? `skipping ${s.id}: flow track (run it with /doug-next)\n` : `skipping ${s.id}: waiting on ${s.waitingOn.join(", ")}\n`);
       const capLine = readyCapWarning(board);
       if (capLine) process.stderr.write(capLine);
@@ -234,6 +264,42 @@ try {
       }
       out.push(`table: ${JSON.stringify(table)}`);
       process.stdout.write(out.join("\n") + "\n");
+      break;
+    }
+    case "rollup": {
+      if (opts.epic !== undefined && opts.milestone !== undefined) fail(USAGE_FOR.rollup, 2);
+      const dir = dirFrom(rest, 0);
+      const board = loadBoard(dir);
+      try {
+        checkFilters(board, { epic: opts.epic, milestone: opts.milestone });
+      } catch (e) {
+        fail(e.message, 2);
+      }
+      let text = null;
+      if (opts.from !== undefined) {
+        try {
+          text = readFileSync(resolve(opts.from), "utf8");
+        } catch (e) {
+          fail(`cannot read --from file ${opts.from}: ${e.message}`, 2);
+        }
+      } else if (existsSync(join(dir, LIVE_RUNS_RELPATH))) {
+        text = readFileSync(join(dir, LIVE_RUNS_RELPATH), "utf8");
+      }
+      const r = rollup(board, text);
+      const out = opts.epic !== undefined ? r.epics.find((e) => e.id === opts.epic) : opts.milestone !== undefined ? r.milestones.find((m) => m.id === opts.milestone) : r;
+      process.stdout.write(JSON.stringify(out, null, 2) + "\n");
+      break;
+    }
+    case "labels": {
+      if (rest[0] === "init" && opts.check !== true) {
+        const dir = dirFrom(rest, 1);
+        saveBoard(dir, initLabelGroups(loadBoard(dir)));
+        process.stdout.write(`Added label groups type and priority to ${relative(dir, boardPath(dir))}.\n`);
+        break;
+      }
+      if (opts.check !== true) fail(USAGE_FOR.labels, 2);
+      const lines = labelContrastFailures(loadBoard(dirFrom(rest, 0)));
+      if (lines.length) process.stdout.write(lines.join("\n") + "\n");
       break;
     }
     case "card": {
@@ -272,6 +338,8 @@ try {
       if (opts.deps !== undefined) fields.deps = opts.deps.split(",").map((d) => d.trim()).filter(Boolean);
       if (opts.tag !== undefined) fields.tags = opts.tag.split(",").map((t) => t.trim()).filter(Boolean);
       if (opts.source !== undefined) fields.source = opts.source;
+      if (opts.epic !== undefined) fields.epic = opts.epic === "" ? null : opts.epic;
+      if (opts.milestone !== undefined) fields.milestone = opts.milestone === "" ? null : opts.milestone;
       const changed = EDIT_FIELD_ORDER.filter((k) => Object.prototype.hasOwnProperty.call(fields, k));
       if (!changed.length) fail(EDIT_USAGE, 2);
       const dir = dirFrom(rest, 1);
@@ -280,6 +348,47 @@ try {
       saveBoard(dir, board);
       for (const w of warnings) process.stderr.write(`warning: ${w}\n`);
       process.stdout.write(`Edited ${id} (${changed.join(", ")}) in ${relative(dir, boardPath(dir))}.\n`);
+      break;
+    }
+    case "epic":
+    case "milestone": {
+      const [action, id] = rest;
+      const add = cmd === "epic" ? addEpic : addMilestone;
+      const edit = cmd === "epic" ? editEpic : editMilestone;
+      const targetOf = () => {
+        const t = {};
+        if (opts.version !== undefined) t.version = opts.version === "" ? null : opts.version;
+        if (opts.date !== undefined) t.date = opts.date === "" ? null : opts.date;
+        return t;
+      };
+      if (action === "list") {
+        const board = loadBoard(dirFrom(rest, 1));
+        process.stdout.write(JSON.stringify(board[`${cmd}s`] || [], null, 2) + "\n");
+        break;
+      }
+      if (!id) fail(planUsage(cmd), 2);
+      if (action === "add") {
+        if (!opts.title || !opts.goal) fail(planUsage(cmd), 2);
+        const dir = dirFrom(rest, 2);
+        const target = {};
+        if (opts.version) target.version = opts.version;
+        if (opts.date) target.date = opts.date;
+        saveBoard(dir, add(loadBoard(dir), { id, title: opts.title, goal: opts.goal, ...(Object.keys(target).length ? { target } : {}) }));
+        process.stdout.write(`Added ${cmd} ${id} in ${relative(dir, boardPath(dir))}.\n`);
+        break;
+      }
+      const fields = {};
+      if (opts.title !== undefined) fields.title = opts.title;
+      if (opts.goal !== undefined) fields.goal = opts.goal;
+      if (opts.status !== undefined) fields.status = opts.status;
+      const target = targetOf();
+      if (Object.keys(target).length) fields.target = target;
+      if (!Object.keys(fields).length) fail(planUsage(cmd), 2);
+      const dir = dirFrom(rest, 2);
+      const { board, warnings } = edit(loadBoard(dir), id, fields, { force: !!opts.force });
+      saveBoard(dir, board);
+      for (const w of warnings) process.stderr.write(`warning: ${w}\n`);
+      process.stdout.write(`Edited ${cmd} ${id} (${Object.keys(fields).join(", ")}) in ${relative(dir, boardPath(dir))}.\n`);
       break;
     }
     case "remove": {
@@ -389,7 +498,7 @@ try {
       break;
     }
     default:
-      fail("usage: board.mjs <next|card|reorder|move|edit|remove|record|summary> ...", 2);
+      fail("usage: board.mjs <next|card|reorder|move|edit|epic|milestone|rollup|labels|remove|record|summary> ...", 2);
   }
 } catch (err) {
   fail(err.message);

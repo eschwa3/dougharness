@@ -243,6 +243,15 @@ export function priceCodexUsage(codexUsage, model = CODEX_DEFAULT_MODEL) {
 
 const CODEX_RELAY = "doug-flow:adversary";
 
+// The report a cost line may use for `runId`: a report carrying a runId attaches only on an exact match; one
+// carrying none attaches only when the caller named the file (`named`). Anything else is null.
+export function reportForRun(report, runId, { named = false } = {}) {
+  if (!report || typeof report !== "object") return null;
+  const id = typeof report.runId === "string" && report.runId !== "" ? report.runId : null;
+  if (id === null) return named ? report : null;
+  return id === runId ? report : null;
+}
+
 // Sum and price every agent of one run. Throws when the run cannot be found; an agent without a transcript or on
 // an unpriced model is reported in `notes`, never estimated.
 // `report` (card adversary-usage-in-report): a parsed workflow report, or null/omitted. When given and it carries

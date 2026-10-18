@@ -1003,6 +1003,28 @@ function followOwnWrites(m, entry, written, confirmedIso, sigBefore) {
   entry.sig = sigAfter;
 }
 
+// What the stale window hides (card recall-window-report): over live rows (not superseded, not stale), the
+// count outside the window by exactly ageDaysOf's rule, the live total, and the oldest hidden age in whole days.
+export function windowHidden(m, { staleDays = 30, now = new Date() } = {}) {
+  const nowMs = (now instanceof Date ? now : new Date(now)).getTime();
+  const rows = m.prepare("SELECT created, confirmed FROM lessons WHERE superseded_by IS NULL AND stale IS NULL").all();
+  let count = 0;
+  let oldest = -Infinity;
+  for (const r of rows) {
+    const age = ageDaysOf(r.confirmed || r.created, nowMs);
+    if (age <= staleDays) continue;
+    count++;
+    if (age > oldest) oldest = age;
+  }
+  return { count, total: rows.length, oldestDays: count ? Math.floor(oldest) : null };
+}
+
+// The one line that says so; null when the window hid nothing.
+export function windowNote(hidden, staleDays = 30) {
+  if (!hidden || !hidden.count) return null;
+  return `window: hid ${hidden.count} of ${hidden.total} live lessons older than ${staleDays} days (oldest ${hidden.oldestDays} days)`;
+}
+
 // --- Dense-ranked recall -----------------------------------------------------------------------------------
 // With a provider and vectors stored under its model/dims, every vectored live in-window lesson is ranked by
 // cosine similarity x recency weight x scope boost (memory-benchmark section 9: cosine x recency beat the old
@@ -1186,7 +1208,8 @@ export async function recallLessons(m, query, opts = {}) {
   }
   if (rows && written.length) followOwnWrites(m, rows, written, nowIsoStr, sigBefore);
 
-  return { mode, reason: mode === "hybrid" ? null : reason, provider: providerName, checked, degraded, ...coverage, lessons: result };
+  const hidden = windowHidden(m, { staleDays, now: nowDate });
+  return { mode, reason: mode === "hybrid" ? null : reason, provider: providerName, checked, degraded, ...coverage, hidden, lessons: result };
 }
 
 // Renders recalled lessons as one line per lesson, in rank order. Each lesson's own text gets a fixed budget

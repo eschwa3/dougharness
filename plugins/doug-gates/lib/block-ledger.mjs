@@ -9,6 +9,7 @@
 import { appendFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { changedFiles } from "./baseline.mjs";
+import { scanText } from "./secret-rules.mjs";
 
 export const BLOCKS_RELPATH = ".doug/.state/blocks.jsonl";
 
@@ -121,7 +122,7 @@ export function failingTestFilesFrom(output, dir) {
 // blockStop call that carries it out (stop-gate.mjs), so an unguarded throw here would fail the *whole gate*
 // open — the one outcome every hook reader must never risk (CLAUDE.md gotchas). Any failure classifies as
 // 'real', the least specific label, rather than ever propagating.
-export function classifyFinalBlock({ preVerificationProblems, evidenceProblemAdded, commandFailures, postCommandProblems, results, redByDesignClaimFiles, changedAtStart, dir, budgetDeadline }) {
+export function classifyFinalBlock({ countProblems, totalProblems, preVerificationProblems, evidenceProblemAdded, commandFailures, postCommandProblems, results, redByDesignClaimFiles, changedAtStart, dir, budgetDeadline }) {
   try {
     const failures = Array.isArray(commandFailures) ? commandFailures : [];
     const namedByCommand = failures.map((cf) => failingTestFilesFrom(cf.output, dir));
@@ -140,8 +141,11 @@ export function classifyFinalBlock({ preVerificationProblems, evidenceProblemAdd
       if (allNamed.every((f) => claimSet.has(f))) return "expected-red";
     }
 
+    // card block-ledger-failing-output: the test-count ratchet is the block's only problem.
     const timedOutOrDropped = (Array.isArray(results) ? results : []).some((r) => r.timedOut || r.skipped === "budget");
     if (timedOutOrDropped && allNamed.length === 0) return "load-timeout";
+
+    if (typeof countProblems === "number" && countProblems > 0 && totalProblems === countProblems) return "test-count";
 
     if (Array.isArray(changedAtStart) && !(typeof budgetDeadline === "number" && Date.now() >= budgetDeadline)) {
       const changedNow = changedFiles(dir);
@@ -159,14 +163,47 @@ export function classifyFinalBlock({ preVerificationProblems, evidenceProblemAdd
   }
 }
 
-// Appends one line to .doug/.state/blocks.jsonl: { hook, at, agent, reason, class, session }. `reason` is
+// card block-ledger-failing-output: the last 40 lines of a command's output, secret-scanned (a hit records
+// "[redacted: <rule>]", a scanner throw "[redacted: scan-error]"; skipped when secrets.enabled === false),
+// then capped at 4096 UTF-8 bytes keeping the end, never splitting a character. Never throws.
+export function redactText(text, secrets) {
+  try {
+    if (!(secrets && secrets.enabled === false)) {
+      const hit = scanText(text, secrets || {});
+      if (hit) return "[redacted: " + hit.rule + "]";
+    }
+    return text;
+  } catch {
+    return "[redacted: scan-error]";
+  }
+}
+
+export function outputTail(output, secrets) {
+  try {
+    let tail = String(output ?? "").trimEnd().split("\n").slice(-40).join("\n");
+    tail = redactText(tail, secrets);
+    const buf = Buffer.from(tail, "utf8");
+    if (buf.length > 4096) {
+      let start = buf.length - 4096;
+      while (start < buf.length && (buf[start] & 0xc0) === 0x80) start++;
+      tail = buf.subarray(start).toString("utf8");
+    }
+    return tail;
+  } catch {
+    return "";
+  }
+}
+
+// Appends one line to .doug/.state/blocks.jsonl: { hook, at, agent, reason, class, session }, plus the keys of
+// `record` ({ failures, cwd, tree }, card block-ledger-failing-output) when it is a plain object. `reason` is
 // reduced to its own first line here (message.split("\n")[0]) whatever the caller passes, so a multi-line
 // block message never leaks past its headline into the ledger. Call synchronously, right before each
 // blockStop/systemMessage in stop-gate.mjs — those each call process.exit(0) themselves, so anything queued
 // after them never runs. Never throws: an unwritable .doug/.state, or a blocks.jsonl path that is itself a
 // directory, just skips the line silently; the gate's own decision is unaffected either way.
-export function appendBlockLine(dir, { hook, agent, reason, class: cls, session }) {
+export function appendBlockLine(dir, { hook, agent, reason, class: cls, session, record }) {
   try {
+    const plain = record && typeof record === "object" && !Array.isArray(record) ? record : {};
     const line =
       JSON.stringify({
         hook,
@@ -175,6 +212,7 @@ export function appendBlockLine(dir, { hook, agent, reason, class: cls, session 
         reason: String(reason).split("\n")[0],
         class: cls,
         session: session ?? null,
+        ...plain,
       }) + "\n";
     mkdirSync(join(dir, ".doug/.state"), { recursive: true });
     appendFileSync(join(dir, BLOCKS_RELPATH), line);

@@ -1,6 +1,6 @@
 {
   "name": "@dougharness/cli",
-  "version": "1.3.0",
+  "version": "1.4.0",
   "description": "doug: tailored, approval-gated harness install for Claude Code.",
   "type": "module",
   "license": "MIT",

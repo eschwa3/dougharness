@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, existsSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, existsSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -49,7 +49,7 @@ describe("doug board init", () => {
     expect(r.code).toBe(0);
     expect(r.stdout).toBe(`Wrote ${join(dir, ".doug/board.json")} with 5 columns and no cards.\n`);
     const board = readBoard(dir);
-    expect(board.version).toBe(1);
+    expect(board.version).toBe(2);
     expect(board.columns.map((c: { id: string }) => c.id)).toEqual(["decide", "backlog", "ready", "flow", "done"]);
     expect(board.components).toEqual([]);
     expect(board.cards).toEqual([]);
@@ -98,9 +98,9 @@ describe("doug board add", () => {
   it("splits --tag a,b into tags, trimmed and empties dropped", async () => {
     const dir = fresh();
     await run(["init", dir]);
-    const r = await run(["add", "one", "--title", "First", "--goal", "g", "--tag", "bug, docs,", dir]);
+    const r = await run(["add", "one", "--title", "First", "--goal", "g", "--tag", "bug, urgent,", dir]);
     expect(r.code, r.stderr).toBe(0);
-    expect(readBoard(dir).cards[0].tags).toEqual(["bug", "docs"]);
+    expect(readBoard(dir).cards[0].tags).toEqual(["bug", "urgent"]);
   });
   it("adds a card with --class and stores it; add without --class stores no class key (card board-card-class C2)", async () => {
     const dir = fresh();
@@ -1116,5 +1116,589 @@ describe("doug board Ready cap (card follow-ups-backlog-ranked)", () => {
     const r = await run(["move", "x", "ready", dir]);
     expect(r.code).toBe(0);
     expect(r.stderr).not.toContain("above the cap");
+  });
+});
+
+describe("doug board epic and milestone commands (card board-v2-cli)", () => {
+  // Version 2 record: card-x (no epic), card-a (e1/m1, Ready), card-c (e2/m2, Ready), card-d (e1/m1, Done), card-z (e3/m3, Done).
+  const EPICS = () => [
+    { id: "e1", title: "Epic one", goal: "first epic", status: "active" },
+    { id: "e2", title: "Epic two", goal: "second epic", status: "planned" },
+    { id: "e3", title: "Epic three", goal: "third epic", status: "active" },
+  ];
+  const MILESTONES = () => [
+    { id: "m1", title: "One four", goal: "ship 1.4", target: { version: "1.4", date: "2026-10-31" }, status: "planned" },
+    { id: "m2", title: "One five", goal: "ship 1.5", status: "planned" },
+    { id: "m3", title: "Old", goal: "shipped", status: "active" },
+  ];
+  const card = (id: string, column: string, extra: object = {}) => ({ id, column, title: id.toUpperCase(), size: "S", deps: [], goal: `goal of ${id}`, ...extra });
+  function v2dir(): string {
+    const dir = fresh();
+    mkdirSync(join(dir, ".doug"), { recursive: true });
+    writeFileSync(
+      join(dir, ".doug/board.json"),
+      JSON.stringify(
+        {
+          version: 2,
+          updated: "2026-01-01",
+          columns: COLUMNS,
+          components: [],
+          epics: EPICS(),
+          milestones: MILESTONES(),
+          cards: [
+            card("card-x", "ready"),
+            card("card-a", "ready", { epic: "e1", milestone: "m1" }),
+            card("card-c", "ready", { epic: "e2", milestone: "m2" }),
+            card("card-d", "done", { epic: "e1", milestone: "m1", source: "commit 2222222" }),
+            card("card-z", "done", { epic: "e3", milestone: "m3", source: "commit 3333333" }),
+          ],
+        },
+        null,
+        2,
+      ) + "\n",
+    );
+    return dir;
+  }
+  function v1dir(): string {
+    const dir = fresh();
+    writeBoard(dir, [card("card-x", "ready")]);
+    return dir;
+  }
+  const raw = (dir: string) => readFileSync(join(dir, ".doug/board.json"), "utf8");
+  const ids = (list: { id: string }[]) => list.map((x) => x.id);
+  const lineFor = (stdout: string, id: string) => stdout.split("\n").find((l) => l.includes(id)) ?? "";
+
+  describe("epic", () => {
+    it("epic add writes the epic and makes the record version 2", async () => {
+      const dir = v1dir();
+      const r = await run(["epic", "add", "e1", "--title", "Epic one", "--goal", "the goal", dir]);
+      expect(r.code).toBe(0);
+      const b = readBoard(dir);
+      expect(b.version).toBe(2);
+      expect(b.epics).toEqual([{ id: "e1", title: "Epic one", goal: "the goal", status: "planned" }]);
+    });
+    it("epic add --version and --date write the target", async () => {
+      const dir = v1dir();
+      expect((await run(["epic", "add", "e1", "--title", "T", "--goal", "G", "--version", "1.4", "--date", "2026-10-31", dir])).code).toBe(0);
+      expect(readBoard(dir).epics[0].target).toEqual({ version: "1.4", date: "2026-10-31" });
+    });
+    it("epic add without --title or --goal is a usage error; a duplicate id is refused", async () => {
+      const dir = v2dir();
+      const before = raw(dir);
+      expect((await run(["epic", "add", "e9", "--goal", "G", dir])).code).toBe(2);
+      expect((await run(["epic", "add", "e9", "--title", "T", dir])).code).toBe(2);
+      const dup = await run(["epic", "add", "e1", "--title", "T", "--goal", "G", dir]);
+      expect(dup.code).toBe(1);
+      expect(dup.stderr).toContain('duplicate epic "e1"');
+      expect(raw(dir)).toBe(before);
+    });
+    it("epic edit changes title and goal, and --status sets the status", async () => {
+      const dir = v2dir();
+      expect((await run(["epic", "edit", "e2", "--title", "New title", "--goal", "New goal", dir])).code).toBe(0);
+      expect(readBoard(dir).epics[1]).toMatchObject({ id: "e2", title: "New title", goal: "New goal", status: "planned" });
+      expect((await run(["epic", "edit", "e2", "--status", "active", dir])).code).toBe(0);
+      expect(readBoard(dir).epics[1].status).toBe("active");
+    });
+    it("epic edit sets the target and clears --version with an empty value", async () => {
+      const dir = v2dir();
+      expect((await run(["epic", "edit", "e1", "--version", "2.0", "--date", "2026-12-01", dir])).code).toBe(0);
+      expect(readBoard(dir).epics[0].target).toEqual({ version: "2.0", date: "2026-12-01" });
+      expect((await run(["epic", "edit", "e1", "--version", "", dir])).code).toBe(0);
+      const t = readBoard(dir).epics[0].target;
+      expect(t.version).toBeUndefined();
+      expect(t.date).toBe("2026-12-01");
+    });
+    it("epic edit with no field is a usage error; an unknown id and a bad status are refused, record unchanged", async () => {
+      const dir = v2dir();
+      const before = raw(dir);
+      expect((await run(["epic", "edit", "e1", dir])).code).toBe(2);
+      const ghost = await run(["epic", "edit", "ghost", "--title", "T", dir]);
+      expect(ghost.code).toBe(1);
+      expect(ghost.stderr).toContain('no epic "ghost" on the board');
+      const bad = await run(["epic", "edit", "e1", "--status", "late", dir]);
+      expect(bad.code).toBe(1);
+      expect(bad.stderr).toContain("status must be planned, active, or done");
+      expect(raw(dir)).toBe(before);
+    });
+    it("epic list prints one line per epic, and --json the array", async () => {
+      const dir = v2dir();
+      const r = await run(["epic", "list", dir]);
+      expect(r.code).toBe(0);
+      const l1 = lineFor(r.stdout, "e1");
+      expect(l1).toContain("active");
+      expect(l1).toContain("Epic one");
+      expect(lineFor(r.stdout, "e2")).toContain("planned");
+      expect(r.stdout.split("\n").filter((l) => l.trim()).length).toBe(3);
+      const j = await run(["epic", "list", dir, "--json"]);
+      expect(j.code).toBe(0);
+      expect(JSON.parse(j.stdout)).toEqual(EPICS());
+      const empty = await run(["epic", "list", v1dir(), "--json"]);
+      expect(JSON.parse(empty.stdout)).toEqual([]);
+    });
+    it("epic edit --status done is refused while a member card is not Done, and allowed when all are Done", async () => {
+      const dir = v2dir();
+      const before = raw(dir);
+      const r = await run(["epic", "edit", "e1", "--status", "done", dir]);
+      expect(r.code).toBe(1);
+      expect(r.stderr).toContain("card-a");
+      expect(r.stderr).toContain("--force");
+      expect(raw(dir)).toBe(before);
+      expect((await run(["epic", "edit", "e3", "--status", "done", dir])).code).toBe(0);
+      expect(readBoard(dir).epics[2].status).toBe("done");
+    });
+  });
+
+  describe("milestone", () => {
+    it("milestone add --version 1.4 --date 2026-11-01 writes the target", async () => {
+      const dir = v1dir();
+      const r = await run(["milestone", "add", "m1", "--title", "One four", "--goal", "ship it", "--version", "1.4", "--date", "2026-11-01", dir]);
+      expect(r.code).toBe(0);
+      const b = readBoard(dir);
+      expect(b.version).toBe(2);
+      expect(b.milestones).toEqual([{ id: "m1", title: "One four", goal: "ship it", target: { version: "1.4", date: "2026-11-01" }, status: "planned" }]);
+    });
+    it("milestone add with only --version writes just the version; a bad date and a missing --goal are refused", async () => {
+      const dir = v1dir();
+      expect((await run(["milestone", "add", "m1", "--title", "T", "--goal", "G", "--version", "1.4", dir])).code).toBe(0);
+      expect(readBoard(dir).milestones[0].target).toEqual({ version: "1.4" });
+      const before = raw(dir);
+      const bad = await run(["milestone", "add", "m2", "--title", "T", "--goal", "G", "--date", "tomorrow", dir]);
+      expect(bad.code).toBe(1);
+      expect(bad.stderr).toContain("YYYY-MM-DD");
+      expect((await run(["milestone", "add", "m3", "--title", "T", dir])).code).toBe(2);
+      expect(raw(dir)).toBe(before);
+    });
+    it("milestone edit --status active sets the status", async () => {
+      const dir = v2dir();
+      expect((await run(["milestone", "edit", "m2", "--status", "active", dir])).code).toBe(0);
+      expect(readBoard(dir).milestones[1]).toMatchObject({ id: "m2", status: "active", title: "One five" });
+    });
+    it("milestone edit changes title, goal and target; an unknown id is refused", async () => {
+      const dir = v2dir();
+      expect((await run(["milestone", "edit", "m1", "--title", "T2", "--goal", "G2", "--version", "1.5", dir])).code).toBe(0);
+      expect(readBoard(dir).milestones[0]).toMatchObject({ title: "T2", goal: "G2", target: { version: "1.5", date: "2026-10-31" } });
+      const ghost = await run(["milestone", "edit", "ghost", "--title", "T", dir]);
+      expect(ghost.code).toBe(1);
+      expect(ghost.stderr).toContain('no milestone "ghost" on the board');
+      expect((await run(["milestone", "edit", "m1", dir])).code).toBe(2);
+    });
+    it("milestone list prints one line per milestone, and --json the array", async () => {
+      const dir = v2dir();
+      const r = await run(["milestone", "list", dir]);
+      expect(r.code).toBe(0);
+      const l1 = lineFor(r.stdout, "m1");
+      expect(l1).toContain("planned");
+      expect(l1).toContain("One four");
+      expect(l1).toContain("1.4");
+      expect(lineFor(r.stdout, "m3")).toContain("active");
+      expect(r.stdout).not.toContain("Epic one");
+      expect(JSON.parse((await run(["milestone", "list", dir, "--json"])).stdout)).toEqual(MILESTONES());
+    });
+    it("milestone edit --status done is refused while a member card is not Done", async () => {
+      const dir = v2dir();
+      const before = raw(dir);
+      const r = await run(["milestone", "edit", "m1", "--status", "done", dir]);
+      expect(r.code).toBe(1);
+      expect(r.stderr).toContain('cannot edit milestone "m1"');
+      expect(r.stderr).toContain("card-a");
+      expect(r.stderr).not.toContain("card-d");
+      expect(r.stderr).toContain("--force");
+      expect(raw(dir)).toBe(before);
+    });
+    it("milestone edit --status done is allowed when every member card is Done", async () => {
+      const dir = v2dir();
+      expect((await run(["milestone", "edit", "m3", "--status", "done", dir])).code).toBe(0);
+      expect(readBoard(dir).milestones[2].status).toBe("done");
+    });
+    it("milestone edit --status done --force sets done with a warning", async () => {
+      const dir = v2dir();
+      const r = await run(["milestone", "edit", "m1", "--status", "done", "--force", dir]);
+      expect(r.code).toBe(0);
+      expect(r.stderr).toContain("warning:");
+      expect(r.stderr).toContain("card-a");
+      expect(readBoard(dir).milestones[0].status).toBe("done");
+    });
+    it("epic edit --status done --force sets done with a warning", async () => {
+      const dir = v2dir();
+      const r = await run(["epic", "edit", "e1", "--status", "done", "--force", dir]);
+      expect(r.code).toBe(0);
+      expect(r.stderr).toContain("warning:");
+      expect(readBoard(dir).epics[0].status).toBe("done");
+    });
+  });
+
+  describe("--epic and --milestone on add, edit, list and next", () => {
+    it("add --epic e1 --milestone m1 writes both fields; an unknown epic is refused", async () => {
+      const dir = v2dir();
+      const r = await run(["add", "card-new", "--title", "New", "--goal", "G", "--epic", "e1", "--milestone", "m1", dir]);
+      expect(r.code).toBe(0);
+      const added = readBoard(dir).cards.find((c: { id: string }) => c.id === "card-new");
+      expect(added.epic).toBe("e1");
+      expect(added.milestone).toBe("m1");
+      const before = raw(dir);
+      const bad = await run(["add", "card-bad", "--title", "T", "--goal", "G", "--epic", "ghost", dir]);
+      expect(bad.code).toBe(1);
+      expect(bad.stderr).toContain('unknown epic "ghost"');
+      expect(raw(dir)).toBe(before);
+    });
+    it("add with an empty --epic means no epic", async () => {
+      const dir = v2dir();
+      expect((await run(["add", "card-new", "--title", "New", "--goal", "G", "--epic", "", dir])).code).toBe(0);
+      const added = readBoard(dir).cards.find((c: { id: string }) => c.id === "card-new");
+      expect(Object.keys(added)).not.toContain("epic");
+    });
+    it("edit --epic e2 changes it, and --milestone m2 sets the milestone", async () => {
+      const dir = v2dir();
+      expect((await run(["edit", "card-a", "--epic", "e2", "--milestone", "m2", dir])).code).toBe(0);
+      const c = readBoard(dir).cards.find((x: { id: string }) => x.id === "card-a");
+      expect(c.epic).toBe("e2");
+      expect(c.milestone).toBe("m2");
+    });
+    it('edit --milestone "" removes the card\'s milestone key and --epic "" its epic key', async () => {
+      const dir = v2dir();
+      expect((await run(["edit", "card-a", "--milestone", "", dir])).code).toBe(0);
+      let c = readBoard(dir).cards.find((x: { id: string }) => x.id === "card-a");
+      expect(Object.keys(c)).not.toContain("milestone");
+      expect(c.epic).toBe("e1");
+      expect((await run(["edit", "card-a", "--epic", "", dir])).code).toBe(0);
+      c = readBoard(dir).cards.find((x: { id: string }) => x.id === "card-a");
+      expect(Object.keys(c)).not.toContain("epic");
+    });
+    it("list --milestone m1 shows only m1's cards (text and --json); list --epic ghost exits 1 with unknown epic \"ghost\"", async () => {
+      const dir = v2dir();
+      const text = await run(["list", dir, "--milestone", "m1"]);
+      expect(text.code).toBe(0);
+      expect(text.stdout).toContain("card-a");
+      expect(text.stdout).toContain("card-d");
+      expect(text.stdout).not.toMatch(/card-x|card-c|card-z/);
+      const json = await run(["list", dir, "--milestone", "m1", "--json"]);
+      expect(ids(JSON.parse(json.stdout)).sort()).toEqual(["card-a", "card-d"]);
+      const epic = await run(["list", dir, "--epic", "e2", "--json"]);
+      expect(ids(JSON.parse(epic.stdout))).toEqual(["card-c"]);
+      const both = await run(["list", dir, "--epic", "e1", "--milestone", "m1", "--column", "ready", "--json"]);
+      expect(ids(JSON.parse(both.stdout))).toEqual(["card-a"]);
+      const ghost = await run(["list", dir, "--epic", "ghost"]);
+      expect(ghost.code).toBe(1);
+      expect(ghost.stderr).toContain('unknown epic "ghost"');
+      const gm = await run(["list", dir, "--milestone", "ghost"]);
+      expect(gm.code).toBe(1);
+      expect(gm.stderr).toContain('unknown milestone "ghost"');
+    });
+    it("next --epic e2 picks the e2 card past a higher Ready card, and its stderr does not name the excluded cards", async () => {
+      const dir = v2dir();
+      const r = await run(["next", dir, "--epic", "e2"]);
+      expect(r.code).toBe(0);
+      expect(JSON.parse(r.stdout).id).toBe("card-c");
+      expect(r.stderr).not.toMatch(/card-x|card-a/);
+    });
+    it("next --milestone m1 picks only an m1 card; no match exits 1", async () => {
+      const dir = v2dir();
+      const r = await run(["next", dir, "--milestone", "m1"]);
+      expect(r.code).toBe(0);
+      expect(JSON.parse(r.stdout).id).toBe("card-a");
+      expect(r.stderr).not.toMatch(/card-x|card-c/);
+      const none = await run(["next", dir, "--epic", "e1", "--milestone", "m2"]);
+      expect(none.code).toBe(1);
+      expect(none.stderr).toContain("No Ready card");
+    });
+    it("next --batch 5 --epic e1 prints only e1's cards, and --milestone filters the batch too", async () => {
+      const dir = v2dir();
+      const r = await run(["next", dir, "--batch", "5", "--epic", "e1"]);
+      expect(r.code).toBe(0);
+      expect(ids(JSON.parse(r.stdout))).toEqual(["card-a"]);
+      expect(r.stderr).not.toMatch(/card-x|card-c/);
+      const m = await run(["next", dir, "--batch", "5", "--milestone", "m2"]);
+      expect(ids(JSON.parse(m.stdout))).toEqual(["card-c"]);
+    });
+    it("next with an unknown epic or milestone exits 1 naming it", async () => {
+      const dir = v2dir();
+      const e = await run(["next", dir, "--epic", "ghost"]);
+      expect(e.code).toBe(1);
+      expect(e.stderr).toContain('unknown epic "ghost"');
+      const m = await run(["next", dir, "--batch", "2", "--milestone", "ghost"]);
+      expect(m.code).toBe(1);
+      expect(m.stderr).toContain('unknown milestone "ghost"');
+    });
+  });
+
+  describe("unknown flags and usage", () => {
+    it("epic add e1 --title T --goal G --bogus x exits 2 naming --bogus, and writes nothing", async () => {
+      const dir = v1dir();
+      const before = raw(dir);
+      const r = await run(["epic", "add", "e1", "--title", "T", "--goal", "G", "--bogus", "x", dir]);
+      expect(r.code).toBe(2);
+      expect(r.stderr).toContain("unknown option --bogus for doug board epic");
+      expect(raw(dir)).toBe(before);
+    });
+    it("milestone edit m1 --bogus x exits 2 naming --bogus; milestone add refuses one too; epic list refuses a flag it does not read", async () => {
+      const dir = v2dir();
+      const before = raw(dir);
+      const edit = await run(["milestone", "edit", "m1", "--bogus", "x", dir]);
+      expect(edit.code).toBe(2);
+      expect(edit.stderr).toContain("--bogus");
+      const add = await run(["milestone", "add", "m9", "--title", "T", "--goal", "G", "--bogus", "x", dir]);
+      expect(add.code).toBe(2);
+      expect(add.stderr).toContain("unknown option --bogus for doug board milestone");
+      expect((await run(["epic", "list", dir, "--title", "x"])).code).toBe(2);
+      expect(raw(dir)).toBe(before);
+    });
+    it("add, edit, list and next still refuse an unknown flag", async () => {
+      const dir = v2dir();
+      for (const argv of [["add", "n", "--title", "T", "--goal", "G", "--bogus", "x", dir], ["edit", "card-x", "--bogus", "x", dir], ["list", dir, "--bogus", "x"], ["next", dir, "--bogus", "x"]]) {
+        expect((await run(argv)).code).toBe(2);
+      }
+    });
+    it("`doug board epic` and `milestone` with no or an unknown action exit 2 with that kind's usage", async () => {
+      for (const kind of ["epic", "milestone"]) {
+        for (const argv of [[kind], [kind, "frob"]]) {
+          const r = await run(argv);
+          expect(r.code).toBe(2);
+          for (const action of ["add", "edit", "list"]) expect(r.stderr).toContain(`doug board ${kind} ${action}`);
+        }
+      }
+    });
+    it("BOARD_USAGE has epic add|edit|list, milestone add|edit|list and --epic/--milestone on add, edit, list, next", async () => {
+      const { BOARD_USAGE } = await import("../src/board.js");
+      const lines = BOARD_USAGE.split("\n");
+      for (const kind of ["epic", "milestone"]) {
+        for (const action of ["add", "edit", "list"]) expect(lines.some((l) => l.trimStart().startsWith(`doug board ${kind} ${action}`)), `${kind} ${action}`).toBe(true);
+      }
+      for (const cmd of ["add", "edit", "list", "next"]) {
+        const line = lines.find((l) => l.trimStart().startsWith(`doug board ${cmd} `)) ?? "";
+        expect(line, cmd).toContain("--epic");
+        expect(line, cmd).toContain("--milestone");
+      }
+      const help = await run(["--help"]);
+      expect(help.stdout).toContain("doug board epic add");
+      expect(help.stdout).toContain("doug board milestone edit");
+    });
+  });
+});
+
+describe("doug board labels init (card board-label-groups-migrate)", () => {
+  function v1dir(): string {
+    const dir = fresh();
+    mkdirSync(join(dir, ".doug"), { recursive: true });
+    writeFileSync(
+      join(dir, ".doug/board.json"),
+      JSON.stringify({
+        version: 1,
+        updated: "2026-01-01",
+        columns: COLUMNS,
+        components: ["gates"],
+        tags: ["bug", "perf"],
+        cards: [
+          { id: "a", column: "ready", component: "gates", title: "A", size: "S", goal: "a", tags: ["bug"] },
+          { id: "b", column: "backlog", component: "gates", title: "B", size: "S", goal: "b", tags: ["perf"] },
+        ],
+      }, null, 2) + "\n",
+    );
+    return dir;
+  }
+  it("migrates a v1 board with tagged cards and the result loads", async () => {
+    const dir = v1dir();
+    const r = await run(["labels", "init", dir]);
+    expect(r.stderr).toBe("");
+    expect(r.code).toBe(0);
+    const rec = readBoard(dir);
+    expect(rec.version).toBe(2);
+    expect(rec.labelGroups.map((g: { id: string }) => g.id)).toEqual(["type", "priority"]);
+    expect(rec.labelGroups[0].labels.map((l: { name: string }) => l.name)).toEqual(["bug", "perf"]);
+    const list = await run(["list", dir]);
+    expect(list.code).toBe(0);
+  });
+  it("refuses a board that already has label groups and leaves the file unchanged", async () => {
+    const dir = fresh();
+    expect((await run(["init", dir])).code).toBe(0);
+    const before = readFileSync(join(dir, ".doug/board.json"), "utf8");
+    const r = await run(["labels", "init", dir]);
+    expect(r.code).toBe(1);
+    expect(r.stderr).toContain("already has label groups");
+    expect(readFileSync(join(dir, ".doug/board.json"), "utf8")).toBe(before);
+  });
+});
+
+describe("doug board rollup and labels --check (card doug-cli-rollup)", () => {
+  const LIVE = [
+    "# Live runs", "",
+    "## 2026-10-01, cs: S card", "", "| Measure | Value |", "|---|---|", "| Outcome | landed |", "| Cost | $2.50 |", "| Wall clock | 40 min |", "",
+    "## 2026-10-02, cm: M card", "", "| Measure | Value |", "|---|---|", "| Cost | $9.00 |", "| Wall clock | 30 min |", "",
+    "## 2026-10-03, cl: L card", "", "| Measure | Value |", "|---|---|", "| Outcome | landed |", "| Wall clock | 150 min |", "",
+  ].join("\n");
+  // twoMilestones puts m0 (with its own card c0, no epic) before m1, so a lookup that returns milestones[0] gives m0, not m1.
+  function rdir(opts: { live?: boolean; labels?: Array<[string, string]>; twoMilestones?: boolean } = {}): string {
+    const dir = fresh();
+    mkdirSync(join(dir, ".doug"), { recursive: true });
+    const board: Record<string, unknown> = {
+      version: 2,
+      updated: "2026-01-01",
+      columns: COLUMNS,
+      components: ["gates"],
+      epics: [{ id: "e1", title: "Epic one", goal: "first", status: "active" }],
+      milestones: [{ id: "m1", title: "One four", goal: "ship", target: { version: "1.4", date: "2026-10-31" }, status: "planned" }],
+      cards: [
+        { id: "cs", column: "done", component: "gates", title: "S", size: "S", source: "commit 1111111", goal: "s", epic: "e1", milestone: "m1" },
+        { id: "cm", column: "flow", component: "gates", title: "M", size: "M", goal: "m", epic: "e1", milestone: "m1" },
+        { id: "cl", column: "done", component: "gates", title: "L", size: "L", source: "commit 2222222", goal: "l", epic: "e1" },
+      ],
+    };
+    if (opts.twoMilestones) {
+      board.milestones = [{ id: "m0", title: "One three", goal: "earlier", target: { version: "1.3" }, status: "done" }, ...(board.milestones as object[])];
+      board.cards = [{ id: "c0", column: "done", component: "gates", title: "Zero", size: "S", source: "commit 0000000", goal: "z", milestone: "m0" }, ...(board.cards as object[])];
+    }
+    if (opts.labels) {
+      board.tags = opts.labels.map(([n]) => n);
+      board.labelGroups = [{ id: "type", title: "Type", exclusive: false, labels: opts.labels.map(([name, color]) => ({ name, color })) }];
+    }
+    writeFileSync(join(dir, ".doug/board.json"), JSON.stringify(board, null, 2) + "\n");
+    if (opts.live) {
+      mkdirSync(join(dir, "docs"), { recursive: true });
+      writeFileSync(join(dir, "docs/live-runs.md"), LIVE);
+    }
+    return dir;
+  }
+
+  describe("rollup", () => {
+    it("defaults --from to docs/live-runs.md when present, else null measured", async () => {
+      const withFile = await run(["rollup", rdir({ live: true })]);
+      expect(withFile.code).toBe(0);
+      expect(JSON.parse(withFile.stdout).epics[0].measured.usd).toBe(2.5);
+      const without = await run(["rollup", rdir()]);
+      expect(without.code).toBe(0);
+      expect(JSON.parse(without.stdout).epics[0].measured.usd).toBeNull();
+    });
+    it("--from reads a file outside docs/; an unreadable --from exits 1 naming the file", async () => {
+      const dir = rdir();
+      const f = join(dir, "elsewhere.md");
+      writeFileSync(f, LIVE);
+      const ok = await run(["rollup", dir, "--from", f]);
+      expect(ok.code).toBe(0);
+      expect(JSON.parse(ok.stdout).epics[0].measured.usd).toBe(2.5);
+      const missing = join(dir, "nope.md");
+      const bad = await run(["rollup", dir, "--from", missing]);
+      expect(bad.code).toBe(1);
+      expect(bad.stderr).toContain("nope.md");
+      expect(bad.stdout).toBe("");
+    });
+    it("--milestone m1 prints one entry with id m1, no milestones key, and cards [cs, cm]; --epic e1 likewise with all three", async () => {
+      const dir = rdir({ live: true, twoMilestones: true });
+      const m = JSON.parse((await run(["rollup", dir, "--milestone", "m1"])).stdout);
+      expect(m).toMatchObject({ id: "m1", total: 2 });
+      expect(m.milestones).toBeUndefined();
+      expect(m.cards).toEqual(["cs", "cm"]);
+      const e = JSON.parse((await run(["rollup", dir, "--epic", "e1"])).stdout);
+      expect(e).toMatchObject({ id: "e1", total: 3 });
+      expect(e.epics).toBeUndefined();
+      expect(e.cards).toEqual(["cs", "cm", "cl"]);
+    });
+    it("with no filter prints {epics, milestones}, each entry carrying cards", async () => {
+      const out = JSON.parse((await run(["rollup", rdir({ live: true })])).stdout);
+      expect(Object.keys(out).sort()).toEqual(["epics", "milestones"]);
+      expect(out.epics[0].cards).toEqual(["cs", "cm", "cl"]);
+      expect(out.milestones[0].cards).toEqual(["cs", "cm"]);
+    });
+    it("--epic with --milestone exits 2 with usage", async () => {
+      const r = await run(["rollup", rdir(), "--epic", "e1", "--milestone", "m1"]);
+      expect(r.code).toBe(2);
+      expect(r.stdout).toBe("");
+      expect(r.stderr).toMatch(/usage/i);
+    });
+    it("an unknown epic or milestone id exits 1 naming it", async () => {
+      const dir = rdir();
+      const e = await run(["rollup", dir, "--epic", "zz"]);
+      expect(e.code).toBe(1);
+      expect(e.stderr).toContain('unknown epic "zz"');
+      const m = await run(["rollup", dir, "--milestone", "zz"]);
+      expect(m.code).toBe(1);
+      expect(m.stderr).toContain('unknown milestone "zz"');
+    });
+    it("refuses an unknown flag with exit 2", async () => {
+      const r = await run(["rollup", rdir(), "--bogus", "x"]);
+      expect(r.code).toBe(2);
+      expect(r.stderr).toContain("unknown option --bogus for doug board rollup");
+    });
+    it("stdout is byte-identical to board.mjs rollup on the same board and live-runs", async () => {
+      const dir = rdir({ live: true });
+      for (const extra of [[], ["--milestone", "m1"], ["--epic", "e1"]]) {
+        const mine = await run(["rollup", dir, ...extra]);
+        const theirs = spawnSync(process.execPath, [pluginCli, "rollup", dir, ...extra], { encoding: "utf8", env: { ...process.env, CLAUDE_PROJECT_DIR: "" } });
+        expect(theirs.status).toBe(0);
+        expect(mine.stdout).toBe(theirs.stdout);
+      }
+    });
+  });
+
+  describe("labels --check", () => {
+    it("prints a line naming the label, its colour and the surface for a colour under 3:1, and exits 0", async () => {
+      const r = await run(["labels", "--check", rdir({ labels: [["pale", "#ffff00"]] })]);
+      expect(r.code).toBe(0);
+      const line = r.stdout.split("\n").find((l) => l.includes("pale")) ?? "";
+      expect(line).toContain("#ffff00");
+      expect(line).toContain("#ffffff");
+    });
+    it("prints one newline-terminated line per failing label, in board order", async () => {
+      const r = await run(["labels", "--check", rdir({ labels: [["pale", "#ffff00"], ["mist", "#eeeeee"]] })]);
+      expect(r.code).toBe(0);
+      const lines = r.stdout.split("\n");
+      expect(lines).toHaveLength(3);
+      expect(lines[2]).toBe("");
+      expect(lines[0]).toMatch(/^pale #ffff00 \d+\.\d\d:1 against #ffffff$/);
+      expect(lines[1]).toMatch(/^mist #eeeeee \d+\.\d\d:1 against #ffffff$/);
+    });
+    it("prints nothing for the default palette", async () => {
+      const dir = fresh();
+      expect((await run(["init", dir])).code).toBe(0);
+      const r = await run(["labels", "--check", dir]);
+      expect(r.code).toBe(0);
+      expect(r.stdout.trim()).toBe("");
+    });
+    it("parses --check as a flag so the directory still resolves (cwd is elsewhere)", async () => {
+      const dir = rdir({ labels: [["pale", "#ffff00"]] });
+      const elsewhere = fresh();
+      const before = process.cwd();
+      process.chdir(elsewhere);
+      try {
+        expect(realpathSync(process.cwd())).toBe(realpathSync(elsewhere));
+        expect(existsSync(join(process.cwd(), ".doug"))).toBe(false);
+        const r = await run(["labels", "--check", dir]);
+        expect(r.stderr).toBe("");
+        expect(r.code).toBe(0);
+        expect(r.stdout).toContain("pale");
+      } finally {
+        process.chdir(before);
+      }
+    });
+    it("labels with neither init nor --check exits 2 and writes nothing", async () => {
+      const dir = rdir({ labels: [["pale", "#ffff00"]] });
+      const before = readFileSync(join(dir, ".doug/board.json"), "utf8");
+      const r = await run(["labels", dir]);
+      expect(r.code).toBe(2);
+      expect(r.stdout).toBe("");
+      expect(readFileSync(join(dir, ".doug/board.json"), "utf8")).toBe(before);
+    });
+    it("labels init still works", async () => {
+      const dir = rdir();
+      expect(readBoard(dir).labelGroups).toBeUndefined();
+      const r = await run(["labels", "init", dir]);
+      expect(r.stderr).toBe("");
+      expect(r.code).toBe(0);
+      expect(r.stdout).toContain("Added label groups type and priority");
+      expect(readBoard(dir).labelGroups.map((g: { id: string }) => g.id)).toEqual(["type", "priority"]);
+    });
+  });
+
+  it("BOARD_USAGE has a rollup line with --epic, --milestone, --from and a labels --check [dir] line", async () => {
+    const { BOARD_USAGE } = await import("../src/board.js");
+    const lines = BOARD_USAGE.split("\n");
+    const roll = lines.find((l) => l.trim().startsWith("doug board rollup")) ?? "";
+    for (const t of ["--epic", "--milestone", "--from"]) expect(roll, t).toContain(t);
+    expect(lines.some((l) => l.includes("doug board labels --check [dir]"))).toBe(true);
+  });
+
+  it("ADR 0016 has exactly one Status line and it is accepted", () => {
+    const adr = join(here, "..", "..", "..", "docs", "decisions", "0016-board-epics-milestones-and-label-groups.md");
+    if (!existsSync(adr)) return;
+    const lines = readFileSync(adr, "utf8").split("\n").filter((l) => /^Date: .*Status:/.test(l));
+    expect(lines).toEqual(["Date: 2026-10-13. Status: accepted."]);
   });
 });

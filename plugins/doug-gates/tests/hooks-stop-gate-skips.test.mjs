@@ -491,6 +491,67 @@ describe("card stop-gate-runs-only-on-code-turns", () => {
     expect(runs(dir)).toBe(1);
   });
 
+  // card stop-gate-read-only-turn-commits: a turn that only commits preCommit.noTestPaths files is still read-only.
+  const stateRecordsOf = (dir) => {
+    const base = join(dir, ".doug/.state/turn-start");
+    return readdirSync(base).map((f) => join(base, f));
+  };
+
+  it("H3 a turn that commits only .doug/board.json skips with reason read-only-turn", () => {
+    const dir = makeDirty(cfgWith([".doug/board.json"]));
+    turnStart(dir);
+    writeFileSync(join(dir, ".doug/board.json"), '{"changed":1}');
+    git(dir, "add", ".doug/board.json");
+    git(dir, "commit", "-q", "-m", "board");
+    const r = stop(dir);
+    expect(runs(dir), "a board-only commit is not code").toBe(0);
+    expect(r.json && r.json.decision, JSON.stringify(r.json)).not.toBe("block");
+    expect(r.json && r.json.systemMessage, JSON.stringify(r.json)).toContain(READ_ONLY_LINE);
+    const state = readState(dir);
+    expect(state.lastGate && state.lastGate.skipped, JSON.stringify(state)).toBe("read-only-turn");
+  });
+
+  it("H4 a turn that commits a code path (src/a.ts, clean at turn start) runs the gate", () => {
+    const dir = makeDirty(cfgWith([".doug/board.json"]));
+    turnStart(dir);
+    writeFileSync(join(dir, "src/a.ts"), "changed a");
+    writeFileSync(join(dir, ".doug/board.json"), '{"changed":1}');
+    git(dir, "add", "src/a.ts", ".doug/board.json");
+    git(dir, "commit", "-q", "-m", "code and board");
+    const r = stop(dir);
+    expect(runs(dir), "a committed code path must verify").toBe(1);
+    expect(r.json && r.json.decision).toBe("block");
+  });
+
+  it("H5 a turn-start head that is not an ancestor of HEAD (amended commit) runs the gate", () => {
+    const dir = makeDirty(cfgWith([".doug/board.json"]));
+    turnStart(dir);
+    writeFileSync(join(dir, ".doug/board.json"), '{"changed":1}');
+    git(dir, "add", ".doug/board.json");
+    git(dir, "commit", "-q", "--amend", "--no-edit");
+    const r = stop(dir);
+    expect(runs(dir), "rewritten history must verify").toBe(1);
+    expect(r.json && r.json.decision).toBe("block");
+  });
+
+  it("H6 a turn-start record whose head git does not know runs the gate", () => {
+    const dir = makeDirty(cfgWith([".doug/board.json"]));
+    turnStart(dir);
+    const files = stateRecordsOf(dir);
+    expect(files.length, "fixture: a record must exist").toBeGreaterThan(0);
+    for (const f of files) {
+      const rec = JSON.parse(readFileSync(f, "utf8"));
+      rec.head = "0123456789abcdef0123456789abcdef01234567";
+      writeFileSync(f, JSON.stringify(rec));
+    }
+    writeFileSync(join(dir, ".doug/board.json"), '{"changed":1}');
+    git(dir, "add", ".doug/board.json");
+    git(dir, "commit", "-q", "-m", "board");
+    const r = stop(dir);
+    expect(runs(dir), "an unknown record head must verify").toBe(1);
+    expect(r.json && r.json.decision).toBe("block");
+  });
+
   // Fix pass: the read-only skip must not bypass the tree checks (plan scope, proposal paths) for a file the turn
   // changed by Bash that sits on preCommit.noTestPaths.
   const sleepMs = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
@@ -1012,5 +1073,28 @@ describe("card gate-docs-skip-unless-named (Stop gate)", () => {
       write(dir, ADR, "v2");
       expectFull(dir, stop(dir));
     }
+  });
+
+  // card docs-gate-comment-mentions: in a code file outside tests/ a doc counts as named only by its full repo-relative path.
+  const COMMENT = `// a note about 0005-two-tracks.md\n`;
+
+  it("DS28 (comment): a basename-only mention in a code file outside tests/ and no test naming the doc -> skip", () => {
+    const dir = makeGreen({ tests: { [OTHER]: "it('x');\n" }, extra: { "plugins/doug-flow/lib/board.mjs": COMMENT } });
+    write(dir, ADR, "v2");
+    expectSkipped(dir, stop(dir));
+  });
+
+  it("DS29 (comment): a basename-only mention in source plus a test naming the doc by its path -> a targeted run of that test only", () => {
+    const dir = makeGreen({ extra: { "plugins/doug-flow/lib/board.mjs": COMMENT } });
+    write(dir, ADR, "v2");
+    stop(dir);
+    expect(argvs(dir)).toEqual([[NAMER]]);
+    expect(typechecks(dir)).toBe(0);
+  });
+
+  it("DS30 (helper): a non-test helper under tests/ naming the doc only by basename segments -> the full gate (doubt fails closed)", () => {
+    const dir = makeGreen({ tests: { [OTHER]: "it('x');\n" }, extra: { "plugins/doug-flow/tests/helpers.mjs": SEGMENTS } });
+    write(dir, ADR, "v2");
+    expectFull(dir, stop(dir));
   });
 });

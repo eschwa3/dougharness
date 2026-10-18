@@ -9,24 +9,30 @@
 //   autopilot.mjs stop <id> --reason "<why>"
 //   autopilot.mjs filed <id> --kind <follow-up|user> [--from <card>] --position "<text>"
 //   autopilot.mjs caps [--usd <n>] [--wall <min>] [--context <pct>]
-//   autopilot.mjs pick [--max <n>]            JSON { launch, needsPlan, held, alone }; a held line per held card on stderr
-//   autopilot.mjs queen-args <id> --kind <flow|hand> [--with <id,id,...>]   writes .doug/.state/reports/<id>/queen-args.json and the per-card queen.js beside it, prints both paths (args, then queen.js)
+//   autopilot.mjs pick [--max <n>] [--milestone <id>]            JSON { launch, needsPlan, held, alone }; a held line per held card on stderr
+//   autopilot.mjs queen-args <id> --kind <flow|hand> [--with <id,id,...>] [--research on|off]   writes .doug/.state/reports/<id>/queen-args.json and the per-card queen.js beside it, prints both paths (args, then queen.js)
 //   autopilot.mjs agent-types --kind <flow|hand>   prints the agent types that queen spawns, one per line
 //   autopilot.mjs launched <id> --run <wf_id> --kind <flow|hand> --worktree <abs> --args-file <path>
-//   autopilot.mjs report --run <wf_id> --file <result.json>   saves the queen's report, prints land|resume|ask
-//   autopilot.mjs resumed <id> --run <wf_id>
+//   autopilot.mjs report --run <wf_id> --file <result.json>   saves the queen's report (a hand card's inline researchNote is written to .doug/.state/research/<id>.md so record promotes it), prints land|resume|ask
+//   autopilot.mjs answer <id> --answer "<text>"   records the user's answer to any asking stop in queen-args.json options.answers
+//   autopilot.mjs resumed <id> --run <wf_id>   counts every resume, plain or with the answer, against the single plain resume
+//   autopilot.mjs rerun-alone <id>   records a rerun-alone answer for a gate-timeout stop; refuses while another queen is in flight or after the card's one resume
+//   autopilot.mjs leave <id> --reason "<text>"   records the user's choice to leave a card In flow
 //   autopilot.mjs lock-wait <id> --ms <n>
+//   autopilot.mjs clear   drops an ended or inactive run; a running run is kept
 //   autopilot.mjs end
 // --dir <d> names the project (default cwd). Exit 0 done; 1 no run or unknown card; 2 bad usage.
 import { execFileSync } from "node:child_process";
-import { copyFileSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadModels } from "../lib/models.mjs";
-import { AUTOPILOT_FILE, STEPS, readAutopilot } from "../lib/autopilot-view.mjs";
+import { AUTOPILOT_FILE, STEPS, clearable, readAutopilot } from "../lib/autopilot-view.mjs";
 import { contextThreshold } from "../lib/context.mjs";
 import { classifyNotification, pickCards, queenLabel, renameQueenMeta, workersMax } from "../lib/coordinator.mjs";
 import { nextReadyCards } from "../lib/board.mjs";
+import { SEATS } from "../lib/card-loop.mjs";
 import { planFor, reportPathFor } from "../lib/plan.mjs";
 
 const argv = process.argv.slice(2);
@@ -82,10 +88,43 @@ function cardOf(s, cardId) {
   if (!c) fail(`unknown card ${cardId}`);
   return c;
 }
+const IN_FLIGHT = ["running", "done", "landing"];
+const RERUN_ALONE = "Rerun alone: no other queen is in flight now.";
+const othersInFlight = (s, id) => s.cards.filter((x) => x.id !== id && IN_FLIGHT.includes(x.state));
+// The saved stop report and queen-args of a card, for the commands that answer an asking stop.
+function savedStop(id, c) {
+  const reportDir = join(dir, ".doug/.state/reports", id);
+  let rep;
+  try {
+    rep = JSON.parse(readFileSync(join(reportDir, "card-report.json"), "utf8"));
+  } catch (e) {
+    fail(`cannot read the saved report for ${id}: ${e.code || e.message}`);
+  }
+  if (!rep || rep.outcome !== "stopped" || rep.reason === "agent-null" || !SEATS.includes(rep.stoppedAt)) fail(`${id} did not stop on an answerable ask stop`);
+  const argsPath = join(reportDir, "queen-args.json");
+  let qa;
+  try {
+    qa = JSON.parse(readFileSync(argsPath, "utf8"));
+  } catch (e) {
+    fail(`cannot read ${argsPath}: ${e.code || e.message}`);
+  }
+  const stopped = (Array.isArray(rep.history) ? rep.history : []).filter((h) => h && h.result === "stopped").pop();
+  const entry = { seat: rep.stoppedAt, question: rep.detail, answer: "" };
+  if (stopped && Number.isInteger(stopped.round) && stopped.round > 0) entry.round = stopped.round;
+  entry.run = c.runId;
+  return { rep, argsPath, qa, entry };
+}
 const clearStep = (c) => {
   delete c.step;
   delete c.stepStartedAt;
+  delete c.seats;
 };
+// Where the queen run's journal lives: the main session's run dir under the user's Claude dir; "" without a session id.
+function journalPath(run) {
+  const sid = process.env.CLAUDE_CODE_SESSION_ID;
+  if (!sid) return "";
+  return join(homedir(), ".claude", "projects", dir.replace(/[^A-Za-z0-9]/g, "-"), sid, "subagents", "workflows", run, "journal.jsonl");
+}
 
 function boardCard(cardId) {
   try {
@@ -169,6 +208,7 @@ switch (cmd) {
     const c = cardOf(s, id);
     c.step = arg2;
     c.stepStartedAt = new Date().toISOString();
+    c.seats = [...(Array.isArray(c.seats) ? c.seats : []), { step: arg2, startedAt: c.stepStartedAt }];
     save(s);
     say(`${id} ${arg2}`);
     break;
@@ -256,9 +296,14 @@ switch (cmd) {
       const b = boardCard(c.id);
       return b ? shape(b) : { id: c.id, goal: "", track: c.kind === "flow" ? "flow" : "hand" };
     });
-    const ready = nextReadyCards(board, { track: "any", batch: Math.max(1, board.cards.length) })
-      .cards.filter((c) => !flyingIds.has(c.id))
-      .map(shape);
+    if (opts.milestone === "") usage("--milestone needs an id");
+    let picked;
+    try {
+      picked = nextReadyCards(board, { track: "any", batch: Math.max(1, board.cards.length), milestone: opts.milestone });
+    } catch (e) {
+      fail(e instanceof Error ? e.message : String(e));
+    }
+    const ready = picked.cards.filter((c) => !flyingIds.has(c.id)).map(shape);
     const plans = {};
     for (const c of [...ready, ...inFlight]) {
       if (c.track !== "flow") continue;
@@ -280,6 +325,10 @@ switch (cmd) {
     if (!id) usage("queen-args needs a card id");
     const kind = need("kind");
     if (kind !== "flow" && kind !== "hand") usage("--kind must be flow or hand");
+    if (opts.research !== undefined) {
+      if (kind === "flow") usage("--research is for a hand card; research for a flow card runs before its plan (doug-next section 1)");
+      if (opts.research !== "on" && opts.research !== "off") usage("--research must be on or off");
+    }
     let args;
     if (kind === "flow") {
       try {
@@ -296,15 +345,21 @@ switch (cmd) {
       } catch {
         // absent or unreadable: no install command
       }
+      let base = "main";
+      try {
+        base = execFileSync("git", ["-C", dir, "symbolic-ref", "--short", "-q", "HEAD"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim() || "main";
+      } catch {
+        // not a git repo or a detached HEAD: main
+      }
       args = {
         card: { id: b.id, title: b.title ?? null, size: b.size ?? null, class: b.class ?? null, goal: b.goal ?? "" },
         options: {
           testerAgent: true,
-          research: false,
+          research: opts.research === "on",
           install: (config.commands && config.commands.install) || null,
           gateCommand: "node .doug/hooks/scripts/verify.mjs",
           branch: `card/${id}`,
-          base: "main",
+          base,
         },
         models: loadModels(dir),
         repoRoot: dir,
@@ -370,6 +425,9 @@ switch (cmd) {
     c.kind = kind;
     c.worktree = worktree;
     clearStep(c);
+    delete c.journals;
+    const journal = journalPath(run);
+    if (journal) c.journals = [journal];
     save(s);
     say(`${id} launched as ${run}`);
     break;
@@ -393,6 +451,11 @@ switch (cmd) {
       // unreadable: classify says resume
     }
     const kind = c.kind === "flow" ? "flow" : "hand";
+    // The queen's task-output file wraps the result: {summary, agentCount, logs, result}.
+    if (parsed !== null && typeof parsed === "object" && !Array.isArray(parsed) && parsed.result !== null && typeof parsed.result === "object") {
+      const bare = kind === "flow" ? !("ok" in parsed) && !("paused" in parsed) : !("card" in parsed) && !("outcome" in parsed);
+      if (bare) parsed = parsed.result;
+    }
     if (parsed !== null) {
       const dest = kind === "flow" ? join(dir, reportPathFor(c.id)) : join(dir, ".doug/.state/reports", c.id, "card-report.json");
       try {
@@ -401,9 +464,92 @@ switch (cmd) {
       } catch (e) {
         process.stderr.write(`autopilot: warning: cannot write ${dest}: ${e.code || e.message}\n`);
       }
+      if (kind === "hand") {
+        const rep = parsed.report ?? parsed;
+        const note = rep && typeof rep.researchNote === "string" ? rep.researchNote : "";
+        if (note.trim() !== "") {
+          const noteDest = join(dir, ".doug/.state/research", `${c.id}.md`);
+          try {
+            const oneLine = note.trim();
+            let src = null;
+            if (!oneLine.includes("\n") && oneLine.startsWith("/") && resolve(oneLine) !== resolve(noteDest) && existsSync(oneLine)) src = oneLine;
+            if (resolve(oneLine) !== resolve(noteDest)) {
+              mkdirSync(dirname(noteDest), { recursive: true });
+              if (src) copyFileSync(src, noteDest);
+              else writeFileSync(noteDest, note);
+            }
+          } catch (e) {
+            process.stderr.write(`autopilot: warning: cannot write ${noteDest}: ${e.code || e.message}\n`);
+          }
+        }
+      }
     }
     const v = classifyNotification(kind, { status: "completed", result: parsed === null ? text : parsed });
+    if (v.action === "ask") {
+      let answered = false;
+      try {
+        const saved = JSON.parse(readFileSync(join(dir, ".doug/.state/reports", c.id, "queen-args.json"), "utf8"));
+        const rep = parsed?.report ?? parsed;
+        const stop = (Array.isArray(rep?.history) ? rep.history : []).filter((h) => h && h.result === "stopped").pop();
+        answered =
+          Array.isArray(saved?.options?.answers) &&
+          saved.options.answers.some(
+            (a) => a && a.run === run && a.seat === rep?.stoppedAt && stop && a.round === stop.round && a.question === rep?.detail,
+          );
+      } catch {
+        // no readable args: not answered
+      }
+      if (answered) {
+        say(`${c.id} resume with the answer`);
+        break;
+      }
+    }
+    if (v.action === "ask" && v.reason === "gate-timeout" && !c.resumes && othersInFlight(s, c.id).length > 0) {
+      c.state = "stopped";
+      c.reason = "gate-timeout: rerun alone pending";
+      save(s);
+      say(`${c.id} rerun alone gate-timeout`);
+      break;
+    }
     say(`${c.id} ${v.action}${v.reason ? ` ${v.reason}` : ""}`);
+    break;
+  }
+  case "answer": {
+    if (!id) usage("answer needs a card id");
+    const answer = need("answer");
+    if (answer.trim() === "") usage("--answer needs a non-blank answer");
+    const s = load();
+    const c = cardOf(s, id);
+    const { rep, argsPath, qa, entry } = savedStop(id, c);
+    entry.answer = answer;
+    qa.options = { ...(qa.options || {}), answers: [...(Array.isArray(qa.options?.answers) ? qa.options.answers : []), entry] };
+    writeFileSync(argsPath, JSON.stringify(qa, null, 2) + "\n");
+    say(`${id} answer recorded for ${entry.seat}`);
+    break;
+  }
+  case "rerun-alone": {
+    if (!id) usage("rerun-alone needs a card id");
+    const s = load();
+    const c = cardOf(s, id);
+    const others = othersInFlight(s, id);
+    if (others.length > 0) fail(`${others.map((x) => x.id).join(", ")} still in flight; rerun ${id} alone after it lands`);
+    if (c.resumes >= 1) fail(`${id} was already resumed once`);
+    const { rep, argsPath, qa, entry } = savedStop(id, c);
+    entry.answer = RERUN_ALONE;
+    qa.options = { ...(qa.options || {}), answers: [...(Array.isArray(qa.options?.answers) ? qa.options.answers : []), entry] };
+    writeFileSync(argsPath, JSON.stringify(qa, null, 2) + "\n");
+    say(`${id} rerun alone recorded for ${rep.stoppedAt}`);
+    break;
+  }
+  case "leave": {
+    if (!id) usage("leave needs a card id");
+    const reason = need("reason");
+    if (reason.trim() === "") usage("--reason needs a non-blank reason");
+    const s = load();
+    const c = cardOf(s, id);
+    c.left = reason;
+    save(s);
+    say(`${id} left In flow: ${reason}`);
     break;
   }
   case "resumed": {
@@ -413,6 +559,9 @@ switch (cmd) {
     const c = cardOf(s, id);
     c.resumes = (c.resumes || 0) + 1;
     c.runId = run;
+    c.state = "running";
+    const journal = journalPath(run);
+    if (journal) c.journals = [...(Array.isArray(c.journals) ? c.journals : []), journal];
     save(s);
     say(`${id} resumed as ${run}`);
     break;
@@ -427,8 +576,40 @@ switch (cmd) {
     say(`${id} lock wait ${c.lockWaitMs}ms`);
     break;
   }
+  case "clear": {
+    if (!existsSync(file)) say("nothing to clear");
+    else {
+      const s = readAutopilot(dir);
+      if (!s) say("kept the unreadable file");
+      else if (clearable(s, new Date())) {
+        rmSync(file);
+        say("cleared");
+      } else say("kept the running run");
+    }
+    break;
+  }
   case "end": {
     const s = load();
+    if (s.cards.length > 0) {
+      let board;
+      try {
+        board = JSON.parse(readFileSync(join(dir, ".doug/board.json"), "utf8"));
+      } catch (e) {
+        fail(`cannot read the board to check cards In flow: ${e.code || e.message}`);
+      }
+      const stuck = s.cards.filter((c) => {
+        if ((board.cards || []).find((b) => b.id === c.id)?.column !== "flow") return false;
+        if (c.resumes >= 1 || (typeof c.left === "string" && c.left.trim() !== "")) return false;
+        let answers = [];
+        try {
+          answers = JSON.parse(readFileSync(join(dir, ".doug/.state/reports", c.id, "queen-args.json"), "utf8")).options.answers;
+        } catch {
+          // no readable args: not answered
+        }
+        return !(Array.isArray(answers) && answers.some((a) => a && a.run === c.runId && a.answer !== RERUN_ALONE));
+      });
+      if (stuck.length > 0) fail(`cannot end: ${stuck.map((c) => c.id).join(", ")} still In flow, neither resumed nor answered`);
+    }
     s.status = "ended";
     s.endedAt = new Date().toISOString();
     save(s);
@@ -436,5 +617,5 @@ switch (cmd) {
     break;
   }
   default:
-    usage(`unknown subcommand${cmd ? ` ${cmd}` : ""}; use start, add, card, step, land, stop, filed, caps, pick, launched, report, resumed, lock-wait, or end`);
+    usage(`unknown subcommand${cmd ? ` ${cmd}` : ""}; use start, add, card, step, land, stop, filed, caps, pick, launched, report, answer, rerun-alone, leave, resumed, lock-wait, clear, or end`);
 }

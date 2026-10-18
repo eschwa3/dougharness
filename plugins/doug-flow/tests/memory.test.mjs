@@ -29,6 +29,8 @@ import {
   embedLessons,
   checkCitation,
   recallLessons,
+  windowHidden,
+  windowNote,
   clearRecallCache,
   topLessons,
   renderLessons,
@@ -3591,5 +3593,80 @@ describe("recallLessons: cache pins (card recall-hybrid-scale)", () => {
       const result = await recallLessons(m, "nanword", { provider: qprov(), now: NOW, staleDays: NaN });
       expect(result.lessons).toEqual([]);
     });
+  });
+});
+
+describe("windowHidden / windowNote (card recall-window-report)", () => {
+  const NOW = new Date("2026-09-30T00:00:00.000Z");
+  const DAY = 86400000;
+  const daysAgo = (n) => new Date(NOW.getTime() - n * DAY).toISOString();
+
+  beforeEach(() => {
+    m = openMemory(dir);
+  });
+
+  const build = () => {
+    const mk = (id, created, confirmed) => {
+      addLesson(m, { id, text: `freshword ${id}`, kind: "pattern", source: { agent: "worker" }, created });
+      if (confirmed !== undefined) m.prepare("UPDATE lessons SET confirmed = ? WHERE id = ?").run(confirmed, id);
+    };
+    mk("f-garbled", "not-a-date");
+    mk("f-js-old", "Aug 1 2026");
+    mk("f-js-new", "Sep 25 2026");
+    mk("f-slash-old", "2026/08/01");
+    mk("f-exact", daysAgo(30));
+    mk("f-over", new Date(NOW.getTime() - 30 * DAY - 60000).toISOString());
+    mk("f-conf-fresh", daysAgo(200), daysAgo(1));
+    mk("f-conf-old", daysAgo(1), daysAgo(200));
+    mk("f-conf-garbled", daysAgo(200), "garbage");
+    mk("f-conf-empty", daysAgo(200), "");
+    mk("f-created-empty", "");
+    mk("f-future", daysAgo(-5));
+  };
+
+  it("windowHidden over the freshness fixture returns count 5, total 12", () => {
+    build();
+    const h = windowHidden(m, { staleDays: 30, now: NOW });
+    expect(h.count).toBe(5);
+    expect(h.total).toBe(12);
+  });
+
+  it("windowHidden over the freshness fixture returns oldestDays 200", () => {
+    build();
+    expect(windowHidden(m, { staleDays: 30, now: NOW }).oldestDays).toBe(200);
+  });
+
+  it("recallLessons carries hidden, and kept plus hidden equals total", async () => {
+    build();
+    const r = await recallLessons(m, "freshword", { now: NOW, staleDays: 30, k: 50 });
+    expect(r.hidden).toEqual({ count: 5, total: 12, oldestDays: 200 });
+    expect(r.lessons.length + r.hidden.count).toBe(r.hidden.total);
+  });
+
+  it("windowHidden ignores superseded and stale rows", () => {
+    addLesson(m, { id: "live", text: "live one", kind: "pattern", source: { agent: "worker" }, created: daysAgo(1) });
+    addLesson(m, { id: "old-live", text: "old live", kind: "pattern", source: { agent: "worker" }, created: daysAgo(100) });
+    addLesson(m, { id: "old-sup", text: "old sup", kind: "pattern", source: { agent: "worker" }, created: daysAgo(300) });
+    addLesson(m, { id: "old-stale", text: "old stale", kind: "pattern", source: { agent: "worker" }, created: daysAgo(400) });
+    m.prepare("UPDATE lessons SET superseded_by = 'live' WHERE id = 'old-sup'").run();
+    m.prepare("UPDATE lessons SET stale = ? WHERE id = 'old-stale'").run(daysAgo(1));
+    expect(windowHidden(m, { staleDays: 30, now: NOW })).toEqual({ count: 1, total: 2, oldestDays: 100 });
+  });
+
+  it("windowHidden honours staleDays", () => {
+    addLesson(m, { id: "a", text: "fresh", kind: "pattern", source: { agent: "worker" }, created: daysAgo(1) });
+    addLesson(m, { id: "b", text: "twenty", kind: "pattern", source: { agent: "worker" }, created: daysAgo(20) });
+    expect(windowHidden(m, { staleDays: 30, now: NOW }).count).toBe(0);
+    expect(windowHidden(m, { staleDays: 10, now: NOW })).toEqual({ count: 1, total: 2, oldestDays: 20 });
+  });
+
+  it("windowHidden with nothing hidden has count 0 and oldestDays null", () => {
+    addLesson(m, { id: "a", text: "fresh", kind: "pattern", source: { agent: "worker" }, created: daysAgo(1) });
+    expect(windowHidden(m, { staleDays: 30, now: NOW })).toEqual({ count: 0, total: 1, oldestDays: null });
+  });
+
+  it("windowNote is exact when something is hidden and null when nothing is", () => {
+    expect(windowNote({ count: 5, total: 12, oldestDays: 200 }, 30)).toBe("window: hid 5 of 12 live lessons older than 30 days (oldest 200 days)");
+    expect(windowNote({ count: 0, total: 12, oldestDays: null }, 30)).toBeNull();
   });
 });

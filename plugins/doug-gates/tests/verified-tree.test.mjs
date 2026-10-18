@@ -613,6 +613,9 @@ describe("verify.mjs takes gate.lock (card verify-takes-gate-lock)", () => {
   const CONFIG = { commands: { test: "node t.mjs" }, stopGate: { commands: ["test"], timeoutMs: 60000 } };
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const fixture = () => makeRepo({ "t.mjs": T, ".doug/config.json": JSON.stringify(CONFIG), ".gitignore": ".doug/.state/\n" });
+  // D3 only: a command slower than the old 400 ms bound stands in for a loaded box (card verify-lock-d3-flake).
+  const T_SLOW = `await new Promise((r) => setTimeout(r, 700));\n` + T;
+  const slowFixture = () => makeRepo({ "t.mjs": T_SLOW, ".doug/config.json": JSON.stringify(CONFIG), ".gitignore": ".doug/.state/\n" });
   const runs = (dir) => {
     const p = join(dir, ".doug/.state/ran.marker");
     return existsSync(p) ? readFileSync(p, "utf8").split("\n").filter(Boolean).length : 0;
@@ -645,28 +648,43 @@ describe("verify.mjs takes gate.lock (card verify-takes-gate-lock)", () => {
     totals: { "node t.mjs": parseTotals("Tests  3 passed (3)\n") },
   });
 
-  it("T1: waits on a held lock, then credits the holder's record without running the commands", async () => {
-    const dir = fixture();
-    const holder = sleeper();
-    try {
-      holdLock(dir, holder.pid);
-      const v = startVerify(dir);
-      await sleep(800);
-      expect(v.exited(), "verify.mjs must wait while a live holder has gate.lock").toBe(false);
-      expect(runs(dir)).toBe(0);
-      writeRecord(dir, holderRecord(dir));
-      rmSync(gateLockPath(dir));
-      const r = await v.done;
-      expect(r.status, r.out).toBe(0);
-      expect(r.out).toContain("credited verified-tree record");
-      expect(r.out).toContain("by holder");
-      expect(lastLine(r.stdout)).toBe("gate: test 0 (3 passed)");
-      expect(runs(dir), "the commands must not run when the holder's record credits").toBe(0);
-      expect(existsSync(gateLockPath(dir)), "a credited run leaves no lock behind").toBe(false);
-    } finally {
-      holder.kill();
+  // Load-robust wait: a run is conclusive only when verify.mjs really entered the wait (text output carries the
+  // 'waited' line). A verify that started after the release credits or runs at once; retry with a longer pre-release sleep.
+  async function waitedRun(beforeRelease, release) {
+    for (const delay of [800, 2000, 5000]) {
+      const dir = fixture();
+      const holder = sleeper();
+      try {
+        holdLock(dir, holder.pid);
+        const v = startVerify(dir);
+        await sleep(delay);
+        expect(v.exited(), "verify.mjs must wait while a live holder has gate.lock").toBe(false);
+        beforeRelease(dir);
+        release(dir);
+        const r = await v.done;
+        if (/\[doug\] verify: waited \d+ ms on gate\.lock/.test(r.out)) return { dir, r };
+      } finally {
+        holder.kill();
+      }
     }
-  }, 30000);
+    throw new Error("verify.mjs never entered the gate.lock wait in any attempt (start-up slower than every pre-release sleep)");
+  }
+
+  it("T1: waits on a held lock, then credits the holder's record without running the commands", async () => {
+    const { dir, r } = await waitedRun(
+      (d) => expect(runs(d)).toBe(0),
+      (d) => {
+        writeRecord(d, holderRecord(d));
+        rmSync(gateLockPath(d));
+      },
+    );
+    expect(r.status, r.out).toBe(0);
+    expect(r.out).toContain("credited verified-tree record");
+    expect(r.out).toContain("by holder");
+    expect(lastLine(r.stdout)).toBe("gate: test 0 (3 passed)");
+    expect(runs(dir), "the commands must not run when the holder's record credits").toBe(0);
+    expect(existsSync(gateLockPath(dir)), "a credited run leaves no lock behind").toBe(false);
+  }, 60000);
 
   it("T2: a lock still held when the wait bound runs out: runs the commands itself and says it waited", async () => {
     const dir = fixture();
@@ -690,9 +708,10 @@ describe("verify.mjs takes gate.lock (card verify-takes-gate-lock)", () => {
     const dir = fixture();
     const dead = spawnSync(process.execPath, ["-e", ""], { stdio: "ignore" });
     holdLock(dir, dead.pid);
-    const r = await startVerify(dir, ["--timeout-ms", "8000"]).done;
+    const r = await startVerify(dir, ["--timeout-ms", "8000", "--json"]).done;
     expect(r.status, r.out).toBe(0);
-    expect(r.ms, "a dead holder must not make verify wait out the bound").toBeLessThan(5000);
+    expect(JSON.parse(lastLine(r.stdout)).lockWaitMs, "a dead holder must not make verify wait").toBe(0);
+    expect(r.stderr).not.toMatch(/still held/i);
     expect(runs(dir)).toBe(1);
     expect(existsSync(gateLockPath(dir))).toBe(false);
   }, 30000);
@@ -781,13 +800,13 @@ describe("verify.mjs takes gate.lock (card verify-takes-gate-lock)", () => {
   }, 30000);
 
   it("D3: under --json the 'still held' line goes to stderr with the bound actually used; stdout's last line is the JSON result", async () => {
-    const dir = fixture();
+    const dir = slowFixture();
     const holder = sleeper();
     try {
       holdLock(dir, holder.pid);
-      const r = await startVerify(dir, ["--json", "--timeout-ms", "400"]).done;
+      const r = await startVerify(dir, ["--json", "--timeout-ms", "3000"]).done;
       expect(r.status, r.out).toBe(0);
-      expect(r.stderr).toMatch(/gate\.lock still held by pid \d+ after 400 ms/);
+      expect(r.stderr).toMatch(/gate\.lock still held by pid \d+ after 3000 ms/);
       expect(r.stdout).not.toMatch(/still held/i);
       const j = JSON.parse(lastLine(r.stdout));
       expect(j.ok).toBe(true);
@@ -795,14 +814,14 @@ describe("verify.mjs takes gate.lock (card verify-takes-gate-lock)", () => {
     } finally {
       holder.kill();
     }
-  }, 30000);
+  }, 60000);
 
   it("D3: without --json the 'still held' line is also on stderr, not stdout", async () => {
-    const dir = fixture();
+    const dir = slowFixture();
     const holder = sleeper();
     try {
       holdLock(dir, holder.pid);
-      const r = await startVerify(dir, ["--timeout-ms", "400"]).done;
+      const r = await startVerify(dir, ["--timeout-ms", "3000"]).done;
       expect(r.status, r.out).toBe(0);
       expect(r.stderr).toMatch(/still held/i);
       expect(r.stdout).not.toMatch(/still held/i);
@@ -812,46 +831,38 @@ describe("verify.mjs takes gate.lock (card verify-takes-gate-lock)", () => {
   }, 30000);
 
   it("D4: the tree is recomputed after the wait: a record for the tree as it changed during the wait is credited", async () => {
-    const dir = fixture();
-    const holder = sleeper();
-    try {
-      holdLock(dir, holder.pid);
-      const v = startVerify(dir);
-      await sleep(800);
-      expect(v.exited()).toBe(false);
-      write(dir, "changed-while-waiting.txt", "new\n");
-      writeRecord(dir, holderRecord(dir));
-      rmSync(gateLockPath(dir));
-      const r = await v.done;
-      expect(r.status, r.out).toBe(0);
-      expect(r.out).toContain("credited verified-tree record");
-      expect(runs(dir), "a stale pre-wait tree would not match the record and would run the commands").toBe(0);
-    } finally {
-      holder.kill();
-    }
-  }, 30000);
+    const { dir, r } = await waitedRun(
+      () => {},
+      (d) => {
+        write(d, "changed-while-waiting.txt", "new\n");
+        writeRecord(d, holderRecord(d));
+        rmSync(gateLockPath(d));
+      },
+    );
+    expect(r.status, r.out).toBe(0);
+    expect(r.out).toContain("credited verified-tree record");
+    expect(runs(dir), "a stale pre-wait tree would not match the record and would run the commands").toBe(0);
+  }, 60000);
 
   // Card parallel-card-queens B4: the time spent waiting on gate.lock is reported (json lockWaitMs, a text line).
-  it("V01: a live lock released after ~800 ms gives lockWaitMs >= 300 under --json and the 'waited' line in text mode", async () => {
+  it("V01: a live lock never released: lockWaitMs covers the whole bound under --json and the 'waited' line in text mode", async () => {
+    const BOUND = 1500;
     for (const json of [true, false]) {
       const dir = fixture();
       const holder = sleeper();
       try {
         holdLock(dir, holder.pid);
-        const v = startVerify(dir, json ? ["--json"] : []);
-        await sleep(800); // node start-up eats part of the sleep before the wait begins
-        rmSync(gateLockPath(dir));
-        const r = await v.done;
+        const r = await startVerify(dir, ["--timeout-ms", String(BOUND), ...(json ? ["--json"] : [])]).done;
         expect(r.status, r.out).toBe(0);
         expect(runs(dir), "no holder record, so the commands run").toBe(1);
         if (json) {
           const j = JSON.parse(lastLine(r.stdout));
-          expect(j.lockWaitMs, "json result carries the wait").toBeGreaterThanOrEqual(300);
-          expect(j.lockWaitMs).toBeLessThan(20000);
+          expect(j.lockWaitMs, "json result carries the wait").toBeGreaterThanOrEqual(BOUND);
+          expect(j.lockWaitMs).toBeLessThanOrEqual(r.ms);
         } else {
           const m = r.out.match(/\[doug\] verify: waited (\d+) ms on gate\.lock/);
           expect(m, r.out).not.toBeNull();
-          expect(Number(m[1])).toBeGreaterThanOrEqual(300);
+          expect(Number(m[1])).toBeGreaterThanOrEqual(BOUND);
         }
       } finally {
         holder.kill();

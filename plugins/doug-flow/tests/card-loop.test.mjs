@@ -8,6 +8,7 @@ import {
   SEAT_ROWS,
   BRIEF_RULES,
   HAND_BACK_SCHEMAS,
+  handBackSchema,
   laneFor,
   initialState,
   currentAction,
@@ -29,6 +30,10 @@ const FACTS = [{ text: "the fact", source: "docs/x.md:3" }];
 const MUT = [{ id: "M1", case: "case one", mutation: "remove the check", test: "T01" }];
 const WT = "/abs/worktree/c1";
 const NOTE = "/abs/note.md";
+const INLINE_NOTE = "Fact: X holds\nSource: https://example.test/a line 3\nunverified: Y";
+
+const TREE_A = "a".repeat(40);
+const TREE_B = "b".repeat(40);
 
 const seenReasons = new Set();
 
@@ -80,8 +85,9 @@ function okHB(seat, state, over = {}) {
     gate: {
       commands: [{ command: "node .doug/hooks/scripts/verify.mjs", exitCode: 0 }],
       gateLine: "typecheck ok; test:unit ok 100 passed",
+      tree: TREE_A,
     },
-    commit: { sha: "abc1234", branch: "card/c1" },
+    commit: { sha: "abc1234", branch: "card/c1", tree: TREE_A },
   }[seat];
   const hb = { seat, ...base, ...over };
   for (const k of Object.keys(hb)) if (hb[k] === undefined) delete hb[k];
@@ -297,13 +303,64 @@ describe("transitions", () => {
     expect(r.action.reason).toBe("tester-red-claim-missing");
   });
 
-  it("T14 a claim of [] or [''] also counts as missing", () => {
+  it("T14 a claim of [''] or [] without mutationResults counts as missing", () => {
     const s = stateAt("tester");
-    for (const claim of [[], [""]]) {
-      const r = go(s, okHB("tester", s, { tests_red_by_design: claim }));
+    for (const over of [{ tests_red_by_design: [""] }, { tests_red_by_design: [], mutationResults: undefined }]) {
+      const r = go(s, okHB("tester", s, over));
       expect(r.action.kind).toBe("stopped");
       expect(r.action.reason).toBe("tester-red-claim-missing");
     }
+  });
+
+  // Walk the happy path to the tester with the lead listing `muts` (default MUT).
+  const testerWith = (muts) => {
+    let state = initialState(CARD, {});
+    let guard = 0;
+    while (state.pending !== "tester") {
+      if (guard++ > 40) throw new Error("never reached tester");
+      state = ok(state, state.pending === "lead" ? { mutations: muts } : {}).state;
+    }
+    return state;
+  };
+  const M2 = { id: "M2", case: "case two", mutation: "drop the other check", test: "T02" };
+  const res = (id, failed) => ({ id, failed, test: "T0" + id.slice(1), assertion: "expected x" });
+
+  it("T14a pin-only claim [] with every listed mutation failed advances to coder with redTests []", () => {
+    const s = testerWith([...MUT, M2]);
+    const r = go(s, okHB("tester", s, { tests_red_by_design: [], mutationResults: [res("M1", true), res("M2", true)] }));
+    expect(r.action.reason).toBeUndefined();
+    expect(r.action.kind).toBe("seat");
+    expect(r.action.seat).toBe("coder");
+    expect(r.action.brief.redTests).toEqual([]);
+  });
+
+  it("T14b pin-only claim [] with a listed mutation missing from mutationResults stops", () => {
+    const s = testerWith([...MUT, M2]);
+    const r = go(s, okHB("tester", s, { tests_red_by_design: [], mutationResults: [res("M1", true)] }));
+    expect(r.action.kind).toBe("stopped");
+    expect(r.action.reason).toBe("tester-red-claim-missing");
+  });
+
+  it("T14c pin-only claim [] with a listed mutation that survived stops", () => {
+    const s = testerWith([...MUT, M2]);
+    const r = go(s, okHB("tester", s, { tests_red_by_design: [], mutationResults: [res("M1", true), res("M2", false)] }));
+    expect(r.action.kind).toBe("stopped");
+    expect(r.action.reason).toBe("tester-red-claim-missing");
+  });
+
+  it("T14d pin-only claim [] with no listed mutations stops", () => {
+    const s = testerWith([]);
+    const r = go(s, okHB("tester", s, { tests_red_by_design: [], mutationResults: [] }));
+    expect(r.action.kind).toBe("stopped");
+    expect(r.action.reason).toBe("tester-red-claim-missing");
+  });
+
+  it("T14e the full-lane tester brief names the pin-only path in the red-claim rule", () => {
+    const s = stateAt("tester");
+    const rule = currentAction(s).brief.rules.find((x) => x.id === "red-claim").text;
+    expect(rule).toContain("tests_red_by_design");
+    expect(rule).toContain("[]");
+    expect(rule).toContain("mutationResults");
   });
 
   it("T15 a reviewer blocker on the first review sends one fix pass to the coder, then back to the reviewer", () => {
@@ -892,9 +949,764 @@ describe("gate seat writes no git", () => {
   });
 });
 
+describe("unrunnable mutations", () => {
+  const REASON = "CLI test outside the scratch copy";
+  const notRunHB = (s, over = {}) =>
+    okHB("coder", s, { mutationResults: [{ id: "M1", notRun: REASON }], ...over });
+  const atReviewer = () => ok(stateAt("coder"), { mutationResults: [{ id: "M1", notRun: REASON }] });
+
+  it("T53 a coder notRun entry in place of failed/test is accepted and advances to the reviewer", () => {
+    const s = stateAt("coder");
+    expect(validateHandBack(s, notRunHB(s))).toEqual([]);
+    const r = go(s, notRunHB(s));
+    expect(r.action.kind).toBe("seat");
+    expect(r.action.seat).toBe("reviewer");
+  });
+
+  it("T54 a coder notRun with a blank or non-string reason is refused", () => {
+    const s = stateAt("coder");
+    for (const notRun of ["", "   ", 5, null]) {
+      const hb = okHB("coder", s, { mutationResults: [{ id: "M1", notRun }] });
+      expect(validateHandBack(s, hb).length).toBeGreaterThan(0);
+    }
+  });
+
+  it("T55 the coder output schema admits notRun; the reviewer's does not", () => {
+    const item = (seat) => HAND_BACK_SCHEMAS[seat].properties.mutationResults.items;
+    expect(item("coder").required).toEqual(["id"]);
+    expect(item("coder").properties.notRun).toBeTruthy();
+    expect(item("reviewer").required).toEqual(["id", "failed", "test"]);
+    expect(item("reviewer").properties.notRun).toBeUndefined();
+  });
+
+  it("T55b the tests-only tester's brief schema admits notRun with only id required", () => {
+    const s = stateAt("tester", { ...CARD, class: "tests-only" });
+    const item = currentAction(s).brief.handBack.properties.mutationResults.items;
+    expect(item.required).toEqual(["id"]);
+    expect(item.properties.notRun).toBeTruthy();
+    expect(handBackSchema("tester", "tests-only")).toEqual(currentAction(s).brief.handBack);
+  });
+
+  it("T55c the full-lane tester's brief schema requires id, failed and test and has no notRun", () => {
+    const s = stateAt("tester");
+    const item = currentAction(s).brief.handBack.properties.mutationResults.items;
+    expect(item.required).toEqual(["id", "failed", "test"]);
+    expect(item.properties.notRun).toBeUndefined();
+    expect(handBackSchema("tester", "full")).toEqual(currentAction(s).brief.handBack);
+  });
+
+  it("T55d a full-lane tester hand-back its brief schema admits is accepted by validateHandBack", () => {
+    const s = stateAt("tester");
+    const hb = okHB("tester", s, { mutationResults: [{ id: "M1", failed: true, test: "T01" }] });
+    expect(validateHandBack(s, hb)).toEqual([]);
+    expect(go(s, hb).action.seat).toBe("coder");
+  });
+
+  it("T55e handBackSchema keeps every other seat's schema as HAND_BACK_SCHEMAS has it, on every lane", () => {
+    for (const lane of ["full", "lean", "tests-only"]) {
+      for (const seat of SEATS) {
+        if (seat === "tester") continue;
+        expect(handBackSchema(seat, lane), `${seat}/${lane}`).toEqual(HAND_BACK_SCHEMAS[seat]);
+      }
+    }
+  });
+
+  it("T55f for every seat and lane, each notRun shape the brief's schema admits is accepted by the validator", () => {
+    const MUTS = [
+      { id: "M1", case: "case one", mutation: "remove the check", test: "T01" },
+      { id: "M2", case: "case two", mutation: "drop the guard", test: "T02" },
+    ];
+    const lanes = {
+      full: CARD,
+      lean: { ...CARD, size: "S", class: "docs" },
+      "tests-only": { ...CARD, class: "tests-only" },
+    };
+    let checked = 0;
+    const seen = [];
+    for (const [lane, card] of Object.entries(lanes)) {
+      let st = initialState(card, {});
+      let guard = 0;
+      while (st.pending && st.pending !== "reviewer") {
+        if (guard++ > 40) throw new Error("walk did not terminate");
+        const seat = st.pending;
+        const brief = currentAction(st).brief;
+        const item = brief.handBack.properties.mutationResults?.items;
+        if (item?.properties?.notRun && brief.mutations.length > 0) {
+          const entries = brief.mutations.map((m) => ({ id: m.id, notRun: "could not run it here" }));
+          const hb = okHB(seat, st, { mutationResults: entries });
+          expect(validateHandBack(st, hb), `${seat}/${lane} notRun`).toEqual([]);
+          checked++;
+          seen.push(`${seat}/${lane}`);
+        }
+        st = ok(st, seat === "lead" ? { mutations: MUTS } : {}).state;
+      }
+    }
+    expect(seen.sort()).toEqual(["coder/full", "tester/tests-only"]);
+    expect(checked).toBe(2);
+  });
+
+  it("T56 every coder notRun id and reason is carried to the reviewer brief and prompt", () => {
+    const r = atReviewer();
+    expect(r.action.seat).toBe("reviewer");
+    expect(r.action.brief.notRun).toEqual([{ id: "M1", reason: REASON }]);
+    const text = briefPrompt(r.action.brief);
+    expect(text).toContain("NOT RUN BY THE CODER");
+    expect(text).toContain("M1: " + REASON);
+    expect(currentAction(stateAt("coder")).brief.notRun).toEqual([]);
+  });
+
+  it("T57 a reviewer that omits a carried notRun id is refused and the card stops", () => {
+    const s = atReviewer().state;
+    const hb = okHB("reviewer", s, { mutationResults: [] });
+    const errors = validateHandBack(s, hb);
+    expect(errors.length).toBeGreaterThan(0);
+    expect(errors.join("; ")).toContain("M1");
+    const r = go(s, hb);
+    expect(r.action.kind).toBe("stopped");
+    expect(r.action.reason).toBe("hand-back-invalid");
+  });
+
+  it("T58 a reviewer notRun entry is refused, with or without failed and test", () => {
+    const s = atReviewer().state;
+    for (const entry of [
+      { id: "M1", notRun: "x" },
+      { id: "M1", failed: true, test: "T01", notRun: "x" },
+    ]) {
+      const hb = okHB("reviewer", s, { mutationResults: [entry] });
+      expect(validateHandBack(s, hb).length).toBeGreaterThan(0);
+    }
+    expect(validateHandBack(s, okHB("reviewer", s, { mutationResults: [{ id: "M1", failed: false, test: "T01" }] }))).toEqual([]);
+  });
+
+  it("T59 the lead brief says what a mutation is", () => {
+    const brief = currentAction(stateAt("lead")).brief;
+    const rule = brief.rules.find((r) => r.id === "mutation-is-code-change");
+    expect(rule).toBeTruthy();
+    expect(rule.text).toContain("A mutation is a code change");
+    expect(rule.text).toContain("(a git diff, a file-absence check) goes in reviewerChecks");
+    expect(briefPrompt(brief)).toContain(rule.text);
+    expect(currentAction(stateAt("coder")).brief.rules.map((r) => r.id)).not.toContain("mutation-is-code-change");
+  });
+
+  it("T60 lead reviewerChecks reach the reviewer brief only", () => {
+    const checks = ["git diff shows no production file"];
+    const s = stateAt("lead");
+    expect(validateHandBack(s, okHB("lead", s, { reviewerChecks: checks }))).toEqual([]);
+    expect(validateHandBack(s, okHB("lead", s, { reviewerChecks: "nope" })).length).toBeGreaterThan(0);
+    let st = ok(s, { reviewerChecks: checks }).state;
+    while (st.pending !== "coder") st = ok(st).state;
+    expect(currentAction(st).brief.reviewerChecks).toEqual([]);
+    while (st.pending !== "reviewer") st = ok(st).state;
+    const brief = currentAction(st).brief;
+    expect(brief.reviewerChecks).toEqual(checks);
+    expect(briefPrompt(brief)).toContain("REVIEWER CHECKS:");
+    expect(briefPrompt(brief)).toContain(checks[0]);
+  });
+});
+
+// Card queen-resume-with-answer: the user's answer to a design question rides in options.answers and reaches only the asking seat.
+describe("card queen-resume-with-answer: options.answers", () => {
+  const ANS = { seat: "tester", question: "Q?", answer: "A." };
+
+  it("T61 an answer reaches the asking seat's brief as { question, answer } and no other seat's", () => {
+    const opts = { answers: [ANS] };
+    expect(currentAction(stateAt("tester", CARD, opts)).brief.answers).toEqual([{ question: "Q?", answer: "A." }]);
+    expect(currentAction(stateAt("lead", CARD, opts)).brief.answers).toEqual([]);
+    expect(currentAction(stateAt("coder", CARD, opts)).brief.answers).toEqual([]);
+    expect(currentAction(initialState(CARD, {})).brief.answers).toEqual([]);
+  });
+
+  it("T62 the prompt carries an ANSWERS FROM THE USER block right after GOAL, only for the answered seat", () => {
+    const withAns = briefPrompt(currentAction(stateAt("tester", CARD, { answers: [ANS] })).brief, { worktreePath: WT });
+    expect(withAns).toContain(
+      "GOAL:\n" + CARD.goal + "\n\nANSWERS FROM THE USER (to your design questions; build on them):\n- Q: Q? A: A.\n\nWORKTREE:",
+    );
+    const without = briefPrompt(currentAction(stateAt("tester", CARD, {})).brief, { worktreePath: WT });
+    expect(without).not.toContain("ANSWERS FROM THE USER");
+    const other = briefPrompt(currentAction(stateAt("lead", CARD, { answers: [ANS] })).brief, { worktreePath: WT });
+    expect(other).not.toContain("ANSWERS FROM THE USER");
+    // a seat's prompt without an answer is byte-identical with and without answers for other seats
+    const lead = (o) => briefPrompt(currentAction(stateAt("lead", CARD, o)).brief, { worktreePath: WT });
+    expect(lead({ answers: [ANS] })).toBe(lead({}));
+  });
+
+  it("T63 an answer with a round applies only from that round on; one without a round applies to every round", () => {
+    const toCoderRound2 = (opts) => {
+      let st = stateAt("coder", CARD, opts);
+      const round1 = currentAction(st).brief;
+      st = ok(st).state; // coder
+      st = go(st, okHB("reviewer", st, { verdict: "fail", findings: [blocker()] })).state;
+      expect(st.pending).toBe("coder");
+      return { round1, round2: currentAction(st).brief };
+    };
+    const late = toCoderRound2({ answers: [{ seat: "coder", question: "Q?", answer: "A.", round: 2 }] });
+    expect(late.round1.round).toBe(1);
+    expect(late.round2.round).toBe(2);
+    expect(late.round1.answers).toEqual([]);
+    expect(late.round2.answers).toEqual([{ question: "Q?", answer: "A." }]);
+    const any = toCoderRound2({ answers: [{ seat: "coder", question: "Q?", answer: "A." }] });
+    expect(any.round1.answers).toEqual([{ question: "Q?", answer: "A." }]);
+    expect(any.round2.answers).toEqual([{ question: "Q?", answer: "A." }]);
+  });
+
+  it("T64 a second designQuestion from the answered seat stops design-decision again", () => {
+    const s = stateAt("tester", CARD, { answers: [ANS] });
+    const r = go(s, { seat: "tester", designQuestion: "A new question?" });
+    expect(r.action.kind).toBe("stopped");
+    expect(r.action.reason).toBe("design-decision");
+    expect(r.action.report.stoppedAt).toBe("tester");
+    expect(r.action.report.detail).toContain("A new question?");
+    expect(r.state.pending).not.toBe("coder");
+  });
+
+  it("T65 malformed options.answers make initialState throw a TypeError naming options.answers", () => {
+    const bad = [
+      "nope",
+      {},
+      [null],
+      ["str"],
+      [{ seat: "nobody", question: "Q?", answer: "A." }],
+      [{ question: "Q?", answer: "A." }],
+      [{ seat: "tester", question: 5, answer: "A." }],
+      [{ seat: "tester", question: "Q?", answer: "  " }],
+      [{ seat: "tester", question: "Q?" }],
+      [{ seat: "tester", question: "Q?", answer: "A.", round: 0 }],
+      [{ seat: "tester", question: "Q?", answer: "A.", round: 1.5 }],
+      [{ seat: "tester", question: "Q?", answer: "A.", round: "1" }],
+    ];
+    for (const answers of bad) {
+      expect(() => initialState(CARD, { answers }), JSON.stringify(answers)).toThrow(TypeError);
+      expect(() => initialState(CARD, { answers }), JSON.stringify(answers)).toThrow(/options\.answers/);
+    }
+    expect(() => initialState(CARD, { answers: [{ ...ANS, round: 2, run: "wf_x" }] })).not.toThrow();
+    expect(initialState(CARD, {}).answers).toEqual([]);
+    expect(initialState(CARD, { answers: [ANS] }).answers).toEqual([ANS]);
+  });
+});
+
+// Card card-loop-notrun-gaps: notRun on the tests-only tester, across coder rounds, unlisted ids; split mutation ids.
+describe("notRun gaps", () => {
+  const REASON = "CLI test outside the scratch copy";
+  const TO = { ...CARD, class: "tests-only" };
+  const MUT2 = [
+    { id: "M1", case: "case one", mutation: "remove the check", test: "T01" },
+    { id: "M2", case: "case two", mutation: "drop the guard", test: "T02" },
+  ];
+  const withMuts = (seat, card, muts) => {
+    let st = initialState(card, {});
+    let guard = 0;
+    while (st.pending !== seat) {
+      if (guard++ > 40) throw new Error("never reached " + seat);
+      st = ok(st, st.pending === "lead" ? { mutations: muts } : {}).state;
+    }
+    return st;
+  };
+  const passed = (id) => ({ id, failed: true, test: "T0" + id.slice(1), assertion: "x" });
+
+  it("T66 a tests-only tester notRun entry in place of failed/test is accepted and advances to the reviewer", () => {
+    const s = stateAt("tester", TO);
+    const hb = okHB("tester", s, { mutationResults: [{ id: "M1", notRun: REASON }] });
+    expect(validateHandBack(s, hb)).toEqual([]);
+    const r = go(s, hb);
+    expect(r.action.kind).toBe("seat");
+    expect(r.action.seat).toBe("reviewer");
+    const blank = okHB("tester", s, { mutationResults: [{ id: "M1", notRun: "  " }] });
+    expect(validateHandBack(s, blank).length).toBeGreaterThan(0);
+  });
+
+  it("T67 a tests-only tester notRun id and reason reach the reviewer brief and prompt; a reviewer that omits it is refused", () => {
+    const s = stateAt("tester", TO);
+    const r = go(s, okHB("tester", s, { mutationResults: [{ id: "M1", notRun: REASON }] }));
+    expect(r.action.brief.notRun).toEqual([{ id: "M1", reason: REASON }]);
+    expect(briefPrompt(r.action.brief)).toContain("M1: " + REASON);
+    const hb = okHB("reviewer", r.state, { mutationResults: [] });
+    expect(validateHandBack(r.state, hb).join("; ")).toContain("M1");
+    expect(go(r.state, hb).action.reason).toBe("hand-back-invalid");
+  });
+
+  it("T67b a tests-only tester notRun id reported twice reaches the reviewer brief once, first reason wins", () => {
+    const s = stateAt("tester", TO);
+    const hb = okHB("tester", s, { mutationResults: [{ id: "M1", notRun: "reason one" }, { id: "M1", notRun: "reason two" }] });
+    const r = go(s, hb);
+    expect(r.action.seat).toBe("reviewer");
+    expect(r.action.brief.notRun).toEqual([{ id: "M1", reason: "reason one" }]);
+  });
+
+  it("T67c a full-lane tester refuses a notRun entry", () => {
+    const s = stateAt("tester");
+    const hb = okHB("tester", s, { mutationResults: [{ id: "M1", notRun: REASON }] });
+    expect(validateHandBack(s, hb).length).toBeGreaterThan(0);
+  });
+
+  it("T66b a tests-only tester notRun on an unlisted or split id is refused naming it, and the card stops", () => {
+    const s = stateAt("tester", TO);
+    for (const id of ["M9", "M1a"]) {
+      const hb = okHB("tester", s, { mutationResults: [passed("M1"), { id, notRun: REASON }] });
+      expect(validateHandBack(s, hb).join("; ")).toContain(id);
+      expect(go(s, hb).action.reason).toBe("hand-back-invalid");
+    }
+  });
+
+  it("T68 notRun builds up across two coder rounds: deduped by id, first reason wins", () => {
+    const s0 = withMuts("coder", CARD, MUT2);
+    const r1 = go(s0, okHB("coder", s0, { mutationResults: [{ id: "M1", notRun: "reason one" }, passed("M2")] }));
+    expect(r1.action.seat).toBe("reviewer");
+    const rv = go(r1.state, okHB("reviewer", r1.state, {
+      verdict: "fail",
+      findings: [blocker()],
+      mutationResults: [passed("M1"), passed("M2")],
+    }));
+    expect(rv.state.pending).toBe("coder");
+    const r2 = go(rv.state, okHB("coder", rv.state, { mutationResults: [{ id: "M1", notRun: "reason two" }, { id: "M2", notRun: "reason three" }] }));
+    expect(r2.action.seat).toBe("reviewer");
+    expect(r2.action.brief.notRun).toEqual([
+      { id: "M1", reason: "reason one" },
+      { id: "M2", reason: "reason three" },
+    ]);
+  });
+
+  it("T69 a coder notRun on an unlisted id is refused naming it, and the card stops", () => {
+    const s = stateAt("coder");
+    const hb = okHB("coder", s, { mutationResults: [passed("M1"), { id: "M9", notRun: REASON }] });
+    expect(validateHandBack(s, hb).join("; ")).toContain("M9");
+    const r = go(s, hb);
+    expect(r.action.kind).toBe("stopped");
+    expect(r.action.reason).toBe("hand-back-invalid");
+  });
+
+  it("T70 a reviewer reporting listed M1 as M1a and M1b without own is accepted", () => {
+    const s = stateAt("reviewer");
+    const hb = okHB("reviewer", s, { mutationResults: [{ id: "M1a", failed: true, test: "T01" }, { id: "M1b", failed: true, test: "T01" }] });
+    expect(validateHandBack(s, hb)).toEqual([]);
+    expect(go(s, hb).action.seat).toBe("gate");
+  });
+
+  it("T71 M10 and M1-x do not cover M1", () => {
+    const s = stateAt("reviewer");
+    for (const id of ["M10", "M1-x"]) {
+      const hb = okHB("reviewer", s, { mutationResults: [{ id, failed: true, test: "T01" }] });
+      const msg = validateHandBack(s, hb).join("; ");
+      expect(msg, id).toContain("missing listed mutation M1");
+      expect(msg, id).toContain(id + " is not listed and not marked own");
+    }
+  });
+});
+
+// Card autopilot-no-stuck-in-flow: a gate command that hit the verify timeout is load, not a red and not a block.
+describe("gate timeout", () => {
+  const LINE = "gate: typecheck 0; test:unit 1 (exit timeout at 301.0 s)";
+  const timedOut = (over = {}) => ({
+    commands: [{ command: "node .doug/hooks/scripts/verify.mjs", exitCode: 1, timedOut: true }],
+    gateLine: LINE,
+    ...over,
+  });
+  const RULE_TEXT =
+    "When verify.mjs prints `exit timeout` for a command, report that command with timedOut: true; a timeout is load, not a red or a block, so leave blocked unset.";
+
+  it("T70 a gate hand-back with a timedOut command stops gate-timeout with the gate line, no red counted, no coder round", () => {
+    const s = stateAt("gate");
+    const r = go(s, okHB("gate", s, timedOut()));
+    expect(r.action.kind).toBe("stopped");
+    expect(r.action.reason).toBe("gate-timeout");
+    expect(r.action.report.detail).toBe(LINE);
+    expect(r.state.counters.redGates).toBe(0);
+    expect(r.state.fixFor ?? null).toBeNull();
+    expect(r.action.report?.stoppedAt ?? "gate").toBe("gate");
+  });
+
+  it("T71 the timeout wins over a blocked string (the 2026-10-17 hand-back shape)", () => {
+    const s = stateAt("gate");
+    const r = go(s, okHB("gate", s, timedOut({ blocked: "Gate red, not green. The test:unit step hit the gate's 301 s timeout" })));
+    expect(r.action.kind).toBe("stopped");
+    expect(r.action.reason).toBe("gate-timeout");
+  });
+
+  it("T72 a red without timedOut keeps the red path, and a blocked gate without timedOut stays seat-blocked", () => {
+    const s = stateAt("gate");
+    const red = go(s, okHB("gate", s, { commands: [{ command: "c", exitCode: 1, timedOut: false }], gateLine: "red" }));
+    expect(red.action.kind).toBe("seat");
+    expect(red.action.seat).toBe("coder");
+    expect(red.state.counters.redGates).toBe(1);
+    const blocked = go(s, okHB("gate", s, { blocked: "cannot run" }));
+    expect(blocked.action.reason).toBe("seat-blocked");
+  });
+
+  it("T70b a gate-timeout stop records lastGate with the timed-out commands and the gate line", () => {
+    const s = stateAt("gate");
+    const hb = timedOut();
+    const r = go(s, okHB("gate", s, hb));
+    expect(r.action.reason).toBe("gate-timeout");
+    expect(r.state.lastGate).toEqual({ commands: hb.commands, gateLine: LINE });
+  });
+
+  it("T70c a timedOut command on a non-gate hand-back does not stop gate-timeout", () => {
+    const s = stateAt("reviewer");
+    const r = go(
+      s,
+      okHB("reviewer", s, {
+        commandsRun: [{ command: "node .doug/hooks/scripts/verify.mjs", exitCode: 0 }],
+        commands: [{ command: "node .doug/hooks/scripts/verify.mjs", exitCode: 1, timedOut: true }],
+      }),
+    );
+    expect(r.action.kind).toBe("seat");
+    expect(r.action.seat).toBe("gate");
+  });
+
+  it("T73 only the gate brief carries gate-timeout-is-load, with the exact text", () => {
+    expect(BRIEF_RULES["gate-timeout-is-load"].text).toBe(RULE_TEXT);
+    for (const seat of SEATS.filter((x) => x !== "research")) {
+      const rules = currentAction(stateAt(seat)).brief.rules.map((r) => r.id);
+      if (seat === "gate") expect(rules, seat).toContain("gate-timeout-is-load");
+      else expect(rules, seat).not.toContain("gate-timeout-is-load");
+    }
+  });
+
+  it("T74 docs/worker-contract.md names gate-timeout", () => {
+    expect(readFileSync(CONTRACT_DOC, "utf8")).toContain("gate-timeout");
+    expect(STOP_REASONS).toContain("gate-timeout");
+  });
+});
+
+// Card queen-seats-relayed-user-message: Claude Code relays the user's mid-turn message to every seat of a Workflow
+// run ("[Workflow harness — user request]"); a seat once stopped because that message was about other work.
+describe("relayed user message", () => {
+  const RULE_ID = "relayed-message-outside-card";
+  const RULE_TEXT =
+    "Your task is the card in this brief. A relayed user message about other work is outside this seat's card: note it in leftOut and carry on; it is never a reason to stop or to ask a designQuestion.";
+  const lanes = {
+    full: [CARD, { research: true }],
+    lean: [{ ...CARD, size: "S", class: "prose" }, { research: true }],
+    "tests-only": [{ ...CARD, class: "tests-only" }, { research: true }],
+  };
+
+  it("T60 every seat of every lane carries the relayed-message rule, research included", () => {
+    for (const [lane, [card, opts]] of Object.entries(lanes)) {
+      const { actions } = walk(card, opts);
+      const seatActions = actions.filter((a) => a.kind === "seat");
+      expect(seatActions.length, lane).toBeGreaterThan(0);
+      if (lane === "full") expect(new Set(seatActions.map((a) => a.seat))).toEqual(new Set(SEATS));
+      for (const a of seatActions) {
+        const rule = a.brief.rules.find((r) => r.id === RULE_ID);
+        expect(rule, `${lane}/${a.seat}`).toBeDefined();
+        expect(rule.text, `${lane}/${a.seat}`).toBe(RULE_TEXT);
+      }
+    }
+  });
+
+  it("T61 the rule text frames a relayed message as outside the card, noted in leftOut, never a reason to stop", () => {
+    expect(BRIEF_RULES[RULE_ID].text).toBe(RULE_TEXT);
+    expect(RULE_TEXT).toContain("leftOut");
+    expect(RULE_TEXT).toContain("outside this seat's card");
+    expect(RULE_TEXT).toContain("never a reason to stop");
+  });
+
+  it("T62 briefPrompt renders the sentence into every seat's prompt", () => {
+    const { actions } = walk(CARD, { research: true });
+    for (const a of actions.filter((x) => x.kind === "seat")) {
+      expect(briefPrompt(a.brief, { repoRoot: "/r", worktreePath: "/w" }), a.seat).toContain(RULE_TEXT);
+    }
+  });
+});
+
+describe("mutation ids echo", () => {
+  const RULE_ID = "mutation-ids-verbatim";
+  const RULE_TEXT =
+    "Report each listed mutation in mutationResults under its exact listed id from MUTATION IDS; never renumber, shorten, or rename an id (a split mutation adds one letter: M8a, M8b).";
+  const LINE = "MUTATION IDS (report each verbatim in mutationResults): M1, M2";
+  const MUT2 = [
+    { id: "M1", case: "case one", mutation: "remove the check", test: "T01" },
+    { id: "M2", case: "case two", mutation: "drop the guard", test: "T02" },
+  ];
+  const res = [
+    { id: "M1", failed: true, test: "T01", assertion: "x" },
+    { id: "M2", failed: true, test: "T02", assertion: "x" },
+  ];
+  const overrides = {
+    "lead#1": { mutations: MUT2 },
+    "tester#1": { mutationResults: res },
+    "coder#1": { mutationResults: res },
+    "reviewer#1": { mutationResults: res.map(({ id, failed, test }) => ({ id, failed, test })) },
+  };
+  const brief = (actions, seat) => actions.find((a) => a.kind === "seat" && a.seat === seat).brief;
+  const has = (b) => b.rules.some((r) => r.id === RULE_ID);
+
+  it("T72 the verbatim-id rule is in the tests-only tester, coder and reviewer briefs, not the full-lane tester or lean briefs", () => {
+    expect(BRIEF_RULES[RULE_ID].text).toBe(RULE_TEXT);
+    const full = walk(CARD, {}, overrides).actions;
+    const only = walk({ ...CARD, class: "tests-only" }, {}, overrides).actions;
+    const lean = walk({ ...CARD, size: "S", class: "docs" }).actions;
+    for (const [name, b] of [
+      ["only tester", brief(only, "tester")],
+      ["only reviewer", brief(only, "reviewer")],
+      ["full coder", brief(full, "coder")],
+      ["full reviewer", brief(full, "reviewer")],
+    ]) {
+      expect(b.rules.find((r) => r.id === RULE_ID), name).toBeDefined();
+      expect(b.rules.find((r) => r.id === RULE_ID).text, name).toBe(RULE_TEXT);
+    }
+    expect(has(brief(full, "tester"))).toBe(false);
+    for (const a of lean.filter((x) => x.kind === "seat")) expect(has(a.brief), a.seat).toBe(false);
+  });
+
+  it("T73 the coder, reviewer and tests-only tester prompts list the exact ids; the full-lane tester prompt does not", () => {
+    const full = walk(CARD, {}, overrides).actions;
+    const only = walk({ ...CARD, class: "tests-only" }, {}, overrides).actions;
+    expect(briefPrompt(brief(full, "coder"))).toContain(LINE);
+    expect(briefPrompt(brief(full, "reviewer"))).toContain(LINE);
+    expect(briefPrompt(brief(only, "tester"))).toContain(LINE);
+    expect(briefPrompt(brief(only, "reviewer"))).toContain(LINE);
+    expect(briefPrompt(brief(full, "tester"))).not.toContain("MUTATION IDS (");
+  });
+
+  it("T74 the lead schema restricts mutation ids to M<n>", () => {
+    const pattern = HAND_BACK_SCHEMAS.lead.properties.mutations.items.properties.id.pattern;
+    expect(pattern).toBe("^M[1-9][0-9]*$");
+    const re = new RegExp(pattern);
+    for (const good of ["M1", "M18"]) expect(re.test(good), good).toBe(true);
+    for (const bad of ["M1-clear-ended", "M0", "m1", "M1a"]) expect(re.test(bad), bad).toBe(false);
+  });
+
+  it("T75 a lead hand-back with a descriptive mutation id is refused and stops the card; M18 is accepted", () => {
+    const s = stateAt("lead");
+    const bad = okHB("lead", s, { mutations: [{ ...MUT[0], id: "M1-clear-ended" }] });
+    const errs = validateHandBack(s, bad);
+    expect(errs.some((e) => e.includes("M1-clear-ended") && e.includes("M<n>"))).toBe(true);
+    const r = go(s, bad);
+    expect(r.action.kind).toBe("stopped");
+    expect(r.action.reason).toBe("hand-back-invalid");
+    expect(validateHandBack(s, okHB("lead", s, { mutations: [{ ...MUT[0], id: "M18" }] }))).toEqual([]);
+  });
+
+  it("T76 the lead brief tells the lead the M<n> id form", () => {
+    const text = "List one mutation per case the goal names, each with a unique id of the form M<n> (M1, M2, ...) and the test that must fail.";
+    expect(BRIEF_RULES["mutation-per-case"].text).toBe(text);
+    expect(currentAction(stateAt("lead")).brief.rules.find((r) => r.id === "mutation-per-case").text).toBe(text);
+  });
+
+  it("T77 an inline multi-line research note is accepted and the loop advances to the lead seat", () => {
+    const s = stateAt("research", CARD, { research: true });
+    const hb = okHB("research", s, { note: INLINE_NOTE });
+    expect(validateHandBack(s, hb)).toEqual([]);
+    const r = go(s, hb);
+    expect(r.action.kind).toBe("seat");
+    expect(r.action.seat).toBe("lead");
+  });
+
+  it("T78 the whole inline note reaches the lead brief and its rendered prompt", () => {
+    const s = stateAt("research", CARD, { research: true });
+    const r = go(s, okHB("research", s, { note: INLINE_NOTE }));
+    expect(r.action.brief.seat).toBe("lead");
+    expect(r.action.brief.researchNote).toBe(INLINE_NOTE);
+    const prompt = briefPrompt(r.action.brief, { repoRoot: "/abs/repo", worktreePath: WT });
+    for (const line of INLINE_NOTE.split("\n")) expect(prompt).toContain(line);
+  });
+
+  it("T79 a blank or whitespace-only research note still stops hand-back-invalid naming note", () => {
+    for (const note of ["", "   ", "\n\t "]) {
+      const s = stateAt("research", CARD, { research: true });
+      const hb = okHB("research", s, { note });
+      expect(validateHandBack(s, hb).join(" ")).toContain("note");
+      const r = go(s, hb);
+      expect(r.action.kind).toBe("stopped");
+      expect(r.action.reason).toBe("hand-back-invalid");
+      expect(r.action.report.detail).toContain("note");
+    }
+  });
+
+  it("T80 worker-contract.md names the M<n> mutation id form and the verbatim-echo rule", () => {
+    const doc = readFileSync(CONTRACT_DOC, "utf8");
+    const lead = doc.split("\n").find((l) => l.startsWith("- `lead`:"));
+    expect(lead).toContain("M<n>");
+    expect(lead).toContain("M1, M2");
+    expect(doc).toContain("verbatim");
+    expect(doc).toContain("M8a");
+  });
+
+  it("T81 the done report carries the research seat's inline note; null when no research seat ran", () => {
+    const withR = walk(CARD, { research: true }, { "research#1": { note: INLINE_NOTE } });
+    expect(withR.last.kind).toBe("done");
+    expect(withR.last.report.researchNote).toBe(INLINE_NOTE);
+    const without = walk(CARD, {});
+    expect(without.last.kind).toBe("done");
+    expect(without.last.report.researchNote).toBeNull();
+  });
+});
+
+// Card seat-no-cpu-burners: a seat's loaded-run proof once started unbounded `yes` burners on a shared machine.
+describe("no cpu burners", () => {
+  const RULE_ID = "no-cpu-burners";
+  const RULE_TEXT =
+    "A burner is any process started only to load the machine (yes > /dev/null, stress, a busy loop), bounded or not; concurrent pnpm test:unit runs are not burners. Never start a burner without the user's yes: a seat that wants one stops and returns a designQuestion naming the load it would start (the process, how many, the timeout, and why), and starts it only after an answer from the user says yes. Before hand-back, confirm with ps that no load process you started survives, orphans reparented to PID 1 included, and kill any that does.";
+  const WORKING = ["tester", "coder", "reviewer"];
+  const lanes = {
+    full: [CARD, { research: true }],
+    lean: [{ ...CARD, size: "S", class: "prose" }, { research: true }],
+    "tests-only": [{ ...CARD, class: "tests-only" }, { research: true }],
+  };
+
+  const SKILL = readFileSync(join(HERE, "..", "skills", "doug-hand", "SKILL.md"), "utf8");
+  const SKILL_RULE = BRIEF_RULES[RULE_ID].text.replace(
+    "concurrent pnpm test:unit runs",
+    "concurrent runs of the project's test command (the commands in `stopGate.commands`)",
+  );
+
+  it("T88 the doug-hand skill carries the rule derived from the contract text, with no pnpm command", () => {
+    expect(SKILL_RULE).not.toBe(BRIEF_RULES[RULE_ID].text);
+    expect(SKILL_RULE).not.toContain("pnpm");
+    expect(SKILL).toContain(SKILL_RULE);
+  });
+
+  it("T89 the skill states the rule once, and that the lead asks the user and resumes the seat", () => {
+    const lines = SKILL.split("\n").filter((l) => l.includes(SKILL_RULE));
+    expect(lines.length).toBe(1);
+    expect(lines[0]).toMatch(/Every tester, coder, and reviewer brief carries the no-CPU-burners rule verbatim/);
+    expect(SKILL).toContain(
+      "When a seat returns a question asking to start a burner, the lead asks the user and resumes the seat with the answer; no burner starts before a yes.",
+    );
+  });
+
+  it("T70 the rule text is pinned", () => {
+    expect(BRIEF_RULES[RULE_ID].text).toBe(RULE_TEXT);
+  });
+
+  it("T71 tester, coder and reviewer briefs carry the exact text on every lane they run on", () => {
+    const seen = new Set();
+    for (const [lane, [card, opts]] of Object.entries(lanes)) {
+      const { actions } = walk(card, opts);
+      for (const a of actions.filter((x) => x.kind === "seat" && WORKING.includes(x.seat))) {
+        seen.add(lane + "/" + a.seat);
+        const rule = a.brief.rules.find((r) => r.id === RULE_ID);
+        expect(rule, `${lane}/${a.seat}`).toBeDefined();
+        expect(rule.text, `${lane}/${a.seat}`).toBe(RULE_TEXT);
+      }
+    }
+    for (const k of ["full/tester", "full/coder", "full/reviewer", "lean/coder", "lean/reviewer", "tests-only/tester", "tests-only/reviewer"]) {
+      expect(seen.has(k), k).toBe(true);
+    }
+  });
+
+  it("T72 setup, research, lead, gate and commit briefs do not carry the rule", () => {
+    for (const [lane, [card, opts]] of Object.entries(lanes)) {
+      const { actions } = walk(card, opts);
+      for (const a of actions.filter((x) => x.kind === "seat" && !WORKING.includes(x.seat))) {
+        expect(a.brief.rules.some((r) => r.id === RULE_ID), `${lane}/${a.seat}`).toBe(false);
+      }
+    }
+  });
+
+  it("T73 briefPrompt renders the rule into the tester, coder and reviewer prompts", () => {
+    const { actions } = walk(CARD, { research: true });
+    const seen = new Set();
+    for (const a of actions.filter((x) => x.kind === "seat" && WORKING.includes(x.seat))) {
+      seen.add(a.seat);
+      expect(briefPrompt(a.brief, { repoRoot: "/r", worktreePath: "/w" }), a.seat).toContain(RULE_TEXT);
+    }
+    expect(seen.size).toBe(3);
+  });
+});
+
+// Card commit-seat-no-file-edits: the commit seat commits exactly the tree the gate passed.
+describe("commit seat tree", () => {
+  const NO_EDIT =
+    "Never edit, create, delete, or format a file: commit exactly the tree the gate seat passed (GATED TREE). A change the commit seems to need goes in blocked, never into the tree.";
+  const COMMIT_TREE =
+    "After git commit returns, run node .doug/hooks/lib/verified-tree.mjs tree with the card worktree path as its argument and report its output as tree; a tree that differs from GATED TREE stops the card.";
+  const GATE_TREE =
+    "After the gate commands, run node .doug/hooks/lib/verified-tree.mjs tree with the card worktree path as its argument and report its output as tree.";
+  const ruleOf = (a, id) => a.brief.rules.find((r) => r.id === id);
+
+  function toCommit(gateTree = TREE_A) {
+    let s = stateAt("gate");
+    s = go(s, okHB("gate", s, { tree: gateTree })).state;
+    expect(s.pending).toBe("commit");
+    return s;
+  }
+
+  it("T82 only the commit brief carries commit-no-file-edits with the pinned text", () => {
+    expect(BRIEF_RULES["commit-no-file-edits"].text).toBe(NO_EDIT);
+    const { actions } = walk(CARD, { research: true });
+    const seats = actions.filter((x) => x.kind === "seat");
+    for (const a of seats) {
+      const r = ruleOf(a, "commit-no-file-edits");
+      if (a.seat === "commit") expect(r?.text).toBe(NO_EDIT);
+      else expect(r, a.seat).toBeUndefined();
+    }
+  });
+
+  it("T83 a commit tree differing from the gated tree stops commit-tree-mismatch", () => {
+    const s = toCommit(TREE_A);
+    const r = go(s, okHB("commit", s, { tree: TREE_B }));
+    expect(r.action.kind).toBe("stopped");
+    expect(r.action.reason).toBe("commit-tree-mismatch");
+    expect(r.action.report.stoppedAt).toBe("commit");
+    expect(r.action.report.detail).toContain("abc1234");
+    expect(r.action.report.detail).toContain(TREE_A);
+    expect(r.action.report.detail).toContain(TREE_B);
+    expect(r.action.report.commit).toBeNull();
+    const good = go(s, okHB("commit", s, { tree: TREE_A }));
+    expect(good.action.kind).toBe("done");
+  });
+
+  it("T84 the gated tree is the latest green gate's tree", () => {
+    let s = stateAt("gate");
+    const red = go(s, okHB("gate", s, { tree: TREE_A, commands: [{ command: "node .doug/hooks/scripts/verify.mjs", exitCode: 1 }] }));
+    expect(red.action.kind).toBe("seat");
+    s = red.state;
+    let guard = 0;
+    while (s.pending !== "gate") {
+      if (guard++ > 20) throw new Error("never reached gate again");
+      s = go(s, okHB(s.pending, s)).state;
+    }
+    s = go(s, okHB("gate", s, { tree: TREE_B })).state;
+    expect(s.pending).toBe("commit");
+    const r = go(s, okHB("commit", s, { tree: TREE_B }));
+    expect(r.action.kind).toBe("done");
+    expect(r.action.report.commit).toBe("abc1234");
+  });
+
+  it("T85 a gate hand-back without a valid tree stops hand-back-invalid naming tree", () => {
+    const s = stateAt("gate");
+    for (const tree of [undefined, "xyz"]) {
+      const r = go(s, okHB("gate", s, { tree }));
+      expect(r.action.reason, String(tree)).toBe("hand-back-invalid");
+      expect(r.action.report.detail).toContain("tree");
+    }
+  });
+
+  it("T85b a commit hand-back without a valid tree stops hand-back-invalid naming tree", () => {
+    const s = toCommit();
+    for (const tree of [undefined, "xyz"]) {
+      const r = go(s, okHB("commit", s, { tree }));
+      expect(r.action.reason, String(tree)).toBe("hand-back-invalid");
+      expect(r.action.report.detail).toContain("tree");
+    }
+  });
+
+  it("T86 the commit brief names the gated tree; other prompts carry no GATED TREE line", () => {
+    const s = toCommit(TREE_A);
+    const a = currentAction(s);
+    expect(a.brief.gateTree).toBe(TREE_A);
+    expect(briefPrompt(a.brief, { repoRoot: "/r", worktreePath: "/w" })).toContain("GATED TREE: " + TREE_A);
+    const { actions } = walk(CARD, { research: true });
+    for (const x of actions.filter((y) => y.kind === "seat" && y.seat !== "commit")) {
+      expect(briefPrompt(x.brief, { repoRoot: "/r", worktreePath: "/w" }), x.seat).not.toContain("GATED TREE:");
+    }
+  });
+
+  it("T87 the gate and commit briefs say how to report the tree", () => {
+    expect(BRIEF_RULES["gate-reports-tree"].text).toBe(GATE_TREE);
+    expect(BRIEF_RULES["commit-reports-tree"].text).toBe(COMMIT_TREE);
+    const { actions } = walk(CARD, { research: true });
+    for (const a of actions.filter((x) => x.kind === "seat")) {
+      expect(!!ruleOf(a, "gate-reports-tree"), a.seat).toBe(a.seat === "gate");
+      expect(!!ruleOf(a, "commit-reports-tree"), a.seat).toBe(a.seat === "commit");
+    }
+  });
+});
+
 describe("coverage", () => {
   it("T32 every STOP_REASONS entry is produced by at least one test", () => {
     expect([...seenReasons].sort()).toEqual([...STOP_REASONS].sort());
-    expect(STOP_REASONS.length).toBe(10);
+    expect(STOP_REASONS.length).toBe(12);
   });
 });

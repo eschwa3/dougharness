@@ -1,11 +1,12 @@
 import { describe, it, expect, vi, beforeAll } from "vitest";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, existsSync, realpathSync, lstatSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, existsSync, realpathSync, lstatSync, rmSync, statSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { readAutopilot, autopilotView, autopilotLines, parseAutopilot } from "../lib/autopilot-view.mjs";
 import * as core from "../lib/autopilot-core.mjs";
+import { initialState, currentAction } from "../lib/card-loop.mjs";
 
 // Card autopilot-live-queue: the lead's autopilot state file (.doug/.state/autopilot.json), its writer script, and
 // the shared pure view the pane and the board page both render. Test names carry the contract's mutation ids.
@@ -361,25 +362,21 @@ describe("parseAutopilot (F3)", () => {
   });
 });
 
-describe("autopilotLines titles (F1)", () => {
-  it("prints the title between id and size/class, and no title text when a card has none (F1)", () => {
+describe("autopilotLines short lines (F1)", () => {
+  it("a card line is mark, id and status only: no title, no size/class (M7)", () => {
     const s = runState({
       cards: [
         { id: "titled", title: "A real title", size: "M", class: "code", state: "queued" },
-        { id: "untitled", size: "S", class: "prose", state: "queued" },
+        { id: "shipped", title: "Shipped title", size: "M", class: "code", state: "landed", commit: "0123456789abcdef" },
         { id: "bare", state: "queued" },
       ],
     });
     const lines = autopilotLines(autopilotView(s, NOW));
-    expect(lines).toContain("· titled A real title (M/code)");
-    expect(lines).toContain("· untitled (S/prose)");
-    expect(lines).toContain("· bare");
-    expect(lines.join("\n")).not.toMatch(/undefined|null/);
-  });
-
-  it("a running titled card keeps its detail after the shape (F1)", () => {
-    const lines = autopilotLines(autopilotView(runState(), NOW));
-    expect(lines.find((l) => l.includes("cur "))).toMatch(/^▶ cur Current \(M\/code\) coder since \d\d:\d\d$/);
+    expect(lines).toContain("  · titled");
+    expect(lines).toContain("  · bare");
+    expect(lines).toContain("  ✓ shipped 0123456");
+    const text = lines.join("\n");
+    expect(text).not.toMatch(/A real title|Shipped title|\(M\/code\)|undefined|null/);
   });
 });
 
@@ -403,21 +400,88 @@ describe("autopilot header times (F7)", () => {
 });
 
 describe("autopilotLines", () => {
-  it("running: header, one line per card with mark/id/size-class/detail, a caps line, a filed line", () => {
-    const lines = autopilotLines(autopilotView(runState(), NOW));
-    expect(Array.isArray(lines)).toBe(true);
-    expect(lines.every((l) => typeof l === "string")).toBe(true);
-    const text = lines.join("\n");
-    expect(lines.find((l) => l.includes("done1"))).toMatch(/done1 Done one \(S\/docs\).*abc1234/);
-    expect(lines.find((l) => l.includes("cur"))).toMatch(/cur Current \(M\/code\) coder since \d\d:\d\d/);
-    expect(lines.find((l) => l.includes("bad"))).toMatch(/bad Bad \(L\/code\).*gate red twice/);
-    expect(lines.find((l) => l.includes("next"))).toMatch(/next Next \(S\/prose\)/);
-    expect(text).toContain("$12.50 / $96.78");
-    expect(text).toContain("80 / 1054 min");
-    expect(text).toContain("21% / 60%");
-    // the four states carry distinct marks
-    const marks = ["done1", "cur", "bad", "next"].map((id) => lines.find((l) => l.includes(id)).split(" ")[0]);
-    expect(new Set(marks).size).toBe(4);
+  it("running: header, then Running/Queued/Landed/Stopped blocks, the spend line, then filed lines (M5, M7, M15)", () => {
+    const st = runState({
+      cards: [
+        { id: "done1", title: "Done one", size: "S", class: "docs", state: "landed", commit: "abc1234def" },
+        { id: "next", title: "Next", size: "S", class: "prose", state: "queued" },
+        { id: "cur", title: "Current", size: "M", class: "code", state: "running", step: "coder", stepStartedAt: iso(-10 * MIN),
+          seats: [{ step: "research", startedAt: iso(-30 * MIN) }, { step: "tester", startedAt: iso(-20 * MIN) }, { step: "coder", startedAt: iso(-10 * MIN) }] },
+        { id: "bad", title: "Bad", size: "L", class: "code", state: "stopped", reason: "gate red twice, then a long reason that must stay whole" },
+        { id: "next2", state: "queued" },
+      ],
+    });
+    const lines = autopilotLines(autopilotView(st, NOW));
+    expect(lines[0]).toMatch(/^Autopilot running since \d\d:\d\d$/);
+    expect(lines.slice(1)).toEqual([
+      "Running",
+      "  ▶ cur research ✓ tester ✓ coder ▶ 10m",
+      "Queued",
+      "  · next",
+      "  · next2",
+      "Landed",
+      "  ✓ done1 abc1234",
+      "Stopped",
+      "  ✗ bad gate red twice, then a long reason that must stay whole",
+      "$12.50 / $96.78, 80 / 1054 min, ctx 21%",
+      "+ fu1 (follow-up from cur) backlog bottom",
+    ]);
+    expect(lines.join("\n")).not.toMatch(/caps:/);
+  });
+
+  it("an empty section is omitted (M5)", () => {
+    const st = runState({ cards: [{ id: "a", state: "queued" }, { id: "b", state: "landed", commit: "1234567" }], filed: [] });
+    const lines = autopilotLines(autopilotView(st, NOW));
+    expect(lines).toContain("Queued");
+    expect(lines).toContain("Landed");
+    expect(lines).not.toContain("Running");
+    expect(lines).not.toContain("Stopped");
+    expect(lines.indexOf("Queued")).toBeLessThan(lines.indexOf("Landed"));
+  });
+
+  it("in an inactive run the formerly running card is listed under Stopped as interrupted (M6)", () => {
+    const st = runState({ updatedAt: iso(-3 * HOUR) });
+    const lines = autopilotLines(autopilotView(st, NOW));
+    expect(lines).not.toContain("Running");
+    const stopped = lines.indexOf("Stopped");
+    expect(stopped).toBeGreaterThan(-1);
+    const idx = lines.findIndex((l) => /^ {2}\S cur interrupted$/.test(l));
+    expect(idx).toBeGreaterThan(stopped);
+  });
+
+  it("an ended run lists a still-running card under Stopped as interrupted (M6)", () => {
+    const lines = autopilotLines(autopilotView(runState({ status: "ended", endedAt: iso(-MIN) }), NOW));
+    expect(lines).not.toContain("Running");
+    expect(lines.findIndex((l) => /^ {2}\S cur interrupted$/.test(l))).toBeGreaterThan(lines.indexOf("Stopped"));
+  });
+
+  it("view exposes the same groups and the spend line for the board (M15, M17)", () => {
+    const v = autopilotView(runState(), NOW);
+    expect(v.spend).toBe("$12.50 / $96.78, 80 / 1054 min, ctx 21%");
+    expect(v.groups.map((g) => g.title)).toEqual(["Running", "Queued", "Landed", "Stopped"]);
+    const cur = v.groups[0].cards[0];
+    expect(cur).toMatchObject({ id: "cur", state: "running" });
+    expect(typeof cur.status).toBe("string");
+    expect(typeof cur.mark).toBe("string");
+    expect(v.groups[2].cards[0]).toMatchObject({ id: "done1", status: "abc1234" });
+    expect(v.groups[3].cards[0]).toMatchObject({ id: "bad", status: "gate red twice" });
+  });
+
+  it("spend line: exactly '$12.40 / $35.66, 94 / 564 min, ctx 31%' for those values (M15)", () => {
+    const st = runState({ caps: { usd: 35.66, wallMin: 564, contextPct: 60 }, used: { usd: 12.4, wallMin: 94, contextPct: 31 } });
+    expect(autopilotLines(autopilotView(st, NOW))).toContain("$12.40 / $35.66, 94 / 564 min, ctx 31%");
+  });
+
+  it("spend line rounds wall minutes to whole minutes (M15)", () => {
+    const st = runState({ caps: { usd: 35.66, wallMin: 564, contextPct: 60 }, used: { usd: 1, wallMin: 93.6, contextPct: 31 } });
+    expect(autopilotView(st, NOW).spend).toBe("$1.00 / $35.66, 94 / 564 min, ctx 31%");
+  });
+
+  it("spend line before any cap check shows dashes, never undefined (M16)", () => {
+    const st = runState({ caps: { usd: 35.66, wallMin: 564, contextPct: 60 }, used: undefined });
+    const lines = autopilotLines(autopilotView(st, NOW));
+    expect(lines).toContain("- / $35.66, - / 564 min, ctx -");
+    expect(lines.join("\n")).not.toMatch(/undefined|NaN/);
   });
 
   it("renders each filed card (A9)", () => {
@@ -509,12 +573,12 @@ describe("card parallel-card-queens autopilot subcommands", () => {
     { id: "h2", column: "ready", track: "hand", component: "flow", title: "H2", size: "S", class: "code", goal: "Change plugins/doug-flow/lib/b.mjs." },
     { id: "h3", column: "ready", track: "hand", component: "cli", title: "H3", size: "S", class: "code", goal: "Change packages/doug-cli/src/c.ts." },
   ];
-  function queenProject({ cards = CARDS, config, plans = {} } = {}) {
+  function queenProject({ cards = CARDS, config, plans = {}, milestones } = {}) {
     const dir = tmp();
     mkdirSync(join(dir, ".doug/.state"), { recursive: true });
     mkdirSync(join(dir, "plugins"), { recursive: true });
     mkdirSync(join(dir, "packages"), { recursive: true });
-    writeFileSync(join(dir, ".doug/board.json"), JSON.stringify({ version: 1, columns: [{ id: "ready", title: "Ready" }, { id: "done", title: "Done" }], components: ["flow", "cli", "gates"], cards }));
+    writeFileSync(join(dir, ".doug/board.json"), JSON.stringify({ version: 1, columns: [{ id: "ready", title: "Ready" }, { id: "done", title: "Done" }], components: ["flow", "cli", "gates"], ...(milestones ? { milestones } : {}), cards }));
     if (config) writeFileSync(join(dir, ".doug/config.json"), JSON.stringify(config));
     for (const [id, p] of Object.entries(plans)) {
       mkdirSync(join(dir, ".doug/plans"), { recursive: true });
@@ -609,6 +673,39 @@ describe("card parallel-card-queens autopilot subcommands", () => {
     const out = JSON.parse(ap(dir, "pick").stdout);
     expect(out.launch).toEqual(["r1", "r2"]);
     expect(out.held).toEqual([]);
+  });
+
+  describe("pick --milestone (ADR 0016)", () => {
+    const MS = [
+      { id: "m1", title: "M1", goal: "First.", status: "active" },
+      { id: "m2", title: "M2", goal: "Second.", status: "planned" },
+    ];
+    const msCards = [{ ...CARDS[0], milestone: "m1" }, { ...CARDS[2], milestone: "m2" }, { ...CARDS[1], id: "h4", component: "gates", goal: "Change plugins/doug-gates/lib/z.mjs." }];
+
+    it("limits the launch list to that milestone's Ready cards; the outside cards appear nowhere", () => {
+      const dir = queenProject({ cards: msCards, milestones: MS, config: { workers: { max: 5 } } });
+      const r = ap(dir, "pick", "--milestone", "m1");
+      expect(r.status).toBe(0);
+      const out = JSON.parse(r.stdout);
+      expect(out.launch).toEqual(["h1"]);
+      for (const k of ["needsPlan", "held", "alone"]) expect(JSON.stringify(out[k])).not.toMatch(/h3|h4/);
+    });
+
+    it("without --milestone every Ready card is picked, in board order", () => {
+      const dir = queenProject({ cards: msCards, milestones: MS, config: { workers: { max: 5 } } });
+      const r = ap(dir, "pick");
+      expect(r.status).toBe(0);
+      expect(JSON.parse(r.stdout).launch).toEqual(["h1", "h3", "h4"]);
+    });
+
+    it("an unknown milestone exits 1 with a one-line autopilot error, no stack and no JSON", () => {
+      const dir = queenProject({ cards: msCards, milestones: MS });
+      const r = ap(dir, "pick", "--milestone", "nope");
+      expect(r.status).toBe(1);
+      expect(r.stderr).toMatch(/^autopilot: unknown milestone "nope"/m);
+      expect(r.stderr).not.toMatch(/\n\s+at /);
+      expect(r.stdout.trim()).toBe("");
+    });
   });
 
   it("A02/A03 error paths: a missing --args-file or --file exits 1 with a message and no stack; an unwritable report still prints the verdict", () => {
@@ -712,6 +809,50 @@ describe("card parallel-card-queens autopilot subcommands", () => {
     expect(stopped.stdout).toMatch(/^autopilot: f1 ask/m);
   });
 
+  it("A09b report unwraps a flow queen result saved with its task-output wrapper", () => {
+    const flowCard = { id: "f1", column: "ready", component: "gates", title: "F1", size: "M", class: "code", goal: "Flow goal for f1." };
+    const dir = queenProject({ cards: [flowCard] });
+    launch(dir, "f1", "wf_f1", "flow");
+    const wrapped = { summary: "done", agentCount: 3, logs: [], result: { ok: true, levels: [], marker: "FLOW-WRAP" } };
+    const r = ap(dir, "report", "--run", "wf_f1", "--file", resultFile(dir, "wrapped.json", wrapped));
+    expect(r.status).toBe(0);
+    expect(r.stdout).toMatch(/^autopilot: f1 land/m);
+    const saved = JSON.parse(readFileSync(join(dir, ".doug/.state/reports/f1/last-report.json"), "utf8"));
+    expect(saved.marker).toBe("FLOW-WRAP");
+    expect("summary" in saved).toBe(false);
+  });
+
+  it("A09c a flow result with top-level ok or paused is never unwrapped", () => {
+    const flowCard = { id: "f1", column: "ready", component: "gates", title: "F1", size: "M", class: "code", goal: "Flow goal for f1." };
+    const dir = queenProject({ cards: [flowCard] });
+    launch(dir, "f1", "wf_f1", "flow");
+    const okTop = ap(dir, "report", "--run", "wf_f1", "--file", resultFile(dir, "ok.json", { ok: true, levels: [], result: { ok: false, stoppedAtLevel: 2 } }));
+    expect(okTop.stdout).toMatch(/^autopilot: f1 land/m);
+    const pausedTop = ap(dir, "report", "--run", "wf_f1", "--file", resultFile(dir, "paused.json", { paused: { gate: "human", level: 1 }, result: { ok: true, levels: [] } }));
+    expect(pausedTop.stdout).toMatch(/^autopilot: f1 ask paused at a human gate/m);
+  });
+
+  it("A03c report unwraps a hand queen result saved with its task-output wrapper", () => {
+    const dir = queenProject();
+    launch(dir, "h3", "wf_h3");
+    const wrapped = { summary: "stopped", agentCount: 4, logs: [], result: { card: { id: "h3" }, outcome: "stopped", reason: "reviewer-major-open", stoppedAt: "reviewer", detail: "R1 open", history: [] } };
+    const r = ap(dir, "report", "--run", "wf_h3", "--file", resultFile(dir, "wrapped.json", wrapped));
+    expect(r.status).toBe(0);
+    expect(r.stdout).toMatch(/^autopilot: h3 ask reviewer-major-open/m);
+    const saved = JSON.parse(readFileSync(join(dir, ".doug/.state/reports/h3/card-report.json"), "utf8"));
+    expect(saved.reason).toBe("reviewer-major-open");
+    expect("summary" in saved).toBe(false);
+  });
+
+  it("A03d a hand result with top-level card or outcome is never unwrapped", () => {
+    const dir = queenProject();
+    launch(dir, "h3", "wf_h3");
+    const outcomeTop = ap(dir, "report", "--run", "wf_h3", "--file", resultFile(dir, "o.json", { outcome: "done", commit: "abc", history: [], result: { outcome: "stopped", reason: "gate-red-twice" } }));
+    expect(outcomeTop.stdout).toMatch(/^autopilot: h3 land/m);
+    const cardTop = ap(dir, "report", "--run", "wf_h3", "--file", resultFile(dir, "c.json", { card: { id: "h3" }, kind: "done", report: {}, result: { outcome: "stopped", reason: "gate-red-twice" } }));
+    expect(cardTop.stdout).toMatch(/^autopilot: h3 land/m);
+  });
+
   it("A05 lock-wait adds to the card's lockWaitMs; an unknown card exits 1", () => {
     const dir = queenProject();
     expect(ap(dir, "lock-wait", "h1", "--ms", "300").status).toBe(0);
@@ -805,6 +946,258 @@ describe("card parallel-card-queens autopilot subcommands", () => {
     expect(v.running).toEqual([{ id: "a", runId: "wf_a" }, { id: "b", runId: "wf_b" }]);
     expect(v.current).toMatchObject({ id: "a" });
     expect(autopilotView(runState(), NOW).running.map((x) => x.id)).toEqual(["cur"]);
+  });
+});
+
+// Card queen-resume-with-answer: `answer` records the user's answer to a design-decision stop in queen-args.json,
+// and `report` then says to resume with it.
+describe("card queen-resume-with-answer: autopilot answer", () => {
+  const CARDS = [
+    { id: "h1", column: "ready", track: "hand", component: "flow", title: "H1", size: "S", class: "code", goal: "Change plugins/doug-flow/lib/a.mjs." },
+    { id: "h2", column: "ready", track: "hand", component: "cli", title: "H2", size: "S", class: "code", goal: "Change packages/doug-cli/src/c.ts." },
+  ];
+  function setup() {
+    const dir = tmp();
+    mkdirSync(join(dir, ".doug/.state"), { recursive: true });
+    mkdirSync(join(dir, "plugins"), { recursive: true });
+    mkdirSync(join(dir, "packages"), { recursive: true });
+    writeFileSync(join(dir, ".doug/board.json"), JSON.stringify({ version: 1, columns: [{ id: "ready", title: "Ready" }], components: ["flow", "cli"], cards: CARDS }));
+    ap(dir, "start", "--cards", "h1,h2", "--usd-cap", "10", "--wall-cap", "100");
+    return dir;
+  }
+  const launchWith = (dir, id, run) => {
+    const argsFile = join(dir, `${id}-args.json`);
+    writeFileSync(argsFile, JSON.stringify({ card: { id }, options: { research: false } }));
+    return ap(dir, "launched", id, "--run", run, "--kind", "hand", "--worktree", join(dir, `wt-${id}`), "--args-file", argsFile);
+  };
+  const result = (dir, name, value) => {
+    const f = join(dir, name);
+    writeFileSync(f, JSON.stringify(value));
+    return f;
+  };
+  const stopResult = (over = {}) => ({
+    outcome: "stopped",
+    reason: "design-decision",
+    stoppedAt: "tester",
+    detail: "Q?",
+    history: [
+      { seat: "setup", round: 1, result: "ok" },
+      { seat: "tester", round: 1, result: "stopped", note: "design-decision" },
+    ],
+    ...over,
+  });
+  const queenArgs = (dir, id) => JSON.parse(readFileSync(join(dir, ".doug/.state/reports", id, "queen-args.json"), "utf8"));
+
+  it("A10 answer appends { seat, question, answer, round, run } to options.answers from the saved stop", () => {
+    const dir = setup();
+    launchWith(dir, "h1", "wf_h1");
+    ap(dir, "report", "--run", "wf_h1", "--file", result(dir, "r.json", stopResult()));
+    const r = ap(dir, "answer", "h1", "--answer", "A.");
+    expect(r.status, r.stderr).toBe(0);
+    expect(r.stdout).toContain("autopilot: h1 answer recorded for tester");
+    const saved = queenArgs(dir, "h1");
+    expect(saved.options.answers).toEqual([{ seat: "tester", question: "Q?", answer: "A.", round: 1, run: "wf_h1" }]);
+    expect(saved.options.research).toBe(false);
+    expect(saved.card).toEqual({ id: "h1" });
+    // a second answer appends
+    ap(dir, "answer", "h1", "--answer", "B.");
+    expect(queenArgs(dir, "h1").options.answers.map((a) => a.answer)).toEqual(["A.", "B."]);
+  });
+
+  it("A10b answer refuses an agent-null stop (a resume, not an ask), a blank answer, a missing report, a missing args file and an unknown card", () => {
+    const dir = setup();
+    launchWith(dir, "h1", "wf_h1");
+    launchWith(dir, "h2", "wf_h2");
+    // no report saved yet
+    expect(ap(dir, "answer", "h1", "--answer", "A.").status).toBe(1);
+    ap(dir, "report", "--run", "wf_h1", "--file", result(dir, "r.json", stopResult({ reason: "agent-null" })));
+    const notDesign = ap(dir, "answer", "h1", "--answer", "A.");
+    expect(notDesign.status).toBe(1);
+    expect(queenArgs(dir, "h1").options.answers).toBeUndefined();
+    ap(dir, "report", "--run", "wf_h2", "--file", result(dir, "r2.json", stopResult()));
+    expect(ap(dir, "answer", "h2", "--answer", "   ").status).toBe(2);
+    expect(ap(dir, "answer", "h2").status).toBe(2);
+    expect(ap(dir, "answer", "nope", "--answer", "A.").status).toBe(1);
+    rmSync(join(dir, ".doug/.state/reports/h2/queen-args.json"));
+    expect(ap(dir, "answer", "h2", "--answer", "A.").status).toBe(1);
+  });
+
+  it("A11 report prints ask design-decision before the answer and resume with the answer after it", () => {
+    const dir = setup();
+    launchWith(dir, "h1", "wf_h1");
+    const f = result(dir, "r.json", stopResult());
+    expect(ap(dir, "report", "--run", "wf_h1", "--file", f).stdout).toMatch(/^autopilot: h1 ask design-decision/m);
+    ap(dir, "answer", "h1", "--answer", "A.");
+    const after = ap(dir, "report", "--run", "wf_h1", "--file", f);
+    expect(after.status).toBe(0);
+    expect(after.stdout).toMatch(/^autopilot: h1 resume with the answer/m);
+    expect(after.stdout).not.toContain("ask design-decision");
+  });
+
+  it("A12 a repeat design-decision stop under the resumed run id is ask again", () => {
+    const dir = setup();
+    launchWith(dir, "h1", "wf_h1");
+    ap(dir, "report", "--run", "wf_h1", "--file", result(dir, "r.json", stopResult()));
+    ap(dir, "answer", "h1", "--answer", "A.");
+    expect(ap(dir, "resumed", "h1", "--run", "wf_h1b").status).toBe(0);
+    const again = ap(dir, "report", "--run", "wf_h1b", "--file", result(dir, "r2.json", stopResult({ detail: "Q2?" })));
+    expect(again.stdout).toMatch(/^autopilot: h1 ask design-decision/m);
+    expect(again.stdout).not.toContain("resume with the answer");
+  });
+
+  it("A12c an identical repeat stop under the resumed run id is ask again, not resume with the answer", () => {
+    const dir = setup();
+    launchWith(dir, "h1", "wf_h1");
+    const f = result(dir, "r.json", stopResult());
+    ap(dir, "report", "--run", "wf_h1", "--file", f);
+    ap(dir, "answer", "h1", "--answer", "A.");
+    expect(ap(dir, "resumed", "h1", "--run", "wf_h1b").status).toBe(0);
+    const again = ap(dir, "report", "--run", "wf_h1b", "--file", f);
+    expect(again.stdout).toMatch(/^autopilot: h1 ask design-decision/m);
+    expect(again.stdout).not.toContain("resume with the answer");
+  });
+
+  it("A13 resumed after a resume with the answer counts it against the single plain resume", () => {
+    const dir = setup();
+    launchWith(dir, "h1", "wf_h1");
+    const f = result(dir, "r.json", stopResult());
+    ap(dir, "report", "--run", "wf_h1", "--file", f);
+    ap(dir, "answer", "h1", "--answer", "A.");
+    expect(ap(dir, "report", "--run", "wf_h1", "--file", f).stdout).toMatch(/^autopilot: h1 resume with the answer/m);
+    expect(ap(dir, "resumed", "h1", "--run", "wf_h1b").status).toBe(0);
+    const c = state(dir).cards.find((x) => x.id === "h1");
+    expect(c.resumes).toBe(1);
+    expect(c.runId).toBe("wf_h1b");
+  });
+
+  it("A14 an answer for the lead does not cover a reviewer design-decision stop under the same run, round and question", () => {
+    const dir = setup();
+    launchWith(dir, "h1", "wf_h1");
+    ap(dir, "report", "--run", "wf_h1", "--file", result(dir, "r.json", stopResult({ stoppedAt: "lead", history: [{ seat: "lead", round: 1, result: "stopped", note: "design-decision" }] })));
+    ap(dir, "answer", "h1", "--answer", "A.");
+    const rev = result(dir, "r2.json", stopResult({ stoppedAt: "reviewer", history: [{ seat: "reviewer", round: 1, result: "stopped", note: "design-decision" }] }));
+    const out = ap(dir, "report", "--run", "wf_h1", "--file", rev);
+    expect(out.stdout).toMatch(/^autopilot: h1 ask design-decision/m);
+    expect(out.stdout).not.toContain("resume with the answer");
+  });
+
+  it("A15 an answer for reviewer round 1 does not cover a reviewer stop at round 2 with the same run and question", () => {
+    const dir = setup();
+    launchWith(dir, "h1", "wf_h1");
+    const stop = (round) => stopResult({ stoppedAt: "reviewer", history: [{ seat: "reviewer", round, result: "stopped", note: "design-decision" }] });
+    ap(dir, "report", "--run", "wf_h1", "--file", result(dir, "r.json", stop(1)));
+    ap(dir, "answer", "h1", "--answer", "A.");
+    const out = ap(dir, "report", "--run", "wf_h1", "--file", result(dir, "r2.json", stop(2)));
+    expect(out.stdout).toMatch(/^autopilot: h1 ask design-decision/m);
+    expect(out.stdout).not.toContain("resume with the answer");
+  });
+
+  it("A16 an answer to Q? does not cover a tester round 1 stop under the same run asking Q2?", () => {
+    const dir = setup();
+    launchWith(dir, "h1", "wf_h1");
+    ap(dir, "report", "--run", "wf_h1", "--file", result(dir, "r.json", stopResult()));
+    ap(dir, "answer", "h1", "--answer", "A.");
+    const out = ap(dir, "report", "--run", "wf_h1", "--file", result(dir, "r2.json", stopResult({ detail: "Q2?" })));
+    expect(out.stdout).toMatch(/^autopilot: h1 ask design-decision/m);
+    expect(out.stdout).not.toContain("resume with the answer");
+  });
+
+  // Card autopilot-answer-any-stop: answer records an answer for any ask stop with a stoppedAt seat.
+  const briefFor = (dir, id, seat, seatRuns) => {
+    const answers = queenArgs(dir, id).options.answers;
+    const st = { ...initialState({ id, goal: "g" }, { answers }), pending: seat, seatRuns };
+    return currentAction(st).brief;
+  };
+  const reviewerMajor = () =>
+    stopResult({
+      reason: "reviewer-major-open",
+      stoppedAt: "reviewer",
+      detail: "major with evidence still open after one fix pass: R1",
+      history: [
+        { seat: "reviewer", round: 1, result: "ok" },
+        { seat: "reviewer", round: 2, result: "stopped", note: "reviewer-major-open" },
+      ],
+    });
+  const gateBlocked = () =>
+    stopResult({
+      reason: "seat-blocked",
+      stoppedAt: "gate",
+      detail: "gate cannot run",
+      history: [{ seat: "gate", round: 1, result: "stopped", note: "seat-blocked" }],
+    });
+
+  it("A17 answer records a reviewer-major-open stop and it reaches the reviewer round-2 brief", () => {
+    const dir = setup();
+    launchWith(dir, "h1", "wf_h1");
+    const rep = reviewerMajor();
+    ap(dir, "report", "--run", "wf_h1", "--file", result(dir, "r.json", rep));
+    const r = ap(dir, "answer", "h1", "--answer", "Accept and resume.");
+    expect(r.status, r.stderr).toBe(0);
+    expect(queenArgs(dir, "h1").options.answers).toEqual([
+      { seat: "reviewer", question: rep.detail, answer: "Accept and resume.", round: 2, run: "wf_h1" },
+    ]);
+    expect(briefFor(dir, "h1", "reviewer", { reviewer: 1 }).answers).toEqual([{ question: rep.detail, answer: "Accept and resume." }]);
+    expect(briefFor(dir, "h1", "tester", {}).answers).toEqual([]);
+  });
+
+  it("A18 answer records a seat-blocked gate stop and it reaches the gate round-1 brief", () => {
+    const dir = setup();
+    launchWith(dir, "h1", "wf_h1");
+    ap(dir, "report", "--run", "wf_h1", "--file", result(dir, "r.json", gateBlocked()));
+    const r = ap(dir, "answer", "h1", "--answer", "Use the other gate.");
+    expect(r.status, r.stderr).toBe(0);
+    const [e] = queenArgs(dir, "h1").options.answers;
+    expect(e).toMatchObject({ seat: "gate", round: 1, question: "gate cannot run", answer: "Use the other gate.", run: "wf_h1" });
+    expect(briefFor(dir, "h1", "gate", {}).answers).toEqual([{ question: "gate cannot run", answer: "Use the other gate." }]);
+    expect(briefFor(dir, "h1", "tester", {}).answers).toEqual([]);
+  });
+
+  it("A19 report prints ask reviewer-major-open before the answer and resume with the answer after it", () => {
+    const dir = setup();
+    launchWith(dir, "h1", "wf_h1");
+    const f = result(dir, "r.json", reviewerMajor());
+    expect(ap(dir, "report", "--run", "wf_h1", "--file", f).stdout).toMatch(/^autopilot: h1 ask reviewer-major-open/m);
+    ap(dir, "answer", "h1", "--answer", "A.");
+    const after = ap(dir, "report", "--run", "wf_h1", "--file", f);
+    expect(after.stdout).toMatch(/^autopilot: h1 resume with the answer/m);
+    expect(after.stdout).not.toContain("ask reviewer-major-open");
+  });
+
+  it("A20 an identical reviewer-major-open stop under the resumed run id is ask again and resumes stays 1", () => {
+    const dir = setup();
+    launchWith(dir, "h1", "wf_h1");
+    const f = result(dir, "r.json", reviewerMajor());
+    ap(dir, "report", "--run", "wf_h1", "--file", f);
+    ap(dir, "answer", "h1", "--answer", "A.");
+    expect(ap(dir, "resumed", "h1", "--run", "wf_h1b").status).toBe(0);
+    const again = ap(dir, "report", "--run", "wf_h1b", "--file", f);
+    expect(again.stdout).toMatch(/^autopilot: h1 ask reviewer-major-open/m);
+    expect(again.stdout).not.toContain("resume with the answer");
+    expect(state(dir).cards.find((x) => x.id === "h1").resumes).toBe(1);
+  });
+
+  it("A21 answer refuses a stopped report with no stoppedAt seat and writes nothing", () => {
+    const dir = setup();
+    launchWith(dir, "h1", "wf_h1");
+    ap(dir, "report", "--run", "wf_h1", "--file", result(dir, "r.json", stopResult({ reason: "seat-blocked", stoppedAt: null, detail: "x" })));
+    expect(ap(dir, "answer", "h1", "--answer", "A.").status).toBe(1);
+    expect(queenArgs(dir, "h1").options.answers).toBeUndefined();
+  });
+
+  it("A21b answer refuses a report that is not a stop and writes nothing", () => {
+    const dir = setup();
+    launchWith(dir, "h1", "wf_h1");
+    ap(dir, "report", "--run", "wf_h1", "--file", result(dir, "r.json", { outcome: "done", history: [] }));
+    expect(ap(dir, "answer", "h1", "--answer", "A.").status).toBe(1);
+    expect(queenArgs(dir, "h1").options.answers).toBeUndefined();
+  });
+
+  it("A12b the unknown-subcommand message and the usage header name answer", () => {
+    const dir = setup();
+    const r = ap(dir, "bogus-subcommand");
+    expect(r.status).not.toBe(0);
+    expect(r.stderr + r.stdout).toContain("answer");
+    expect(readFileSync(script, "utf8").split("\n").slice(0, 40).join("\n")).toContain("autopilot.mjs answer <id>");
   });
 });
 
@@ -994,7 +1387,10 @@ describe("card autopilot-pane-current", () => {
     const $ = {
       state,
       session: { root: async () => dir },
-      fs: { read: async (p) => readFileSync(p, "utf8") },
+      fs: {
+        read: async (p) => readFileSync(p, "utf8"),
+        list: async (p) => readdirSync(p).map((name) => ({ name, kind: "file", size: 0, mtimeMs: statSync(join(p, name)).mtimeMs, isLink: false })),
+      },
       command: { register: async () => {} },
       ui: { open: async (o) => void opens.push(o) },
       clock: { every: (ms, fn) => void timers.push(fn) },
@@ -1136,5 +1532,727 @@ describe("card autopilot-pane-current", () => {
       expect(r.opens.length - base).toBe(expected);
       if (expected) expect(r.opens[base].id).toBe("doug-autopilot");
     }
+  });
+  it("M14: a running queen card's pane line shows its seats from the journal file", async () => {
+    const r = rig();
+    const wf = join(r.dir, "claude-home", "wf_pane");
+    mkdirSync(wf, { recursive: true });
+    const jl = (o) => JSON.stringify(o);
+    writeFileSync(
+      join(wf, "journal.jsonl"),
+      [
+        jl({ type: "launched" }),
+        jl({ type: "started", key: "k1", agentId: "A1", label: "setup:q1:1", phase: "Setup" }),
+        jl({ type: "result", key: "k1", agentId: "A1", result: { seat: "setup" } }),
+        jl({ type: "started", key: "k2", agentId: "A2", label: "tester:q1:1", phase: "Tester" }),
+      ].join("\n") + "\n",
+    );
+    writeFileSync(join(wf, "agent-A1.meta.json"), "{}");
+    writeFileSync(join(wf, "agent-A2.meta.json"), "{}");
+    const t = (Date.now() - 270000) / 1000;
+    utimesSync(join(wf, "agent-A2.meta.json"), t, t);
+    r.write(run(RUN1, "q1", { cards: [{ id: "q1", state: "running", runId: "wf_pane", kind: "hand", journals: [join(wf, "journal.jsonl")] }] }));
+    await r.start();
+    expect(r.shown()).toContain("  ▶ q1 setup ✓ tester ▶ 4m");
+  });
+
+  it("a journal that cannot be read leaves the card line at 'started', never throws", async () => {
+    const r = rig();
+    r.write(run(RUN1, "q1", { cards: [{ id: "q1", state: "running", runId: "wf_x", kind: "hand", journals: [join(r.dir, "nope", "journal.jsonl")] }] }));
+    await r.start();
+    expect(r.shown()).toContain("  ▶ q1 started");
+  });
+});
+
+// Card autopilot-pane-redesign: clear an ended run, seat history for main-run and queen cards, the journal path a
+// launched queen records. Test names carry the mutation ids of the brief.
+describe("card autopilot-pane-redesign: clear", () => {
+  const fresh = () => {
+    const dir = project();
+    started(dir);
+    return dir;
+  };
+
+  it("M1: clear on an ended run removes the file, prints 'autopilot: cleared', exit 0", () => {
+    const dir = fresh();
+    ap(dir, "end");
+    const r = ap(dir, "clear");
+    expect(r.status).toBe(0);
+    expect(r.stdout.trim()).toBe("autopilot: cleared");
+    expect(existsSync(statePath(dir))).toBe(false);
+  });
+
+  it("M2: clear on a fresh running run keeps the file byte for byte and says so", () => {
+    const dir = fresh();
+    ap(dir, "card", "alpha");
+    const before = readFileSync(statePath(dir), "utf8");
+    const r = ap(dir, "clear");
+    expect(r.status).toBe(0);
+    expect(r.stdout.trim()).toBe("autopilot: kept the running run");
+    expect(readFileSync(statePath(dir), "utf8")).toBe(before);
+  });
+
+  it("M3: clear on a running file updated 2 h + 1 min ago removes it", () => {
+    const dir = fresh();
+    const s = state(dir);
+    s.updatedAt = new Date(Date.now() - (2 * HOUR + MIN)).toISOString();
+    write(dir, s);
+    const r = ap(dir, "clear");
+    expect(r.status).toBe(0);
+    expect(r.stdout.trim()).toBe("autopilot: cleared");
+    expect(existsSync(statePath(dir))).toBe(false);
+  });
+
+  it("a running file updated 2 h - 1 min ago is kept", () => {
+    const dir = fresh();
+    const s = state(dir);
+    s.updatedAt = new Date(Date.now() - (2 * HOUR - MIN)).toISOString();
+    write(dir, s);
+    expect(ap(dir, "clear").stdout.trim()).toBe("autopilot: kept the running run");
+    expect(existsSync(statePath(dir))).toBe(true);
+  });
+
+  it("no file: 'autopilot: nothing to clear', exit 0", () => {
+    const dir = project();
+    const r = ap(dir, "clear");
+    expect(r.status).toBe(0);
+    expect(r.stdout.trim()).toBe("autopilot: nothing to clear");
+  });
+
+  it("an unparseable file is preserved, exit 0, no stack", () => {
+    const dir = project();
+    writeFileSync(statePath(dir), "{ not json");
+    const r = ap(dir, "clear");
+    expect(r.status).toBe(0);
+    expect(r.stderr).not.toMatch(/\bat .*\.mjs:\d+/);
+    expect(readFileSync(statePath(dir), "utf8")).toBe("{ not json");
+  });
+
+  it("clear leaves no tmp file and a later start works", () => {
+    const dir = fresh();
+    ap(dir, "end");
+    ap(dir, "clear");
+    expect(readdirSync(join(dir, ".doug/.state"))).toEqual([]);
+    expect(started(dir).status).toBe(0);
+  });
+
+  it("core.clearable: ended and inactive true, running and null false (M1-M3)", () => {
+    const base = { version: 1, startedAt: iso(-HOUR), cards: [] };
+    expect(core.clearable(null, NOW)).toBe(false);
+    expect(core.clearable({ ...base, status: "ended", updatedAt: iso(-MIN) }, NOW)).toBe(true);
+    expect(core.clearable({ ...base, status: "running", updatedAt: iso(-(2 * HOUR + MIN)) }, NOW)).toBe(true);
+    expect(core.clearable({ ...base, status: "running", updatedAt: iso(-MIN) }, NOW)).toBe(false);
+  });
+});
+
+describe("card autopilot-pane-redesign: main-run seat history", () => {
+  it("M13: card, step research, step tester gives two seats and the line 'research ✓ tester ▶ 0m'", () => {
+    const dir = project();
+    started(dir);
+    ap(dir, "card", "alpha");
+    ap(dir, "step", "alpha", "research");
+    ap(dir, "step", "alpha", "tester");
+    const c = state(dir).cards[0];
+    expect(c.seats.map((x) => x.step)).toEqual(["research", "tester"]);
+    expect(c.seats.every((x) => !Number.isNaN(Date.parse(x.startedAt)))).toBe(true);
+    expect(c.step).toBe("tester");
+    const now = new Date(Date.parse(c.seats[1].startedAt) + 5000);
+    const lines = autopilotLines(autopilotView(state(dir), now));
+    expect(lines).toContain("  ▶ alpha research ✓ tester ▶ 0m");
+  });
+
+  it("the running seat shows whole minutes elapsed, floored", () => {
+    const st = runState({ cards: [{ id: "m", state: "running", seats: [{ step: "research", startedAt: iso(-20 * MIN) }, { step: "coder", startedAt: iso(-(4 * MIN + 30000)) }] }] });
+    expect(autopilotLines(autopilotView(st, NOW))).toContain("  ▶ m research ✓ coder ▶ 4m");
+  });
+});
+
+describe("card autopilot-pane-redesign: launched records the journal", () => {
+  const launchedIn = (dir, home, sid, run, id = "alpha") => {
+    const argsFile = join(dir, "args.json");
+    writeFileSync(argsFile, JSON.stringify({ card: { id } }));
+    const env = { ...process.env, CLAUDE_PROJECT_DIR: dir, HOME: home };
+    if (sid === undefined) delete env.CLAUDE_CODE_SESSION_ID;
+    else env.CLAUDE_CODE_SESSION_ID = sid;
+    return spawnSync(process.execPath, [script, "launched", id, "--run", run, "--kind", "hand", "--worktree", join(dir, "wt"), "--args-file", argsFile, "--dir", dir], { encoding: "utf8", env });
+  };
+  const slugOf = (d) => d.replace(/[^A-Za-z0-9]/g, "-");
+
+  it("M12: launched records the journal path, and resumed appends the new run's", () => {
+    const dir = project();
+    started(dir);
+    const home = tmp();
+    expect(launchedIn(dir, home, "sess1", "wf_one").status).toBe(0);
+    const j1 = join(home, ".claude", "projects", slugOf(dir), "sess1", "subagents", "workflows", "wf_one", "journal.jsonl");
+    expect(state(dir).cards[0].journals).toEqual([j1]);
+    const env = { ...process.env, CLAUDE_PROJECT_DIR: dir, HOME: home, CLAUDE_CODE_SESSION_ID: "sess1" };
+    const r = spawnSync(process.execPath, [script, "resumed", "alpha", "--run", "wf_two", "--dir", dir], { encoding: "utf8", env });
+    expect(r.status).toBe(0);
+    const j2 = join(home, ".claude", "projects", slugOf(dir), "sess1", "subagents", "workflows", "wf_two", "journal.jsonl");
+    expect(state(dir).cards[0].journals).toEqual([j1, j2]);
+  });
+
+  it("without CLAUDE_CODE_SESSION_ID launched records no journals and still succeeds", () => {
+    const dir = project();
+    started(dir);
+    const r = launchedIn(dir, tmp(), undefined, "wf_one");
+    expect(r.status).toBe(0);
+    expect(state(dir).cards[0].journals ?? []).toEqual([]);
+    expect(state(dir).cards[0].runId).toBe("wf_one");
+  });
+});
+
+describe("card autopilot-pane-redesign: queen seat history from the journal", () => {
+  const J = (...objs) => objs.map((o) => JSON.stringify(o)).join("\n") + "\n";
+  const st = (key, agentId, label, phase) => ({ type: "started", key, agentId, label, phase });
+  const res = (key, agentId) => ({ type: "result", key, agentId, result: { seat: "x" } });
+  const fail = (key, agentId) => ({ type: "failed", key, agentId });
+  const queenState = (extra = {}) =>
+    runState({ cards: [{ id: "q1", title: "Queen card", size: "M", class: "code", state: "running", runId: "wf_1", kind: "hand", journals: ["/j/wf_1/journal.jsonl"], ...extra }], filed: [] });
+  const line = (journals, startedMs = {}, extra) => {
+    const run = { q1: { journals: Array.isArray(journals) ? journals : [journals], startedMs } };
+    const lines = autopilotLines(autopilotView(queenState(extra), NOW, run));
+    return lines.find((l) => /^ {2}\S q1\b/.test(l));
+  };
+  const T = NOW.getTime();
+
+  it("M8, M10: setup and lead done, tester running 4m30s shows 'setup ✓ lead ✓ tester ▶ 4m'", () => {
+    const j = J({ type: "launched" }, st("k1", "A1", "setup:q1:1", "Setup"), res("k1", "A1"), st("k2", "A2", "lead:q1:1", "Lead"), res("k2", "A2"), st("k3", "A3", "tester:q1:1", "Tester"));
+    expect(line(j, { A3: T - (4 * MIN + 30000) })).toBe("  ▶ q1 setup ✓ lead ✓ tester ▶ 4m");
+  });
+
+  it("M10: under a minute reads 0m; an unknown start time shows the seat with no elapsed text", () => {
+    const j = J(st("k1", "A1", "setup:q1:1", "Setup"));
+    expect(line(j, { A1: T - 20000 })).toBe("  ▶ q1 setup ▶ 0m");
+    expect(line(j, {})).toBe("  ▶ q1 setup ▶");
+  });
+
+  it("M9: a failed seat that was retried with the same key shows once, done", () => {
+    const j = J(st("k1", "A1", "lead:q1:1", "Lead"), fail("k1", "A1"), st("k1", "A2", "lead:q1:1", "Lead"), res("k1", "A2"), st("k2", "A3", "tester:q1:1", "Tester"));
+    const l = line(j, { A3: T - 10000 });
+    expect(l).toBe("  ▶ q1 lead ✓ tester ▶ 0m");
+    expect(l).not.toContain("✗");
+  });
+
+  it("a failed seat with no retry shows ✗", () => {
+    const j = J(st("k1", "A1", "setup:q1:1", "Setup"), res("k1", "A1"), st("k2", "A2", "coder:q1:1", "Coder"), fail("k2", "A2"));
+    expect(line(j)).toBe("  ▶ q1 setup ✓ coder ✗");
+  });
+
+  it("a repeated round is its own seat, in order (real wf_dc6f309e shape)", () => {
+    const j = J(
+      st("k1", "A1", "setup:q1:1", "Setup"), res("k1", "A1"),
+      st("k2", "A2", "lead:q1:1", "Lead"), fail("k2", "A2"), st("k2", "A3", "lead:q1:1", "Lead"), res("k2", "A3"),
+      st("k3", "A4", "tester:q1:1", "Tester"), res("k3", "A4"),
+      st("k4", "A5", "coder:q1:1", "Coder"), res("k4", "A5"),
+      st("k5", "A6", "reviewer:q1:1", "Reviewer"), res("k5", "A6"),
+      st("k6", "A7", "coder:q1:2", "Coder"), res("k6", "A7"),
+      st("k7", "A8", "reviewer:q1:2", "Reviewer"),
+    );
+    expect(line(j, { A8: T - 2 * MIN })).toBe("  ▶ q1 setup ✓ lead ✓ tester ✓ coder ✓ reviewer ✓ coder ✓ reviewer ▶ 2m");
+  });
+
+  it("M11: parallel flow agents of one phase are one seat; the seat name is the phase, not the label", () => {
+    const j = J(
+      st("k1", "A1", "implement:a", "Implement"), st("k2", "A2", "worker:b:1", "Implement"), res("k1", "A1"), res("k2", "A2"),
+      st("k3", "A3", "verify:a", "Verify"),
+    );
+    expect(line(j, { A3: T - 2 * MIN })).toBe("  ▶ q1 implement ✓ verify ▶ 2m");
+  });
+
+  it("M11: a parallel seat with one agent still running is running, elapsed from its earliest running agent", () => {
+    const j = J(st("k1", "A1", "implement:a", "Implement"), res("k1", "A1"), st("k2", "A2", "implement:b", "Implement"), st("k3", "A3", "implement:c", "Implement"));
+    expect(line(j, { A1: T - 20 * MIN, A2: T - (3 * MIN + 30000), A3: T - 90000 })).toBe("  ▶ q1 implement ▶ 3m");
+  });
+
+  it("a resumed run merges the old and new journals by key: a replayed seat shows once", () => {
+    const old = J(st("k1", "A1", "setup:q1:1", "Setup"), res("k1", "A1"), st("k2", "A2", "lead:q1:1", "Lead"), res("k2", "A2"));
+    const next = J(st("k1", "B1", "setup:q1:1", "Setup"), res("k1", "B1"), st("k3", "B2", "tester:q1:1", "Tester"));
+    expect(line([old, next], { B2: T - MIN })).toBe("  ▶ q1 setup ✓ lead ✓ tester ▶ 1m");
+  });
+
+  it("garbage lines and an empty journal never throw; an empty journal reads 'started'", () => {
+    expect(() => line("{ nope\n\nnull\n42\n")).not.toThrow();
+    expect(line("")).toBe("  ▶ q1 started");
+    expect(line("{ nope\n")).toBe("  ▶ q1 started");
+  });
+
+  it("a queen card with no journal data shows 'started'", () => {
+    const lines = autopilotLines(autopilotView(queenState(), NOW));
+    expect(lines).toContain("  ▶ q1 started");
+  });
+
+  it("the seat name comes from the phase, lowercased, not the label", () => {
+    const j = J(st("k1", "A1", "x:q1:1", "Review"), res("k1", "A1"), st("k2", "A2", "adversary:q1", "Adversary"));
+    expect(line(j, { A2: T - MIN })).toBe("  ▶ q1 review ✓ adversary ▶ 1m");
+  });
+});
+
+describe("card autopilot-pane-redesign: fix pass pins", () => {
+  const jl = (...objs) => objs.map((o) => JSON.stringify(o)).join("\n") + "\n";
+
+  it("G1: readRuns reads a running queen card's journal and agent meta mtimes, and the view shows its seats", async () => {
+    const { readRuns } = await import("../lib/autopilot-view.mjs");
+    const d = tmp();
+    const wf = join(d, "wf_r");
+    mkdirSync(wf, { recursive: true });
+    writeFileSync(
+      join(wf, "journal.jsonl"),
+      jl(
+        { type: "started", key: "k1", agentId: "A1", label: "setup:q1:1", phase: "Setup" },
+        { type: "result", key: "k1", agentId: "A1", result: {} },
+        { type: "started", key: "k2", agentId: "A2", label: "tester:q1:1", phase: "Tester" },
+      ),
+    );
+    writeFileSync(join(wf, "agent-A2.meta.json"), "{}");
+    const t = (NOW.getTime() - 4 * MIN) / 1000;
+    utimesSync(join(wf, "agent-A2.meta.json"), t, t);
+    const s = runState({
+      cards: [
+        { id: "q1", title: "Q", size: "M", class: "code", state: "running", runId: "wf_r", kind: "hand", journals: [join(wf, "journal.jsonl")] },
+        { id: "q2", title: "Q2", size: "M", class: "code", state: "queued", journals: [join(wf, "journal.jsonl")] },
+      ],
+      filed: [],
+    });
+    const runs = readRuns(s);
+    expect(Object.keys(runs)).toEqual(["q1"]);
+    expect(runs.q1.journals).toHaveLength(1);
+    expect(typeof runs.q1.startedMs.A2).toBe("number");
+    const l = autopilotLines(autopilotView(s, NOW, runs)).find((x) => /^ {2}\S q1\b/.test(x));
+    expect(l).toBe("  ▶ q1 setup ✓ tester ▶ 4m");
+  });
+
+  it("G2: a replayed started line for a finished seat does not reopen it", () => {
+    const seats = core.journalSeats([
+      jl(
+        { type: "started", key: "k1", agentId: "A1", label: "setup:q1:1", phase: "Setup" },
+        { type: "result", key: "k1", agentId: "A1", result: {} },
+        { type: "started", key: "k1", agentId: "A9", label: "setup:q1:1", phase: "Setup" },
+      ),
+    ]);
+    expect(seats).toEqual([{ name: "setup", status: "done", elapsed: "" }]);
+  });
+
+  it("G3: re-running a card after steps clears its seat history", () => {
+    const dir = project();
+    expect(started(dir).status).toBe(0);
+    expect(ap(dir, "card", "alpha").status).toBe(0);
+    expect(ap(dir, "step", "alpha", "tester").status).toBe(0);
+    expect(ap(dir, "step", "alpha", "coder").status).toBe(0);
+    expect(state(dir).cards[0].seats).toHaveLength(2);
+    expect(ap(dir, "card", "alpha").status).toBe(0);
+    const c = state(dir).cards[0];
+    expect(c.seats).toBeUndefined();
+    expect(c.step).toBeUndefined();
+  });
+});
+
+// Card queen-args-research: queen-args takes --research on|off and the project's current branch as base.
+describe("card queen-args-research: queen-args research flag and base branch", () => {
+  const card = (id, track) => ({ id, column: "ready", track, component: "flow", title: id, size: "S", class: "code", goal: `Change plugins/doug-flow/lib/${id}.mjs.` });
+  function proj(setup) {
+    const dir = tmp();
+    mkdirSync(join(dir, ".doug/.state"), { recursive: true });
+    mkdirSync(join(dir, ".doug/plans"), { recursive: true });
+    mkdirSync(join(dir, "plugins"), { recursive: true });
+    const cards = [card("h1", "hand"), card("f1", "flow")];
+    writeFileSync(join(dir, ".doug/board.json"), JSON.stringify({ version: 1, columns: [{ id: "ready", title: "Ready" }], components: ["flow"], cards }));
+    writeFileSync(join(dir, ".doug/plans/f1.json"), JSON.stringify({ version: 1, goal: "G", status: "approved", card: "f1", tasks: [{ id: "t1", title: "T", spec: "s", files: ["a.txt"], acceptance: [{ text: "x", command: "true" }] }] }));
+    if (setup) setup(dir);
+    ap(dir, "start", "--cards", "h1,f1", "--usd-cap", "10", "--wall-cap", "100");
+    return dir;
+  }
+  const git = (dir, ...a) => {
+    const env = { ...process.env };
+    for (const k of ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE"]) delete env[k];
+    const r = spawnSync("git", ["-C", dir, "-c", "user.email=a@b", "-c", "user.name=a", ...a], { encoding: "utf8", env });
+    expect(r.status, r.stderr).toBe(0);
+  };
+  const argsOf = (dir, id = "h1") => JSON.parse(readFileSync(join(dir, `.doug/.state/reports/${id}/queen-args.json`), "utf8"));
+  const hand = (dir, ...rest) => ap(dir, "queen-args", "h1", "--kind", "hand", ...rest);
+
+  it("--research on writes options.research true; absent and off write false", () => {
+    const dir = proj();
+    expect(hand(dir, "--research", "on").status).toBe(0);
+    expect(argsOf(dir).options.research).toBe(true);
+    expect(hand(dir).status).toBe(0);
+    expect(argsOf(dir).options.research).toBe(false);
+    expect(hand(dir, "--research", "off").status).toBe(0);
+    expect(argsOf(dir).options.research).toBe(false);
+  });
+
+  it("a --research value other than on|off (or none) exits 2 and writes no queen-args.json", () => {
+    for (const rest of [["--research", "yes"], ["--research", "true"], ["--research"]]) {
+      const dir = proj();
+      const r = hand(dir, ...rest);
+      expect(r.status, rest.join(" ")).toBe(2);
+      expect(existsSync(join(dir, ".doug/.state/reports/h1/queen-args.json")), rest.join(" ")).toBe(false);
+    }
+  });
+
+  it("--research with --kind flow exits 2 and writes nothing", () => {
+    const dir = proj();
+    const r = ap(dir, "queen-args", "f1", "--kind", "flow", "--research", "on");
+    expect(r.status).toBe(2);
+    expect(existsSync(join(dir, ".doug/.state/reports/f1/queen-args.json"))).toBe(false);
+  });
+
+  it("base is the --dir project's current branch, not the process cwd's", () => {
+    const dir = proj((d) => git(d, "init", "-q", "-b", "trunk"));
+    expect(hand(dir).status).toBe(0);
+    expect(argsOf(dir).options.base).toBe("trunk");
+  });
+
+  it("base falls back to main on a detached HEAD and outside a git repo", () => {
+    const detached = proj((d) => {
+      git(d, "init", "-q", "-b", "trunk");
+      git(d, "commit", "-q", "--allow-empty", "-m", "x");
+      git(d, "checkout", "-q", "--detach");
+    });
+    expect(hand(detached).status).toBe(0);
+    expect(argsOf(detached).options.base).toBe("main");
+    const plain = proj();
+    expect(hand(plain).status).toBe(0);
+    expect(argsOf(plain).options.base).toBe("main");
+  });
+
+  it("the usage header documents [--research on|off]", () => {
+    const line = readFileSync(script, "utf8").split("\n").find((l) => l.includes("autopilot.mjs queen-args <id>"));
+    expect(line).toContain("[--research on|off]");
+  });
+});
+
+// Card autopilot-no-stuck-in-flow: a gate timeout under load is rerun alone, and end refuses while a card is In flow.
+describe("card autopilot-no-stuck-in-flow", () => {
+  const CARDS = ["h1", "h2", "h3"].map((id) => ({ id, column: "ready", track: "hand", component: "flow", title: id, size: "S", class: "code", goal: "Change plugins/doug-flow/lib/a.mjs." }));
+  const ALONE = "Rerun alone: no other queen is in flight now.";
+  const boardPath = (dir) => join(dir, ".doug/.state/../board.json");
+  function setup() {
+    const dir = tmp();
+    mkdirSync(join(dir, ".doug/.state"), { recursive: true });
+    mkdirSync(join(dir, "plugins"), { recursive: true });
+    mkdirSync(join(dir, "packages"), { recursive: true });
+    writeFileSync(boardPath(dir), JSON.stringify({ version: 1, columns: [{ id: "ready", title: "Ready" }, { id: "flow", title: "In flow" }], components: ["flow", "cli"], cards: CARDS }));
+    ap(dir, "start", "--cards", "h1,h2,h3", "--usd-cap", "10", "--wall-cap", "100");
+    return dir;
+  }
+  const inFlow = (dir, ...ids) => {
+    const b = JSON.parse(readFileSync(boardPath(dir), "utf8"));
+    for (const c of b.cards) if (ids.includes(c.id)) c.column = "flow";
+    writeFileSync(boardPath(dir), JSON.stringify(b));
+  };
+  const launch = (dir, id, run) => {
+    const argsFile = join(dir, `${id}-args.json`);
+    writeFileSync(argsFile, JSON.stringify({ card: { id }, options: { research: false } }));
+    return ap(dir, "launched", id, "--run", run, "--kind", "hand", "--worktree", join(dir, `wt-${id}`), "--args-file", argsFile);
+  };
+  const result = (dir, name, value) => {
+    const f = join(dir, name);
+    writeFileSync(f, JSON.stringify(value));
+    return f;
+  };
+  const timeoutStop = (over = {}) => ({
+    outcome: "stopped",
+    reason: "gate-timeout",
+    stoppedAt: "gate",
+    detail: "gate: typecheck 0; test:unit 1 (exit timeout at 301.0 s)",
+    history: [
+      { seat: "reviewer", round: 1, result: "ok" },
+      { seat: "gate", round: 1, result: "stopped", note: "gate-timeout" },
+    ],
+    ...over,
+  });
+  const report = (dir, run, value = timeoutStop(), name = `r-${run}.json`) => ap(dir, "report", "--run", run, "--file", result(dir, name, value));
+  const card = (dir, id) => state(dir).cards.find((c) => c.id === id);
+  const queenArgs = (dir, id) => JSON.parse(readFileSync(join(dir, ".doug/.state/reports", id, "queen-args.json"), "utf8"));
+  const briefFor = (dir, id, seat, seatRuns) => {
+    const answers = queenArgs(dir, id).options.answers;
+    const st = { ...initialState({ id, goal: "g" }, { answers }), pending: seat, seatRuns };
+    return currentAction(st).brief;
+  };
+
+  it("N1 a gate timeout with another queen in flight prints rerun alone and marks the card stopped", () => {
+    const dir = setup();
+    launch(dir, "h1", "wf_h1");
+    launch(dir, "h2", "wf_h2");
+    const r = report(dir, "wf_h1");
+    expect(r.status, r.stderr).toBe(0);
+    expect(r.stdout).toMatch(/^autopilot: h1 rerun alone gate-timeout/m);
+    expect(card(dir, "h1").state).toBe("stopped");
+    expect(card(dir, "h1").reason).toBe("gate-timeout: rerun alone pending");
+  });
+
+  it("N2 a gate timeout with no other queen in flight asks (unsure means a normal stop)", () => {
+    const dir = setup();
+    launch(dir, "h1", "wf_h1");
+    launch(dir, "h2", "wf_h2");
+    ap(dir, "land", "h2", "--commit", "abc1234");
+    const r = report(dir, "wf_h1");
+    expect(r.stdout).toMatch(/^autopilot: h1 ask gate-timeout/m);
+    expect(r.stdout).not.toContain("rerun alone");
+    expect(card(dir, "h1").state).toBe("running");
+    // a queued card is not in flight either
+    const lone = setup();
+    launch(lone, "h1", "wf_h1");
+    expect(report(lone, "wf_h1").stdout).toMatch(/^autopilot: h1 ask gate-timeout/m);
+  });
+
+  it("N3 a seat-blocked gate stop stays ask even with another queen in flight", () => {
+    const dir = setup();
+    launch(dir, "h1", "wf_h1");
+    launch(dir, "h2", "wf_h2");
+    const r = report(dir, "wf_h1", timeoutStop({ reason: "seat-blocked", history: [{ seat: "gate", round: 1, result: "stopped", note: "seat-blocked" }] }));
+    expect(r.stdout).toMatch(/^autopilot: h1 ask seat-blocked/m);
+  });
+
+  it("N4 a second gate timeout asks: the rerun alone is the card's one resume", () => {
+    const dir = setup();
+    launch(dir, "h1", "wf_h1");
+    launch(dir, "h2", "wf_h2");
+    expect(report(dir, "wf_h1").stdout).toContain("rerun alone");
+    ap(dir, "land", "h2", "--commit", "abc1234");
+    expect(ap(dir, "rerun-alone", "h1").status).toBe(0);
+    expect(ap(dir, "resumed", "h1", "--run", "wf_h1b").status).toBe(0);
+    launch(dir, "h3", "wf_h3");
+    const again = report(dir, "wf_h1b");
+    expect(again.stdout).toMatch(/^autopilot: h1 ask gate-timeout/m);
+    expect(again.stdout).not.toContain("rerun alone");
+    expect(ap(dir, "rerun-alone", "h1").status).toBe(1);
+  });
+
+  it("N4b rerun-alone refuses a card already resumed once, with no other queen in flight, and writes nothing", () => {
+    const dir = setup();
+    launch(dir, "h1", "wf_h1");
+    launch(dir, "h2", "wf_h2");
+    expect(report(dir, "wf_h1").stdout).toContain("rerun alone");
+    ap(dir, "land", "h2", "--commit", "abc1234");
+    expect(ap(dir, "rerun-alone", "h1").status).toBe(0);
+    expect(ap(dir, "resumed", "h1", "--run", "wf_h1b").status).toBe(0);
+    expect(report(dir, "wf_h1b").stdout).toMatch(/^autopilot: h1 ask gate-timeout/m);
+    const again = ap(dir, "rerun-alone", "h1");
+    expect(again.status).toBe(1);
+    expect(again.stderr).toContain("already resumed once");
+    expect(queenArgs(dir, "h1").options.answers).toHaveLength(1);
+  });
+
+  it("N5 rerun-alone refuses while another queen is in flight, naming it, and writes nothing; after it lands it succeeds", () => {
+    const dir = setup();
+    launch(dir, "h1", "wf_h1");
+    launch(dir, "h2", "wf_h2");
+    report(dir, "wf_h1");
+    const refused = ap(dir, "rerun-alone", "h1");
+    expect(refused.status).toBe(1);
+    expect(refused.stdout + refused.stderr).toContain("h2");
+    expect(queenArgs(dir, "h1").options.answers).toBeUndefined();
+    ap(dir, "land", "h2", "--commit", "abc1234");
+    const r = ap(dir, "rerun-alone", "h1");
+    expect(r.status, r.stderr).toBe(0);
+    expect(r.stdout).toContain("autopilot: h1 rerun alone recorded for gate");
+  });
+
+  it("N6 rerun-alone records a gate answer that reaches the gate brief, and report then says resume with the answer", () => {
+    const dir = setup();
+    launch(dir, "h1", "wf_h1");
+    launch(dir, "h2", "wf_h2");
+    const rep = timeoutStop();
+    report(dir, "wf_h1", rep);
+    ap(dir, "land", "h2", "--commit", "abc1234");
+    expect(ap(dir, "rerun-alone", "h1").status).toBe(0);
+    expect(queenArgs(dir, "h1").options.answers).toEqual([{ seat: "gate", question: rep.detail, answer: ALONE, round: 1, run: "wf_h1" }]);
+    expect(briefFor(dir, "h1", "gate", {}).answers).toEqual([{ question: rep.detail, answer: ALONE }]);
+    expect(briefFor(dir, "h1", "tester", {}).answers).toEqual([]);
+    expect(report(dir, "wf_h1", rep).stdout).toMatch(/^autopilot: h1 resume with the answer/m);
+  });
+
+  it("N7 rerun-alone refuses a missing report, a non-stop, an agent-null stop and a stop with no seat; an unknown card is exit 1", () => {
+    const dir = setup();
+    launch(dir, "h1", "wf_h1");
+    expect(ap(dir, "rerun-alone", "h1").status).toBe(1);
+    report(dir, "wf_h1", { outcome: "done", history: [] });
+    expect(ap(dir, "rerun-alone", "h1").status).toBe(1);
+    report(dir, "wf_h1", timeoutStop({ reason: "agent-null" }), "n.json");
+    expect(ap(dir, "rerun-alone", "h1").status).toBe(1);
+    report(dir, "wf_h1", timeoutStop({ stoppedAt: null }), "m.json");
+    expect(ap(dir, "rerun-alone", "h1").status).toBe(1);
+    expect(queenArgs(dir, "h1").options.answers).toBeUndefined();
+    expect(ap(dir, "rerun-alone", "ghost").status).toBe(1);
+  });
+
+  it("N8 waiting cards rerun one at a time: resumed marks the card in flight again", () => {
+    const dir = setup();
+    launch(dir, "h1", "wf_h1");
+    launch(dir, "h2", "wf_h2");
+    launch(dir, "h3", "wf_h3");
+    expect(report(dir, "wf_h1").stdout).toContain("h1 rerun alone");
+    expect(report(dir, "wf_h2", timeoutStop(), "r2.json").stdout).toContain("h2 rerun alone");
+    ap(dir, "land", "h3", "--commit", "abc1234");
+    expect(ap(dir, "rerun-alone", "h1").status).toBe(0);
+    expect(ap(dir, "resumed", "h1", "--run", "wf_h1b").status).toBe(0);
+    expect(card(dir, "h1").state).toBe("running");
+    const second = ap(dir, "rerun-alone", "h2");
+    expect(second.status).toBe(1);
+    expect(second.stdout + second.stderr).toContain("h1");
+    ap(dir, "land", "h1", "--commit", "def5678");
+    expect(ap(dir, "rerun-alone", "h2").status).toBe(0);
+  });
+
+  it("N9 end refuses with an In flow card that was never resumed, naming it, and leaves the run running", () => {
+    const dir = setup();
+    launch(dir, "h1", "wf_h1");
+    launch(dir, "h2", "wf_h2");
+    ap(dir, "land", "h2", "--commit", "abc1234");
+    inFlow(dir, "h1");
+    const r = ap(dir, "end");
+    expect(r.status).toBe(1);
+    expect(r.stdout + r.stderr).toContain("h1");
+    expect(r.stdout + r.stderr).not.toContain("h2");
+    expect(state(dir).status).toBe("running");
+    expect(state(dir).endedAt ?? null).toBeNull();
+  });
+
+  it("N10 end names every In flow card that is neither resumed nor answered", () => {
+    const dir = setup();
+    launch(dir, "h1", "wf_h1");
+    launch(dir, "h2", "wf_h2");
+    inFlow(dir, "h1", "h2");
+    const r = ap(dir, "end");
+    expect(r.status).toBe(1);
+    expect(r.stdout + r.stderr).toContain("h1");
+    expect(r.stdout + r.stderr).toContain("h2");
+  });
+
+  it("N11 end allows an In flow card that was resumed once", () => {
+    const dir = setup();
+    launch(dir, "h1", "wf_h1");
+    inFlow(dir, "h1");
+    expect(ap(dir, "resumed", "h1", "--run", "wf_h1b").status).toBe(0);
+    expect(ap(dir, "end").status).toBe(0);
+    expect(state(dir).status).toBe("ended");
+  });
+
+  it("N12 end allows an In flow card the user chose to leave, recorded by leave; a pending rerun-alone answer alone does not", () => {
+    const dir = setup();
+    launch(dir, "h1", "wf_h1");
+    launch(dir, "h2", "wf_h2");
+    report(dir, "wf_h1");
+    ap(dir, "land", "h2", "--commit", "abc1234");
+    ap(dir, "rerun-alone", "h1");
+    inFlow(dir, "h1");
+    expect(ap(dir, "end").status).toBe(1);
+    expect(state(dir).status).toBe("running");
+    const left = ap(dir, "leave", "h1", "--reason", "Leave In flow");
+    expect(left.status, left.stderr).toBe(0);
+    expect(card(dir, "h1").left).toBe("Leave In flow");
+    expect(ap(dir, "end").status).toBe(0);
+    expect(state(dir).status).toBe("ended");
+  });
+
+  it("N13 end allows an In flow card with a user answer for its run", () => {
+    const dir = setup();
+    launch(dir, "h1", "wf_h1");
+    report(dir, "wf_h1", { outcome: "stopped", reason: "design-decision", stoppedAt: "tester", detail: "Q?", history: [{ seat: "tester", round: 1, result: "stopped", note: "design-decision" }] });
+    inFlow(dir, "h1");
+    expect(ap(dir, "end").status).toBe(1);
+    expect(ap(dir, "answer", "h1", "--answer", "A.").status).toBe(0);
+    expect(ap(dir, "end").status).toBe(0);
+  });
+
+  it("N14 end ignores cards not In flow, and refuses when the board cannot be read", () => {
+    const dir = setup();
+    launch(dir, "h1", "wf_h1");
+    const bad = setup();
+    writeFileSync(boardPath(bad), "{ not json");
+    const r = ap(bad, "end");
+    expect(r.status).toBe(1);
+    expect(state(bad).status).toBe("running");
+    expect(ap(dir, "end").status).toBe(0);
+  });
+
+  it("N15 leave with a blank or missing reason is exit 2 and an unknown card is exit 1", () => {
+    const dir = setup();
+    launch(dir, "h1", "wf_h1");
+    expect(ap(dir, "leave", "h1", "--reason", "  ").status).toBe(2);
+    expect(ap(dir, "leave", "h1").status).toBe(2);
+    expect(card(dir, "h1").left).toBeUndefined();
+    expect(ap(dir, "leave", "ghost", "--reason", "x").status).toBe(1);
+  });
+
+  it("N16 the unknown-subcommand message and the usage header name rerun-alone and leave", () => {
+    const dir = setup();
+    const r = ap(dir, "bogus-subcommand");
+    expect(r.stderr + r.stdout).toContain("rerun-alone");
+    expect(r.stderr + r.stdout).toContain("leave");
+    const head = readFileSync(script, "utf8").split("\n").slice(0, 40).join("\n");
+    expect(head).toContain("autopilot.mjs rerun-alone <id>");
+    expect(head).toContain("autopilot.mjs leave <id>");
+  });
+});
+
+// Card queen-research-note-promotion: a queen report's inline research note is written to .doug/.state/research/<card id>.md
+// by `autopilot.mjs report`, so board.mjs record promotes it to docs/research/<card id>.md.
+describe("card queen-research-note-promotion", () => {
+  const boardScript = join(here, "..", "scripts", "board.mjs");
+  const NOTE = "Fact: X holds\nSource: https://example.test/a line 3\nunverified: Y\n";
+  const CARD = { id: "h3", column: "ready", track: "hand", component: "cli", title: "H3", size: "S", class: "code", goal: "Change packages/doug-cli/src/c.ts." };
+  function proj() {
+    const dir = tmp();
+    mkdirSync(join(dir, ".doug/.state"), { recursive: true });
+    mkdirSync(join(dir, "plugins"), { recursive: true });
+    mkdirSync(join(dir, "packages"), { recursive: true });
+    writeFileSync(join(dir, ".doug/board.json"), JSON.stringify({ version: 1, columns: [{ id: "ready", title: "Ready" }, { id: "done", title: "Done" }], components: ["cli"], cards: [CARD] }));
+    ap(dir, "start", "--cards", "h3", "--usd-cap", "10", "--wall-cap", "100");
+    const argsFile = join(dir, "h3-args.json");
+    writeFileSync(argsFile, JSON.stringify({ card: "h3", seed: "s" }));
+    ap(dir, "launched", "h3", "--run", "wf_h3", "--kind", "hand", "--worktree", join(dir, "wt-h3"), "--args-file", argsFile);
+    return dir;
+  }
+  const rep = (dir, value) => {
+    const f = join(dir, "res.json");
+    writeFileSync(f, JSON.stringify(value));
+    return ap(dir, "report", "--run", "wf_h3", "--file", f);
+  };
+  const record = (dir) => spawnSync(process.execPath, [boardScript, "record", "h3", "--hand", dir, "--summary", "x"], { encoding: "utf8", cwd: dir, env: { ...process.env, CLAUDE_PROJECT_DIR: dir } });
+  const noteFile = (dir) => join(dir, ".doug/.state/research/h3.md");
+  const docFile = (dir) => join(dir, "docs/research/h3.md");
+  const flat = (extra) => ({ card: { id: "h3" }, outcome: "done", history: [], ...extra });
+
+  it("A22 a flat queen report with an inline note yields docs/research/h3.md at record", () => {
+    const dir = proj();
+    rep(dir, flat({ researchNote: NOTE }));
+    expect(readFileSync(noteFile(dir), "utf8")).toBe(NOTE);
+    const r = record(dir);
+    expect(r.stdout).toContain("Promoted the research note for h3");
+    expect(readFileSync(docFile(dir), "utf8")).toBe(NOTE);
+    expect(existsSync(join(dir, ".doug/.state/research/wf_h3.md"))).toBe(false);
+  });
+
+  it("A23 an absent or null note writes no note and record promotes nothing", () => {
+    for (const extra of [{}, { researchNote: null }]) {
+      const dir = proj();
+      rep(dir, flat(extra));
+      expect(existsSync(noteFile(dir))).toBe(false);
+      const r = record(dir);
+      expect(r.stdout).not.toContain("Promoted the research note");
+      expect(existsSync(docFile(dir))).toBe(false);
+    }
+  });
+
+  it("A24 a note inside the task-output wrapper is persisted", () => {
+    const dir = proj();
+    rep(dir, { summary: "s", agentCount: 7, logs: [], result: flat({ researchNote: NOTE }) });
+    expect(readFileSync(noteFile(dir), "utf8")).toBe(NOTE);
+  });
+
+  it("A25 a path-form note is copied from that file; a path equal to the destination is left alone", () => {
+    const dir = proj();
+    const src = join(dir, "elsewhere-note.md");
+    writeFileSync(src, NOTE);
+    rep(dir, flat({ researchNote: src }));
+    expect(readFileSync(noteFile(dir), "utf8")).toBe(NOTE);
+    const dir2 = proj();
+    mkdirSync(join(dir2, ".doug/.state/research"), { recursive: true });
+    writeFileSync(noteFile(dir2), NOTE);
+    rep(dir2, flat({ researchNote: noteFile(dir2) }));
+    expect(readFileSync(noteFile(dir2), "utf8")).toBe(NOTE);
   });
 });

@@ -64,7 +64,8 @@
 //                                                 (card memory-every-session) recall for a hand-track card's
 //                                                 briefs: query = the card's title and goal, k 8. Prints the
 //                                                 workflow's lessons header, the rendered `- [id] ...` lines
-//                                                 (capped at 2000 chars like plan.mjs), then `memoryUsed: <ids>`;
+//                                                 (capped at 2000 chars like plan.mjs), then the window line
+//                                                 when lessons were hidden, then `memoryUsed: <ids>`;
 //                                                 writes .doug/.state/reports/<card-id>/lessons.json. No database
 //                                                 -> "No lessons recalled for <id>." (database not created);
 //                                                 a database or provider error -> one stderr line, exit 0;
@@ -949,7 +950,7 @@ try {
       }
       const provider = createProvider(readMemoryConfig(dir));
       const staleDays = readMemoryStaleDays(dir);
-      const { openMemory, recallLessons, degradedWarning, detectLocalProvider } = await import("../lib/memory.mjs");
+      const { openMemory, recallLessons, degradedWarning, detectLocalProvider, windowNote } = await import("../lib/memory.mjs");
       // Probed once, and only when no provider is configured; a failed probe is just "not detected".
       const detectedProvider = provider ? null : await detectLocalProvider();
       const m = openMemory(dir);
@@ -968,7 +969,8 @@ try {
           result.mode === "hybrid"
             ? `recall: hybrid via ${result.provider} ${provider.model}/${provider.dims}`
             : `recall: keyword-only (${result.reason})`;
-        const lines = [header, ...result.lessons.map((l) => `${l.id}  ${l.score.toFixed(4)}  ${l.kind}  ${l.text}`)];
+        const note = windowNote(result.hidden, staleDays);
+        const lines = [header, ...(note ? [note] : []), ...result.lessons.map((l) => `${l.id}  ${l.score.toFixed(4)}  ${l.kind}  ${l.text}`)];
         process.stdout.write(lines.join("\n") + "\n");
       }
       break;
@@ -991,13 +993,14 @@ try {
       }
       const query = `${card.title}\n${card.goal ?? ""}`;
       const header = "Lessons from earlier runs on this repository (memory; each cites where it was learned):";
-      const saved = { card: id, query, mode: null, reason: null, ids: [], text: null, recalledAt: new Date().toISOString() };
+      const saved = { card: id, query, mode: null, reason: null, ids: [], text: null, recalledAt: new Date().toISOString(), hidden: null };
+      let note = null;
       let error = null;
       if (existsSync(join(dir, ".doug", ".state", "memory", "memory.db"))) {
         try {
           const provider = createProvider(readMemoryConfig(dir));
           const staleDays = readMemoryStaleDays(dir);
-          const { openMemory, recallLessons, degradedWarning, degradedReason, detectLocalProvider, renderLessons } = await import("../lib/memory.mjs");
+          const { openMemory, recallLessons, degradedWarning, degradedReason, detectLocalProvider, renderLessons, windowNote } = await import("../lib/memory.mjs");
           const detectedProvider = provider ? null : await detectLocalProvider();
           const m = openMemory(dir);
           try {
@@ -1006,6 +1009,8 @@ try {
             if (warning) process.stderr.write(warning + "\n");
             const rendered = renderLessons(result.lessons);
             saved.mode = result.mode;
+            saved.hidden = result.hidden ?? null;
+            note = windowNote(result.hidden, staleDays);
             saved.reason = result.degraded ? degradedReason(result, detectedProvider) : null;
             saved.ids = rendered.ids;
             saved.text = rendered.text === null ? null : result.degraded ? `(recall was keyword-only: ${saved.reason})\n${rendered.text}` : rendered.text;
@@ -1018,6 +1023,8 @@ try {
           saved.reason = null;
           saved.ids = [];
           saved.text = null;
+          saved.hidden = null;
+          note = null;
           saved.error = error;
           process.stderr.write(`[doug] memory recall skipped: ${error}\n`);
         }
@@ -1028,9 +1035,9 @@ try {
       if (opts.json) {
         process.stdout.write(JSON.stringify(saved, null, 2) + "\n");
       } else if (saved.ids.length) {
-        process.stdout.write([header, saved.text, `memoryUsed: ${saved.ids.join(", ")}`].join("\n") + "\n");
+        process.stdout.write([header, saved.text, ...(note ? [note] : []), `memoryUsed: ${saved.ids.join(", ")}`].join("\n") + "\n");
       } else {
-        process.stdout.write(`No lessons recalled for ${id}.\n`);
+        process.stdout.write(`No lessons recalled for ${id}.\n${note ? note + "\n" : ""}`);
       }
       break;
     }

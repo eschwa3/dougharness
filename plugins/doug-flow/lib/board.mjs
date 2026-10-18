@@ -42,6 +42,35 @@ function stopText(t) {
   return `${t.id}${t.stopClass ? ` [${t.stopClass}]` : ""}: "${t.stopReason}"`;
 }
 export const DEFAULT_TAGS = ["bug", "feature", "chore", "docs", "refactor", "spike"];
+// Record version 2 (decision 0016): the priority labels, highest first, and the label groups a new board gets.
+export const PRIORITY_LABELS = ["urgent", "high", "medium", "low"];
+export const DEFAULT_LABEL_GROUPS = [
+  {
+    id: "type",
+    title: "Type",
+    exclusive: true,
+    labels: [
+      { name: "bug", color: "#d73a4a" },
+      { name: "feature", color: "#2f81f7" },
+      { name: "chore", color: "#848d97" },
+      { name: "docs", color: "#0e8a9e" },
+      { name: "refactor", color: "#a371f7" },
+      { name: "spike", color: "#b0831f" },
+    ],
+  },
+  {
+    id: "priority",
+    title: "Priority",
+    exclusive: true,
+    labels: [
+      { name: "urgent", color: "#e5534b" },
+      { name: "high", color: "#db6d28" },
+      { name: "medium", color: "#a8801c" },
+      { name: "low", color: "#3f9142" },
+    ],
+  },
+];
+export const PLAN_STATUSES = ["planned", "active", "done"];
 
 export const DEFAULT_COLUMNS = [
   { id: "decide", title: "Decide", hint: "needs a decision from the owner before it can be planned" },
@@ -217,13 +246,34 @@ function relpathOf(dir, file) {
 }
 
 export function newBoard({ date } = {}) {
-  return { version: 1, updated: date || today(), columns: DEFAULT_COLUMNS.map((c) => ({ ...c })), components: [], tags: [...DEFAULT_TAGS], cards: [] };
+  const labelGroups = DEFAULT_LABEL_GROUPS.map((g) => ({ ...g, labels: g.labels.map((l) => ({ ...l })) }));
+  return {
+    version: 2,
+    updated: date || today(),
+    columns: DEFAULT_COLUMNS.map((c) => ({ ...c })),
+    components: [],
+    tags: groupLabelNames(labelGroups),
+    labelGroups,
+    cards: [],
+  };
 }
 
-// The tag vocabulary a board uses: its own `tags` array when it has one (an installed project's board can
+// The label names of the groups, in group then label order. Skips whatever is malformed; never throws.
+function groupLabelNames(groups) {
+  const names = [];
+  if (!Array.isArray(groups)) return names;
+  for (const g of groups) {
+    if (!g || typeof g !== "object" || !Array.isArray(g.labels)) continue;
+    for (const l of g.labels) if (l && typeof l === "object" && typeof l.name === "string" && l.name.length > 0) names.push(l.name);
+  }
+  return names;
+}
+
+// The tag vocabulary a board uses: the label names of its `labelGroups` when it has them (version 2), else its own `tags` array when it has one (an installed project's board can
 // pick its own set by editing the record), else DEFAULT_TAGS. .doug/board.json is not migrated by this
 // function; a record with no `tags` field falls back here rather than being rewritten.
 export function boardTags(board) {
+  if (board && Array.isArray(board.labelGroups)) return groupLabelNames(board.labelGroups);
   return board && Array.isArray(board.tags) && board.tags.every((t) => typeof t === "string") ? board.tags : DEFAULT_TAGS;
 }
 
@@ -260,6 +310,16 @@ function inspectBoard(board) {
   const errors = [];
   if (!board || typeof board !== "object" || Array.isArray(board)) return ["board is not an object"];
 
+  const versionOk = board.version === undefined || board.version === 1 || board.version === 2;
+  if (!versionOk) errors.push("version must be 1 or 2");
+  const isV1 = board.version === undefined || board.version === 1;
+  const isV2 = board.version === 2;
+  if (isV1) {
+    for (const key of ["epics", "milestones", "labelGroups"]) {
+      if (board[key] !== undefined) errors.push(`${key} is a version 2 field; this record is version 1`);
+    }
+  }
+
   const columnIds = [];
   if (!Array.isArray(board.columns) || board.columns.length === 0) {
     errors.push("columns must be a non-empty array");
@@ -277,7 +337,8 @@ function inspectBoard(board) {
   const components = Array.isArray(board.components) && board.components.every((c) => typeof c === "string") ? board.components : null;
   if (!components) errors.push("components must be an array of strings");
 
-  if (board.tags !== undefined) {
+  const groupsActive = isV2 && Array.isArray(board.labelGroups);
+  if (board.tags !== undefined && !groupsActive) {
     if (!Array.isArray(board.tags) || !board.tags.every((t) => isNonEmptyString(t))) {
       errors.push("tags must be an array of strings when present");
     } else {
@@ -288,7 +349,73 @@ function inspectBoard(board) {
       }
     }
   }
-  const vocabulary = boardTags(board);
+  const vocabulary = isV1 ? (board.tags !== undefined && Array.isArray(board.tags) && board.tags.every((t) => typeof t === "string") ? board.tags : DEFAULT_TAGS) : boardTags(board);
+
+  const exclusiveGroups = [];
+  if (isV2) {
+    if (board.labelGroups !== undefined && !Array.isArray(board.labelGroups)) errors.push("labelGroups must be an array");
+    else if (Array.isArray(board.labelGroups)) {
+      const groupIds = new Set();
+      const labelNames = new Set();
+      board.labelGroups.forEach((g, i) => {
+        if (!g || typeof g !== "object" || Array.isArray(g)) return errors.push(`label group at index ${i}: not an object`);
+        const gid = g.id;
+        if (!isNonEmptyString(gid)) errors.push(`label group at index ${i}: missing id`);
+        else if (groupIds.has(gid)) errors.push(`duplicate label group "${gid}"`);
+        else groupIds.add(gid);
+        const name = isNonEmptyString(gid) ? gid : null;
+        const at = name === null ? `label group at index ${i}` : `label group "${gid}"`;
+        if (!isNonEmptyString(g.title)) errors.push(`${at}: missing title`);
+        if (typeof g.exclusive !== "boolean") errors.push(`${at}: exclusive must be true or false`);
+        if (!Array.isArray(g.labels)) return errors.push(`${at}: labels must be an array`);
+        const names = [];
+        g.labels.forEach((l, j) => {
+          if (!l || typeof l !== "object" || Array.isArray(l) || !isNonEmptyString(l.name)) return errors.push(`${at}: label at index ${j}: missing name`);
+          if (labelNames.has(l.name)) errors.push(`duplicate label "${l.name}"`);
+          labelNames.add(l.name);
+          names.push(l.name);
+          if (typeof l.color !== "string" || !/^#[0-9a-fA-F]{6}$/.test(l.color)) errors.push(`label "${l.name}": color must be #rrggbb`);
+          if (l.description !== undefined && typeof l.description !== "string") errors.push(`label "${l.name}": description must be a string`);
+        });
+        if (g.exclusive === true && isNonEmptyString(gid)) exclusiveGroups.push({ id: gid, names });
+      });
+      const expected = groupLabelNames(board.labelGroups);
+      const tags = board.tags;
+      if (!Array.isArray(tags) || tags.length !== expected.length || tags.some((t, i) => t !== expected[i])) {
+        errors.push(`tags must equal the label names: ${expected.join(", ")}`);
+      }
+    }
+  }
+
+  const planIds = { epic: new Set(), milestone: new Set() };
+  if (isV2) {
+    for (const [kind, list] of [["epic", board.epics], ["milestone", board.milestones]]) {
+      if (list === undefined) continue;
+      if (!Array.isArray(list)) {
+        errors.push(`${kind}s must be an array`);
+        continue;
+      }
+      list.forEach((e, i) => {
+        if (!e || typeof e !== "object" || Array.isArray(e)) return errors.push(`${kind} at index ${i}: not an object`);
+        const eid = e.id;
+        if (!isNonEmptyString(eid)) return errors.push(`${kind} at index ${i}: missing id`);
+        if (planIds[kind].has(eid)) errors.push(`duplicate ${kind} "${eid}"`);
+        planIds[kind].add(eid);
+        const at = `${kind} "${eid}"`;
+        if (!isNonEmptyString(e.title)) errors.push(`${at}: missing title`);
+        if (!isNonEmptyString(e.goal)) errors.push(`${at}: missing goal`);
+        if (!PLAN_STATUSES.includes(e.status)) errors.push(`${at}: status must be planned, active, or done`);
+        if (e.target !== undefined) {
+          const t = e.target;
+          if (!t || typeof t !== "object" || Array.isArray(t)) errors.push(`${at}: target must be an object`);
+          else {
+            if (t.version !== undefined && !isNonEmptyString(t.version)) errors.push(`${at}: target version must be a non-empty string`);
+            if (t.date !== undefined && !isRealDate(t.date)) errors.push(`${at}: target date must be YYYY-MM-DD`);
+          }
+        }
+      });
+    }
+  }
 
   if (!Array.isArray(board.cards)) {
     errors.push("cards must be an array");
@@ -330,8 +457,26 @@ function inspectBoard(board) {
         }
       }
     }
+    for (const key of ["epic", "milestone"]) {
+      if (card[key] === undefined) continue;
+      if (isV1) errors.push(`card "${id}": ${key} is a version 2 field; this record is version 1`);
+      else if (isV2 && !planIds[key].has(card[key])) errors.push(`card "${id}": unknown ${key} "${show(card[key])}"`);
+    }
+    if (isV2 && Array.isArray(card.tags)) {
+      for (const g of exclusiveGroups) {
+        const hit = card.tags.filter((t, k) => g.names.includes(t) && card.tags.indexOf(t) === k);
+        if (hit.length > 1) errors.push(`card "${id}": tags "${hit[0]}" and "${hit[1]}" are both in exclusive group "${g.id}"`);
+      }
+    }
   });
   return errors;
+}
+
+// YYYY-MM-DD naming a real calendar date.
+function isRealDate(v) {
+  if (typeof v !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(v)) return false;
+  const d = new Date(`${v}T00:00:00Z`);
+  return !Number.isNaN(d.getTime()) && d.toISOString().slice(0, 10) === v;
 }
 
 function errorList(head, errors) {
@@ -374,13 +519,12 @@ export function findCard(board, id) {
 // `tag`, when given, filters to Ready cards carrying it: a card without it is skipped SILENTLY (not pushed onto
 // `skipped`, since a caller-requested filter should not print a "skipping" line per card it filters out); a `tag`
 // outside boardTags(board) throws.
-export function nextReadyCard(board, { track = "flow", tag } = {}) {
-  if (tag !== undefined && !boardTags(board).includes(tag)) throw new Error(`unknown tag "${tag}"; tags are ${boardTags(board).join(", ")}`);
+export function nextReadyCard(board, { track = "flow", tag, epic, milestone } = {}) {
+  checkFilters(board, { tag, epic, milestone });
   const done = new Set(board.cards.filter((c) => c.column === DONE).map((c) => c.id));
   const skipped = [];
-  for (const c of board.cards) {
-    if (c.column !== READY) continue;
-    if (tag !== undefined && !(c.tags || []).includes(tag)) continue;
+  for (const c of readyByPriority(board)) {
+    if (!passesFilters(c, { tag, epic, milestone })) continue;
     const cardTrack = c.track === "hand" ? "hand" : "flow";
     if (track !== "any" && cardTrack !== track) {
       skipped.push(cardTrack === "hand" ? { id: c.id, hand: true } : { id: c.id, flow: true });
@@ -396,18 +540,18 @@ export function nextReadyCard(board, { track = "flow", tag } = {}) {
   return { card: null, skipped };
 }
 
-// The first `batch` runnable Ready cards on the track, in board order, with the skipped ones (card parallel-cards):
+// The first `batch` runnable Ready cards on the track, in priority order, with the skipped ones (card parallel-cards):
 // what `board next --batch <n>` selects for one plan. Fewer than n when the board has fewer runnable cards.
-// `tag`, like nextReadyCard's, filters to cards carrying it, silently, and throws on a tag outside boardTags(board).
-export function nextReadyCards(board, { track = "flow", batch, tag } = {}) {
+// `tag`, `epic` and `milestone`, like nextReadyCard's, filter silently; an unknown value throws.
+export function nextReadyCards(board, { track = "flow", batch, tag, epic, milestone } = {}) {
   if (!(Number.isInteger(batch) && batch > 0)) throw new Error("batch must be a positive integer");
-  if (tag !== undefined && !boardTags(board).includes(tag)) throw new Error(`unknown tag "${tag}"; tags are ${boardTags(board).join(", ")}`);
+  checkFilters(board, { tag, epic, milestone });
   const done = new Set(board.cards.filter((c) => c.column === DONE).map((c) => c.id));
   const cards = [];
   const skipped = [];
-  for (const c of board.cards) {
-    if (c.column !== READY || cards.length >= batch) continue;
-    if (tag !== undefined && !(c.tags || []).includes(tag)) continue;
+  for (const c of readyByPriority(board)) {
+    if (cards.length >= batch) continue;
+    if (!passesFilters(c, { tag, epic, milestone })) continue;
     const cardTrack = c.track === "hand" ? "hand" : "flow";
     if (track !== "any" && cardTrack !== track) {
       skipped.push(cardTrack === "hand" ? { id: c.id, hand: true } : { id: c.id, flow: true });
@@ -421,6 +565,35 @@ export function nextReadyCards(board, { track = "flow", batch, tag } = {}) {
     cards.push(c);
   }
   return { cards, skipped };
+}
+
+export function checkFilters(board, { tag, epic, milestone }) {
+  if (tag !== undefined && !boardTags(board).includes(tag)) throw new Error(`unknown tag "${tag}"; tags are ${boardTags(board).join(", ")}`);
+  for (const [kind, value, list] of [["epic", epic, board.epics], ["milestone", milestone, board.milestones]]) {
+    if (value === undefined) continue;
+    const ids = Array.isArray(list) ? list.filter((e) => e && typeof e.id === "string").map((e) => e.id) : [];
+    if (!ids.includes(value)) throw new Error(`unknown ${kind} "${value}"; ${ids.length ? `${kind}s are ${ids.join(", ")}` : `no ${kind}s are defined`}`);
+  }
+}
+
+function passesFilters(c, { tag, epic, milestone }) {
+  if (tag !== undefined && !(c.tags || []).includes(tag)) return false;
+  if (epic !== undefined && c.epic !== epic) return false;
+  if (milestone !== undefined && c.milestone !== milestone) return false;
+  return true;
+}
+
+// The Ready cards, highest priority first (urgent, high, medium, low, then none), board order breaking ties.
+// A board with no label group "priority" keeps pure board order (decision 0016).
+function readyByPriority(board) {
+  const ready = board.cards.filter((c) => c.column === READY);
+  const hasPriority = Array.isArray(board.labelGroups) && board.labelGroups.some((g) => g && g.id === "priority");
+  if (!hasPriority) return ready;
+  const rank = (c) => {
+    const ranks = (Array.isArray(c.tags) ? c.tags : []).map((t) => PRIORITY_LABELS.indexOf(t)).filter((r) => r >= 0);
+    return ranks.length ? Math.min(...ranks) : PRIORITY_LABELS.length;
+  };
+  return ready.map((c, i) => ({ c, i, r: rank(c) })).sort((a, b) => a.r - b.r || a.i - b.i).map((x) => x.c);
 }
 
 // Returns a new board with the card moved. `source` replaces the card's source line (the landing commit).
@@ -479,7 +652,7 @@ export function reorderCard(board, id, placement, { date } = {}) {
 
 // Returns a new board with a card appended (column defaults to backlog, deps to []). The result is
 // validated; a duplicate id, unknown column, component, or dep, or a missing field throws.
-export function addCard(board, { id, title, goal, component, size, track, deps, column, tags, class: cls }, { date } = {}) {
+export function addCard(board, { id, title, goal, component, size, track, deps, column, tags, epic, milestone, class: cls }, { date } = {}) {
   const card = {
     id,
     column: column === undefined ? "backlog" : column,
@@ -488,6 +661,8 @@ export function addCard(board, { id, title, goal, component, size, track, deps, 
     ...(size !== undefined ? { size } : {}),
     ...(track !== undefined ? { track } : {}),
     ...(tags !== undefined ? { tags } : {}),
+    ...(epic !== undefined ? { epic } : {}),
+    ...(milestone !== undefined ? { milestone } : {}),
     deps: deps === undefined ? [] : deps,
     goal,
     ...(cls !== undefined ? { class: cls } : {}),
@@ -498,8 +673,105 @@ export function addCard(board, { id, title, goal, component, size, track, deps, 
   return next;
 }
 
+function addPlanEntry(kind, board, { id, title, goal, target, status = "planned" }, { date } = {}) {
+  const key = `${kind}s`;
+  const entry = { id, title, goal, ...(target !== undefined ? { target } : {}), status };
+  const next = { ...board, version: 2, updated: date || today(), [key]: [...(Array.isArray(board[key]) ? board[key] : []), entry] };
+  const errors = validateBoard(next);
+  if (errors.length) throw new Error(errorList(`cannot add ${kind} "${id}":`, errors));
+  return next;
+}
+
+// Returns a new board with the epic appended (input untouched, `updated` stamped). The first epic, milestone or
+// label group added moves a version 1 record to version 2. The result is validated like addCard's.
+export function addEpic(board, entry, opts) {
+  return addPlanEntry("epic", board, entry, opts);
+}
+
+export function addMilestone(board, entry, opts) {
+  return addPlanEntry("milestone", board, entry, opts);
+}
+
+// Fields editEpic and editMilestone accept. `target` is { version?, date? }, merged onto the existing target (a null part or a null target removes it).
+const PLAN_EDIT_FIELDS = ["title", "goal", "status", "target"];
+
+function editPlanEntry(kind, board, id, fields, { force = false, date } = {}) {
+  const prefix = `cannot edit ${kind} "${id}":`;
+  const key = `${kind}s`;
+  const list = Array.isArray(board[key]) ? board[key] : [];
+  const entry = list.find((e) => e && e.id === id);
+  if (!entry) throw new Error(`no ${kind} "${id}" on the board`);
+  const keys = fields && typeof fields === "object" && !Array.isArray(fields) ? Object.keys(fields) : [];
+  if (!keys.length) throw new Error(`${prefix} no field to change`);
+  for (const k of keys) {
+    if (!PLAN_EDIT_FIELDS.includes(k)) throw new Error(`${prefix} unknown field "${k}"; editable fields are ${PLAN_EDIT_FIELDS.join(", ")}`);
+  }
+  const warnings = [];
+  if (fields.status === "done" && entry.status !== "done") {
+    const open = board.cards.filter((c) => c[kind] === id && c.column !== DONE).map((c) => c.id);
+    if (open.length) {
+      const sentence = `${kind} "${id}" is set to done while ${open.length === 1 ? "this card is" : "these cards are"} not Done: ${open.join(", ")}`;
+      if (!force) throw new Error(`${prefix} ${sentence}; pass --force to set it anyway`);
+      warnings.push(sentence);
+    }
+  }
+  const nextEntry = { ...entry };
+  for (const k of keys) {
+    if (k === "target" && fields.target && typeof fields.target === "object" && !Array.isArray(fields.target)) {
+      // A target object merges onto the existing one; a null part removes that part, an empty result removes the target.
+      const merged = { ...(entry.target && typeof entry.target === "object" ? entry.target : {}) };
+      for (const [part, v] of Object.entries(fields.target)) {
+        if (v === null) delete merged[part];
+        else merged[part] = v;
+      }
+      if (Object.keys(merged).length) nextEntry.target = merged;
+      else delete nextEntry.target;
+    } else if (fields[k] === null) delete nextEntry[k];
+    else nextEntry[k] = fields[k];
+  }
+  const next = { ...board, updated: date || today(), [key]: list.map((e) => (e === entry ? nextEntry : e)) };
+  const errors = validateBoard(next);
+  if (errors.length) throw new Error(errorList(prefix, errors));
+  return { board: next, warnings };
+}
+
+// Returns { board, warnings }: a new board with the epic's fields changed (input untouched, `updated` stamped).
+// Setting status to done while a card with that epic is not Done is refused unless `force`; forced, it returns a
+// warning naming those cards. An unknown id throws `no epic "<id>" on the board`. The result is validated.
+export function editEpic(board, id, fields, opts) {
+  return editPlanEntry("epic", board, id, fields, opts);
+}
+
+export function editMilestone(board, id, fields, opts) {
+  return editPlanEntry("milestone", board, id, fields, opts);
+}
+
+// Adds a label group; the flat `tags` array is rewritten as the label names of every group.
+export function addLabelGroup(board, { id, title, exclusive, labels }, { date } = {}) {
+  const groups = [...(Array.isArray(board.labelGroups) ? board.labelGroups : []), { id, title, exclusive, labels }];
+  const next = { ...board, version: 2, updated: date || today(), tags: groupLabelNames(groups), labelGroups: groups };
+  const errors = validateBoard(next);
+  if (errors.length) throw new Error(errorList(`cannot add label group "${id}":`, errors));
+  return next;
+}
+
+// Migrates a board with no label groups: the type group holds the board's existing tags, the fixed priority group is added, and the record becomes version 2, in one write.
+// A board that already has label groups is refused.
+export function initLabelGroups(board, { date } = {}) {
+  if (Array.isArray(board.labelGroups)) throw new Error("cannot init label groups: the board already has label groups");
+  const known = new Map(DEFAULT_LABEL_GROUPS[0].labels.map((l) => [l.name, l.color]));
+  const type = { ...DEFAULT_LABEL_GROUPS[0], labels: boardTags(board).map((name) => ({ name, color: known.get(name) || "#848d97" })) };
+  const groups = [type, DEFAULT_LABEL_GROUPS[1]];
+  const next = { ...board, version: 2, updated: date || today(), tags: groupLabelNames(groups), labelGroups: groups };
+  const errors = validateBoard(next);
+  if (errors.length) throw new Error(errorList("cannot init label groups:", errors));
+  return next;
+}
+
 // Fields editCard accepts; the column is never one of them (move stays the way to change a column).
-const EDITABLE_FIELDS = ["title", "goal", "size", "component", "track", "deps", "source", "tags", "class"];
+const EDITABLE_FIELDS = ["title", "goal", "size", "component", "track", "deps", "source", "tags", "class", "epic", "milestone"];
+// Planning fields: a done card takes them without --force (the milestone's cards are Done when the milestone is filed).
+const PLANNING_FIELDS = ["epic", "milestone"];
 
 // Returns a new board with the named card's fields changed (a new board, input untouched, `updated` stamped
 // like moveCard) and `warnings`, an array of strings (empty when none). `fields` may carry any of
@@ -524,8 +796,8 @@ export function editCard(board, id, fields, { force = false, date, plan = null }
   const card = findCard(board, id);
   const warnings = [];
 
-  if (card.column === DONE) {
-    if (keys.some((k) => k !== "goal" && k !== "source")) throw new Error(`${prefix} a done card accepts only --goal and --source, with --force`);
+  if (card.column === DONE && !keys.every((k) => PLANNING_FIELDS.includes(k))) {
+    if (keys.some((k) => k !== "goal" && k !== "source" && !PLANNING_FIELDS.includes(k))) throw new Error(`${prefix} a done card accepts only --goal and --source, with --force`);
     const landed = card.source || "an unrecorded commit";
     if (!force) throw new Error(`${prefix} a done card changes only with --force; it landed as ${landed}`);
     warnings.push(`editing done card "${id}", landed as ${landed}: docs/live-runs.md and the landing commit still describe the old text`);
@@ -541,7 +813,10 @@ export function editCard(board, id, fields, { force = false, date, plan = null }
   }
 
   const nextCard = { ...card };
-  for (const k of keys) nextCard[k] = fields[k];
+  for (const k of keys) {
+    if (PLANNING_FIELDS.includes(k) && fields[k] === null) delete nextCard[k];
+    else nextCard[k] = fields[k];
+  }
   const cards = board.cards.map((c) => (c.id === id ? nextCard : c));
   const next = { ...board, updated: date || today(), cards };
   const errors = validateBoard(next);
@@ -1076,4 +1351,74 @@ export function recordLanding(dir, id, markdown) {
   const promoted = promoteResearchNote(dir, id);
   const file = appendRun(dir, markdown);
   return { file, promoted };
+}
+
+// Roll-up per epic and milestone (decision 0016): counts per column, done out of total, progress weighted by
+// cardBudgetMinutes (In flow earns nothing), measured cost and wall of the Done cards with coverage (null with no
+// live-runs text), and the not-Done cards' budget. A version 1 board has no epics or milestones.
+export function rollup(board, liveRunsText) {
+  const costs = new Map(liveRunsText == null ? [] : parseLiveRunCosts(liveRunsText).map((r) => [r.id, r.usd]));
+  const walls = new Map(liveRunsText == null ? [] : parseLiveRunWalls(liveRunsText).map((r) => [r.id, r.minutes]));
+  const measured = liveRunsText != null;
+  const entry = (item, field) => {
+    const members = board.cards.filter((c) => c[field] === item.id);
+    const doneCards = members.filter((c) => c.column === DONE);
+    const open = members.filter((c) => c.column !== DONE);
+    const columns = {};
+    for (const col of board.columns) columns[col.id] = members.filter((c) => c.column === col.id).length;
+    const weight = (cs) => cs.reduce((n, c) => n + cardBudgetMinutes(c), 0);
+    const total = weight(members);
+    const withUsd = doneCards.filter((c) => costs.has(c.id));
+    const withWall = doneCards.filter((c) => walls.has(c.id));
+    return {
+      id: item.id,
+      title: item.title,
+      status: item.status,
+      target: item.target ?? null,
+      columns,
+      done: doneCards.length,
+      total: members.length,
+      progress: total === 0 ? 0 : weight(doneCards) / total,
+      measured: {
+        usd: measured ? Math.round(withUsd.reduce((n, c) => n + costs.get(c.id), 0) * 100) / 100 : null,
+        usdCards: measured ? withUsd.length : null,
+        wallMinutes: measured ? withWall.reduce((n, c) => n + walls.get(c.id), 0) : null,
+        wallCards: measured ? withWall.length : null,
+        doneCards: doneCards.length,
+      },
+      cards: members.map((c) => c.id),
+      budget: {
+        wallMinutes: weight(open),
+        usd: Math.round(open.reduce((n, c) => n + cardBudgetDollars(c), 0) * 100) / 100,
+      },
+    };
+  };
+  const list = (v) => (Array.isArray(v) ? v.filter((e) => e && typeof e.id === "string") : []);
+  return { epics: list(board.epics).map((e) => entry(e, "epic")), milestones: list(board.milestones).map((m) => entry(m, "milestone")) };
+}
+
+// The board page's card surfaces (board-app.js --surface), light and dark.
+export const LABEL_SURFACES = ["#ffffff", "#1c2022"];
+export const LABEL_MIN_CONTRAST = 3;
+function luminance(hex) {
+  const [r, g, b] = [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16) / 255).map((v) => (v <= 0.04045 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4));
+  return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+}
+export function contrastRatio(a, b) {
+  const [hi, lo] = [luminance(a), luminance(b)].sort((x, y) => y - x);
+  return (hi + 0.05) / (lo + 0.05);
+}
+// One line per label colour under 3:1 (WCAG 2.2 SC 1.4.11) against a card surface; nothing when all pass.
+export function labelContrastFailures(board) {
+  const out = [];
+  for (const g of Array.isArray(board.labelGroups) ? board.labelGroups : []) {
+    for (const l of g && Array.isArray(g.labels) ? g.labels : []) {
+      if (!l || typeof l.color !== "string" || !/^#[0-9a-fA-F]{6}$/.test(l.color)) continue;
+      for (const surface of LABEL_SURFACES) {
+        const ratio = contrastRatio(l.color, surface);
+        if (ratio < LABEL_MIN_CONTRAST) out.push(`${l.name} ${l.color} ${ratio.toFixed(2)}:1 against ${surface}`);
+      }
+    }
+  }
+  return out;
 }

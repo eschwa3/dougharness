@@ -4,7 +4,7 @@
 import { atom, read, update } from 'claude-code'
 import type { Register } from 'claude-code'
 
-import { AUTOPILOT_FILE, autopilotLines, autopilotView, parseAutopilot, shouldOpenPane } from '../lib/autopilot-core.mjs'
+import { AUTOPILOT_FILE, autopilotLines, autopilotView, parseAutopilot, shouldOpenPane, startedFromList } from '../lib/autopilot-core.mjs'
 
 const PANE = 'doug-autopilot'
 const POLL_MS = 5000
@@ -22,7 +22,23 @@ const refresh = async ($: any) => {
       // no file: no run
     }
     const state = parseAutopilot(text)
-    const fresh = autopilotLines(autopilotView(state, new Date()))
+    // A running queen card's seats come from its journal and the seat start times beside it; a read that fails adds none.
+    const run: Record<string, { journals: string[]; startedMs: Record<string, number> }> = {}
+    for (const c of Array.isArray(state?.cards) ? state.cards : []) {
+      if (!c || c.state !== 'running' || !Array.isArray(c.journals)) continue
+      const journals: string[] = []
+      let startedMs: Record<string, number> = {}
+      for (const j of c.journals as string[]) {
+        try {
+          journals.push(await $.fs.read(j))
+          startedMs = { ...startedMs, ...startedFromList(await $.fs.list(j.slice(0, j.lastIndexOf('/')))) }
+        } catch {
+          // an unreadable journal adds no seats
+        }
+      }
+      if (journals.length) run[c.id] = { journals, startedMs }
+    }
+    const fresh = autopilotLines(autopilotView(state, new Date(), run))
     await update($, lines, old => (JSON.stringify(old) === JSON.stringify(fresh) ? old : fresh))
     // Only `autopilot.autoOpenPane: false` in .doug/config.json turns the auto-open off.
     let autoOpen = true

@@ -122,7 +122,10 @@ fixed) is un-marked with `memory.mjs lesson unstale <id>` below — recall never
 
 A lesson unconfirmed for more than `memory.staleDays` (`.doug/config.json`, 30 by default) since it was last
 created or confirmed is excluded from candidates outright, regardless of citation. Read by both `memory.mjs
-recall` and `plan.mjs json`'s per-task recall. A value that is not a positive finite number is never used: one
+recall` and `plan.mjs json`'s per-task recall. `memory.mjs recall` and `brief-lessons` (and the SessionStart
+hook) report the exclusion with one line, `window: hid <n> of <total> live lessons older than <staleDays> days
+(oldest <d> days)`, naming the configured value; recall prints it right after its header, `brief-lessons` after
+the lesson lines and before `memoryUsed:`. A value that is not a positive finite number is never used: one
 stderr line (`[doug] .doug/config.json memory.staleDays is not a positive number; using 30`) and 30 is used —
 this never throws or exits nonzero.
 
