@@ -1,0 +1,99 @@
+diff --git a/src/customers/membership.ts b/src/customers/membership.ts
+index 67be949..e81c4a3 100644
+--- a/src/customers/membership.ts
++++ b/src/customers/membership.ts
+@@ -3,6 +3,9 @@ import type { Customer } from "./customer.js";
+ /** Members take this percentage off the rental. */
+ export const MEMBER_DISCOUNT_PERCENT = 10;
+ 
++/** Members may return an item this many days after the due day before late fees start. */
++export const MEMBER_GRACE_DAYS = 1;
++
+ export function isMember(customer: Customer): boolean {
+   return customer.tier === "member";
+ }
+@@ -11,6 +14,11 @@ export function memberDiscountPercent(customer: Customer | undefined): number {
+   return customer && isMember(customer) ? MEMBER_DISCOUNT_PERCENT : 0;
+ }
+ 
++/** The grace days a customer gets before late fees start; zero for a customer who is not a member. */
++export function memberGraceDays(customer: Customer | undefined): number {
++  return customer && isMember(customer) ? MEMBER_GRACE_DAYS : 0;
++}
++
+ export function upgradeToMember(customer: Customer): Customer {
+   return { ...customer, tier: "member" };
+ }
+diff --git a/src/pricing/late-fees.ts b/src/pricing/late-fees.ts
+index d4398f2..8da2b19 100644
+--- a/src/pricing/late-fees.ts
++++ b/src/pricing/late-fees.ts
+@@ -1,4 +1,6 @@
+ import type { Item } from "../catalog/item.js";
++import type { Customer } from "../customers/customer.js";
++import { memberGraceDays } from "../customers/membership.js";
+ import { daysBetween } from "../util/dates.js";
+ import type { Day } from "../util/dates.js";
+ import { percentOf } from "../util/money.js";
+@@ -7,9 +9,9 @@ import type { Cents } from "../util/money.js";
+ /** A late day costs this percentage of the day rate. */
+ export const LATE_FEE_PERCENT = 150;
+ 
+-/** How many late days a return costs: none on the due day or before, then one per day after it. */
+-export function lateDays(due: Day, returned: Day): number {
+-  return Math.max(0, daysBetween(due, returned));
++/** How many late days a return costs: none on the due day or before, then one per day after it, less a member's grace days. */
++export function lateDays(due: Day, returned: Day, customer?: Customer): number {
++  return Math.max(0, daysBetween(due, returned) - memberGraceDays(customer));
+ }
+ 
+ /** The fee for a number of late days. */
+@@ -18,6 +20,6 @@ export function feeForDays(item: Item, days: number): Cents {
+ }
+ 
+ /** The fee for returning on `returned` an item that was due on `due`. */
+-export function lateFeeCents(item: Item, due: Day, returned: Day): Cents {
+-  return feeForDays(item, lateDays(due, returned));
++export function lateFeeCents(item: Item, due: Day, returned: Day, customer?: Customer): Cents {
++  return feeForDays(item, lateDays(due, returned, customer));
+ }
+diff --git a/tests/pricing.test.ts b/tests/pricing.test.ts
+index 45c6043..f623ff0 100644
+--- a/tests/pricing.test.ts
++++ b/tests/pricing.test.ts
+@@ -1,7 +1,7 @@
+ import { describe, it, expect } from "vitest";
+ import { seedCatalog } from "../src/catalog/catalog.js";
+ import { makeCustomer } from "../src/customers/customer.js";
+-import { upgradeToMember } from "../src/customers/membership.js";
++import { memberGraceDays, upgradeToMember } from "../src/customers/membership.js";
+ import { afterDiscount, bundleDiscountCents, memberDiscountCents, percentOffCents } from "../src/pricing/discounts.js";
+ import { feeForDays, lateDays, lateFeeCents } from "../src/pricing/late-fees.js";
+ import { billableDays, costForSpan, dayRateLabel, rentalCostCents, weekRateLabel } from "../src/pricing/rates.js";
+@@ -77,6 +77,26 @@ describe("late days", () => {
+   });
+ });
+ 
++describe("member grace day", () => {
++  const member = upgradeToMember(ana);
++  it("gives a member one grace day and a standard customer none", () => {
++    expect(memberGraceDays(member)).toBe(1);
++    expect(memberGraceDays(ana)).toBe(0);
++    expect(memberGraceDays(undefined)).toBe(0);
++  });
++  it("charges a member nothing for a return the day after the due day", () => {
++    expect(lateDays("2025-03-13", "2025-03-14", member)).toBe(0);
++    expect(lateFeeCents(drill, "2025-03-13", "2025-03-14", member)).toBe(0);
++  });
++  it("charges a member from the second day after the due day", () => {
++    expect(lateDays("2025-03-13", "2025-03-15", member)).toBe(1);
++    expect(lateFeeCents(drill, "2025-03-13", "2025-03-15", member)).toBe(2250);
++  });
++  it("gives a standard customer no grace day", () => {
++    expect(lateDays("2025-03-13", "2025-03-14", ana)).toBe(1);
++  });
++});
++
+ describe("more pricing", () => {
+   it("prices every seeded item for one day at its day rate", () => {
+     for (const item of seedCatalog()) expect(rentalCostCents(item, 1)).toBe(item.dayRateCents);

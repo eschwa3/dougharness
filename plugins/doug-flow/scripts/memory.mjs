@@ -19,13 +19,26 @@
 //                                                 condition columns from it; without one the row still records
 //                                                 (exit 0) and an extra stdout line says the landing is
 //                                                 unstamped (--json: "stamped": true|false instead)
+//   memory.mjs record <card-id> --hand --stop <reason> [dir] [--detail <text>] [--json]
+//                                                 record a stopped by-hand run as exactly one stop row (run
+//                                                 stop:<12 hex>, commit null, stop_class <reason>, stop_reason
+//                                                 --detail or the reason); the same stop recorded again updates
+//                                                 that row. Condition columns and memory_config come from
+//                                                 condition.json when present, else the row is unstamped (extra
+//                                                 stdout line; --json: "stamped": false). --stop with no value
+//                                                 or with --commit exits 2 and writes nothing
 //   memory.mjs condition open <card-id> [dir] [--json]
 //                                                 (card outcomes-condition-columns) writes
 //                                                 .doug/.state/reports/<card-id>/condition.json: harnessCommit
 //                                                 (git HEAD), configHash (conditionConfigHash: .doug/config.json
 //                                                 plus the CLAUDE.md Models table text), class and arm
 //                                                 (<class>/default) from the card's board record, assignedBy
-//                                                 "policy", exploreProbability null, openedAt. Refuses (exit 1,
+//                                                 "policy", exploreProbability null, openedAt, memoryConfig (card
+//                                                 memory-outcome-arms: memoryConfig() from the project's
+//                                                 embeddings config and staleDays, track "hand": delivery
+//                                                 index+fetch; a flow row from `record <report.json>` is
+//                                                 stamped with track "flow": delivery index+fetch, fetch top-k,
+//                                                 fetchTokens 4000). Refuses (exit 1,
 //                                                 nothing written) when the file already exists, the card is
 //                                                 missing or has no class, or there is no git HEAD
 //   memory.mjs condition backfill [dir] [--json]
@@ -39,9 +52,22 @@
 //                                                 outcomes rows with a harness commit." (--json: {"backfilled": n})
 //   memory.mjs outcomes [dir] [--run <id>] [--task <id>] [--json]
 //                                                 list recorded outcomes, filtered by run and/or task
+//   memory.mjs arms [dir] [--min <n>] [--json]
+//                                                 (card memory-outcome-arms) compares outcome arms by the memory
+//                                                 configuration stamped on each row (outcomes.memory_config):
+//                                                 landings, stops, then stop-or-land rate, fix rounds, harmful
+//                                                 marks per landing and cost per landing once an arm has --min
+//                                                 landings (default 12; an integer >= 1), else "not compared: <n>
+//                                                 of <min> landings"; a last line says whether two arms are
+//                                                 comparable. Reads existing rows only: no database -> "No
+//                                                 outcomes recorded." (exit 0, database not created); no claude
+//                                                 call, no network request
 //   memory.mjs lessons [dir] [--search <text>] [--k <n>] [--all] [--json]
 //                                                 list lessons, or full-text search them (--search); --all
 //                                                 includes superseded rows
+//   memory.mjs lessons --unconfirmed [dir] [--json]
+//                                                 read-only review list: live lessons with helpful 0, harmful 0
+//                                                 and no `lesson show --card` fetch; id, kind, created, title
 //   memory.mjs lesson add --text <text> --kind <feedback|project|pitfall|pattern> [dir]
 //                          [--scope <glob,glob>] [--citation <text>] [--card <id>]
 //                          [--commit <sha>] [--source-agent <name>] [--source-model <name>] [--json]
@@ -60,11 +86,34 @@
 //   memory.mjs lesson unstale <id> [dir] [--json]
 //                                                 clear a lesson's stale mark (set by recall's citation
 //                                                 re-check) so it is a candidate again; refuses on an unknown id
+//   memory.mjs lesson unarchive <id> [dir] [--json]
+//                                                 restore an archived lesson (clears archived and
+//                                                 archived_reason); refuses on an unknown or non-archived id
+//   memory.mjs lesson show <id> [dir] [--card <card-id>] [--json]
+//                                                 (card memory-progressive-access) one lesson in full: cost
+//                                                 line, citation line, superseded/stale status when set, a
+//                                                 blank line, then the whole text, never cut. Read-only unless
+//                                                 --card <card-id> (a plain id, else exit 2): then, after the
+//                                                 lesson is found and printed, one JSON line {id, at} is
+//                                                 appended to .doug/.state/reports/<card-id>/fetched.jsonl
+//                                                 (reflect --hand credits only those). No
+//                                                 store or unknown id -> one stderr line, exit 1 (nothing
+//                                                 created); no id -> usage, exit 2. --json: the row with
+//                                                 hasVector and tokens instead of the embedding blob
+//   memory.mjs history show <ref> [dir] [--json]
+//                                                 (card memory-progressive-access) fetch run history (L0) by
+//                                                 id: <card> lists its runs, <card>/<run> lists the run's
+//                                                 entries with token costs, <card>/<run>:<line> prints one
+//                                                 entry whole (a leading history: and a .jsonl suffix are
+//                                                 accepted). Needs no memory database; bad id -> exit 2,
+//                                                 missing -> one stderr line, exit 1
 //   memory.mjs brief-lessons <card-id> [dir] [--k <n>] [--json]
 //                                                 (card memory-every-session) recall for a hand-track card's
 //                                                 briefs: query = the card's title and goal, k 8. Prints the
-//                                                 workflow's lessons header, the rendered `- [id] ...` lines
-//                                                 (capped at 2000 chars like plan.mjs), then the window line
+//                                                 workflow's lessons header, the index `- [id] title (kind,
+//                                                 ~n tokens)` lines (capped at 2000 chars; the lead fetches
+//                                                 full text with `lesson show`), an `index: omitted` line
+//                                                 naming lessons the cap dropped, then the window line
 //                                                 when lessons were hidden, then `memoryUsed: <ids>`;
 //                                                 writes .doug/.state/reports/<card-id>/lessons.json. No database
 //                                                 -> "No lessons recalled for <id>." (database not created);
@@ -92,11 +141,13 @@
 //                                                 filtered in code (a pitfall needs a block classed real, a
 //                                                 pattern needs a first-pass verified task, the citation must be
 //                                                 checkable, the text must not already be derivable from the
-//                                                 checkout, and a near-duplicate bumps the existing lesson's
-//                                                 helpful instead of appending); idempotent on the report's
+//                                                 checkout, and a proposal may name one listed lesson
+//                                                 it repeats (that lesson's seen rises, nothing is appended) or
+//                                                 supersedes (the new lesson is written and the old retired); a
+//                                                 near-duplicate with neither is rejected); idempotent on the report's
 //                                                 sha256 (a second reflect on the same report is a no-op, exit
-//                                                 0); --dry-run applies nothing but still runs the LLM pass and
-//                                                 prints what would happen. Cost is measured from the same local
+//                                                 0); --dry-run applies nothing, makes no model call, and
+//                                                 prints the counters it would credit and the prompt it would send. Cost is measured from the same local
 //                                                 transcripts cost.mjs reads, falling back to the CLI's own
 //                                                 cost estimate. For each appended lesson with no CLAUDE.md home
 //                                                 it prints `claude-md candidate for lesson <id>: <command>`
@@ -108,9 +159,48 @@
 //                                                 (card memory-every-session) the same pass for a hand landing:
 //                                                 assembles .doug/.state/reports/<card-id>/hand-report.json from
 //                                                 the saved briefs/, reviews/ and lessons.json (memoryUsed = its
-//                                                 ids; verified true; passes = --rounds, default 1; one fixed
+//                                                 ids that the card's fetched.jsonl lists; verified true; passes = --rounds, default 1; one fixed
 //                                                 blocker ledger entry per --review id), then reflects on it
 //                                                 exactly as above. --commit is required (exit 2). No schema change.
+//   memory.mjs reflect --failures <card-id> [dir] [--session <id>] [--claude-bin <path>] [--model <name>] [--max-usd <n>] [--dry-run] [--json]
+//                                                 (card memory-failure-lessons) the failure pass: reads the card's
+//                                                 run history for stopped reports, blocks classed real and
+//                                                 denials, prints the item count with the blocks it hid by class
+//                                                 and the entries it could not read, then a cheap-row pass proposes
+//                                                 pitfall lessons citing a history ref of one item; a proposal's
+//                                                 `repeats` names a live pitfall and records an occurrence in
+//                                                 .doug/.state/memory/pitfalls.jsonl (no new lesson, no helpful).
+//                                                 Exclusive with --hand and a report path (exit 2); idempotent on
+//                                                 the slice; --dry-run makes no model call and prints the prompt it would send;
+//                                                 not wired into any loop (its spend cap is open)
+//   memory.mjs ideas [dir] [--claude-bin <path>] [--model <name>] [--max-usd <n>] [--cap <n>] [--dry-run] [--json]
+//                                                 (card memory-idea-proposals, ADR 0019 L3) one cheap-row `claude
+//                                                 -p --json-schema` call (--max-usd default 0.5) over the live
+//                                                 lessons, run history, pitfall occurrences and the Backlog and
+//                                                 Ready cards files at most --cap (default 3) idea cards to
+//                                                 Backlog only, source `memory-proposed: <citations>`, and appends
+//                                                 priority reviews naming Backlog cards to
+//                                                 .doug/.state/memory/priority-reviews.jsonl. An item with an
+//                                                 unresolved citation is dropped; a duplicate or invalid idea is
+//                                                 skipped. Never touches Ready. No store or no board exits 1 with
+//                                                 no call; a failed call exits 1 and writes nothing. --dry-run
+//                                                 makes no model call, writes neither file and prints the prompt
+//                                                 it would send and the files it would write
+//   memory.mjs model regen [dir] [--claude-bin <path>] [--model <name>] [--max-usd <n>] [--dry-run] [--json]
+//                                                 (card memory-project-model, ADR 0019 L2) one cheap-row `claude
+//                                                 -p --json-schema` call (--max-usd default 0.5) over the live
+//                                                 lessons and the run-history index writes .doug/project-model.md:
+//                                                 failure patterns, conventions and open risks, at most 2000
+//                                                 characters in all. A statement with any citation that does not
+//                                                 resolve in code (a live lesson id, or a run-history ref whose
+//                                                 file and line exist) is dropped whole; over the cap the most
+//                                                 cited statements stay. Prints one line with the counts, the
+//                                                 drops and the cost. A failed call or zero surviving statements
+//                                                 exits 1 and leaves an existing file untouched; no store exits 1
+//                                                 with no call. --dry-run makes no model call, writes nothing and prints the prompt
+//   memory.mjs model show [dir]
+//                                                 prints .doug/project-model.md verbatim, read-only; missing ->
+//                                                 one stderr line, exit 1
 //   memory.mjs doctor [dir] [--json]
 //                                                 probe the configured embedding provider (memory.embeddings in
 //                                                 .doug/config.json), or a local Ollama at localhost:11434 when
@@ -190,11 +280,11 @@
 // lesson add and import embed only the row(s) they just wrote, best-effort, when a provider is configured: a
 // provider failure prints one stderr line and never turns into a nonzero exit for that add/import. A pending
 // row from an earlier add is left alone until `reembed` (or a later add/import) picks it up.
-import { readFileSync, existsSync, mkdirSync, writeFileSync, readdirSync } from "node:fs";
+import { readFileSync, existsSync, mkdirSync, writeFileSync, readdirSync, appendFileSync, statSync } from "node:fs";
 import { resolve, join, dirname } from "node:path";
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
-import { parseAdversaryClasses, loadBoard, findCard } from "../lib/board.mjs";
+import { parseAdversaryClasses, loadBoard, saveBoard, findCard } from "../lib/board.mjs";
 import { planFor, unwrapReport } from "../lib/plan.mjs";
 import { costRun } from "../lib/cost.mjs";
 import { loadModels } from "../lib/models.mjs";
@@ -211,7 +301,7 @@ import {
 } from "../lib/embeddings.mjs";
 
 const argv = process.argv.slice(2);
-const FLAGS = new Set(["json", "all", "hand", "dry-run", "check", "no-check"]);
+const FLAGS = new Set(["json", "all", "hand", "dry-run", "check", "no-check", "unconfirmed"]);
 const REPEATABLE = new Set(["adversary", "review", "harmful"]);
 const opts = {};
 const positional = [];
@@ -284,7 +374,8 @@ async function bestEffortEmbed(m, dir, ids) {
   if (!ids || !ids.length) return;
   const provider = createProvider(readMemoryConfig(dir));
   if (!provider) return;
-  if (embeddingChangeDetected(m, provider)) {
+  const { LIVE_LESSON_SQL } = await import("../lib/memory.mjs");
+  if (embeddingChangeDetected(m, provider, LIVE_LESSON_SQL)) {
     process.stderr.write(
       `Note: ${provider.model}/${provider.dims} is new to this store; leaving ${ids.length} lesson(s) pending. Run \`memory.mjs reembed\` first — it runs the cosine sanity check before this store commits to a new model.\n`
     );
@@ -350,10 +441,10 @@ function parseLastJsonObject(text) {
 // stdin, a 180s timeout, and a 64MB stdout buffer (a report's prompt plus a model's proposals can run long).
 // Throws on any failure the spec names (spawn error, timeout, unparseable stdout, is_error, a missing
 // structured_output.lessons array) so runReflect's single catch handles every case uniformly.
-function makePropose({ claudeBin, model, maxUsd, dir }) {
+function makePropose({ claudeBin, model, maxUsd, dir, schema = null, resultKey = "lessons", extraKeys = [] }) {
   return async (prompt) => {
     const { REFLECT_SCHEMA } = await import("../lib/memory.mjs");
-    const args = ["-p", "--output-format", "json", "--json-schema", JSON.stringify(REFLECT_SCHEMA), "--model", model, "--max-budget-usd", String(maxUsd)];
+    const args = ["-p", "--output-format", "json", "--json-schema", JSON.stringify(schema ?? REFLECT_SCHEMA), "--model", model, "--max-budget-usd", String(maxUsd)];
     const res = spawnSync(claudeBin, args, { input: prompt, encoding: "utf8", cwd: dir, timeout: 180000, maxBuffer: 64 * 1024 * 1024 });
     if (res.error) throw new Error(`claude spawn failed: ${res.error.message}`);
     if (res.signal) throw new Error(`claude was killed by signal ${res.signal} (likely the 180s timeout)`);
@@ -365,10 +456,11 @@ function makePropose({ claudeBin, model, maxUsd, dir }) {
       throw new Error(`claude printed no parseable JSON: ${err.message}`);
     }
     if (envelope.is_error) throw new Error(`claude reported is_error${envelope.result ? `: ${envelope.result}` : ""}`);
-    const lessons = envelope.structured_output && envelope.structured_output.lessons;
-    if (!Array.isArray(lessons)) throw new Error("claude's structured_output.lessons is missing");
+    const items = envelope.structured_output && envelope.structured_output[resultKey];
+    if (!Array.isArray(items)) throw new Error(`claude's structured_output.${resultKey} is missing`);
     return {
-      lessons,
+      [resultKey]: items,
+      ...Object.fromEntries(extraKeys.map((k) => [k, Array.isArray(envelope.structured_output[k]) ? envelope.structured_output[k] : []])),
       sessionId: envelope.session_id || null,
       totalCostUsd: typeof envelope.total_cost_usd === "number" ? envelope.total_cost_usd : null,
     };
@@ -382,6 +474,10 @@ function costLine(usd, source) {
 
 function idsList(ids) {
   return ids.length ? ids.join(", ") : "none";
+}
+
+function supersededList(pairs) {
+  return pairs.length ? pairs.map((p) => `${p.old}->${p.new}`).join(", ") : "none";
 }
 
 function reviewIssueCountText(count) {
@@ -405,7 +501,7 @@ function outcomeLine(row) {
     `verified ${verifiedWord(row.verified)}`,
     ...(row.partial === 1 || row.partial === 0 ? [`partial ${partialWord(row.partial)}`] : []),
     `review ${reviewIssueCountText(row.review_issue_count)} issue(s)`,
-    `adversary ${adv} (${blocksText(row.blocks)} block(s))`,
+    String(row.run).startsWith("stop:") ? `gate blocks ${blocksText(row.blocks)}` : `adversary ${adv} (${blocksText(row.blocks)} block(s))`,
     `passes ${row.passes ?? "null"}`,
     `tokens ${tokensText(row.tokens)}`,
     `usd ${usdText(row.usd)}`,
@@ -444,11 +540,11 @@ function sanityLine(result) {
 // embedded under provider.model/provider.dims — a model or dims change, including the very first embed ever
 // under any model. Mirrors lessonsNeedingEmbedding's WHERE clause in lib/memory.mjs so "no lesson matches"
 // means the same thing here as it does there.
-function embeddingChangeDetected(m, provider) {
-  const total = m.prepare("SELECT COUNT(*) AS n FROM lessons WHERE superseded_by IS NULL AND stale IS NULL").get().n;
+function embeddingChangeDetected(m, provider, LIVE_LESSON_SQL) {
+  const total = m.prepare(`SELECT COUNT(*) AS n FROM lessons WHERE ${LIVE_LESSON_SQL}`).get().n;
   if (total === 0) return false;
   const matching = m
-    .prepare("SELECT COUNT(*) AS n FROM lessons WHERE superseded_by IS NULL AND stale IS NULL AND embedding_model = ? AND embedding_dims = ?")
+    .prepare(`SELECT COUNT(*) AS n FROM lessons WHERE ${LIVE_LESSON_SQL} AND embedding_model = ? AND embedding_dims = ?`)
     .get(provider.model, provider.dims).n;
   return matching === 0;
 }
@@ -515,6 +611,56 @@ try {
         const handUsage =
           'usage: memory.mjs record <card-id> --hand [dir] --commit <sha> [--wall <text>] [--gate <text>] [--note <text>] [--cost <usd>] [--json]';
         const [id, ...extra] = rest;
+        if (opts.stop !== undefined) {
+          // Card memory-hand-stop-rows: a stopped by-hand run records exactly one stop row.
+          const stopUsage =
+            'usage: memory.mjs record <card-id> --hand --stop <reason> [dir] [--detail <text>] [--json]';
+          if (!id || String(opts.stop).trim() === "" || opts.commit !== undefined) fail(stopUsage, 2);
+          if (id.endsWith(".json") || existsSync(resolve(id))) fail(`${stopUsage}\n--hand takes a card id, not a report.`, 2);
+          if (opts.run !== undefined || opts.adversary !== undefined || opts["claude-dir"] !== undefined || extra.length > 1) {
+            fail(stopUsage, 2);
+          }
+          const dir = dirFrom(rest, 1);
+          const conditionFile = join(dir, ".doug", ".state", "reports", id, "condition.json");
+          let condition = null;
+          if (existsSync(conditionFile)) {
+            try {
+              condition = JSON.parse(readFileSync(conditionFile, "utf8"));
+            } catch (err) {
+              fail(`cannot read ${conditionFile}: ${err.message}`);
+            }
+          }
+          const reason = String(opts.stop).trim();
+          const detail = textOrNull(opts.detail);
+          const reportHash = createHash("sha256")
+            .update(JSON.stringify({ card: id, reason, detail, openedAt: condition?.openedAt ?? null }))
+            .digest("hex");
+          const { openMemory, recordOutcomes, stopOutcomeRow } = await import("../lib/memory.mjs");
+          const row = stopOutcomeRow({ card: id, report: { outcome: "stopped", reason, detail }, reportHash, blocks: [], condition });
+          const m = openMemory(dir);
+          let result;
+          try {
+            result = recordOutcomes(m, [row]);
+          } finally {
+            m.close();
+          }
+          const stamped = !!condition;
+          if (opts.json) {
+            process.stdout.write(
+              JSON.stringify({ run: row.run, card: id, inserted: result.inserted, updated: result.updated, stamped }, null, 2) + "\n"
+            );
+          } else {
+            process.stdout.write(
+              `Recorded a hand-track stop for ${id} (${reason}) in .doug/.state/memory/memory.db (${result.inserted} new, ${result.updated} updated).\n`
+            );
+            if (!stamped) {
+              process.stdout.write(
+                `No condition.json for ${id}: this stop is unstamped (memory.mjs condition open ${id} writes one before the brief).\n`
+              );
+            }
+          }
+          break;
+        }
         if (!id || !opts.commit) fail(handUsage, 2);
         if (id.endsWith(".json") || existsSync(resolve(id))) {
           fail(`${handUsage}\n--hand takes a card id, not a report.`, 2);
@@ -600,8 +746,9 @@ try {
         }
       }
       // Lazy: a Node without node:sqlite must fail loudly here, not with a stack trace, and never before this point.
-      const { openMemory, recordOutcomes, outcomeRows } = await import("../lib/memory.mjs");
-      const rows = outcomeRows(report, { plan, classes, run, reportHash, reportPath, card: opts.card ?? null, commit: opts.commit ?? null, cost });
+      const { openMemory, recordOutcomes, outcomeRows, memoryConfig } = await import("../lib/memory.mjs");
+      const flowConfig = memoryConfig({ embeddings: readMemoryConfig(dir).embeddings, staleDays: readMemoryStaleDays(dir), track: "flow" });
+      const rows = outcomeRows(report, { plan, classes, run, reportHash, reportPath, card: opts.card ?? null, commit: opts.commit ?? null, cost, memoryConfig: flowConfig });
       const m = openMemory(dir);
       let result;
       try {
@@ -622,12 +769,85 @@ try {
     case "reflect": {
       const usage =
         'usage: memory.mjs reflect <report.json> [dir] [--run <wf-id>] [--card <id>] [--commit <sha>] [--adversary "<id>=<class>[: <reason>]"]... [--harmful <id>]... [--claude-bin <path>] [--claude-dir <path>] [--model <name>] [--max-usd <n>] [--dry-run] [--json]';
+      if (opts.failures !== undefined) {
+        const failuresUsage =
+          "usage: memory.mjs reflect --failures <card-id> [dir] [--session <id>] [--claude-bin <path>] [--model <name>] [--max-usd <n>] [--dry-run] [--json]";
+        const card = textOrNull(opts.failures);
+        if (!card || opts.hand) fail(`${failuresUsage}\n--failures takes a card id and is exclusive with --hand and a report path.`, 2);
+        if (rest.length > 1) fail(failuresUsage, 2);
+        if (rest.length === 1) {
+          // A lone positional that is a file, or names a .json report, is a report path, not a dir.
+          let isFile = /\.json$/i.test(rest[0]);
+          try {
+            if (statSync(resolve(rest[0])).isFile()) isFile = true;
+          } catch {
+            // missing path: judged by its name above
+          }
+          if (isFile) fail(`${failuresUsage}\n--failures takes a card id and is exclusive with --hand and a report path.`, 2);
+        }
+        const fdir = dirFrom(rest, 0);
+        const fmodels = loadModels(fdir);
+        const fmodel = textOrNull(opts.model) || (fmodels.tiers.cheap && fmodels.tiers.cheap.model) || "haiku";
+        let fmaxUsd = 0.5;
+        if (opts["max-usd"] !== undefined) {
+          fmaxUsd = Number(opts["max-usd"]);
+          if (!Number.isFinite(fmaxUsd) || fmaxUsd <= 0) fail(`${failuresUsage}\n--max-usd must be a positive number, got ${JSON.stringify(opts["max-usd"])}.`, 2);
+        }
+        const fClaudeBin = textOrNull(opts["claude-bin"]) || process.env.DOUG_CLAUDE_BIN || "claude";
+        const fDry = !!opts["dry-run"];
+        const { openMemory, runFailureReflect, FAILURE_REFLECT_SCHEMA } = await import("../lib/memory.mjs");
+        const m = openMemory(fdir);
+        let fres;
+        try {
+          fres = await runFailureReflect(m, {
+            dir: fdir,
+            card,
+            session: textOrNull(opts.session),
+            model: fmodel,
+            claudeDir: opts["claude-dir"] ? resolve(opts["claude-dir"]) : undefined,
+            dryRun: fDry,
+            propose: fDry ? null : makePropose({ claudeBin: fClaudeBin, model: fmodel, maxUsd: fmaxUsd, dir: fdir, schema: FAILURE_REFLECT_SCHEMA }),
+          });
+          if (!fDry && fres.ok && fres.appended && fres.appended.length) await bestEffortEmbed(m, fdir, fres.appended);
+        } finally {
+          m.close();
+        }
+        if (fres.alreadyReflected) {
+          if (opts.json) process.stdout.write(JSON.stringify(fres.row, null, 2) + "\n");
+          else process.stdout.write(`Already reflected on ${fres.row.recorded} for the failures of ${card}; nothing to do.\n`);
+          break;
+        }
+        if (fres.ok === false) {
+          process.stderr.write(`reflect: the failure pass failed for ${card}: ${fres.reason}\n`);
+          if (opts.json) process.stdout.write(JSON.stringify(fres, null, 2) + "\n");
+          process.exit(1);
+        }
+        if (opts.json) {
+          process.stdout.write(JSON.stringify(fres, null, 2) + "\n");
+          break;
+        }
+        const hiddenText = Object.entries(fres.hidden).map(([k, n]) => `${k} ${n}`).join(", ") || "none";
+        const prefix = fDry ? "(dry run) " : "";
+        process.stdout.write(`${prefix}Failures of ${card}: ${fres.items} item(s); hidden blocks: ${hiddenText}; unreadable: ${fres.unreadable}\n`);
+        if (fres.items === 0) break;
+        if (fDry && fres.proposed === null) {
+          process.stdout.write(`${prefix}no model call; the prompt that would be sent:\n${fres.prompt}\n`);
+          process.stdout.write(`${prefix}Would append pitfall lessons to the memory store, .doug/.state/memory/pitfalls.jsonl and a reflections row; ${costLine(fres.usd, fres.usdSource)}\n`);
+          break;
+        }
+        process.stdout.write(
+          `${prefix}Reflected: proposed ${fres.proposed}, ${fDry ? "would append" : "appended"} ${fres.appended.length} (${idsList(fres.appended)}), repeated ${fres.repeated.length} (${idsList(fres.repeated)}), rejected ${fres.rejected.length}; model ${fres.model}; ${costLine(fres.usd, fres.usdSource)}\n`
+        );
+        for (const r of fres.rejected) process.stdout.write(`  rejected ${r.text ? JSON.stringify(r.text) : "(no text)"}: ${r.reason}\n`);
+        break;
+      }
       let dir;
       let reportPath;
       let reportText;
       let report;
       let classes;
       let handCard = null;
+      let rounds = 1;
       if (opts.hand) {
         const handUsage =
           'usage: memory.mjs reflect --hand <card-id> [dir] --commit <sha> [--rounds <n>] [--review "<R<n> or <card-id>/R<n>>=<real|marginal|false>[: <reason>]"]... [--harmful <id>]... [--note <text>] [--claude-bin <path>] [--model <name>] [--max-usd <n>] [--dry-run] [--json]';
@@ -635,7 +855,6 @@ try {
         if (!id || !opts.commit) fail(handUsage, 2);
         handCard = id;
         dir = dirFrom(rest, 1);
-        let rounds = 1;
         if (opts.rounds !== undefined) {
           rounds = Number(opts.rounds);
           if (!Number.isInteger(rounds) || rounds < 1) fail(`${handUsage}\n--rounds must be a positive integer, got ${JSON.stringify(opts.rounds)}.`, 2);
@@ -678,6 +897,16 @@ try {
         } catch {
           memoryUsed = [];
         }
+        const fetched = new Set();
+        try {
+          for (const line of readFileSync(join(base, "fetched.jsonl"), "utf8").split("\n")) {
+            try {
+              const rec = JSON.parse(line);
+              if (rec && typeof rec.id === "string") fetched.add(rec.id);
+            } catch {}
+          }
+        } catch {}
+        memoryUsed = [...new Set(memoryUsed.filter((x) => fetched.has(x)))];
         const ledger = classes.map((c) => {
           return { id: c.id, stage: "adversary", seat: "reviewer", severity: "blocker", status: "fixed", description: c.reason || `reviewer finding ${c.id}` };
         });
@@ -695,6 +924,23 @@ try {
         mkdirSync(base, { recursive: true });
         writeFileSync(reportPath, reportText, "utf8");
         report = handReport;
+        if (!opts["dry-run"]) {
+          try {
+            const { historyScanner, writeRunHistory } = await import("../lib/memory.mjs");
+            const entries = [{ kind: "report", source: "hand-report.json", value: handReport }];
+            for (const f of readDirFiles("briefs")) {
+              const mm = /^(\d+)-(.+)\.md$/.exec(f.name);
+              entries.push({ kind: "brief", seat: mm ? mm[2] : null, round: mm ? Number(mm[1]) : null, source: `briefs/${f.name}`, value: f.text });
+            }
+            for (const f of readDirFiles("reviews")) {
+              const mm = /^(\d+)\.md$/.exec(f.name);
+              entries.push({ kind: "review", seat: "reviewer", round: mm ? Number(mm[1]) : null, source: `reviews/${f.name}`, value: f.text });
+            }
+            writeRunHistory(dir, { card: id, run: `hand:${opts.commit}`, entries, scan: await historyScanner(dir) });
+          } catch (err) {
+            process.stderr.write(`reflect: warning: cannot write the run history for ${id}: ${err.message || err}\n`);
+          }
+        }
       } else {
         const [reportFile] = rest;
         if (!reportFile) fail(usage, 2);
@@ -728,7 +974,7 @@ try {
       const runLabel = opts.run || `report:${reportHash.slice(0, 12)}`;
 
       const { openMemory, runReflect } = await import("../lib/memory.mjs");
-      const propose = makePropose({ claudeBin, model, maxUsd, dir });
+      const propose = dryRun ? null : makePropose({ claudeBin, model, maxUsd, dir });
       const m = openMemory(dir);
       let result;
       try {
@@ -748,6 +994,10 @@ try {
         });
         if (!dryRun && result.ok && result.appended && result.appended.length) {
           await bestEffortEmbed(m, dir, result.appended);
+        }
+        // Card memory-outcome-arms: only an explicit --rounds is a measurement; the default of 1 is never written.
+        if (handCard && !dryRun && opts.rounds !== undefined && (result.ok || result.alreadyReflected)) {
+          m.prepare("UPDATE outcomes SET passes = ?, fix_passes = ? WHERE run = ? AND task = ?").run(rounds, rounds - 1, `hand:${opts.commit}`, handCard);
         }
       } finally {
         m.close();
@@ -773,11 +1023,20 @@ try {
       } else {
         const c = result.counters;
         const prefix = result.dryRun ? "(dry run) " : "";
+        if (result.dryRun && result.proposed === null) {
+          process.stdout.write(
+            `${prefix}Reflected on ${runLabel}: counters helpful +${c.helpful.length} (${idsList(c.helpful)}) harmful +${c.harmful.length} (${idsList(c.harmful)}); ` +
+              `cheap-row pass not run (dry run, no model call); ${costLine(result.usd, result.usdSource)}\n`
+          );
+          process.stdout.write(`${prefix}the prompt that would be sent:\n${result.prompt}\n`);
+          break;
+        }
         process.stdout.write(
           `${prefix}Reflected on ${runLabel}: counters helpful +${c.helpful.length} (${idsList(c.helpful)}) harmful +${c.harmful.length} (${idsList(c.harmful)}); ` +
             `proposed ${result.proposed}, appended ${result.appended.length} (${idsList(result.appended)}), bumped ${result.bumped.length} (${idsList(result.bumped)}), ` +
-            `rejected ${result.rejected.length}; model ${result.model}; ${costLine(result.usd, result.usdSource)}\n`
+            `superseded ${result.superseded.length} (${supersededList(result.superseded)}), rejected ${result.rejected.length}; model ${result.model}; ${costLine(result.usd, result.usdSource)}\n`
         );
+        for (const n of result.notes || []) process.stdout.write(`  note: ${n}\n`);
         for (const r of result.rejected) {
           process.stdout.write(`  rejected ${r.text ? JSON.stringify(r.text) : "(no text)"}: ${r.reason}\n`);
         }
@@ -811,8 +1070,70 @@ try {
       }
       break;
     }
+    case "arms": {
+      const armsUsage = "usage: memory.mjs arms [dir] [--min <n>] [--json]";
+      let min = 12;
+      if (opts.min !== undefined) {
+        min = /^\d+$/.test(String(opts.min)) ? Number(opts.min) : NaN;
+        if (!Number.isInteger(min) || min < 1) fail(`${armsUsage}\n--min must be an integer >= 1, got ${JSON.stringify(opts.min)}.`, 2);
+      }
+      const dir = dirFrom(rest, 0);
+      const { memoryPath, openMemory, compareMemoryArms } = await import("../lib/memory.mjs");
+      if (!existsSync(memoryPath(dir))) {
+        process.stdout.write("No outcomes recorded.\n");
+        break;
+      }
+      const m = openMemory(dir);
+      let res;
+      try {
+        res = compareMemoryArms(m, { min });
+      } finally {
+        m.close();
+      }
+      if (opts.json) {
+        process.stdout.write(JSON.stringify(res, null, 2) + "\n");
+        break;
+      }
+      const num = (v, d = 2) => (typeof v === "number" ? v.toFixed(d) : "n/a");
+      const label = (cfg) => {
+        try {
+          const c = JSON.parse(cfg);
+          const e = c.embeddings ? `${c.embeddings.provider}/${c.embeddings.model}/${c.embeddings.dims}` : "keyword-only";
+          return `${c.stage} ${e} staleDays ${c.staleDays}`;
+        } catch {
+          return cfg;
+        }
+      };
+      const lines = res.arms.map((a) => {
+        const head = `${label(a.config)}: ${a.landings} landings, ${a.stops} stops`;
+        if (!a.ready) return `${head}; not compared: ${a.landings} of ${res.min} landings`;
+        const fix = a.fixRounds.n ? `${num(a.fixRounds.mean)} (n ${a.fixRounds.n})` : "n/a (none measured)";
+        return `${head}; land rate ${num(a.landRate)}; fix rounds ${fix}; harmful per landing ${num(a.harmfulPerLanding)}; cost per landing ${typeof a.costPerLanding === "number" ? `$${a.costPerLanding.toFixed(2)}` : "n/a"} (${a.priced} priced)`;
+      });
+      if (res.unstamped) lines.push(`${res.unstamped} rows carry no memory configuration and are in no arm.`);
+      lines.push(res.comparable ? "Two or more arms are comparable." : "Not comparable yet: fewer than two arms have enough landings.");
+      process.stdout.write(lines.join("\n") + "\n");
+      break;
+    }
     case "lessons": {
       const dir = dirFrom(rest, 0);
+      if (opts.unconfirmed) {
+        if (opts.search !== undefined || opts.all) fail("usage: memory.mjs lessons --unconfirmed [dir] [--json] (not with --search or --all)", 2);
+        let list = [];
+        if (existsSync(join(dir, ".doug", ".state", "memory", "memory.db"))) {
+          const { openMemory, listUnconfirmedLessons, readFetchedLessonIds } = await import("../lib/memory.mjs");
+          const m = openMemory(dir);
+          try {
+            list = listUnconfirmedLessons(m, { fetchedIds: readFetchedLessonIds(dir) });
+          } finally {
+            m.close();
+          }
+        }
+        if (opts.json) process.stdout.write(JSON.stringify(list, null, 2) + "\n");
+        else if (!list.length) process.stdout.write("no unconfirmed lessons\n");
+        else process.stdout.write(list.map((r) => `${r.id}  ${r.kind}  ${r.created}  ${r.title}`).join("\n") + "\n");
+        break;
+      }
       const { openMemory, listLessons, searchLessons } = await import("../lib/memory.mjs");
       const m = openMemory(dir);
       let rows;
@@ -839,7 +1160,9 @@ try {
         "usage: memory.mjs lesson add --text <text> --kind <feedback|project|pitfall|pattern> [dir]\n" +
         "                      [--scope <glob,glob>] [--citation <text>] [--card <id>]\n" +
         "                      [--commit <sha>] [--source-agent <name>] [--source-model <name>] [--json]\n" +
-        "       memory.mjs lesson unstale <id> [dir] [--json]";
+        "       memory.mjs lesson unstale <id> [dir] [--json]\n" +
+        "       memory.mjs lesson unarchive <id> [dir] [--json]\n" +
+        "       memory.mjs lesson show <id> [dir] [--card <card-id>] [--json]";
       const [sub, ...subrest] = rest;
       if (sub === "unstale") {
         const [id] = subrest;
@@ -857,6 +1180,57 @@ try {
           process.stdout.write(JSON.stringify(row, null, 2) + "\n");
         } else {
           process.stdout.write(`Cleared the stale mark on lesson ${row.id}.\n`);
+        }
+        break;
+      }
+      if (sub === "unarchive") {
+        const [id] = subrest;
+        if (!id) fail(usage, 2);
+        const dir = dirFrom(subrest, 1);
+        const { openMemory, unarchiveLesson } = await import("../lib/memory.mjs");
+        const m = openMemory(dir);
+        let row;
+        try {
+          row = unarchiveLesson(m, id);
+        } finally {
+          m.close();
+        }
+        if (opts.json) {
+          process.stdout.write(JSON.stringify(row, null, 2) + "\n");
+        } else {
+          process.stdout.write(`Restored archived lesson ${row.id}.\n`);
+        }
+        break;
+      }
+      if (sub === "show") {
+        const [id] = subrest;
+        if (!id) fail(usage, 2);
+        if (opts.card !== undefined && !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(String(opts.card))) fail(usage, 2);
+        const dir = dirFrom(subrest, 1);
+        if (!existsSync(join(dir, ".doug", ".state", "memory", "memory.db"))) fail(`no lesson ${id}: no memory store`);
+        const { openMemory, getLesson, lessonTokens } = await import("../lib/memory.mjs");
+        const m = openMemory(dir);
+        let row;
+        try {
+          row = getLesson(m, id);
+        } finally {
+          m.close();
+        }
+        if (!row) fail(`no lesson ${id}`);
+        const tokens = lessonTokens(row.text);
+        if (opts.json) {
+          const { embedding, ...rest2 } = row;
+          process.stdout.write(JSON.stringify({ ...rest2, hasVector: embedding != null, tokens }, null, 2) + "\n");
+        } else {
+          const head = [`lesson ${row.id} (${row.kind}, ~${tokens} tokens)`, `citation: ${row.citation || "none"}`];
+          if (row.superseded_by) head.push(`superseded by ${row.superseded_by}`);
+          if (row.stale) head.push(`stale since ${row.stale}`);
+          process.stdout.write(head.join("\n") + "\n\n" + row.text + "\n");
+        }
+        if (opts.card !== undefined) {
+          const fdir = join(dir, ".doug", ".state", "reports", String(opts.card));
+          mkdirSync(fdir, { recursive: true });
+          appendFileSync(join(fdir, "fetched.jsonl"), JSON.stringify({ id: row.id, at: new Date().toISOString() }) + "\n");
         }
         break;
       }
@@ -993,21 +1367,22 @@ try {
       }
       const query = `${card.title}\n${card.goal ?? ""}`;
       const header = "Lessons from earlier runs on this repository (memory; each cites where it was learned):";
-      const saved = { card: id, query, mode: null, reason: null, ids: [], text: null, recalledAt: new Date().toISOString(), hidden: null };
+      const saved = { card: id, query, mode: null, reason: null, ids: [], text: null, omitted: [], recalledAt: new Date().toISOString(), hidden: null };
       let note = null;
       let error = null;
       if (existsSync(join(dir, ".doug", ".state", "memory", "memory.db"))) {
         try {
           const provider = createProvider(readMemoryConfig(dir));
           const staleDays = readMemoryStaleDays(dir);
-          const { openMemory, recallLessons, degradedWarning, degradedReason, detectLocalProvider, renderLessons, windowNote } = await import("../lib/memory.mjs");
+          const { openMemory, recallLessons, degradedWarning, degradedReason, detectLocalProvider, renderLessonIndex, windowNote } = await import("../lib/memory.mjs");
           const detectedProvider = provider ? null : await detectLocalProvider();
           const m = openMemory(dir);
           try {
             const result = await recallLessons(m, query, { k, checkoutDir: dir, provider, staleDays, detectedProvider });
             const warning = degradedWarning(result, { what: "memory recall", detectedProvider });
             if (warning) process.stderr.write(warning + "\n");
-            const rendered = renderLessons(result.lessons);
+            const rendered = renderLessonIndex(result.lessons);
+            saved.omitted = rendered.omitted;
             saved.mode = result.mode;
             saved.hidden = result.hidden ?? null;
             note = windowNote(result.hidden, staleDays);
@@ -1023,6 +1398,7 @@ try {
           saved.reason = null;
           saved.ids = [];
           saved.text = null;
+          saved.omitted = [];
           saved.hidden = null;
           note = null;
           saved.error = error;
@@ -1035,10 +1411,255 @@ try {
       if (opts.json) {
         process.stdout.write(JSON.stringify(saved, null, 2) + "\n");
       } else if (saved.ids.length) {
-        process.stdout.write([header, saved.text, ...(note ? [note] : []), `memoryUsed: ${saved.ids.join(", ")}`].join("\n") + "\n");
+        const omittedLine = saved.omitted.length
+          ? [`index: omitted ${saved.omitted.length} lessons over the 2000-character index budget: ${saved.omitted.join(", ")}`]
+          : [];
+        process.stdout.write([header, saved.text, ...omittedLine, ...(note ? [note] : []), `memoryUsed: ${saved.ids.join(", ")}`].join("\n") + "\n");
       } else {
         process.stdout.write(`No lessons recalled for ${id}.\n${note ? note + "\n" : ""}`);
       }
+      break;
+    }
+    case "history": {
+      const usage = "usage: memory.mjs history show <card>[/<run>[:<line>]] [dir] [--json]";
+      const [sub, ref, ...extra] = rest;
+      if (sub !== "show" || !ref) fail(usage, 2);
+      const dir = dirFrom(extra, 0);
+      const { parseHistoryRef, readRunHistory } = await import("../lib/memory.mjs");
+      let parsed;
+      try {
+        parsed = parseHistoryRef(ref);
+      } catch (err) {
+        fail(`${err.message}\n${usage}`, 2);
+      }
+      let data;
+      try {
+        data = readRunHistory(dir, parsed);
+      } catch (err) {
+        fail(err.message);
+      }
+      if (opts.json) {
+        process.stdout.write(JSON.stringify(data, null, 2) + "\n");
+      } else if (parsed.line !== null) {
+        const e = data;
+        const out = [`history ${parsed.card}/${parsed.run}:${parsed.line} (${e.kind}, seat ${e.seat ?? "-"}, round ${e.round ?? "-"}, ${e.source}, ~${e.tokens} tokens)`];
+        if (e.truncated) out.push(`truncated at capture: ${e.bytes} bytes, head kept`);
+        if (e.redacted) out.push(`redacted: ${e.redacted}`);
+        process.stdout.write(out.join("\n") + "\n\n" + (e.text ?? "") + "\n");
+      } else if (parsed.run !== null) {
+        const out = [`history ${data.card}/${data.run}: ${data.entries.length} entries, ~${data.tokens} tokens`];
+        for (const e of data.entries) {
+          if (e.kind === "cap") {
+            out.push(`${e.line}  cap  dropped ${e.dropped} entries over ${e.maxRunBytes} bytes`);
+            continue;
+          }
+          out.push(
+            `${e.line}  ${e.kind}  ${e.seat ?? "-"}  ${e.round ?? "-"}  ${e.source}  ~${e.tokens} tokens` +
+              (e.truncated ? ` truncated from ${e.bytes} bytes` : "") +
+              (e.redacted ? ` redacted: ${e.redacted}` : "")
+          );
+        }
+        process.stdout.write(out.join("\n") + "\n");
+      } else {
+        const out = [`history ${data.card}: ${data.runs.length} runs`];
+        for (const r of data.runs) out.push(`${data.card}/${r.run}  ${r.entries} entries  ~${r.tokens} tokens`);
+        process.stdout.write(out.join("\n") + "\n");
+      }
+      break;
+    }
+    case "ideas": {
+      const usage = "usage: memory.mjs ideas [dir] [--claude-bin <path>] [--model <name>] [--max-usd <n>] [--cap <n>] [--dry-run] [--json]";
+      const dir = dirFrom(rest, 0);
+      const lib = await import("../lib/memory.mjs");
+      const models = loadModels(dir);
+      const model = textOrNull(opts.model) || (models.tiers.cheap && models.tiers.cheap.model) || "haiku";
+      let maxUsd = 0.5;
+      if (opts["max-usd"] !== undefined) {
+        maxUsd = Number(opts["max-usd"]);
+        if (!Number.isFinite(maxUsd) || maxUsd <= 0) fail(`${usage}\n--max-usd must be a positive number, got ${JSON.stringify(opts["max-usd"])}.`, 2);
+      }
+      let cap = lib.IDEA_CAP;
+      if (opts.cap !== undefined) {
+        cap = Number(opts.cap);
+        if (!Number.isInteger(cap) || cap < 1) fail(`${usage}\n--cap must be an integer of at least 1, got ${JSON.stringify(opts.cap)}.`, 2);
+      }
+      const claudeBin = textOrNull(opts["claude-bin"]) || process.env.DOUG_CLAUDE_BIN || "claude";
+      const dryRun = !!opts["dry-run"];
+      if (!existsSync(lib.memoryPath(dir))) fail("no memory store: nothing to propose ideas from");
+      let board;
+      try {
+        board = loadBoard(dir);
+      } catch (err) {
+        fail(`ideas: ${err.message}`);
+      }
+      const m = lib.openMemory(dir);
+      let call;
+      let ideaCheck;
+      let reviewCheck;
+      let dryPrompt = null;
+      try {
+        const prompt = lib.buildIdeasPrompt({
+          lessons: lib.listLessons(m),
+          runs: lib.listRunHistoryRefs(dir),
+          pitfalls: lib.readPitfallOccurrences(dir),
+          cards: board.cards.filter((c) => c.column === "backlog" || c.column === "ready"),
+        });
+        if (dryRun) {
+          dryPrompt = prompt;
+        } else {
+          try {
+            call = await makePropose({ claudeBin, model, maxUsd, dir, schema: lib.IDEAS_SCHEMA, resultKey: "ideas", extraKeys: ["reviews"] })(prompt);
+          } catch (err) {
+            fail(`ideas: the model call failed: ${err.message}`);
+          }
+          ideaCheck = lib.checkIdeaCitations(m, dir, call.ideas);
+          reviewCheck = lib.checkIdeaCitations(m, dir, call.reviews);
+        }
+      } finally {
+        m.close();
+      }
+      if (dryRun) {
+        const writes = [".doug/board.json", lib.PRIORITY_REVIEWS_RELPATH];
+        if (opts.json) {
+          process.stdout.write(JSON.stringify({ dryRun: true, prompt: dryPrompt, wouldWrite: writes, usd: 0, usdSource: "none" }, null, 2) + "\n");
+        } else {
+          process.stdout.write(`(dry run) no model call; the prompt that would be sent:\n${dryPrompt}\n`);
+          for (const w of writes) process.stdout.write(`Would write ${w}\n`);
+          process.stdout.write(`(dry run) Would file idea cards and reviews from the model's proposals; ${costLine(0, "none")}\n`);
+        }
+        break;
+      }
+      const cost = lib.computeReflectCost({ dir, sessionId: call.sessionId, totalCostUsd: call.totalCostUsd });
+      const date = new Date().toISOString().slice(0, 10);
+      try {
+        board = loadBoard(dir);
+      } catch (err) {
+        fail(`ideas: ${err.message}`);
+      }
+      const filed = lib.fileIdeaCards(board, ideaCheck.kept, { cap, date });
+      const reviewsChecked = lib.checkPriorityReviews(board, reviewCheck.kept, { cap, recorded: lib.readPriorityReviews(dir) });
+      const at = new Date().toISOString();
+      const reviewLines = reviewsChecked.kept.map((r) => ({ at, text: r.text, cards: r.cards, citations: r.citations }));
+      const droppedReviews = [...reviewCheck.dropped, ...reviewsChecked.dropped];
+      if (!dryRun) {
+        if (filed.filed.length) saveBoard(dir, filed.board);
+        if (reviewLines.length) {
+          const file = join(dir, lib.PRIORITY_REVIEWS_RELPATH);
+          mkdirSync(dirname(file), { recursive: true });
+          appendFileSync(file, reviewLines.map((l) => JSON.stringify(l)).join("\n") + "\n", "utf8");
+        }
+      }
+      const filedCards = filed.filed.map((id) => {
+        const c = filed.board.cards.find((x) => x.id === id);
+        return { id, title: c.title };
+      });
+      if (opts.json) {
+        process.stdout.write(
+          JSON.stringify(
+            { filed: filedCards, skipped: filed.skipped, reviews: reviewLines, droppedReviews, unresolved: ideaCheck.dropped, usd: cost.usd, usdSource: cost.usdSource, dryRun },
+            null,
+            2
+          ) + "\n"
+        );
+        break;
+      }
+      const out = [];
+      for (const c of filedCards) out.push(`${dryRun ? "would file" : "filed"} ${c.id}: ${c.title}`);
+      for (const s2 of filed.skipped) out.push(`skipped ${s2.id}: ${s2.reason}`);
+      for (const u of ideaCheck.dropped) out.push(`skipped ${u.id}: unresolved citation`);
+      for (const r of reviewLines) out.push(`${dryRun ? "would record" : "recorded"} review: ${r.text} (${r.cards.join(", ")})`);
+      out.push(
+        `${dryRun ? "Would file" : "Filed"} ${filedCards.length} idea cards to Backlog, ${filed.skipped.length + ideaCheck.dropped.length} skipped, ${reviewLines.length} reviews kept, ${droppedReviews.length} dropped; ${costLine(cost.usd, cost.usdSource)}`
+      );
+      process.stdout.write(out.join("\n") + "\n");
+      break;
+    }
+    case "model": {
+      const usage = "usage: memory.mjs model regen [dir] [--claude-bin <path>] [--model <name>] [--max-usd <n>] [--dry-run] [--json] | memory.mjs model show [dir]";
+      const [sub, ...subrest] = rest;
+      if (sub !== "regen" && sub !== "show") fail(usage, 2);
+      const dir = dirFrom(subrest, 0);
+      const lib = await import("../lib/memory.mjs");
+      const modelPath = join(dir, lib.PROJECT_MODEL_RELPATH);
+      if (sub === "show") {
+        if (!existsSync(modelPath)) fail(`no project model at ${lib.PROJECT_MODEL_RELPATH}: run \`memory.mjs model regen\``);
+        process.stdout.write(readFileSync(modelPath, "utf8"));
+        break;
+      }
+      const models = loadModels(dir);
+      const model = textOrNull(opts.model) || (models.tiers.cheap && models.tiers.cheap.model) || "haiku";
+      let maxUsd = 0.5;
+      if (opts["max-usd"] !== undefined) {
+        maxUsd = Number(opts["max-usd"]);
+        if (!Number.isFinite(maxUsd) || maxUsd <= 0) fail(`${usage}\n--max-usd must be a positive number, got ${JSON.stringify(opts["max-usd"])}.`, 2);
+      }
+      const claudeBin = textOrNull(opts["claude-bin"]) || process.env.DOUG_CLAUDE_BIN || "claude";
+      const dryRun = !!opts["dry-run"];
+      if (!existsSync(lib.memoryPath(dir))) fail("no memory store: nothing to build a project model from");
+      const m = lib.openMemory(dir);
+      let call;
+      let checked;
+      let dryPrompt = null;
+      try {
+        const lessons = lib.listLessons(m);
+        const prompt = lib.buildProjectModelPrompt({ lessons, runs: lib.listRunHistoryRefs(dir) });
+        if (dryRun) {
+          dryPrompt = prompt;
+        } else {
+          try {
+            call = await makePropose({ claudeBin, model, maxUsd, dir, schema: lib.PROJECT_MODEL_SCHEMA, resultKey: "statements" })(prompt);
+          } catch (err) {
+            fail(`model regen: the model call failed: ${err.message}`);
+          }
+          checked = lib.checkProjectModelCitations(m, dir, call.statements);
+        }
+      } finally {
+        m.close();
+      }
+      if (dryRun) {
+        if (opts.json) {
+          process.stdout.write(JSON.stringify({ path: modelPath, dryRun: true, prompt: dryPrompt, usd: 0, usdSource: "none" }, null, 2) + "\n");
+        } else {
+          process.stdout.write(`(dry run) no model call; the prompt that would be sent:\n${dryPrompt}\n`);
+          process.stdout.write(`Would write ${lib.PROJECT_MODEL_RELPATH} from the model's statements; ${costLine(0, "none")}\n`);
+        }
+        break;
+      }
+      const cost = lib.computeReflectCost({ dir, sessionId: call.sessionId, totalCostUsd: call.totalCostUsd });
+      const rendered = lib.renderProjectModel(checked.kept);
+      const counts = `dropped ${checked.dropped.length} unresolved, ${rendered.overCap.length} over cap`;
+      if (!rendered.kept.length) {
+        fail(`model regen: nothing was written: no statement survived (${call.statements.length} proposed; ${counts}); ${costLine(cost.usd, cost.usdSource)}`);
+      }
+      if (!dryRun) {
+        mkdirSync(dirname(modelPath), { recursive: true });
+        writeFileSync(modelPath, rendered.text, "utf8");
+      }
+      if (opts.json) {
+        process.stdout.write(
+          JSON.stringify(
+            {
+              path: modelPath,
+              statements: rendered.kept.length,
+              chars: rendered.chars,
+              cap: lib.PROJECT_MODEL_CHAR_CAP,
+              unresolved: checked.dropped.length,
+              overCap: rendered.overCap.length,
+              dropped: checked.dropped,
+              usd: cost.usd,
+              usdSource: cost.usdSource,
+              dryRun,
+            },
+            null,
+            2
+          ) + "\n"
+        );
+        break;
+      }
+      if (dryRun) process.stdout.write(rendered.text + "\n");
+      process.stdout.write(
+        `${dryRun ? "Would write" : "Wrote"} ${lib.PROJECT_MODEL_RELPATH}: ${rendered.kept.length} statements, ${rendered.chars} characters (cap ${lib.PROJECT_MODEL_CHAR_CAP}); ${counts}; ${costLine(cost.usd, cost.usdSource)}\n`
+      );
       break;
     }
     case "doctor": {
@@ -1097,7 +1718,7 @@ try {
       if (opts.check && opts["no-check"]) {
         fail(`${usage}\n--check and --no-check are mutually exclusive.`, 2);
       }
-      const { openMemory, embedLessons, lessonsNeedingEmbedding } = await import("../lib/memory.mjs");
+      const { openMemory, embedLessons, lessonsNeedingEmbedding, LIVE_LESSON_SQL } = await import("../lib/memory.mjs");
       const m = openMemory(dir);
       let result;
       let checkStatus;
@@ -1107,7 +1728,7 @@ try {
         if (opts["no-check"]) {
           process.stderr.write("embed-check: skipped (--no-check)\n");
           checkStatus = "skipped";
-        } else if (opts.check || embeddingChangeDetected(m, provider)) {
+        } else if (opts.check || embeddingChangeDetected(m, provider, LIVE_LESSON_SQL)) {
           const pairs = loadPairsOrFail(opts);
           const check = await checkEmbeddingSanity(provider, pairs);
           if (!check.ok) {
@@ -1125,7 +1746,7 @@ try {
           onProgress: ({ embedded, total }) => process.stderr.write(`embedded ${embedded}/${total}\n`),
         });
         stillMissing = lessonsNeedingEmbedding(m, { model: provider.model, dims: provider.dims }).length;
-        liveTotal = m.prepare("SELECT COUNT(*) AS n FROM lessons WHERE superseded_by IS NULL AND stale IS NULL").get().n;
+        liveTotal = m.prepare(`SELECT COUNT(*) AS n FROM lessons WHERE ${LIVE_LESSON_SQL}`).get().n;
       } finally {
         m.close();
       }
@@ -1366,7 +1987,7 @@ try {
         if (headRes.status !== 0 || !headRes.stdout.trim()) {
           fail(`cannot open condition for "${id}": no git HEAD in ${dir}${headRes.stderr && headRes.stderr.trim() ? ` (${headRes.stderr.trim()})` : " (not a git repository, or no commits yet)"}.`);
         }
-        const { conditionConfigHash } = await import("../lib/memory.mjs");
+        const { conditionConfigHash, memoryConfig } = await import("../lib/memory.mjs");
         const written = {
           harnessCommit: headRes.stdout.trim(),
           configHash: conditionConfigHash(dir),
@@ -1375,6 +1996,7 @@ try {
           assignedBy: "policy",
           exploreProbability: null,
           openedAt: new Date().toISOString(),
+          memoryConfig: memoryConfig({ embeddings: readMemoryConfig(dir).embeddings, staleDays: readMemoryStaleDays(dir), track: "hand" }),
         };
         mkdirSync(dirname(file), { recursive: true });
         writeFileSync(file, JSON.stringify(written, null, 2) + "\n");
@@ -1458,7 +2080,7 @@ try {
       break;
     }
     default:
-      fail("usage: memory.mjs <record|reflect|outcomes|lessons|lesson|import|recall|brief-lessons|doctor|reembed|embed-check|index|condition|decision|rule|claude-md> ...", 2);
+      fail("usage: memory.mjs <record|reflect|outcomes|arms|lessons|lesson|history|model|import|recall|brief-lessons|doctor|reembed|embed-check|index|condition|decision|rule|claude-md> ...", 2);
   }
 } catch (err) {
   fail(err.message);

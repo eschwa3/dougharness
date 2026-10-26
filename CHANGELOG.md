@@ -1,5 +1,28 @@
 # Changelog
 
+## 1.5.0
+
+- Memory: lessons are fetched on demand. `memory.mjs` prints a lesson index with token costs, `lesson show` and a history fetch return full text, and the lead fetches full lesson text into its briefs; flow tasks get the index plus fetch in place of the 400-char cut, and each outcome row records the delivery its track got.
+- Memory: `reflect --hand` credits only lessons fetched into a brief, reads the failure slice, and can name a lesson a proposal repeats or supersedes; `learn` counts pitfall cards and sessions for path-scoped rules.
+- Memory: recall scoring takes `harmful` and the evidence class into account, with an archive rule (store schema v12); `lesson unarchive` restores a lesson, and every reader uses one shared live-lesson predicate.
+- Memory: an on-demand, cited project model (L2) with its own bench arm; `bench-memory` adds a delivery metric, multi-answer queries and a heading-split store arm.
+- Memory: each card keeps an append-only run-history file, and a stopped by-hand or flow run records one stop row (`memory.mjs record --hand --stop`); a re-record keeps measured passes and fix passes.
+- Memory: outcome rows stamp the memory configuration, and an arms report compares them; `memory.mjs lessons --unconfirmed` lists live lessons no run has confirmed, and `memory.mjs ideas` files cited idea cards to Backlog and records priority reviews.
+- Memory: every `memory.mjs --dry-run` makes no paid model call, and `reflect --dry-run` still prints what it would credit.
+- Card loop: a reviewer-seat answer reaches one coder fix round on resume, and every seat that may commit is told not to add trailers.
+- Card loop: setup installs dependencies in the card worktree, the gate seat reinstalls a missing `node_modules`, and a gate hand-back must carry the gate command (the install match is exact).
+- Card loop: a reused branch is rebuilt on the current base, and a minor re-report no longer reopens a ledger finding.
+- Stop gate: verified-tree records stamp where they ran and the gate uses totals only from the run dir that wrote them; exit codes are credited across checkouts only when nothing was skipped, and `verify.mjs` refuses a foreign skipped record in main.
+- Stop gate: the block reason redacts the failing command and its output, and the ratchet credit reads the record's baseline.
+- A worktree agent's read-only skip compares against `origin/HEAD` as recorded at start.
+- A plan landed after `done --force` is recorded as landed with its acceptance, and the summary and batch record count a forced landing as landed, with a per-card acceptance count.
+- Planner: a signature the request states reaches the plan verbatim, and the swarm planner is told the shape gate.
+- Gates show the phase or plan file in chat before asking for approval; the L-card offer says a `/doug-start` card is dropped from a batch.
+- Detached eval and rehearsal runs post one completion line to the launching session; the lead launches them with `run_in_background`, since a bypass-mode lead holds `nohup`.
+- Rehearsals: a `ts-orders` fixture with a scenario for every Doug command path, and a harder tier (`rehearse.mjs --tier hard`) on a `ts-rentals` fixture with cross-module tasks and longer queues; a stage that ends on a turn or budget cap is judged by its assert, and a session that exits non-zero fails its stage.
+- CI: end-to-end replay tests of every scenario and a command journey run with no live model, and `test:e2e` is split out of `test:unit`; failing replays file Backlog cards through the `doug board` CLI.
+- `doug ablate` and the evals docs know the testers arm.
+
 ## 1.4.0
 
 - Board v2: the record is version 2 with epics, milestones, label groups and a priority order. `doug board labels init` migrates a v1 board (`type` holds its tags, `priority` is added), and `epic` and `milestone` take `add|edit|list` in both board CLIs.

@@ -1,0 +1,72 @@
+#!/usr/bin/env node
+// The one hand-written fake `claude` for the e2e replays (docs/specs/ci-e2e/architecture.md 4.1). The scenario
+// comes from DOUG_REPLAY_SCENARIO (or an absolute DOUG_REPLAY_SCENARIO_FILE), the stage from the prompt.
+// Exit 3 with nothing on stdout when no scenario or no unique step is found.
+const { existsSync, mkdtempSync, readFileSync, appendFileSync } = require("node:fs");
+const { tmpdir } = require("node:os");
+const { join } = require("node:path");
+const { pathToFileURL } = require("node:url");
+
+function die(msg, code) {
+  process.stderr.write(`${msg}\n`);
+  process.exit(code);
+}
+function finish(text, code = 0) {
+  process.stdout.write(text, () => process.exit(code));
+}
+
+async function main() {
+  const lib = await import(pathToFileURL(join(__dirname, "lib.mjs")).href);
+  const name = process.env.DOUG_REPLAY_SCENARIO;
+  const file = process.env.DOUG_REPLAY_SCENARIO_FILE || (name ? join(lib.REPLAY_DIR, "scenarios", `${name}.mjs`) : "");
+  if (!file) die("replay: DOUG_REPLAY_SCENARIO is not set", 3);
+  if (!existsSync(file)) die(`replay: no scenario file ${file}`, 3);
+  const scenario = await import(pathToFileURL(file).href);
+
+  const argv = process.argv.slice(2);
+  let inv = lib.readInvocation(argv, "");
+  if (inv.mode === "command") {
+    let stdin = "";
+    try {
+      stdin = readFileSync(0, "utf8");
+    } catch {
+      stdin = "";
+    }
+    inv = lib.readInvocation(argv, stdin);
+  }
+  const step = lib.pickStep(scenario.steps || [], inv.prompt || "");
+  if (step.error) die(step.error, 3);
+
+  const useFail = process.env.DOUG_REPLAY_FAIL === step.stage && typeof step.fail === "function";
+  const dir = process.cwd();
+  const transcript = join(mkdtempSync(join(tmpdir(), "replay-session-")), "stream.jsonl");
+  const stream = new lib.Stream(transcript);
+  const ctx = { dir, prompt: inv.prompt, schema: inv.schema, stream, scenario: name || file, lib };
+
+  if (inv.mode === "command") {
+    const out = useFail ? await step.fail(ctx) : await step.envelope(ctx);
+    return finish(`${out}\n`);
+  }
+
+  stream.init();
+  try {
+    if (useFail) await step.fail(ctx);
+    else await step.run(ctx);
+  } catch (e) {
+    process.stderr.write(`replay: step ${step.stage} threw: ${e && e.message ? e.message : e}\n`);
+    stream.result({ text: "step threw" });
+    return finish(stream.text(), 1);
+  }
+  const stop = lib.runStopHooks(dir, { sessionId: "replay", transcriptPath: transcript });
+  if (stop.blocked) {
+    process.stderr.write(`${stop.reason}\n`);
+    if (process.env.DOUG_REPLAY_LOG) appendFileSync(process.env.DOUG_REPLAY_LOG, `${stop.reason}\n`);
+    process.kill(process.pid, "SIGTERM");
+    setTimeout(() => process.exit(1), 5000);
+    return;
+  }
+  stream.result();
+  finish(stream.text());
+}
+
+main().catch((e) => die(`replay: ${e && e.stack ? e.stack : e}`, 4));

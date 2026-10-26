@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach } from "vitest";
-import { writeFileSync, appendFileSync, mkdirSync, readFileSync, existsSync, mkdtempSync, rmSync } from "node:fs";
+import { writeFileSync, appendFileSync, mkdirSync, readFileSync, existsSync, mkdtempSync, rmSync, realpathSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { join, dirname } from "node:path";
 import { tmpdir } from "node:os";
@@ -941,6 +941,7 @@ describe("card verified-tree-record", () => {
     by: "verify",
     commands: [{ name: "test", command: CMD, exit: 0, durationMs: 5 }],
     totals: totalsFor(3),
+    ranIn: dir,
     ...over,
   });
   const seed = (dir, over) => {
@@ -1081,6 +1082,110 @@ describe("card verified-tree-record", () => {
     expect(runs(dir2), "a baseline with no readable recorded totals must run the commands").toBe(1);
   });
 
+  // Card ratchet-credit-reads-record: the credit decides hasBaseline from the same baseline as the count check, which on
+  // the main checkout is the last-green record when it has an entry for the command.
+  it("CR1: a verified-tree record with no totals is not credited when only the last-green record holds the command's baseline; the command runs", () => {
+    const dir = makeRec();
+    edit(dir, "edited");
+    mkdirSync(join(dir, ".doug/.state"), { recursive: true });
+    writeFileSync(join(dir, ".doug/.state/test-totals.json"), JSON.stringify({ [CMD]: { total: 3, skipped: 0, todo: 0 } }));
+    expect(loadState(dir, "test-session").testTotals ?? null, "fixture: no session-start copy").toBeNull();
+    seed(dir, { totals: {} });
+    stop(dir);
+    expect(runs(dir), "a baselined command without recorded totals must run, not be credited").toBe(1);
+  });
+
+  // Card land-card-record-env-totals: totals depend on the environment (built dist), so a record's totals count as
+  // evidence only when it records the directory the commands ran in (ranIn) and that is this checkout.
+  const skippedTotals = { [CMD]: { status: "ok", summaries: [{ total: 56, skipped: 53, todo: 0 }], totals: { total: 56, skipped: 53, todo: 0 } } };
+  const envFixture = (over) => {
+    const dir = makeRec();
+    edit(dir, "edited");
+    markEdited(dir);
+    const state = loadState(dir, "test-session");
+    state.testTotals = { [CMD]: { total: 3, skipped: 0, todo: 0 } };
+    saveState(dir, "test-session", state);
+    seed(dir, { totals: skippedTotals, ...(typeof over === "function" ? over(dir) : over) });
+    return dir;
+  };
+
+  it("E1: a record whose commands ran in another directory is not main's count evidence; the commands run", () => {
+    const other = mkdtempSync(join(tmpdir(), "doug-env-other-"));
+    const dir = envFixture({ ranIn: other });
+    const r = stop(dir);
+    expect(r.json, JSON.stringify(r.json)).toBeNull();
+    expect(JSON.stringify(r.json || "")).not.toContain("test count regressed");
+    expect(runs(dir), "foreign-environment totals must not be compared; the command runs").toBe(1);
+  });
+
+  it("E2: a record whose commands ran in this checkout is still count evidence", () => {
+    const dir = envFixture({});
+    const r = stop(dir);
+    expect(r.json && r.json.decision, JSON.stringify(r.json)).toBe("block");
+    expect(r.json.reason).toContain("skipped rose from 0 (baseline) to 53");
+    expect(runs(dir), "the credited command must not run").toBe(0);
+  });
+
+  it("E3: a legacy record with no ranIn is not count evidence; the commands run", () => {
+    const dir = envFixture({ ranIn: undefined });
+    const r = stop(dir);
+    expect(r.json, JSON.stringify(r.json)).toBeNull();
+    expect(runs(dir)).toBe(1);
+  });
+
+  it("E4: a Stop that runs the gate stamps ranIn with this checkout", () => {
+    const dir = makeRec();
+    edit(dir, "edited");
+    stop(dir);
+    expect(readRecord(dir).ranIn).toBe(realpathSync(dir));
+  });
+
+  // Card verified-tree-exit-credit-env: with no session baseline, a foreign record still credited exit codes for
+  // tests it skipped. Exit codes cross checkouts only when the record skipped nothing.
+  const noBaselineForeign = (over, config) => {
+    const other = mkdtempSync(join(tmpdir(), "doug-exit-other-"));
+    const dir = makeRec(config);
+    edit(dir, "edited");
+    markEdited(dir);
+    seed(dir, { ranIn: other, ...over });
+    return dir;
+  };
+
+  it("E5: a foreign record that skipped tests (skipped 53), no session baseline, is not credited; the command runs", () => {
+    const dir = noBaselineForeign({ totals: skippedTotals });
+    const r = stop(dir);
+    expect(r.json, JSON.stringify(r.json)).toBeNull();
+    expect(runs(dir), "a foreign record that skipped tests must not credit exit codes").toBe(1);
+  });
+
+  it("E6: a foreign record that skipped nothing, no session baseline, is still credited", () => {
+    const dir = noBaselineForeign({ totals: totalsFor(3) });
+    const r = stop(dir);
+    expect(r.json, JSON.stringify(r.json)).toBeNull();
+    expect(runs(dir)).toBe(0);
+    expect(sessionState(dir).lastGate.results[0]).toMatchObject({ name: "test", ok: true, credited: "verified-tree" });
+  });
+
+  it("E7: a foreign record with totals only for the test command (skipped 0) and a second command with no totals key is credited", () => {
+    const TYPECHECK = `${process.execPath} -e "require('fs').appendFileSync('.doug/.state/tc.marker','x')"`;
+    const cfg = cfgFor({ commands: { test: CMD, typecheck: TYPECHECK }, stopGate: { ...baseConfig.stopGate, commands: ["test", "typecheck"] } });
+    const dir = noBaselineForeign(
+      {
+        commands: [
+          { name: "test", command: CMD, exit: 0, durationMs: 5 },
+          { name: "typecheck", command: TYPECHECK, exit: 0, durationMs: 5 },
+        ],
+        totals: totalsFor(3),
+      },
+      cfg,
+    );
+    const r = stop(dir);
+    expect(r.json, JSON.stringify(r.json)).toBeNull();
+    expect(runs(dir)).toBe(0);
+    expect(existsSync(join(dir, ".doug/.state/tc.marker"))).toBe(false);
+    expect(sessionState(dir).lastGate.results.every((x) => x.credited === "verified-tree")).toBe(true);
+  });
+
   it("R9: scans and evidence still run on a credited gate", () => {
     // protected files
     const dir = makeRec();
@@ -1176,7 +1281,7 @@ describe("card worktree-count-baseline", () => {
   };
 
   // Main checkout with a baseline of {total 100, skipped 0} taken at SessionStart; a worktree under .claude/worktrees.
-  function makeFixture() {
+  function makeFixture({ mainRecord = true } = {}) {
     const dir = makeProject({ config: { ...baseConfig, commands: { test: CMD } }, git: true });
     writeFileSync(join(dir, ".gitignore"), ".doug/.state/\n");
     mkdirSync(join(dir, "src"));
@@ -1184,7 +1289,7 @@ describe("card worktree-count-baseline", () => {
     git(dir, "add", "-A");
     git(dir, "commit", "-q", "-m", "base");
     mkdirSync(join(dir, ".doug/.state"), { recursive: true });
-    writeFileSync(join(dir, REC), JSON.stringify({ [CMD]: [{ total: 100, skipped: 0, todo: 0 }] }));
+    if (mainRecord) writeFileSync(join(dir, REC), JSON.stringify({ [CMD]: [{ total: 100, skipped: 0, todo: 0 }] }));
     runHookScript("session-start-baseline", { hook_event_name: "SessionStart", source: "startup" }, { dir });
     const wt = join(dir, ".claude/worktrees/wt1");
     git(dir, "worktree", "add", "-q", wt, "-b", "wt1-branch");
@@ -1195,7 +1300,7 @@ describe("card worktree-count-baseline", () => {
   const traceFile = (dir) => join(dir, ".doug/.state/trace/test-session.jsonl");
   // One worktree agent's life: it commits a change in the worktree, the command prints `out` there, then it stops.
   let n = 0;
-  function wtStop(dir, wt, out) {
+  function wtStop(dir, wt, out, beforeStop) {
     n += 1;
     const agent = `ag${n}`;
     const file = join(wt, "src/a.ts");
@@ -1212,6 +1317,7 @@ describe("card worktree-count-baseline", () => {
     ].map((l) => JSON.stringify({ ...base, ...l }));
     appendFileSync(traceFile(dir), lines.join("\n") + "\n");
     runHookScript("edit-loop", { tool_name: "Write", tool_input: { file_path: file }, agent_id: agent }, { dir });
+    if (beforeStop) beforeStop(wt);
     return runHookScript("stop-gate", { hook_event_name: "SubagentStop", agent_id: agent, agent_type: agentType }, { dir });
   }
   const rec = (d) => JSON.parse(readFileSync(join(d, REC), "utf8"));
@@ -1240,6 +1346,27 @@ describe("card worktree-count-baseline", () => {
     const second = wtStop(dir, wt, { total: 100, skipped: 54 });
     expect(second.json && second.json.decision, JSON.stringify(second.json)).toBe("block");
     expect(second.json.reason).toContain("skipped rose from 53 (baseline) to 54 (now)");
+  });
+
+  // Card ratchet-credit-reads-record: the tree credit takes the worktree's own last-green record as its baseline.
+  it("WCB4: a worktree record holding the command's baseline refuses a totals-less verified-tree credit; the command runs and a drop blocks", () => {
+    const { dir, wt } = makeFixture({ mainRecord: false });
+    writeFileSync(join(wt, REC), JSON.stringify({ [CMD]: [{ total: 100, skipped: 0, todo: 0 }] }));
+    const r = wtStop(dir, wt, { total: 90 }, (w) => {
+      mkdirSync(join(w, ".doug/.state"), { recursive: true });
+      writeTreeRecord(w, {
+        version: 1,
+        tree: computeTree(w),
+        node: process.version,
+        at: new Date().toISOString(),
+        by: "verify",
+        commands: [{ name: "test", command: CMD, exit: 0, durationMs: 5 }],
+        totals: {},
+        ranIn: w,
+      });
+    });
+    expect(r.json && r.json.decision, JSON.stringify(r.json)).toBe("block");
+    expect(r.json.reason).toContain("total dropped from 100");
   });
 });
 
@@ -1341,6 +1468,22 @@ describe("card ratchet-stale-session-baseline", () => {
     const r = mainStop(dir);
     expect(isBlock(r), JSON.stringify(r.json)).toBe(true);
     expect(r.json.reason).toContain("skipped rose from 0 (baseline) to 53 (now)");
+  });
+
+  it("O1: a seat with no SubagentStart line in the trace is still blocked by a count change", () => {
+    const dir = makeProj({ startRec: rec(100, 0), out: summary({ total: 100, skipped: 53 }) });
+    fireBash(dir, "ag1", "doug-flow:lead");
+    writeFileSync(join(dir, "src/b.ts"), "another seat edited the main checkout");
+    const r = subStop(dir, "ag1", "doug-flow:lead");
+    expect(isBlock(r), JSON.stringify(r.json)).toBe(true);
+    expect(r.json.reason).toContain("test count regressed");
+  });
+
+  it("O3: a last-green record without the command's entry falls back to the session-start copy and still blocks a drop", () => {
+    const dir = makeProj({ startRec: rec(137), nowRec: { "some other command": { total: 1, skipped: 0, todo: 0 } }, out: summary({ total: 131 }) });
+    const r = mainStop(dir);
+    expect(isBlock(r), JSON.stringify(r.json)).toBe(true);
+    expect(r.json.reason).toContain("total dropped from 137 (baseline) to 131 (now)");
   });
 
   it("M5: a seat with a successful Edit in its own trace is still blocked by a count regression", () => {

@@ -2,13 +2,14 @@
 // scripts/verify.mjs end to end. Design: .doug/.state/briefs/verified-tree-record-design.md sections 1, 4, 6.
 import { describe, it, expect } from "vitest";
 import { spawnSync, spawn } from "node:child_process";
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, readdirSync, rmSync, renameSync, statSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, readdirSync, rmSync, renameSync, statSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { parseTotals } from "../lib/test-totals.mjs";
 import * as gateLock from "../lib/gate-lock.mjs";
 const { gateLockPath } = gateLock;
+import * as vtLib from "../lib/verified-tree.mjs";
 import { computeTree, readRecord, writeRecord, removeRecord, creditable, noTestPathHit, resolveCommands, RECORD_RELPATH } from "../lib/verified-tree.mjs";
 
 const VERIFY = join(dirname(fileURLToPath(import.meta.url)), "..", "scripts", "verify.mjs");
@@ -583,6 +584,73 @@ describe("verify.mjs end to end (card verified-tree-record V8)", () => {
     expect(JSON.parse(r2.stdout.trim()).credited).toBeFalsy();
   });
 
+  it("VE1: a green run records the directory it ran in; --cwd with --record-dir records the cwd, not the record dir", () => {
+    const dir = fixture();
+    expect(verify(dir).status).toBe(0);
+    expect(readRecord(dir).ranIn).toBe(realpathSync(dir));
+    const a = fixture();
+    const b = fixture();
+    expect(verify(b, ["--cwd", a, "--record-dir", b]).status).toBe(0);
+    expect(readRecord(b).ranIn).toBe(realpathSync(a));
+  });
+
+  it("VE2: a --credit-dir copy keeps the source record's ranIn", () => {
+    const { a, b } = sameTreeTwice();
+    expect(readRecord(b).ranIn).toBe(realpathSync(b));
+    const r = verify(a, ["--json", "--credit-dir", b]);
+    expect(r.status, r.out).toBe(0);
+    expect(JSON.parse(r.stdout.trim()).credited).toBe("verified-tree");
+    expect(readRecord(a).ranIn).toBe(realpathSync(b));
+  });
+
+  // Card verify-credit-foreign-skipped: a foreign record that skipped tests (a dist-less worktree) must not credit in the main checkout.
+  const T_SKIP = T.replace(
+    `console.log("Tests  3 passed (3)");`,
+    `console.log(process.cwd().split("/").pop().startsWith("card-wt") ? "Tests  3 passed | 2 skipped (5)" : "Tests  3 passed (3)");`,
+  );
+  const skipFixture = () => makeRepo({ "t.mjs": T_SKIP, ".doug/config.json": JSON.stringify(CONFIG), ".gitignore": ".doug/.state/\n" });
+  const linked = (main, name) => {
+    const wt = join(mkdtempSync(join(tmpdir(), "doug-vt-wt-")), name);
+    git(main, ["worktree", "add", "-q", wt, "-b", `b-${name}`]);
+    return wt;
+  };
+
+  it("VF1: verify in the main checkout does not credit a foreign record that skipped tests; the commands run", () => {
+    const main = skipFixture();
+    const wt = linked(main, "card-wt");
+    expect(verify(main, ["--cwd", wt, "--record-dir", main]).status).toBe(0);
+    const rec = readRecord(main);
+    expect(rec?.ranIn).toBe(realpathSync(wt));
+    expect(rec.tree).toBe(computeTree(main));
+    expect(runs(wt)).toBe(1);
+    const r = verify(main, ["--json"]);
+    expect(r.status, r.out).toBe(0);
+    expect(runs(main), "a skipped foreign record must not be credited").toBe(1);
+    expect(JSON.parse(r.stdout.trim()).credited).toBeFalsy();
+  });
+
+  it("VF2: --credit-dir from a same-environment linked worker still credits for a linked integration worktree", () => {
+    const main = skipFixture();
+    const integ = linked(main, "integ-wt");
+    const worker = linked(main, "card-wt");
+    expect(verify(main, ["--cwd", worker, "--record-dir", worker]).status).toBe(0);
+    expect(readRecord(worker)?.ranIn).toBe(realpathSync(worker));
+    const r = verify(main, ["--json", "--by", "integrate", "--cwd", integ, "--record-dir", main, "--credit-dir", worker]);
+    expect(r.status, r.out).toBe(0);
+    expect(JSON.parse(r.stdout.trim()).credited).toBe("verified-tree");
+    expect(runs(integ), "a credited command must not run").toBe(0);
+  });
+
+  it("VF3: verify in the main checkout does not credit a skipped record that comes through --credit-dir", () => {
+    const main = skipFixture();
+    const worker = linked(main, "card-wt");
+    expect(verify(main, ["--cwd", worker, "--record-dir", worker]).status).toBe(0);
+    const r = verify(main, ["--json", "--credit-dir", worker]);
+    expect(r.status, r.out).toBe(0);
+    expect(runs(main), "a skipped foreign record must not be credited").toBe(1);
+    expect(JSON.parse(r.stdout.trim()).credited).toBeFalsy();
+  });
+
   it("VD2: without --credit-dir the same setup runs the commands", () => {
     const { a } = sameTreeTwice();
     const r = verify(a, ["--json"]);
@@ -880,4 +948,64 @@ describe("verify.mjs takes gate.lock (card verify-takes-gate-lock)", () => {
     expect(rt.status, rt.out).toBe(0);
     expect(rt.out).not.toMatch(/waited \d+ ms on gate\.lock/);
   }, 30000);
+});
+
+describe("totalsUsable and the pre-commit record writer (card land-card-record-env-totals)", () => {
+  const rec = (over = {}) => ({ version: 1, tree: "a".repeat(40), node: process.version, at: "x", by: "verify", commands: [], totals: {}, ...over });
+
+  it("VE3: totalsUsable is true only for a record whose ranIn is the given directory", () => {
+    const dir = makeRepo(BASE);
+    const other = makeRepo(BASE);
+    expect(typeof vtLib.totalsUsable).toBe("function");
+    expect(vtLib.totalsUsable(rec({ ranIn: dir }), dir)).toBe(true);
+    expect(vtLib.totalsUsable(rec({ ranIn: other }), dir)).toBe(false);
+    expect(vtLib.totalsUsable(rec(), dir)).toBe(false);
+  });
+
+  it("VE4: totalsUsable never throws and fails closed", () => {
+    const dir = makeRepo(BASE);
+    expect(typeof vtLib.totalsUsable).toBe("function");
+    expect(vtLib.totalsUsable(rec({ ranIn: "/does/not/exist/doug" }), dir)).toBe(false);
+    expect(vtLib.totalsUsable(rec({ ranIn: dir }), "/does/not/exist/doug")).toBe(false);
+    expect(vtLib.totalsUsable(null, dir)).toBe(false);
+    expect(vtLib.totalsUsable(rec({ ranIn: 42 }), dir)).toBe(false);
+  });
+
+  // Card verified-tree-exit-credit-env: exit codes cross checkouts only when the record skipped nothing.
+  const entry = (...skips) => ({ status: "ok", summaries: skips.map((s) => ({ total: 60, skipped: s, todo: 0 })), totals: { total: 60, skipped: skips.reduce((a, b) => a + b, 0), todo: 0 } });
+  const CMDK = "pnpm test:unit";
+
+  it("VE6: exitCreditUsable: same checkout always; foreign or legacy only when nothing was skipped", () => {
+    const dir = makeRepo(BASE);
+    const other = makeRepo(BASE);
+    expect(typeof vtLib.exitCreditUsable).toBe("function");
+    expect(vtLib.exitCreditUsable(rec({ ranIn: dir, totals: { [CMDK]: entry(53) } }), dir)).toBe(true);
+    expect(vtLib.exitCreditUsable(rec({ ranIn: other, totals: { [CMDK]: entry(53) } }), dir)).toBe(false);
+    expect(vtLib.exitCreditUsable(rec({ ranIn: other, totals: { [CMDK]: entry(0) } }), dir)).toBe(true);
+    expect(vtLib.exitCreditUsable(rec({ ranIn: other, totals: {} }), dir)).toBe(true);
+    expect(vtLib.exitCreditUsable(rec({ totals: { [CMDK]: entry(53) } }), dir)).toBe(false);
+    expect(vtLib.exitCreditUsable(rec({ ranIn: other, totals: { [CMDK]: entry(0, 7) } }), dir)).toBe(false);
+    expect(vtLib.exitCreditUsable(rec({ ranIn: other, totals: { [CMDK]: { status: "none" } } }), dir)).toBe(true);
+    expect(vtLib.exitCreditUsable(rec({ ranIn: other, totals: { a: entry(0), b: entry(2) } }), dir)).toBe(false);
+  });
+
+  it("VE7: exitCreditUsable never throws on a null record, non-object totals, or a missing directory", () => {
+    const dir = makeRepo(BASE);
+    const other = makeRepo(BASE);
+    expect(typeof vtLib.exitCreditUsable).toBe("function");
+    expect(() => vtLib.exitCreditUsable(null, dir)).not.toThrow();
+    expect(() => vtLib.exitCreditUsable(rec({ ranIn: other, totals: "x" }), dir)).not.toThrow();
+    expect(() => vtLib.exitCreditUsable(rec({ ranIn: other, totals: { [CMDK]: entry(0) } }), "/does/not/exist/doug")).not.toThrow();
+    expect(vtLib.exitCreditUsable(null, dir)).toBe(false);
+  });
+
+  it("VE5: the pre-commit record CLI stamps ranIn with the directory", () => {
+    const dir = makeRepo(BASE);
+    const lib = join(dirname(fileURLToPath(import.meta.url)), "..", "lib", "verified-tree.mjs");
+    const t = computeTree(dir);
+    const cmds = JSON.stringify([{ name: "test", command: "x", exit: 0, durationMs: 1 }]);
+    const r = spawnSync(process.execPath, [lib, "record", t, cmds, dir], { encoding: "utf8", env: cleanEnv() });
+    expect(r.status, r.stderr).toBe(0);
+    expect(readRecord(dir)?.ranIn).toBe(realpathSync(dir));
+  });
 });

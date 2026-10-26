@@ -1,0 +1,207 @@
+diff --git a/src/billing/statement.ts b/src/billing/statement.ts
+new file mode 100644
+index 0000000..65eccb7
+--- /dev/null
++++ b/src/billing/statement.ts
+@@ -0,0 +1,46 @@
++import type { Item } from "../catalog/item.js";
++import type { Customer } from "../customers/customer.js";
++import { netReceivedInMonth } from "../payments/ledger.js";
++import type { Ledger } from "../payments/ledger.js";
++import { billableDays, rentalCostCents } from "../pricing/rates.js";
++import type { Reservation } from "../reservations/reservation.js";
++import { sumCents } from "../util/money.js";
++import type { Cents } from "../util/money.js";
++import { pluralise } from "../util/text.js";
++
++export interface StatementLine {
++  reservationId: string;
++  label: string;
++  cents: Cents;
++}
++
++export interface Statement {
++  customerId: string;
++  /** The month the statement covers, "2025-03". */
++  month: string;
++  lines: StatementLine[];
++  chargesCents: Cents;
++  /** Payments received in the month less refunds paid in it. */
++  receivedCents: Cents;
++  balanceCents: Cents;
++}
++
++/** The monthly statement of one customer: the rentals that start in the month, less what was received in it. */
++export function statementFor(customer: Customer, reservations: Reservation[], items: Item[], ledger: Ledger, month: string): Statement {
++  const mine = reservations.filter((r) => r.customerId === customer.id);
++  const lines: StatementLine[] = [];
++  for (const reservation of mine) {
++    if (reservation.status === "cancelled" || reservation.start.slice(0, 7) !== month) continue;
++    const item = items.find((i) => i.id === reservation.itemId);
++    if (!item) continue;
++    const days = billableDays(reservation.start, reservation.end);
++    lines.push({ reservationId: reservation.id, label: `${item.name}, ${pluralise(days, "day")}`, cents: rentalCostCents(item, days) });
++  }
++  const chargesCents = sumCents(lines.map((line) => line.cents));
++  const receivedCents = netReceivedInMonth(
++    ledger,
++    mine.map((r) => r.id),
++    month,
++  );
++  return { customerId: customer.id, month, lines, chargesCents, receivedCents, balanceCents: chargesCents - receivedCents };
++}
+diff --git a/src/notifications/templates.ts b/src/notifications/templates.ts
+index 7aa9703..350bb52 100644
+--- a/src/notifications/templates.ts
++++ b/src/notifications/templates.ts
+@@ -1,6 +1,8 @@
++import type { Statement } from "../billing/statement.js";
+ import type { Item } from "../catalog/item.js";
+ import type { Customer } from "../customers/customer.js";
+ import type { Reservation } from "../reservations/reservation.js";
++import { formatCents } from "../util/money.js";
+ import { fill } from "../util/text.js";
+ 
+ export const TEMPLATES = {
+@@ -11,6 +13,13 @@ export const TEMPLATES = {
+ 
+ export type TemplateName = keyof typeof TEMPLATES;
+ 
++export const STATEMENT_TEMPLATE = "Hello {name}, your statement for {month} shows a balance of {balance}.";
++
++/** The email text of a monthly statement: the customer's name, the month and the balance. */
++export function renderStatement(customer: Customer, statement: Statement): string {
++  return fill(STATEMENT_TEMPLATE, { name: customer.name, month: statement.month, balance: formatCents(statement.balanceCents) });
++}
++
+ export function render(name: TemplateName, customer: Customer, reservation: Reservation, item: Item): string {
+   return fill(TEMPLATES[name], {
+     name: customer.name,
+diff --git a/src/payments/ledger.ts b/src/payments/ledger.ts
+index e3e768d..a70c0f4 100644
+--- a/src/payments/ledger.ts
++++ b/src/payments/ledger.ts
+@@ -47,3 +47,12 @@ export function refundedCents(ledger: Ledger, reservationId: string): Cents {
+ export function netPaidCents(ledger: Ledger, reservationId: string): Cents {
+   return paidCents(ledger, reservationId) - refundedCents(ledger, reservationId);
+ }
++
++/** Money kept in a month over some reservations: payments less refunds dated in that month ("2025-03"). */
++export function netReceivedInMonth(ledger: Ledger, reservationIds: string[], month: string): Cents {
++  return sumCents(
++    ledger
++      .filter((p) => reservationIds.includes(p.reservationId) && p.day.slice(0, 7) === month)
++      .map((p) => (p.kind === "payment" ? p.cents : -p.cents)),
++  );
++}
+diff --git a/tests/billing.test.ts b/tests/billing.test.ts
+index eee888c..0c432d9 100644
+--- a/tests/billing.test.ts
++++ b/tests/billing.test.ts
+@@ -1,11 +1,13 @@
+ import { describe, it, expect } from "vitest";
+ import { depositFor, describeRefund, refundCents } from "../src/billing/deposit.js";
+ import { buildInvoice, invoiceLines } from "../src/billing/invoice.js";
++import { statementFor } from "../src/billing/statement.js";
+ import { DEFAULT_TAX_BP, taxCents, taxLabel, withTax } from "../src/billing/tax.js";
+ import { seedCatalog } from "../src/catalog/catalog.js";
+ import { makeCustomer } from "../src/customers/customer.js";
+ import { upgradeToMember } from "../src/customers/membership.js";
+-import { createReservation } from "../src/reservations/reservation.js";
++import type { Payment } from "../src/payments/ledger.js";
++import { cancel, createReservation } from "../src/reservations/reservation.js";
+ 
+ const [drill, saw] = seedCatalog();
+ const ana = makeCustomer({ id: "cus-0001", name: "Ana", email: "ana@example.com" });
+@@ -105,3 +107,39 @@ describe("more billing", () => {
+     expect(invoice.reservationId).toBe("res-0001");
+   });
+ });
++
++describe("statement", () => {
++  const items = seedCatalog();
++  const bo = makeCustomer({ id: "cus-0002", name: "Bo", email: "bo@example.com" });
++  const rent = (id: string, customerId: string, itemIndex: number, start: string, end: string) =>
++    createReservation({ id, item: items[itemIndex], customerId, start, end }, []);
++  const march = rent("res-0101", "cus-0001", 0, "2025-03-10", "2025-03-13");
++  const marchSaw = rent("res-0102", "cus-0001", 1, "2025-03-20", "2025-03-22");
++  const april = rent("res-0103", "cus-0001", 0, "2025-04-02", "2025-04-04");
++  const others = rent("res-0104", "cus-0002", 2, "2025-03-11", "2025-03-12");
++  const pay = (id: string, reservationId: string, cents: number, day: string): Payment => ({ id, reservationId, cents, kind: "payment", day });
++  const ledger: Payment[] = [pay("pay-1", "res-0101", 2000, "2025-03-12"), pay("pay-2", "res-0103", 3000, "2025-04-02")];
++
++  it("charges each rental that starts in the month", () => {
++    const s = statementFor(ana, [march, marchSaw, april, others], items, ledger, "2025-03");
++    expect(s.lines).toEqual([
++      { reservationId: "res-0101", label: "Cordless drill, 3 days", cents: 4500 },
++      { reservationId: "res-0102", label: "Tile saw, 2 days", cents: 8000 },
++    ]);
++    expect(s.chargesCents).toBe(12500);
++  });
++  it("leaves out cancelled rentals and rentals of other customers", () => {
++    const s = statementFor(ana, [cancel(march), marchSaw, others], items, ledger, "2025-03");
++    expect(s.lines.map((l) => l.reservationId)).toEqual(["res-0102"]);
++    expect(statementFor(bo, [march, others], items, ledger, "2025-03").lines.map((l) => l.reservationId)).toEqual(["res-0104"]);
++  });
++  it("takes the payments received in the month, net of refunds, off the charges", () => {
++    const refund: Payment = { id: "pay-3", reservationId: "res-0101", cents: 500, kind: "refund", day: "2025-03-14" };
++    const s = statementFor(ana, [march, marchSaw, april], items, [...ledger, refund], "2025-03");
++    expect(s.receivedCents).toBe(1500);
++    expect(s.balanceCents).toBe(12500 - 1500);
++  });
++  it("is empty for a month with no rentals", () => {
++    expect(statementFor(ana, [march], items, [], "2025-05")).toMatchObject({ lines: [], chargesCents: 0, receivedCents: 0, balanceCents: 0 });
++  });
++});
+diff --git a/tests/notifications.test.ts b/tests/notifications.test.ts
+index 3b1e632..6ee07df 100644
+--- a/tests/notifications.test.ts
++++ b/tests/notifications.test.ts
+@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
+ import { seedCatalog } from "../src/catalog/catalog.js";
+ import { makeCustomer } from "../src/customers/customer.js";
+ import { pickupReminders, startingTomorrow } from "../src/notifications/reminders.js";
+-import { TEMPLATES, render, subjectFor } from "../src/notifications/templates.js";
++import { TEMPLATES, render, renderStatement, subjectFor } from "../src/notifications/templates.js";
+ import { confirm, createReservation } from "../src/reservations/reservation.js";
+ 
+ const items = seedCatalog();
+@@ -62,3 +62,10 @@ describe("more notifications", () => {
+     expect(startingTomorrow([tomorrow], "2025-03-11")).toEqual([]);
+   });
+ });
++
++describe("statement text", () => {
++  it("greets the customer and states the month and the balance", () => {
++    const statement = { customerId: "cus-0001", month: "2025-03", lines: [], chargesCents: 12500, receivedCents: 2000, balanceCents: 10500 };
++    expect(renderStatement(ana, statement)).toBe("Hello Ana, your statement for 2025-03 shows a balance of $105.00.");
++  });
++});
+diff --git a/tests/payments.test.ts b/tests/payments.test.ts
+index a96fcc2..542a7b3 100644
+--- a/tests/payments.test.ts
++++ b/tests/payments.test.ts
+@@ -1,5 +1,5 @@
+ import { describe, it, expect } from "vitest";
+-import { netPaidCents, paidCents, paymentsFor, recordPayment, refundedCents } from "../src/payments/ledger.js";
++import { netPaidCents, netReceivedInMonth, paidCents, paymentsFor, recordPayment, refundedCents } from "../src/payments/ledger.js";
+ import type { Ledger, Payment } from "../src/payments/ledger.js";
+ import { planRefund, refundEntry, refundableCents } from "../src/payments/refunds.js";
+ 
+@@ -68,3 +68,16 @@ describe("more payments", () => {
+     expect(refundEntry(ledger, "pay-9", "res-1", 0, "2025-03-15")).toBeNull();
+   });
+ });
++
++describe("received in a month", () => {
++  const spread: Ledger = [pay("pay-1", "res-1", 5000, "2025-03-10"), back("pay-2", "res-1", 1000, "2025-03-14"), pay("pay-3", "res-1", 700, "2025-04-02"), pay("pay-4", "res-2", 900, "2025-03-20")];
++  it("nets payments and refunds dated in the month over the given reservations", () => {
++    expect(netReceivedInMonth(spread, ["res-1"], "2025-03")).toBe(4000);
++    expect(netReceivedInMonth(spread, ["res-1", "res-2"], "2025-03")).toBe(4900);
++    expect(netReceivedInMonth(spread, ["res-1"], "2025-04")).toBe(700);
++  });
++  it("is zero for no reservations or a quiet month", () => {
++    expect(netReceivedInMonth(spread, [], "2025-03")).toBe(0);
++    expect(netReceivedInMonth(spread, ["res-1"], "2025-05")).toBe(0);
++  });
++});

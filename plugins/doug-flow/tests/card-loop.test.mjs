@@ -258,7 +258,7 @@ describe("briefs", () => {
     for (const id of ["commit-foreground", "commit-no-background", "commit-sha-from-git-log"]) expect(ids("coder")).not.toContain(id);
     expect(ids("coder")).not.toContain("red-claim");
     expect(ids("reviewer")).not.toContain("no-test-edit-without-reason");
-    expect(ids("tester")).not.toContain("no-trailers");
+    expect(ids("tester")).toContain("no-trailers");
     expect(ids("lead")).not.toContain("stay-in-goal");
     expect(ids("tester")).not.toContain("tests-only-no-production-edit");
     for (const r of Object.values(BRIEF_RULES)) {
@@ -270,6 +270,65 @@ describe("briefs", () => {
     const tids = tester.brief.rules.map((r) => r.id);
     expect(tids).toContain("tests-only-no-production-edit");
     expect(tids).not.toContain("red-claim");
+  });
+
+  it("T10a no-trailers reaches every seat that may commit (tester, coder, reviewer, commit), including the coder fix pass, and no other seat", () => {
+    const TEXT = "Commit without Co-Authored-By or Claude-Session trailers.";
+    expect(BRIEF_RULES["no-trailers"].text).toBe(TEXT);
+    const { actions } = walk({ ...CARD }, { research: true });
+    const rulesOf = (a) => a.brief.rules.filter((r) => r.id === "no-trailers");
+    const seatActions = (seat) => actions.filter((x) => x.kind === "seat" && x.seat === seat);
+    for (const seat of ["tester", "coder", "reviewer", "commit"]) {
+      const a = seatActions(seat)[0];
+      expect(a, seat).toBeTruthy();
+      expect(rulesOf(a), seat).toEqual([{ id: "no-trailers", text: TEXT }]);
+    }
+    for (const seat of ["setup", "research", "lead", "gate"]) {
+      const a = seatActions(seat)[0];
+      expect(a, seat).toBeTruthy();
+      expect(rulesOf(a), seat).toEqual([]);
+    }
+    const fix = walk(CARD, {}, { "reviewer#1": { verdict: "fail", findings: [blocker()] } });
+    const coders = fix.actions.filter((x) => x.kind === "seat" && x.seat === "coder");
+    expect(coders.length).toBeGreaterThanOrEqual(2);
+    expect(coders[1].brief.round).toBe(2);
+    expect(rulesOf(coders[1])).toEqual([{ id: "no-trailers", text: TEXT }]);
+  });
+
+  it("T10b the lead is told to fetch the full text of each indexed lesson it needs, right after the verbatim rule; no other seat carries it", () => {
+    const { actions } = walk();
+    const rules = (seat) => actions.find((x) => x.kind === "seat" && x.seat === seat).brief.rules;
+    const lead = rules("lead");
+    const at = lead.findIndex((r) => r.id === "lessons-fetch");
+    expect(at, "lessons-fetch in the lead brief").toBeGreaterThan(-1);
+    expect(lead[at].text).toBe(
+      "For each indexed lesson the card needs, run memory.mjs lesson show <id> <repo-root> --card <card-id>, passing the REPO ROOT named in this brief as [dir], and append its output verbatim to lessons below the brief-lessons block; never cut or paraphrase a fetched lesson."
+    );
+    expect(lead[at - 1].id).toBe("lessons-verbatim");
+    expect(lead[at - 1].text).toBe("Run memory.mjs brief-lessons <card-id> <repo-root>, passing the REPO ROOT named in this brief as [dir], and return its block for this card verbatim in lessons; never paraphrase it.");
+    expect(BRIEF_RULES["lessons-fetch"].seats).toEqual(["lead"]);
+    for (const seat of ["setup", "research", "tester", "coder", "reviewer", "gate", "commit"]) {
+      const a = actions.find((x) => x.kind === "seat" && x.seat === seat);
+      if (a) expect(a.brief.rules.map((r) => r.id), seat).not.toContain("lessons-fetch");
+    }
+  });
+
+  it("T10c the lead prompt names the queen's repo root right after the worktree line; no other seat prints it; a missing root prints nothing", () => {
+    const RR = "/abs/main-repo";
+    const WTX = "/abs/main-repo/.claude/worktrees/card-c1";
+    const lead = briefPrompt(currentAction(stateAt("lead")).brief, { repoRoot: RR, worktreePath: WTX });
+    expect(lead).toContain("REPO ROOT: " + RR);
+    expect(lead).not.toContain("REPO ROOT: " + WTX);
+    expect(lead.indexOf("REPO ROOT: " + RR)).toBeGreaterThan(lead.indexOf("WORKTREE: " + WTX));
+    for (const seat of ["setup", "research", "tester", "coder", "reviewer", "gate", "commit"]) {
+      const st = stateAt(seat, CARD, seat === "research" ? { research: true } : {});
+      const t = briefPrompt(currentAction(st).brief, { repoRoot: RR, worktreePath: WTX });
+      expect(t, seat).not.toContain("REPO ROOT:");
+    }
+    const none = briefPrompt(currentAction(stateAt("lead")).brief, { worktreePath: WTX });
+    expect(none).not.toContain("REPO ROOT:");
+    const empty = briefPrompt(currentAction(stateAt("lead")).brief, { repoRoot: "", worktreePath: WTX });
+    expect(empty).not.toContain("REPO ROOT:");
   });
 
   it("T11 each brief's row and handBack come from SEAT_ROWS and HAND_BACK_SCHEMAS", () => {
@@ -353,6 +412,28 @@ describe("transitions", () => {
     const r = go(s, okHB("tester", s, { tests_red_by_design: [], mutationResults: [] }));
     expect(r.action.kind).toBe("stopped");
     expect(r.action.reason).toBe("tester-red-claim-missing");
+  });
+
+  it("T14f pin-only claim [] with split ids where one part survived stops", () => {
+    const s = testerWith(MUT);
+    const r = go(s, okHB("tester", s, { tests_red_by_design: [], mutationResults: [res("M1a", true), res("M1b", false)] }));
+    expect(r.action.kind).toBe("stopped");
+    expect(r.action.reason).toBe("tester-red-claim-missing");
+  });
+
+  it("T14g pin-only claim [] with split ids all failed advances to coder with redTests []", () => {
+    const s = testerWith(MUT);
+    const r = go(s, okHB("tester", s, { tests_red_by_design: [], mutationResults: [res("M1a", true), res("M1b", true)] }));
+    expect(r.action.reason).toBeUndefined();
+    expect(r.action.kind).toBe("seat");
+    expect(r.action.seat).toBe("coder");
+    expect(r.action.brief.redTests).toEqual([]);
+  });
+
+  it("T14h the contract doc names the pin-only exception to tester-red-claim-missing", () => {
+    const doc = readFileSync(CONTRACT_DOC, "utf8");
+    const line = doc.split("\n").find((l) => l.startsWith("Stop reasons:"));
+    expect(line).toMatch(/`tester-red-claim-missing` \(pin-only exception[^)]*every listed mutation[^)]*failed/);
   });
 
   it("T14e the full-lane tester brief names the pin-only path in the red-claim rule", () => {
@@ -1701,6 +1782,191 @@ describe("commit seat tree", () => {
       expect(!!ruleOf(a, "gate-reports-tree"), a.seat).toBe(a.seat === "gate");
       expect(!!ruleOf(a, "commit-reports-tree"), a.seat).toBe(a.seat === "commit");
     }
+  });
+});
+
+// Card card-loop-reviewer-answer-reaches-coder: an answer to a reviewer stop that orders a fix reaches a coder round.
+describe("card card-loop-reviewer-answer-reaches-coder: reviewer answers", () => {
+  const major = (over = {}) => ({ id: "F2", severity: "major", file: "b.mjs", description: "meh", evidence: "ran X, saw Y", ...over });
+  const QUESTION = "major with evidence still open after one fix pass: F2";
+  const ANSWER = "Fix F2.";
+  const withAnswer = (answer = ANSWER) => ({ answers: [{ seat: "reviewer", question: QUESTION, answer, round: 2 }] });
+  const fail = (s, findings) => go(s, okHB("reviewer", s, { verdict: "fail", findings }));
+
+  // reviewer 1 fails, fix-pass coder 2, reviewer 2 (carries the answer): returns the result of reviewer 2.
+  function toReviewer2(options, findings2) {
+    const s = stateAt("reviewer", CARD, options);
+    const r1 = fail(s, [major()]);
+    expect(r1.state.pending).toBe("coder");
+    const fixPass = currentAction(r1.state).brief;
+    const r2 = ok(r1.state);
+    expect(r2.state.pending).toBe("reviewer");
+    return { fixPass, r3: findings2 ? fail(r2.state, findings2) : go(r2.state, okHB("reviewer", r2.state)) };
+  }
+
+  it("T90 a reviewer answer reaches the next coder brief, not the fix-pass coder before it", () => {
+    const { fixPass, r3 } = toReviewer2(withAnswer(), [major()]);
+    expect(fixPass.round).toBe(2);
+    expect(fixPass.answers).toEqual([]);
+    expect(r3.action.kind).toBe("seat");
+    expect(r3.state.pending).toBe("coder");
+    const brief = r3.action.brief;
+    expect(brief.round).toBe(3);
+    expect(brief.answers).toEqual([{ question: QUESTION, answer: ANSWER }]);
+    expect(brief.findings.map((f) => f.id)).toEqual(["F2"]);
+    expect(briefPrompt(brief, { worktreePath: WT })).toContain("Q: " + QUESTION + " A: " + ANSWER);
+    expect(briefPrompt(fixPass, { worktreePath: WT })).not.toContain("ANSWERS FROM THE USER");
+  });
+
+  it("T91 the answer-driven coder round is followed by the reviewer, which can pass to the gate", () => {
+    const { r3 } = toReviewer2(withAnswer(), [major()]);
+    const r4 = ok(r3.state);
+    expect(r4.state.pending).toBe("reviewer");
+    const r5 = go(r4.state, okHB("reviewer", r4.state));
+    expect(r5.state.pending).toBe("gate");
+  });
+
+  it("T92 an accept-only answer adds no coder round: a passing reviewer goes straight to the gate", () => {
+    const { r3 } = toReviewer2(withAnswer("Accept F2 as minor."));
+    expect(r3.action.kind).toBe("seat");
+    expect(r3.state.pending).toBe("gate");
+    expect(r3.state.counters.coderRounds).toBe(2);
+  });
+
+  it("T93 the answer-driven coder round happens once: a major still open after it stops reviewer-major-open", () => {
+    const { r3 } = toReviewer2(withAnswer(), [major()]);
+    expect(r3.state.pending).toBe("coder");
+    const r4 = ok(r3.state);
+    const r5 = fail(r4.state, [major()]);
+    expect(r5.action.kind).toBe("stopped");
+    expect(r5.action.reason).toBe("reviewer-major-open");
+  });
+
+  it("T94 the answer-driven coder round happens once: a blocker still open after it stops reviewer-blocker-open", () => {
+    const { r3 } = toReviewer2(withAnswer(), [major()]);
+    expect(r3.state.pending).toBe("coder");
+    const r4 = ok(r3.state);
+    const r5 = fail(r4.state, [blocker()]);
+    expect(r5.action.kind).toBe("stopped");
+    expect(r5.action.reason).toBe("reviewer-blocker-open");
+  });
+});
+
+describe("card card-worktree-deps-survive-seats: install runs in the worktree and the gate reinstalls", () => {
+  const REPO = "/abs/repo";
+  const WTP = REPO + "/.claude/worktrees/card-c1";
+  const INSTALL = "pnpm install --frozen-lockfile";
+  const VERIFY = "node .doug/hooks/scripts/verify.mjs";
+  const CDI = `cd ${WTP} && ${INSTALL}`;
+  const gateAt = (install = INSTALL) => stateAt("gate", CARD, { install });
+  const gateHB2 = (s, commands) => okHB("gate", s, { commands });
+
+  it("T90 the setup prompt renders the install as one literal cd <worktree> && <install> after the worktree add", () => {
+    const s = initialState(CARD, { install: INSTALL });
+    const t = briefPrompt(currentAction(s).brief, { repoRoot: REPO, worktreePath: WTP });
+    const add = `git -C ${REPO} worktree add -b card/c1 ${WTP} main`;
+    expect(t).toContain(CDI);
+    expect(t.indexOf(CDI)).toBeGreaterThan(t.indexOf(add));
+  });
+
+  it("T91 the gate brief carries the install command and renders it as cd <worktree> && <install>; none when install is null", () => {
+    const b = currentAction(gateAt()).brief;
+    expect(b.install).toBe(INSTALL);
+    const t = briefPrompt(b, { repoRoot: REPO, worktreePath: WTP });
+    expect(t).toContain("INSTALL COMMAND");
+    expect(t).toContain(CDI);
+    const n = currentAction(gateAt(null)).brief;
+    expect(briefPrompt(n, { repoRoot: REPO, worktreePath: WTP })).not.toContain("INSTALL COMMAND");
+  });
+
+  it("T92 only the gate brief carries gate-reinstall-missing-deps, and only when install is set", () => {
+    const ids = (seat, install) => currentAction(stateAt(seat, CARD, { install })).brief.rules.map((r) => r.id);
+    expect(ids("gate", INSTALL)).toContain("gate-reinstall-missing-deps");
+    for (const seat of ["commit", "coder", "reviewer", "tester"]) {
+      expect(ids(seat, INSTALL)).not.toContain("gate-reinstall-missing-deps");
+    }
+    expect(ids("gate", null)).not.toContain("gate-reinstall-missing-deps");
+    const rule = currentAction(gateAt()).brief.rules.find((r) => r.id === "gate-reinstall-missing-deps");
+    const text = rule.text.toLowerCase();
+    expect(text).toContain("node_modules");
+    expect(text).toContain("only when");
+    expect(text).toContain("missing");
+    expect(text).toContain("first commands item");
+  });
+
+  it("T93 a green reinstall followed by a green gate goes to commit with no red counted", () => {
+    const s = gateAt();
+    const r = go(s, gateHB2(s, [{ command: `cd ${s.worktree} && ${INSTALL}`, exitCode: 0 }, { command: VERIFY, exitCode: 0 }]));
+    expect(r.action.kind).toBe("seat");
+    expect(r.action.seat).toBe("commit");
+    expect(r.state.counters.redGates).toBe(0);
+  });
+
+  it("T94 a failed reinstall stops setup-failed at once: no red counted, no coder seat", () => {
+    const s = gateAt();
+    const r = go(s, gateHB2(s, [{ command: `cd ${s.worktree} && ${INSTALL}`, exitCode: 1 }]));
+    expect(r.action.kind).toBe("stopped");
+    expect(r.action.reason).toBe("setup-failed");
+    expect(r.state.counters.redGates).toBe(0);
+    expect(r.action.seat).toBeUndefined();
+  });
+
+  it("T95 a green reinstall followed by a red gate keeps the red path", () => {
+    const s = gateAt();
+    const r = go(s, gateHB2(s, [{ command: `cd ${s.worktree} && ${INSTALL}`, exitCode: 0 }, { command: VERIFY, exitCode: 1 }]));
+    expect(r.action.kind).toBe("seat");
+    expect(r.action.seat).toBe("coder");
+    expect(r.state.counters.redGates).toBe(1);
+  });
+
+  it("T96 with install set and node_modules present, a red verify goes to the coder, then gate-red-twice", () => {
+    const s = gateAt();
+    const red = [{ command: VERIFY, exitCode: 1 }];
+    const r1 = go(s, gateHB2(s, red));
+    expect(r1.action.seat).toBe("coder");
+    expect(r1.state.fixFor).toBe("gate");
+    expect(r1.state.counters.redGates).toBe(1);
+    const r2 = ok(ok(r1.state).state);
+    expect(r2.action.seat).toBe("gate");
+    const r3 = go(r2.state, gateHB2(r2.state, red));
+    expect(r3.action.kind).toBe("stopped");
+    expect(r3.action.reason).toBe("gate-red-twice");
+  });
+
+  it("T97 a hand-back holding only a green reinstall does not reach commit: hand-back-invalid naming the gate command, no red counted", () => {
+    const s = gateAt();
+    const r = go(s, gateHB2(s, [{ command: `cd ${s.worktree} && ${INSTALL}`, exitCode: 0 }]));
+    expect(r.action.kind).toBe("stopped");
+    expect(r.action.reason).toBe("hand-back-invalid");
+    expect(r.state.counters.redGates).toBe(0);
+    expect(JSON.stringify(r.action)).toContain(VERIFY);
+  });
+
+  it("T97b a green hand-back with only git status and no gate command run stops hand-back-invalid", () => {
+    const s = gateAt();
+    const r = go(s, gateHB2(s, [{ command: "git status", exitCode: 0 }]));
+    expect(r.action.kind).toBe("stopped");
+    expect(r.action.reason).toBe("hand-back-invalid");
+    expect(r.state.counters.redGates).toBe(0);
+  });
+
+  it("T98 a gate command containing the install text is not a reinstall: it takes the red path", () => {
+    const s = gateAt();
+    const r = go(s, gateHB2(s, [{ command: `cd ${s.worktree} && ${INSTALL} && ${VERIFY}`, exitCode: 1 }]));
+    expect(r.action.kind).toBe("seat");
+    expect(r.action.seat).toBe("coder");
+    expect(r.state.fixFor).toBe("gate");
+    expect(r.state.counters.redGates).toBe(1);
+  });
+
+  it("T99 the gate command run as cd <worktree> && <gate> after a green reinstall still counts and reaches commit", () => {
+    const s = gateAt();
+    const r = go(s, gateHB2(s, [
+      { command: `cd ${s.worktree} && ${INSTALL}`, exitCode: 0 },
+      { command: `cd ${s.worktree} && ${VERIFY}`, exitCode: 0 },
+    ]));
+    expect(r.action.kind).toBe("seat");
+    expect(r.action.seat).toBe("commit");
   });
 });
 

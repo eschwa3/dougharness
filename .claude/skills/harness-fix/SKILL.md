@@ -97,6 +97,6 @@ A card whose goal names any of these is built by hand (doug-hand step 2b):
 
 ## 3. The gate, the commit, the record
 
-1. Before the commit run the full gate with `node .doug/hooks/scripts/verify.mjs` (it runs `pnpm typecheck` and `pnpm test:unit`, or credits a verified-tree record of the same tree; `--no-credit` forces a real run). Never `pnpm test`, which spawns Codex. Say what ran and the counts.
+1. Before the commit run the full gate with `node .doug/hooks/scripts/verify.mjs` (it runs `pnpm typecheck` and `pnpm test:unit`, or credits a verified-tree record of the same tree; `--no-credit` forces a real run). Never `pnpm test`, which spawns Codex. The gate no longer runs the rehearse fixture suites: a change to `scripts/rehearse*.mjs` or `tests/rehearse*` also runs `pnpm test:rehearse`. Say what ran and the counts.
 2. Commit without attribution trailers, one commit per coherent change, with a message that says what changed and why. Leave `.doug/plan.json` and `.doug/anchor.md` out unless the change is about them.
 3. When the change alters a measurement (a run's cost, wall clock, pass count, or what a stage does), add a line to `docs/live-runs.md`; a change to the board record shows on the served page (`doug board serve`).

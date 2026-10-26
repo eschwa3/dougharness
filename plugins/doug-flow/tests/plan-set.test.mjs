@@ -412,7 +412,7 @@ describe("plan.mjs merge", () => {
 });
 
 // plan.mjs json's memory recall (card memory-recall #2): per-task lessons attached from a seeded memory db,
-// capped at 2000 characters, never written to the plan file itself. Review minor 1: there is no plan-level
+// index plus fetched full text (card memory-atomic-lessons), never written to the plan file itself. Review minor 1: there is no plan-level
 // list — the planner recalls on its own before writing the plan, and json only ever attaches per task.
 describe("plan.mjs json memory recall", () => {
   function memoryProject({ goal, task } = {}) {
@@ -459,159 +459,99 @@ describe("plan.mjs json memory recall", () => {
     expect(loadPlan(dir).tasks[0].lessons).toBeUndefined();
   });
 
-  it("caps a task's lessons string at 2000 characters, cutting each lesson's own line and skipping any that still overflow, with lessonIds matching the lines kept", () => {
-    const task = { id: "a", title: "zzzcapword task", spec: "zzzcapword goal for the cap test.", files: ["src/a.ts"] };
+  // Card memory-atomic-lessons: a flow task gets the index plus the fetched full text, not the 400-character cut.
+  it("M1: gives task.lessons an index line `- [id] title (kind, ~n tokens)` for every recalled lesson", () => {
+    const task = { id: "a", title: "zzzindexword task", spec: "zzzindexword goal for the index test.", files: ["src/a.ts"] };
     const dir = memoryProject({ task });
     const m = openMemory(dir);
     const seeded = [];
-    for (let i = 0; i < 8; i++) {
-      const text = `zzzcapword filler lesson number ${i} ` + "y".repeat(260);
+    for (let i = 0; i < 3; i++) {
+      const text = `zzzindexword title ${i}\n` + `zzzindexword body ${i} `.repeat(20);
       seeded.push(addLesson(m, { text, kind: "pattern", source: { agent: "worker" } }));
     }
     m.close();
 
     const out = run(["json"], dir);
     expect(out.status, out.stderr).toBe(0);
-    const plan = JSON.parse(out.stdout);
-    const t = plan.tasks.find((x) => x.id === "a");
-    expect(t.lessons.length).toBeLessThanOrEqual(2000);
-    const lines = t.lessons.split("\n");
-    expect(lines.length).toBe(t.lessonIds.length);
-    expect(t.lessonIds.length).toBeLessThan(seeded.length);
-    for (const line of lines) expect(line).toMatch(/^- \[[0-9a-f]{16}\] /);
-    for (const id of t.lessonIds) expect(t.lessons).toContain(`[${id}]`);
-    // Proof the cap actually triggered: every candidate line is the same length, so all of them would have
-    // overflowed 2000 characters had none been cut.
-    const lineLength = lines[0].length;
-    expect(lineLength * seeded.length + (seeded.length - 1)).toBeGreaterThan(2000);
+    const t = JSON.parse(out.stdout).tasks.find((x) => x.id === "a");
+    for (const l of seeded) {
+      const tokens = Math.ceil(l.text.length / 4);
+      expect(t.lessons).toContain(`- [${l.id}] zzzindexword title ${seeded.indexOf(l)} (pattern, ~${tokens} tokens)`);
+    }
+    expect([...t.lessonIds].sort()).toEqual(seeded.map((l) => l.id).sort());
   });
 
-  it("gives each lesson its own budget: a 12k-char top hit and two short lessons all render, in rank order, within the cap", () => {
-    const task = {
-      id: "a",
-      title: "zzzhugeball rewrite task",
-      spec: "Rewrite the zzzhugeball documentation for the project with a new structure.",
-      files: ["src/a.ts"],
-    };
+  it("M2: carries a fetched lesson whole, no 400-character cut and no cut marker", () => {
+    const task = { id: "a", title: "zzzwholeword task", spec: "zzzwholeword goal for the whole-text test.", files: ["src/a.ts"] };
     const dir = memoryProject({ task });
     const m = openMemory(dir);
-    const big = addLesson(m, {
-      text: "zzzhugeball documentation rewrite project structure notes. ".repeat(200).slice(0, 12000),
-      kind: "pattern",
-      source: { agent: "worker" },
-    });
+    const text = "zzzwholeword title\n" + "zzzwholeword filler sentence here. ".repeat(40).slice(0, 1200) + " SENTINEL_PAST_1200 " + "tail words. ".repeat(20);
+    expect(text.indexOf("SENTINEL_PAST_1200")).toBeGreaterThan(1200);
+    const lesson = addLesson(m, { text, kind: "pattern", source: { agent: "worker" } });
+    m.close();
+
+    const out = run(["json"], dir);
+    expect(out.status, out.stderr).toBe(0);
+    const t = JSON.parse(out.stdout).tasks.find((x) => x.id === "a");
+    expect(t.lessonIds).toEqual([lesson.id]);
+    expect(t.lessons).toContain(text);
+    expect(t.lessons).toContain("SENTINEL_PAST_1200");
+    expect(t.lessons).not.toContain("…");
+    expect(t.lessons.length).toBeGreaterThan(text.length);
+  });
+
+  it("fetches a 12k-char top lesson and the short ones after it, whole and in rank order, and may exceed 2000 characters", () => {
+    const task = { id: "a", title: "zzzhugeball rewrite task", spec: "Rewrite the zzzhugeball documentation for the project with a new structure.", files: ["src/a.ts"] };
+    const dir = memoryProject({ task });
+    const m = openMemory(dir);
+    const bigText = "zzzhugeball documentation rewrite project structure notes. ".repeat(200).slice(0, 12000);
+    const big = addLesson(m, { text: bigText, kind: "pattern", source: { agent: "worker" } });
     const short1 = addLesson(m, { text: "zzzhugeball short lesson one about structure.", kind: "pattern", source: { agent: "worker" } });
     const short2 = addLesson(m, { text: "zzzhugeball short lesson two about documentation.", kind: "pattern", source: { agent: "worker" } });
     m.close();
 
     const out = run(["json"], dir);
     expect(out.status, out.stderr).toBe(0);
-    const plan = JSON.parse(out.stdout);
-    const t = plan.tasks.find((x) => x.id === "a");
-    // Proof this store actually exercises the fix: the 12k lesson must rank first, ahead of the two short ones.
-    expect(t.lessonIds[0]).toBe(big.id);
+    const t = JSON.parse(out.stdout).tasks.find((x) => x.id === "a");
     expect(t.lessonIds).toEqual([big.id, short1.id, short2.id]);
-    expect(t.lessons.length).toBeLessThanOrEqual(2000);
-    const lines = t.lessons.split("\n");
-    expect(lines.length).toBe(3);
-    // The 12k lesson's line is cut to its own budget, at a sentence boundary, with an ellipsis, its citation
-    // (falling back to kind, here "pattern") still at the end of the line.
-    const bigLine = lines[0];
-    expect(bigLine.length).toBeLessThan(500);
-    expect(bigLine).toMatch(/\.… \(pattern\)$/);
-    expect(lines[1]).toBe(`- [${short1.id}] zzzhugeball short lesson one about structure. (pattern)`);
-    expect(lines[2]).toBe(`- [${short2.id}] zzzhugeball short lesson two about documentation. (pattern)`);
+    expect(t.lessons).toContain(bigText);
+    expect(t.lessons).toContain("zzzhugeball short lesson one about structure.");
+    expect(t.lessons).toContain("zzzhugeball short lesson two about documentation.");
+    expect(t.lessons.length).toBeGreaterThan(12000);
   });
 
-  it("still renders a cut head for every lesson when the whole store is oversized, skipping past nothing rather than stopping", () => {
-    const task = { id: "a", title: "zzzoversized task", spec: "zzzoversized goal needing recall.", files: ["src/a.ts"] };
+  it("M6: with one lesson over the 4000-token budget, lessonIds holds only the fetched lessons in rank order; the over-budget lesson stays in the index and its text is not in the brief", () => {
+    const task = { id: "a", title: "zzzbudgetword task", spec: "zzzbudgetword goal for the budget test.", files: ["src/a.ts"] };
     const dir = memoryProject({ task });
     const m = openMemory(dir);
-    // Three shapes of oversized lesson: an early sentence boundary, a word boundary but no sentence-ender, and
-    // no boundary at all (one long unbroken token), so the cut logic's three fallbacks all get exercised.
-    const withSentence = addLesson(m, { text: "zzzoversized lesson with a sentence. " + "z".repeat(3000), kind: "pattern", source: { agent: "worker" } });
-    const withWord = addLesson(m, { text: "zzzoversized lesson word boundary " + "y".repeat(3000), kind: "pattern", source: { agent: "worker" } });
-    const noBoundary = addLesson(m, { text: "x".repeat(3000) + " zzzoversized marker", kind: "pattern", source: { agent: "worker" } });
+    const repeated = (len, marker) => {
+      let s = "zzzbudgetword ";
+      while (s.length < len - marker.length) s += "zzzbudgetword ";
+      return s.slice(0, len - marker.length) + marker;
+    };
+    // 20,000 chars is ~5000 tokens: over the whole fetch budget on its own.
+    const huge = addLesson(m, { text: "zzzbudgetword huge title\n" + repeated(20000, "HUGE_TAIL_MARKER"), kind: "pattern", source: { agent: "worker" } });
+    const short1 = addLesson(m, { text: "zzzbudgetword short lesson one SHORT_ONE_MARKER", kind: "pattern", source: { agent: "worker" } });
+    const short2 = addLesson(m, { text: "zzzbudgetword short lesson two SHORT_TWO_MARKER", kind: "pattern", source: { agent: "worker" } });
     m.close();
 
     const out = run(["json"], dir);
     expect(out.status, out.stderr).toBe(0);
-    const plan = JSON.parse(out.stdout);
-    const t = plan.tasks.find((x) => x.id === "a");
-    expect([...t.lessonIds].sort()).toEqual([withSentence.id, withWord.id, noBoundary.id].sort());
-    expect(t.lessons.length).toBeLessThanOrEqual(2000);
-    const lines = t.lessons.split("\n");
-    expect(lines.length).toBe(3);
-    for (const line of lines) {
-      expect(line).toContain("…");
-      expect(line.length).toBeLessThan(500);
-    }
-  });
-
-  it("skips an earlier-ranked line that overflows the cap so a later, shorter lesson still renders (review MAJOR: skip, not stop)", () => {
-    const task = {
-      id: "a",
-      title: "zzzskiptest task",
-      spec: "zzzskiptest goal for the skip test.",
-      files: ["src/a.ts"],
-    };
-    const dir = memoryProject({ task });
-    const m = openMemory(dir);
-    // Repeating the keyword heavily gives these four filler lessons, plus the fifth "overflow" one, the
-    // strongest possible bm25 match, so all five out-rank the weakly-matching "short" lesson below despite it
-    // being far shorter — the tie-break the fix must survive.
-    const repeatedText = (len, marker) => {
-      const room = len - marker.length;
-      let text = "";
-      while (text.length < room) text += "zzzskiptest ";
-      return text.slice(0, room) + marker;
-    };
-    const fillerIds = [];
-    for (let i = 0; i < 4; i++) {
-      fillerIds.push(addLesson(m, { text: repeatedText(399, `mark${i}`), kind: "pattern", source: { agent: "worker" } }).id);
-    }
-    const overflow = addLesson(m, { text: repeatedText(399, "markoverflow"), kind: "pattern", source: { agent: "worker" } });
-    const short = addLesson(m, { text: "zzzskiptest short lesson.", kind: "pattern", source: { agent: "worker" } });
-    m.close();
-
-    const out = run(["json"], dir);
-    expect(out.status, out.stderr).toBe(0);
-    const plan = JSON.parse(out.stdout);
-    const t = plan.tasks.find((x) => x.id === "a");
-    // The four ~430-char filler lines alone already total ~1723 of the 2000 cap; the fifth same-sized line
-    // (overflow), ranked right after them, would push that past 2000 and must be skipped, while the far
-    // shorter line ranked after it still fits.
-    expect(t.lessonIds).toEqual([...fillerIds, short.id]);
-    expect(t.lessonIds).not.toContain(overflow.id);
-    expect(t.lessons).not.toContain(`[${overflow.id}]`);
-    expect(t.lessons).toContain(`[${short.id}]`);
-    expect(t.lessons.length).toBeLessThanOrEqual(2000);
-  });
-
-  it("does not collapse a lesson to almost nothing when a boundary sits too close to the start (review MINOR)", () => {
-    const task = {
-      id: "a",
-      title: "zzznewlinetest task",
-      spec: "zzznewlinetest goal for the newline test.",
-      files: ["src/a.ts"],
-    };
-    const dir = memoryProject({ task });
-    const m = openMemory(dir);
-    // The keyword is followed immediately by a newline, then 600 unbroken characters with no further space or
-    // sentence-ender within the budget: the newline alone would cut this down to almost nothing.
-    const lesson = addLesson(m, { text: "zzznewlinetest\n" + "z".repeat(600), kind: "pattern", source: { agent: "worker" } });
-    m.close();
-
-    const out = run(["json"], dir);
-    expect(out.status, out.stderr).toBe(0);
-    const plan = JSON.parse(out.stdout);
-    const t = plan.tasks.find((x) => x.id === "a");
-    expect(t.lessonIds).toEqual([lesson.id]);
-    // A cut collapsed to the newline alone would render "zzznewlinetest…"; the fix falls through past it
-    // (here, to the hard-cut fallback, since there is no later space either) and keeps most of a budget's
-    // worth of text instead.
-    expect(t.lessons).toContain("zzznewlinetest\nz");
-    expect(t.lessons.length).toBeGreaterThan(300);
+    const t = JSON.parse(out.stdout).tasks.find((x) => x.id === "a");
+    expect(t.lessonIds).not.toContain(huge.id);
+    expect([...t.lessonIds].sort()).toEqual([short1.id, short2.id].sort());
+    // rank order: the fetched ids appear in the brief in the order lessonIds gives
+    const pos = t.lessonIds.map((id) => t.lessons.indexOf(`lesson ${id} (`));
+    for (const p of pos) expect(p).toBeGreaterThan(-1);
+    expect([...pos].sort((x, y) => x - y)).toEqual(pos);
+    // still indexed, never fetched, named, never cut
+    expect(t.lessons).toContain(`- [${huge.id}] zzzbudgetword huge title (pattern, ~5007 tokens)`);
+    expect(t.lessons).not.toContain(`lesson ${huge.id} (`);
+    expect(t.lessons).not.toContain("HUGE_TAIL_MARKER");
+    expect(t.lessons).toContain("SHORT_ONE_MARKER");
+    expect(t.lessons).toContain("SHORT_TWO_MARKER");
+    const nf = t.lessons.split("\n").find((l) => l.startsWith("not fetched"));
+    expect(nf).toContain(huge.id);
   });
 
   it("omits the fields when there is no memory database", () => {
@@ -881,6 +821,19 @@ describe("plan.mjs json degraded recall (card recall-fallback-warning)", () => {
     expect(out.stderr.split("\n").filter(Boolean)).toEqual([
       "WARNING: memory recall degraded to keyword-only: no vectors stored for zzzdegrade-model/3; run memory.mjs reembed",
     ]);
+  });
+
+  it("M4 (card memory-archived-readers): a store whose only lesson is archived does not count as having lessons, so no degraded warning", async () => {
+    const dir = projectOf(threeTasks().slice(0, 1), {
+      memory: { embeddings: { provider: "openai-compatible", baseUrl: "http://127.0.0.1:1", model: "zzzdegrade-model", dims: 3 } },
+    });
+    const m = openMemory(dir);
+    const lesson = addLesson(m, { text: "zzzdegrade archived lesson", kind: "pattern", source: { agent: "worker" } });
+    m.prepare("UPDATE lessons SET archived = ?, archived_reason = ? WHERE id = ?").run("2026-09-29T00:00:00.000Z", "harmful 2", lesson.id);
+    m.close();
+    const out = await runAsync(["json"], dir);
+    expect(out.status, out.stderr).toBe(0);
+    expect(out.stderr).not.toContain("WARNING: memory recall degraded to keyword-only");
   });
 
   it("no provider configured but a local Ollama is detected: the block and one WARNING say so", async () => {

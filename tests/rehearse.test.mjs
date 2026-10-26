@@ -78,8 +78,10 @@ describe("ESTIMATES and estimateLines are per stage (review #6)", () => {
     }
     // Every stage a scenario actually runs has an estimate, and vice versa.
     for (const s of SCENARIOS) {
-      const sessionStageNames = SCENARIO_STAGES[s].filter((st) => st.kind === "session").map((st) => st.name);
-      expect(Object.keys(ESTIMATES[s].stages).sort()).toEqual(sessionStageNames.sort());
+      // Changed pin (card fixture-repo-scenarios): the memory scenario's reflect/model-regen/ideas are "command"
+      // stages that spend through a Doug CLI, so the estimate keys cover session and command stage names.
+      const spendingStageNames = SCENARIO_STAGES[s].filter((st) => st.kind === "session" || st.kind === "command").map((st) => st.name);
+      expect(Object.keys(ESTIMATES[s].stages).sort()).toEqual(spendingStageNames.sort());
     }
   });
   it("estimateLines(): no scenario renders one total per scenario plus the all total; a named scenario renders its stage breakdown", () => {
@@ -96,9 +98,11 @@ describe("ESTIMATES and estimateLines are per stage (review #6)", () => {
 
 describe("parseArgs", () => {
   it("reads the scenario, --card, --spend, and a trailing dir positionally", () => {
-    expect(parseArgs([])).toEqual({ scenario: null, dir: null, spend: false, card: null });
-    expect(parseArgs(["flow", "--card", "x", "--spend", "/tmp/repo"])).toEqual({ scenario: "flow", dir: "/tmp/repo", spend: true, card: "x" });
-    expect(parseArgs(["all", "--spend"])).toEqual({ scenario: "all", dir: null, spend: true, card: null });
+    // Changed pin (card fixture-repo-scenarios): parseArgs also reads --fixture and --dry-run (null and false by default).
+    // parseArgs also reads --tier, null by default.
+    expect(parseArgs([])).toEqual({ scenario: null, dir: null, spend: false, card: null, fixture: null, dryRun: false, tier: null });
+    expect(parseArgs(["flow", "--card", "x", "--spend", "/tmp/repo"])).toEqual({ scenario: "flow", dir: "/tmp/repo", spend: true, card: "x", fixture: null, dryRun: false, tier: null });
+    expect(parseArgs(["all", "--spend"])).toEqual({ scenario: "all", dir: null, spend: true, card: null, fixture: null, dryRun: false, tier: null });
   });
 });
 
@@ -356,6 +360,126 @@ describe("runStage and runSessionStage error handling (review #5)", () => {
     const result = await inLib("runSessionStage", { $expr: `({ name: "boom", maxTurns: 1, prompt: () => "ok", assert: () => { throw new Error("kaboom"); } })` }, { dir, card: {}, claudeBin: bin });
     expect(result.ok).toBe(false);
     expect(result.message).toContain("kaboom");
+  });
+  const PASSING_STAGE = `({ name: "x", maxTurns: 1, prompt: () => "ok", assert: () => ({ ok: true }) })`;
+  it("a non-zero claude exit fails the stage even when the assert passes, naming the status and the stderr reason", async () => {
+    const dir = trackedTempDir("rehearse-exit2-");
+    const bin = makeFakeClaude(cannedStream(), { exitCode: 2, stderr: "Stop hook blocked: gate red (test:unit 1)\n" });
+    const result = await inLib("runSessionStage", { $expr: PASSING_STAGE }, { dir, card: {}, claudeBin: bin });
+    expect(result.ok).toBe(false);
+    expect(result.message).toMatch(/\b2\b/);
+    expect(result.message).toContain("Stop hook blocked: gate red (test:unit 1)");
+  });
+  it("the message carries the tail of stderr, not the head, and stays bounded", async () => {
+    const dir = trackedTempDir("rehearse-exit2-tail-");
+    const noise = Array.from({ length: 300 }, (_, i) => `noise-${i + 1}`).join("\n");
+    const bin = makeFakeClaude(cannedStream(), { exitCode: 2, stderr: `${noise}\nthe real reason\n` });
+    const result = await inLib("runSessionStage", { $expr: PASSING_STAGE }, { dir, card: {}, claudeBin: bin });
+    expect(result.ok).toBe(false);
+    expect(result.message).toContain("the real reason");
+    expect(result.message).not.toContain("noise-1\n");
+    expect(result.message.length).toBeLessThan(4000);
+  });
+  it("a non-zero exit with empty stderr still fails, naming the status", async () => {
+    const dir = trackedTempDir("rehearse-exit2-empty-");
+    const bin = makeFakeClaude(cannedStream(), { exitCode: 2 });
+    const result = await inLib("runSessionStage", { $expr: PASSING_STAGE }, { dir, card: {}, claudeBin: bin });
+    expect(result.ok).toBe(false);
+    expect(result.message).toMatch(/\b2\b/);
+  });
+  it("exit 0 with a passing assert still passes", async () => {
+    const dir = trackedTempDir("rehearse-exit0-");
+    const bin = makeFakeClaude(cannedStream());
+    const result = await inLib("runSessionStage", { $expr: PASSING_STAGE }, { dir, card: {}, claudeBin: bin });
+    expect(result.ok).toBe(true);
+  });
+  it("a signal kill keeps its message and now also carries the stderr reason", async () => {
+    const dir = trackedTempDir("rehearse-sigterm-");
+    const bin = makeFakeClaude(cannedStream(), { killSignal: "SIGTERM", stderr: "terminated by watchdog reason\n" });
+    const result = await inLib("runSessionStage", { $expr: PASSING_STAGE }, { dir, card: {}, claudeBin: bin });
+    expect(result.ok).toBe(false);
+    expect(result.message).toContain("killed by signal SIGTERM");
+    expect(result.message).toContain("terminated by watchdog reason");
+  });
+  // Card rehearse-max-turns-exit: a session that ends on --max-turns or --max-budget-usd may exit non-zero; the
+  // stream's final result subtype decides, not the exit status.
+  const resultStream = (...subtypes) => cannedStream().split("\n").filter(Boolean).slice(0, 1).concat(subtypes.map((s) => JSON.stringify({ type: "result", subtype: s, is_error: s !== "success", total_cost_usd: 0.01, num_turns: 1 }))).join("\n") + "\n";
+  const markedStage = (dir, verdict) => {
+    const ran = join(dir, "assert-ran");
+    const v = JSON.stringify(verdict);
+    return { ran, expr: `({ name: "x", maxTurns: 1, prompt: () => "ok", assert: () => { process.getBuiltinModule("node:fs").writeFileSync(${JSON.stringify(ran)}, "1"); return ${v}; } })` };
+  };
+  const OK = { ok: true };
+  it("max-turns ending with a non-zero exit still runs the assert, and an ok assert passes", async () => {
+    const dir = trackedTempDir("rehearse-maxturns-ok-");
+    const { ran, expr } = markedStage(dir, OK);
+    const bin = makeFakeClaude(resultStream("error_max_turns"), { exitCode: 1 });
+    const result = await inLib("runSessionStage", { $expr: expr }, { dir, card: {}, claudeBin: bin });
+    expect(existsSync(ran)).toBe(true);
+    expect(result.ok).toBe(true);
+  });
+  it("max-turns ending whose assert fails reports the assert message and names the subtype", async () => {
+    const dir = trackedTempDir("rehearse-maxturns-fail-");
+    const { ran, expr } = markedStage(dir, { ok: false, message: "fixture not fixed" });
+    const bin = makeFakeClaude(resultStream("error_max_turns"), { exitCode: 1 });
+    const result = await inLib("runSessionStage", { $expr: expr }, { dir, card: {}, claudeBin: bin });
+    expect(existsSync(ran)).toBe(true);
+    expect(result.ok).toBe(false);
+    expect(result.message).toContain("fixture not fixed");
+    expect(result.message).toContain("error_max_turns");
+  });
+  it("a budget-cap ending (error_max_budget_usd) with a non-zero exit runs the assert too", async () => {
+    const dir = trackedTempDir("rehearse-maxbudget-ok-");
+    const { ran, expr } = markedStage(dir, OK);
+    const bin = makeFakeClaude(resultStream("error_max_budget_usd"), { exitCode: 1 });
+    const result = await inLib("runSessionStage", { $expr: expr }, { dir, card: {}, claudeBin: bin });
+    expect(existsSync(ran)).toBe(true);
+    expect(result.ok).toBe(true);
+  });
+  it("any other error subtype with a non-zero exit fails before the assert", async () => {
+    const dir = trackedTempDir("rehearse-duringexec-");
+    const { ran, expr } = markedStage(dir, OK);
+    const bin = makeFakeClaude(resultStream("error_during_execution"), { exitCode: 1, stderr: "boom\n" });
+    const result = await inLib("runSessionStage", { $expr: expr }, { dir, card: {}, claudeBin: bin });
+    expect(result.ok).toBe(false);
+    expect(result.message).toContain("exited with status 1");
+    expect(result.message).toContain("boom");
+    expect(existsSync(ran)).toBe(false);
+  });
+  it("a non-zero exit with no result line fails before the assert", async () => {
+    const dir = trackedTempDir("rehearse-noresult-");
+    const { ran, expr } = markedStage(dir, OK);
+    const bin = makeFakeClaude(resultStream(), { exitCode: 1, stderr: "boom\n" });
+    const result = await inLib("runSessionStage", { $expr: expr }, { dir, card: {}, claudeBin: bin });
+    expect(result.ok).toBe(false);
+    expect(result.message).toContain("exited with status 1");
+    expect(existsSync(ran)).toBe(false);
+  });
+  it("a signal kill fails first even when the stream ended on error_max_turns", async () => {
+    const dir = trackedTempDir("rehearse-maxturns-sigterm-");
+    const { ran, expr } = markedStage(dir, OK);
+    const bin = makeFakeClaude(resultStream("error_max_turns"), { killSignal: "SIGTERM" });
+    const result = await inLib("runSessionStage", { $expr: expr }, { dir, card: {}, claudeBin: bin });
+    expect(result.ok).toBe(false);
+    expect(result.message).toContain("killed by signal SIGTERM");
+    expect(existsSync(ran)).toBe(false);
+  });
+  it("exit 0 with an error_max_turns result and an ok assert still passes", async () => {
+    const dir = trackedTempDir("rehearse-maxturns-exit0-");
+    const { ran, expr } = markedStage(dir, OK);
+    const bin = makeFakeClaude(resultStream("error_max_turns"), { exitCode: 0 });
+    const result = await inLib("runSessionStage", { $expr: expr }, { dir, card: {}, claudeBin: bin });
+    expect(existsSync(ran)).toBe(true);
+    expect(result.ok).toBe(true);
+  });
+  it("only the final result line counts: an earlier error_max_turns followed by error_during_execution fails before the assert", async () => {
+    const dir = trackedTempDir("rehearse-final-result-");
+    const { ran, expr } = markedStage(dir, OK);
+    const bin = makeFakeClaude(resultStream("error_max_turns", "error_during_execution"), { exitCode: 1 });
+    const result = await inLib("runSessionStage", { $expr: expr }, { dir, card: {}, claudeBin: bin });
+    expect(result.ok).toBe(false);
+    expect(result.message).toContain("exited with status 1");
+    expect(existsSync(ran)).toBe(false);
   });
   it("the cap passed to claude is 3x the stage's own estimate, not the scenario total", async () => {
     const dir = trackedTempDir("rehearse-cap-");
@@ -786,6 +910,31 @@ describe("recording always goes through the board.mjs CLI (review #3)", () => {
     expect(runText).toContain("| Landed as | `47fe70c` |");
   });
 
+  it("recordHandOutcome and recordRunOutcome write the fixture the run used in the header: fixture 'ts-orders' reads 'on the ts-orders fixture', none reads ts-basic (card ts-orders-rehearsal-scenario-fixes)", async () => {
+    const tempRepo = tempRepoWithCard();
+    await inLib("recordHandOutcome", tempRepo, "fix-hours", { commit: "47fe70cca7eb3444ae8a382ee14018f3950bfe1c", wallClock: "3 min", gate: "unit 5 passed", rehearsal: "hand", outcome: "passed", fixture: "ts-orders" });
+    const handText = readFileSync(join(tempRepo, "docs/live-runs.md"), "utf8");
+    expect(handText).toContain("Rehearsal hand for card `fix-hours` on the ts-orders fixture (scripts/rehearse.mjs)");
+    expect(handText).not.toContain("ts-basic");
+
+    const tempRepo2 = tempRepoWithCard();
+    const reportFile = join(tempRepo2, "report.json");
+    writeFileSync(reportFile, JSON.stringify({ ok: false, stoppedAtLevel: 0, plan: "P", integrationBranch: "none", levels: [] }));
+    await inLib("recordRunOutcome", tempRepo2, "fix-hours", { reportFile, wallClock: "1 min", rehearsal: "swarm", outcome: "failed", fixture: "ts-orders" });
+    const runText = readFileSync(join(tempRepo2, "docs/live-runs.md"), "utf8");
+    expect(runText).toContain("Rehearsal swarm for card `fix-hours` on the ts-orders fixture (scripts/rehearse.mjs)");
+    expect(runText).not.toContain("ts-basic");
+  });
+
+  it("scripts/rehearse.mjs passes result.fixture into both recordHandOutcome and recordRunOutcome (card ts-orders-rehearsal-scenario-fixes)", () => {
+    const src = readFileSync(join(here, "..", "scripts", "rehearse.mjs"), "utf8");
+    for (const fn of ["recordHandOutcome", "recordRunOutcome"]) {
+      const call = src.split("\n").find((l) => l.includes(`${fn}(dir, opts.card`));
+      expect(call, `${fn} call`).toBeTruthy();
+      expect(call, `${fn} passes the fixture`).toContain("fixture: result.fixture");
+    }
+  });
+
   it("a failed hand rehearsal records 'rehearsal hand failed', never 'landed', in the entry and the printed block (card rehearsal-failure-not-landed)", async () => {
     const tempRepo = tempRepoWithCard();
     const out = await inLib("recordHandOutcome", tempRepo, "fix-hours", { commit: "47fe70cca7eb3444ae8a382ee14018f3950bfe1c", wallClock: "6.3 min", gate: "not observed", rehearsal: "hand", outcome: "failed" });
@@ -933,7 +1082,9 @@ describe("T1 (R1): requireWorkers reads a task's swarm record before falling bac
 describe("T2 (R2): the prepared fixture's card carries a class (hand, flow, and swarm fixtures)", () => {
   it.skipIf(!existsSync(CLI))("prepareFixture gives fix-hours class \"code\" on every scenario", async () => {
     // Card doug-start-skill: `start` is an empty repo with no card at all.
-    for (const scenario of SCENARIOS.filter((s) => s !== "start")) {
+    // Changed pin (card fixture-repo-scenarios): only the scenarios that default to the ts-basic fixture carry
+    // fix-hours / swarm-split-planned; the new scenarios default to ts-orders (pinned in rehearse-fixture-orders.test.mjs).
+    for (const scenario of ["flow", "swarm", "hand", "auto", "parallel", "start-feature"]) {
       const { dir } = await inLib("prepareFixture", { scenario, tempPrefix: TEST_PREFIX });
       tempDirs.push(dir);
       const board = JSON.parse(readFileSync(join(dir, ".doug/board.json"), "utf8"));

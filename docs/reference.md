@@ -42,7 +42,7 @@ node packages/doug-cli/dist/bin.js init <path-to-a-typescript-repo>             
 
 `config.subagents.promptCacheTtl` (default `"1h"`) is written as the top-level `subagentPromptCacheTtl` setting, and `config.subagents.maxConcurrentWorkflowAgents` (default `16`, Claude Code's own default) as `env.CLAUDE_CODE_WORKFLOW_MAX_CONCURRENT_AGENTS`. Set either to `null` to omit it. Unlike the spawn depth, an existing value in `.claude/settings.json` is never overwritten.
 
-The gate is `pnpm typecheck` and `pnpm test:unit`. `pnpm test` additionally runs `packages/doug-codex/tests/codex-live.test.ts`, which spawns Codex and costs usage.
+The gate is `pnpm typecheck` and `pnpm test:unit`; the rehearse fixture suites run under `pnpm test:rehearse` (CI runs it as its own step), and `node scripts/test-budget.mjs` fails when test:unit's Duration passes 200 s. `pnpm test` additionally runs `packages/doug-codex/tests/codex-live.test.ts`, which spawns Codex and costs usage.
 
 Every test file's temp files live under one `doug-tests-*` directory in the OS temp dir (`tests/setup/tmpdir.mjs`, a Vitest setup file that scopes `TMPDIR` per test file), removed in that file's `afterAll` when it finishes. If the OS temp dir fills with `doug-*`, `ts-app-*`, or `codex-review-*` directories, they are from runs before 2026-09-13 or from a killed worker; delete them once no test run is active (a `doug-tests-*` root belonging to a run still in flight is live, not leaked).
 
@@ -203,7 +203,7 @@ doug board labels init [dir]  # migrates a board with no label groups: type hold
 `doug init` proposes `"statusLine": { "type": "command", "command": "node .doug/hooks/scripts/statusline.mjs" }` in `.claude/settings.json`. The script reads the status-line JSON on stdin and prints one line, e.g.:
 
 ```
-Doug 1.4.0 · Opus · main · ctx 8%
+Doug 1.5.0 · Opus · main · ctx 8%
 ```
 
 The segments are the product name from `.doug/config.json`, the installed `doug-gates` version (`.doug/hooks/VERSION`, falling back to config `doug.version`), `model.display_name`, the current git branch, and the used context-window percentage. Fallbacks: `ctx --` before the first API call or after `/compact`, no branch segment outside a git repo, and the bare line `Doug` on any error. Always exits 0. Tests in `plugins/doug-gates/tests/statusline.test.mjs`.

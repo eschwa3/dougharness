@@ -519,3 +519,132 @@ describe("per-card plan paths (planFor)", () => {
     }
   });
 });
+
+describe("validatePlan stated signatures (card planner-keeps-stated-signatures)", () => {
+  // 2026-10-23, ts-orders swarm-skill: the request stated byCategory(products: Product[]): Record<string, string[]>,
+  // the plan's task spec said byCategory(catalog: Catalog): Map<string, Product[]>, and the held-out test failed.
+  const STATED = "byCategory(products: Product[]): Record<string, string[]>";
+  const DRIFTED = "byCategory(catalog: Catalog): Map<string, Product[]>";
+  const sigPlan = ({ goal, acceptance, spec }) =>
+    plan({
+      goal: goal ?? "Split money and catalog helpers out of orders.ts so callers import them directly.",
+      acceptance: acceptance ?? ["byCategory groups skus per category"],
+      tasks: [{ id: "split-money-catalog", title: "Split", spec, files: ["src/catalog.ts"], verify: "pnpm exec vitest run tests/catalog.test.ts" }],
+    });
+  const errsOf = (p) => validatePlan(p).filter((e) => /verbatim|stated/i.test(e));
+
+  it("rejects a task spec whose signature differs from the one an acceptance line states (the ts-orders case)", () => {
+    const errs = validatePlan(sigPlan({
+      acceptance: [`\`${STATED}\` groups skus per category`],
+      spec: `Add \`export function ${DRIFTED}\` to src/catalog.ts that groups products by category.`,
+    }));
+    expect(errs).toHaveLength(1);
+    expect(errs[0]).toMatch(/split-money-catalog/);
+    expect(errs[0]).toContain("byCategory");
+    expect(errs[0]).toContain(STATED);
+    expect(errs[0]).toContain(DRIFTED);
+    expect(errs[0]).toMatch(/verbatim/);
+  });
+  it("reads a signature stated in the goal, and in an object acceptance entry's text", () => {
+    const fromGoal = validatePlan(sigPlan({
+      goal: `Add \`${STATED}\` to the catalog module so callers can group skus.`,
+      spec: `Add \`${DRIFTED}\` to src/catalog.ts that groups products by category.`,
+    }));
+    expect(fromGoal).toHaveLength(1);
+    expect(fromGoal[0]).toContain(DRIFTED);
+    const fromObject = validatePlan(sigPlan({
+      acceptance: [{ text: `\`${STATED}\` groups skus`, command: "true" }],
+      spec: `Add \`${DRIFTED}\` to src/catalog.ts that groups products by category.`,
+    }));
+    expect(fromObject).toHaveLength(1);
+    expect(fromObject[0]).toContain(STATED);
+  });
+  it("accepts the same signature in the spec, bare or with an export function prefix", () => {
+    for (const quoted of [STATED, `export function ${STATED}`, `export async function ${STATED}`, `function ${STATED}`]) {
+      const p = sigPlan({ acceptance: [`\`${STATED}\` groups skus`], spec: `Add \`${quoted}\` to src/catalog.ts that groups products by category.` });
+      expect(validatePlan(p), quoted).toEqual([]);
+    }
+  });
+  it("accepts a stated signature stated with an export function prefix against a bare spec signature", () => {
+    const p = sigPlan({ acceptance: [`\`export function ${STATED}\` groups skus`], spec: `Add \`${STATED}\` to src/catalog.ts that groups products by category.` });
+    expect(validatePlan(p)).toEqual([]);
+  });
+  it("is no error when the task spec does not mention the name in backticks", () => {
+    const p = sigPlan({ acceptance: [`\`${STATED}\` groups skus`], spec: "Add a function that groups products by category to src/catalog.ts and export it." });
+    expect(validatePlan(p)).toEqual([]);
+    const plain = sigPlan({ acceptance: [`\`${STATED}\` groups skus`], spec: "Add byCategory to src/catalog.ts that groups products by category." });
+    expect(validatePlan(plain)).toEqual([]);
+  });
+  it("never treats a path or command span as a stated signature", () => {
+    const p = sigPlan({
+      goal: "Move helpers into `src/catalog.ts` and run `pnpm test` afterwards to prove it.",
+      acceptance: ["`src/catalog.ts` exists", "`pnpm test` passes"],
+      spec: "Edit `src/catalog.ts` and then run `pnpm exec vitest run` and `pnpm test` to check it still works.",
+    });
+    expect(validatePlan(p)).toEqual([]);
+  });
+  it("validates as before when goal and acceptance state no backtick signature", () => {
+    expect(validatePlan(sigPlan({ spec: `Add \`${DRIFTED}\` to src/catalog.ts that groups products by category.` }))).toEqual([]);
+  });
+  it("rejects two different signatures for one name, goal against acceptance, and names the name", () => {
+    const errs = validatePlan(sigPlan({
+      goal: `Add \`${STATED}\` to the catalog module so callers can group skus.`,
+      acceptance: [`\`${DRIFTED}\` groups skus per category`],
+      spec: "Add the grouping helper to src/catalog.ts, grouped by category as the goal says.",
+    }));
+    expect(errs).toHaveLength(1);
+    expect(errs[0]).toContain("byCategory");
+    expect(errs[0]).toContain(STATED);
+    expect(errs[0]).toContain(DRIFTED);
+  });
+  it("checks every task, naming the one that drifted", () => {
+    const p = plan({
+      goal: "Split money and catalog helpers out of orders.ts so callers import them directly.",
+      acceptance: [`\`${STATED}\` groups skus`],
+      tasks: [
+        { id: "money", title: "Money", spec: "Add `formatMoney(cents: number): string` to src/money.ts.", files: ["src/money.ts"] },
+        { id: "catalog", title: "Catalog", spec: `Add \`${DRIFTED}\` to src/catalog.ts.`, files: ["src/catalog.ts"] },
+      ],
+    });
+    const errs = validatePlan(p);
+    expect(errs).toHaveLength(1);
+    expect(errs[0]).toMatch(/task catalog /);
+    expect(errs[0]).not.toMatch(/task money /);
+  });
+  // Round-2 design from the lead after review: only a call form with a return type is a signature; an example call is not.
+  const MONEY = "splitMoney(cents: number, parts: number): number[]";
+  it("is no error when an acceptance line gives an example call of the stated signature", () => {
+    const p = sigPlan({
+      goal: `Add \`${MONEY}\` to src/money.ts.`,
+      acceptance: ["`splitMoney(100, 3)` returns `[34, 33, 33]`"],
+      spec: `Add \`${MONEY}\` to src/money.ts.`,
+    });
+    expect(validatePlan(p)).toEqual([]);
+  });
+  it("does not compare an untyped example call in a spec, but still rejects a typed different signature", () => {
+    const ok = sigPlan({
+      goal: `Add \`${MONEY}\` to src/money.ts.`,
+      spec: `Add \`${MONEY}\`; for example \`splitMoney(100, 3)\` gives three parts.`,
+    });
+    expect(validatePlan(ok)).toEqual([]);
+    const bad = sigPlan({
+      goal: `Add \`${MONEY}\` to src/money.ts.`,
+      spec: "Add `splitMoney(total: number): number[]` to src/money.ts; for example `splitMoney(100, 3)`.",
+    });
+    const errs = validatePlan(bad);
+    expect(errs).toHaveLength(1);
+    expect(errs[0]).toContain("splitMoney(total: number): number[]");
+  });
+  it("ignores a trailing semicolon on a quoted signature", () => {
+    const p = sigPlan({
+      acceptance: [`\`${STATED}\` groups skus`],
+      spec: `Add \`export function ${STATED};\` to src/catalog.ts that groups products by category.`,
+    });
+    expect(validatePlan(p)).toEqual([]);
+    const stated = sigPlan({
+      acceptance: [`\`${STATED};\` groups skus`],
+      spec: `Add \`${STATED}\` to src/catalog.ts.`,
+    });
+    expect(validatePlan(stated)).toEqual([]);
+  });
+});

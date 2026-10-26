@@ -1,0 +1,40 @@
+diff --git a/src/billing/deposit.ts b/src/billing/deposit.ts
+index 1e8a8db..d9e4049 100644
+--- a/src/billing/deposit.ts
++++ b/src/billing/deposit.ts
+@@ -7,9 +7,9 @@ export function depositFor(item: Item): Cents {
+   return item.depositCents;
+ }
+ 
+-/** What goes back to the customer once damage is taken out of the deposit. */
++/** What goes back to the customer once damage is taken out of the deposit. Damage above the deposit leaves nothing, never a negative refund. */
+ export function refundCents(depositCents: Cents, damageCents: Cents): Cents {
+-  return depositCents - damageCents;
++  return Math.max(0, depositCents - damageCents);
+ }
+ 
+ /** One line for the return slip. */
+diff --git a/tests/billing.test.ts b/tests/billing.test.ts
+index eee888c..00e621e 100644
+--- a/tests/billing.test.ts
++++ b/tests/billing.test.ts
+@@ -75,6 +75,19 @@ describe("deposit", () => {
+   });
+ });
+ 
++describe("deposit refund with heavy damage", () => {
++  it("refunds nothing when damage is above the deposit", () => {
++    expect(refundCents(5000, 8000)).toBe(0);
++    expect(refundCents(5000, 5001)).toBe(0);
++  });
++  it("shows a zero refund on the return slip", () => {
++    expect(describeRefund(5000, 8000)).toBe("Deposit $50.00, damage $80.00, refund $0.00");
++  });
++  it("still takes damage within the deposit out of the refund", () => {
++    expect(refundCents(5000, 4999)).toBe(1);
++  });
++});
++
+ describe("more billing", () => {
+   it("rounds tax to the nearest cent", () => {
+     expect(taxCents(1250)).toBe(100);

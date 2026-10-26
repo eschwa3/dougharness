@@ -94,7 +94,7 @@ import { parseTotals, readSummaries, sumTotals, compareTotals, deltaTotals, waiv
 import { failingTestFilesFrom, nonTestTscPathsFrom, classifyFinalBlock, appendBlockLine, outputTail, redactText } from "../lib/block-ledger.mjs";
 import { docsGateDecision } from "../lib/docs-gate.mjs";
 import { gateLockPath, readGateLock, pidIsLive, writeGateLock, takeOverGateLock, resolveHookTimeoutSec, lockStaleByAge, normalizedTimeoutMs, lockWaitBoundMs } from "../lib/gate-lock.mjs";
-import { resolveCommands, computeTree, readRecord, writeRecord as writeTreeRecord, removeRecord as removeTreeRecord, creditable } from "../lib/verified-tree.mjs";
+import { resolveCommands, computeTree, readRecord, writeRecord as writeTreeRecord, removeRecord as removeTreeRecord, creditable, totalsUsable, exitCreditUsable } from "../lib/verified-tree.mjs";
 
 // Only the last this many characters of last_assistant_message are ever scanned for a partial claim
 // (review, scan cost): a structured result lives at the end of a worker's message, and the balanced-span
@@ -311,14 +311,14 @@ function stripLeadingDotSlash(f) {
 // failed command's output names at least one test file, every named file is in the claim, and every
 // claimed file is changed or untracked in the working tree (`changed`, from changedFiles(dir) above);
 // otherwise `{ covered: false, reasonLine }` — one line, no newline, saying why.
-function redByDesignCoverage(claimFiles, commandFailures, changed, dir) {
+function redByDesignCoverage(claimFiles, commandFailures, changed, dir, secrets) {
   const changedSet = new Set(Array.isArray(changed) ? changed : []);
   for (const cf of commandFailures) {
     const bad = nonTestTscPathsFrom(cf.output, dir);
     if (bad.length > 0) {
       return {
         covered: false,
-        reasonLine: `The tests_red_by_design claim does not cover this: \`${cf.command}\` reported a type error in ${bad.join(", ")}, which is not a test file.`,
+        reasonLine: `The tests_red_by_design claim does not cover this: \`${redactText(cf.command, secrets)}\` reported a type error in ${bad.join(", ")}, which is not a test file.`,
       };
     }
   }
@@ -327,7 +327,7 @@ function redByDesignCoverage(claimFiles, commandFailures, changed, dir) {
   if (noFile.length > 0) {
     return {
       covered: false,
-      reasonLine: `The tests_red_by_design claim does not cover this: ${noFile.map((c) => `\`${c.command}\``).join(", ")} named no test file in its output.`,
+      reasonLine: `The tests_red_by_design claim does not cover this: ${noFile.map((c) => `\`${redactText(c.command, secrets)}\``).join(", ")} named no test file in its output.`,
     };
   }
   const allNamed = [...new Set(namedByCommand.flatMap((c) => c.files))];
@@ -510,7 +510,7 @@ function agentMadeNoChanges(dir, cfg, sessionId, subagent) {
 // card stop-gate-worktree-agent-fingerprint: the start record is a fingerprint of the main checkout (the trace
 // hook runs there), so for a worktree verification dir it is compared like with like instead: unchanged only if
 // the record exists, every verification dir has no changed files, and every one's HEAD carries no commit of its
-// own: it equals or is an ancestor of the record's HEAD, or of the main checkout's refs/remotes/origin/HEAD (Claude
+// own: it equals or is an ancestor of the record's HEAD, or of the origin/HEAD sha the record holds, taken at start, never the live ref (Claude
 // Code branches a fresh isolation worktree from the remote default branch, which local main may be ahead of or
 // behind). Any git failure reads as changed. A verification set that mixes a worktree with `dir` reads as
 // changed. A main-checkout agent keeps the fingerprint comparison.
@@ -539,12 +539,7 @@ function treeUnchangedSinceStart(dir, cfg, sessionId, subagent, input, currentFi
       if (!start || typeof start !== "object" || !start.head) return false;
       const dirs = forced ? [vdir] : verifyDirs(dir, cfg, sessionId, input, subagent);
       if (!dirs.includes(vdir) || dirs.includes(dir)) return false;
-      let remoteHead;
-      try {
-        remoteHead = execFileSync("git", ["rev-parse", "--verify", "-q", "refs/remotes/origin/HEAD^{commit}"], { cwd: dir, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], timeout: 5000 }).trim() || null;
-      } catch {
-        remoteHead = null;
-      }
+      const remoteHead = typeof start.originHead === "string" && start.originHead ? start.originHead : null;
       return dirs.every((d) => {
         const h = headAt(d);
         if (!h) return false;
@@ -827,22 +822,36 @@ function readLastGreen(dir) {
   }
 }
 
+// card ratchet-credit-reads-record: one baseline for the count check and both credit paths. In a worktree
+// (vdir !== dir) it is the worktree's own last-green record. On the main checkout (card
+// ratchet-stale-session-baseline) it is the main last-green record when that has a readable entry for the
+// command, else the session-start copy state.testTotals. Returns (command) => baseline object or null. Never throws.
+function countBaselineFor(dir, state, vdir) {
+  try {
+    const inWorktree = typeof vdir === "string" && vdir !== dir;
+    const worktreeBaseline = inWorktree ? readLastGreen(vdir) : null;
+    const mainRecord = inWorktree ? null : readLastGreen(dir);
+    const fallback = state && state.testTotals && typeof state.testTotals === "object" ? state.testTotals : null;
+    return (command) => {
+      try {
+        if (inWorktree) return worktreeBaseline;
+        return mainRecord && readSummaries(mainRecord[command]) ? mainRecord : fallback;
+      } catch {
+        return null;
+      }
+    };
+  } catch {
+    return () => null;
+  }
+}
+
 // The count check for the commands that ran green by exit code. Returns { problems, parsed }: `problems` are
 // block reasons, `parsed` the per-command summary lists of every run that was counted (for the last-green
 // record). A missing or unparseable summary, or no baseline, is a trace line and no check.
 function countCheck(dir, cfg, state, input, ran, vdir) {
   // card worktree-count-baseline: a worktree run compares against its own earlier green runs, never main's record
   // (a worktree can lack the dist build main has, so its skipped count differs). No record yet means no check.
-  const inWorktree = typeof vdir === "string" && vdir !== dir;
-  // card ratchet-stale-session-baseline: a main-checkout run compares against the main tree's live last-green
-  // record too (per command), not the session-start copy; the copy is the fallback when the record has no
-  // readable entry for the command, so a deleted record does not remove the check.
-  const worktreeBaseline = inWorktree ? readLastGreen(vdir) : null;
-  const mainRecord = inWorktree ? null : readLastGreen(dir);
-  const baselineFor = (command) => {
-    if (inWorktree) return worktreeBaseline;
-    return mainRecord && readSummaries(mainRecord[command]) ? mainRecord : state.testTotals;
-  };
+  const baselineFor = countBaselineFor(dir, state, vdir);
   const problems = [];
   const parsed = {};
   // The note carries its own event name, never the stop event's: a decision-less SubagentStop line would read to
@@ -943,7 +952,7 @@ function readableRecordedTotals(t) {
 // one `{ name, command, ok: true, credited: "verified-tree", recorded? }` per resolveCommands entry in config
 // order. A command with a baseline in state.testTotals and no readable recorded totals returns null (the commands
 // run), the same rule as preCommitCredit. Never throws: any failure is null, and null runs the commands.
-function treeCredit(dir, cfg, state, tree) {
+function treeCredit(dir, cfg, state, tree, mainDir) {
   try {
     if (!tree) return null;
     const record = readRecord(dir);
@@ -951,11 +960,14 @@ function treeCredit(dir, cfg, state, tree) {
     const configured = resolveCommands(cfg);
     if (configured.length === 0) return null;
     if (!creditable(dir, cfg, record, tree, configured.map((c) => c.command)).ok) return null;
-    const all = state && state.testTotals && typeof state.testTotals === "object" ? state.testTotals : null;
+    if (!exitCreditUsable(record, dir)) return null;
+    // dir is the verify dir (a worktree for a worktree agent); mainDir the main checkout, as countCheck's dir.
+    const baselineFor = countBaselineFor(mainDir ?? dir, state, dir);
     const out = [];
     for (const { name, command } of configured) {
-      const recorded = readableRecordedTotals(record.totals[command]);
-      const hasBaseline = all ? readSummaries(all[command]) !== null : false;
+      const recorded = totalsUsable(record, dir) ? readableRecordedTotals(record.totals[command]) : null;
+      const base = baselineFor(command);
+      const hasBaseline = base ? readSummaries(base[command]) !== null : false;
       if (hasBaseline && (!recorded || recorded.status === "none")) return null;
       out.push({ name, command, ok: true, credited: "verified-tree", ...(recorded ? { recorded } : {}) });
     }
@@ -975,7 +987,7 @@ function treeCredit(dir, cfg, state, tree) {
 // wrong-shape, failing, stale-tree, or mismatched-commands record, or a dirty tree — fail closed to running,
 // never to passing. A reader must never throw: every path here is wrapped, so a corrupt record never crashes
 // the hook (`runHook` fails open on a throw, which here would mean passing without running — forbidden).
-function preCommitCredit(dir, cfg, changed, state) {
+function preCommitCredit(dir, cfg, changed, state, mainDir) {
   try {
     if (!Array.isArray(changed)) return null;
     const ignore = cfg.stopGate.ignoreChangedPaths || [];
@@ -1001,12 +1013,14 @@ function preCommitCredit(dir, cfg, changed, state) {
     // card ratchet-pre-commit-credit: a command with a baseline in state.testTotals is credited only when the
     // record carries readable totals for it (a list of valid summaries, or an old ok or conflict shape);
     // otherwise null and the commands really run. `recorded` is the parseTotals-shaped result for the count check.
-    const all = state && state.testTotals && typeof state.testTotals === "object" ? state.testTotals : null;
+    // dir is the verify dir (a worktree for a worktree agent); mainDir the main checkout, as countCheck's dir.
+    const baselineFor = countBaselineFor(mainDir ?? dir, state, dir);
     const out = [];
     for (let i = 0; i < configured.length; i++) {
       const { name, command } = configured[i];
       const recorded = readableRecordedTotals(record.commands[i].totals);
-      const hasBaseline = all ? readSummaries(all[command]) !== null : false;
+      const base = baselineFor(command);
+      const hasBaseline = base ? readSummaries(base[command]) !== null : false;
       if (hasBaseline && (!recorded || recorded.status === "none")) return null;
       out.push({ name, command, ok: true, credited: "pre-commit", ...(recorded ? { recorded } : {}) });
     }
@@ -1721,8 +1735,8 @@ runHook("stop-gate", async (input) => {
         currentFingerprint &&
         (sameTree(rec.fingerprint, currentFingerprint) || (rec.scope === scopeNow && (redViaNoTestPaths = onlyNoTestPathsChanged(vdir, cfg, rec.fingerprint, vchanged)))) &&
         !(subagent && (redByDesignClaim(input.last_assistant_message) ?? redByDesignClaim(lastHandbackMessage(input.agent_transcript_path)))) &&
-        !preCommitCredit(vdir, cfg, vchanged, state) &&
-        !treeCredit(vdir, cfg, state, computeTree(vdir))
+        !preCommitCredit(vdir, cfg, vchanged, state, dir) &&
+        !treeCredit(vdir, cfg, state, computeTree(vdir), dir)
       ) {
         lastRed = rec;
       }
@@ -1970,7 +1984,7 @@ runHook("stop-gate", async (input) => {
   // card verified-tree-record: treeBefore is the working tree immediately before the first command; a record of
   // it (any writer: Stop, verify.mjs, land, pre-commit) is tried before preCommitCredit's last-run.json.
   const treeBefore = skipVerification ? null : computeTree(vdir);
-  const credited = skipVerification ? null : (treeCredit(vdir, cfg, state, treeBefore) ?? preCommitCredit(vdir, cfg, vchanged, state));
+  const credited = skipVerification ? null : (treeCredit(vdir, cfg, state, treeBefore, dir) ?? preCommitCredit(vdir, cfg, vchanged, state, dir));
   // card gate-docs-skip-unless-named: a targeted run is never a full run (no record, no ratchet, no state.verified).
   const targeted = !credited && targetedFiles ? targetedFiles : null;
   if (!skipVerification && credited) {
@@ -2008,7 +2022,7 @@ runHook("stop-gate", async (input) => {
         const output = r.stderr + "\n" + r.stdout;
         // card gate-output-names-failures: the block reason leads with the failing test names (R1/R2);
         // commandFailures below keeps the untruncated output for the tests_red_by_design coverage check.
-        problems.push(`\`${command}\` failed (${why}):\n${failureSummary(output, 40)}`);
+        problems.push(`\`${redactText(command, cfg.secrets)}\` failed (${why}):\n${redactText(failureSummary(output, 40), cfg.secrets)}`);
         commandFailures.push({ command, output });
         failedRuns.push({ status: r.status, timedOut: r.timedOut });
       }
@@ -2035,6 +2049,7 @@ runHook("stop-gate", async (input) => {
             node: process.version,
             at: new Date().toISOString(),
             by: subagent ? "subagent-stop" : "stop",
+            ranIn: realpathSync(vdir),
             commands: results.map((r) => ({ name: r.name, command: r.command, exit: 0, durationMs: typeof r.durationMs === "number" ? r.durationMs : 0 })),
             totals,
           });
@@ -2150,7 +2165,7 @@ runHook("stop-gate", async (input) => {
           // (none of them a dropped command) closes that gap.
           postCommandProblems - preVerificationProblems === commandFailures.length
         ) {
-          const coverage = redByDesignCoverage(claimFiles, commandFailures, changed, dir);
+          const coverage = redByDesignCoverage(claimFiles, commandFailures, changed, dir, cfg.secrets);
           if (coverage.covered) {
             // Same as a subagent's green gate: counter resets, no checkpoint, no turn.
             state.agentBlocks = { ...(state.agentBlocks || {}), [subagent.id]: 0 };

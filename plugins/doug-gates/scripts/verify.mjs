@@ -7,13 +7,13 @@
 // No count ratchet and no scans here (no session baseline); the Stop gate does those. Takes the Stop gate's gate.lock (under the git common dir, shared by every worktree) around the commands (card verify-takes-gate-lock).
 
 import { spawnSync } from "node:child_process";
-import { unlinkSync } from "node:fs";
+import { unlinkSync, realpathSync } from "node:fs";
 import { resolve } from "node:path";
 import { loadConfig } from "../lib/config.mjs";
 import { gateLockPath, readGateLock, pidIsLive, writeGateLock, takeOverGateLock, resolveHookTimeoutSec, lockStaleByAge, normalizedTimeoutMs, lockWaitBoundMs } from "../lib/gate-lock.mjs";
 import { runCommand, tail } from "../lib/run.mjs";
 import { parseTotals, readSummaries, sumTotals } from "../lib/test-totals.mjs";
-import { computeTree, readRecord, writeRecord, removeRecord, creditable, resolveCommands } from "../lib/verified-tree.mjs";
+import { computeTree, readRecord, writeRecord, removeRecord, creditable, exitCreditUsable, resolveCommands } from "../lib/verified-tree.mjs";
 
 function parseArgs(argv) {
   const o = { noCredit: false, json: false, commands: [], creditDirs: [] };
@@ -51,6 +51,20 @@ function toplevel() {
   return process.cwd();
 }
 
+// True when dir is a main checkout (git dir equals the common dir), or when that cannot be told (fail closed). Never throws.
+function isMainCheckout(dir) {
+  try {
+    const env = {};
+    for (const [k, v] of Object.entries(process.env)) if (!k.startsWith("GIT_")) env[k] = v;
+    const r = spawnSync("git", ["rev-parse", "--git-dir", "--git-common-dir"], { cwd: dir, encoding: "utf8", env, timeout: 10000 });
+    const [a, b] = r.status === 0 ? r.stdout.trim().split("\n") : [];
+    if (!a || !b) return true;
+    return realpathSync(resolve(dir, a)) === realpathSync(resolve(dir, b));
+  } catch {
+    return true;
+  }
+}
+
 function passed(totals) {
   const s = totals && totals.status === "ok" ? readSummaries(totals) : null;
   if (!s) return null;
@@ -86,9 +100,11 @@ function main() {
     const wanted = commands.map((c) => c.command);
     let record = null;
     let fromOther = false;
+    // Card verify-credit-foreign-skipped: in a main checkout a record from another checkout that skipped tests is not evidence.
+    const mainCwd = isMainCheckout(cwd);
     for (const [i, d] of [recordDir, ...o.creditDirs.map((c) => resolve(c))].entries()) {
       const rec = readRecord(d);
-      if (rec && creditable(cwd, cfg, rec, treeBefore, wanted).ok) {
+      if (rec && creditable(cwd, cfg, rec, treeBefore, wanted).ok && (!mainCwd || exitCreditUsable(rec, cwd))) {
         record = rec;
         fromOther = i > 0;
         break;
@@ -185,7 +201,7 @@ function main() {
   if (ok) {
     const treeAfter = computeTree(cwd);
     if (treeBefore && treeAfter && treeBefore === treeAfter) {
-      writeRecord(recordDir, { version: 1, tree: treeAfter, node: process.version, at: new Date().toISOString(), by: o.by || "verify", commands: recCommands, totals });
+      writeRecord(recordDir, { version: 1, tree: treeAfter, node: process.version, at: new Date().toISOString(), by: o.by || "verify", ranIn: realpathSync(cwd), commands: recCommands, totals });
     }
   } else {
     removeRecord(recordDir);

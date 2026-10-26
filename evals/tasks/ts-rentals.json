@@ -1,0 +1,1011 @@
+{
+  "fixture": "ts-rentals",
+  "setup": [
+    "pnpm install --prefer-offline --silent"
+  ],
+  "tasks": [
+    {
+      "id": "fix-late-return-fee",
+      "prompt": "A customer who returns an item on the day it is due is charged a late fee, though that return is on time. Fix it so a return on or before the due date costs no late fee and a return one day after costs one late day, and add a test for it in the pricing tests. Run the tests and the typecheck to confirm.",
+      "allowedFiles": [
+        "src/pricing/late-fees.ts",
+        "tests/pricing.test.ts"
+      ],
+      "requiredFiles": [
+        "src/pricing/late-fees.ts"
+      ],
+      "requireTestFile": true,
+      "rules": [
+        "a return on or before the due date costs no late fee",
+        "a return one day after the due date costs one late day"
+      ],
+      "heldOut": [
+        {
+          "from": "ts-rentals-fix-late-return-fee.test.ts",
+          "to": "tests/heldout-fix-late-return-fee.test.ts"
+        }
+      ],
+      "mustPass": [
+        "pnpm test",
+        "pnpm typecheck"
+      ],
+      "mustNotChange": [
+        ".env",
+        "pnpm-lock.yaml",
+        "README.md",
+        "src/cli.ts",
+        "tests/cli.test.ts",
+        "src/store/store.ts",
+        "tests/store.test.ts"
+      ],
+      "plan": {
+        "version": 1,
+        "title": "Fix the late fee on a return",
+        "goal": "A customer who brings an item back on the day it is due is charged a late fee, but a return on that day is on time. Late fees must start on the day after the due date: a return on or before the due date costs no late fee, and a return one day after the due date costs one late day. Cover the fix with a test.",
+        "acceptance": [
+          "a return on the due date costs no late fee",
+          "a return one day late costs one late day",
+          "a test covers the due date"
+        ],
+        "verify": [
+          "pnpm test",
+          "pnpm typecheck"
+        ],
+        "tasks": [
+          {
+            "id": "fix-late-return-fee",
+            "title": "Fix the late fee on a return",
+            "spec": "Find why a return on the due date is charged a late day, fix it, and add a test for the due date and the day after it.",
+            "files": [
+              "src/pricing/late-fees.ts",
+              "tests/pricing.test.ts"
+            ],
+            "verify": "pnpm test",
+            "size": "S"
+          }
+        ]
+      },
+      "note": "A planted bug in one module, and the hand rehearsal's card. The goal and the rules name the symptom only: the cause is an inclusive day count in the late fee code, which the session has to find. The commit must change a tests/ file, but which one is the session's choice. Existing tests only use returns before the due date."
+    },
+    {
+      "id": "member-grace-day",
+      "prompt": "Members get one grace day before late fees start. Give lateDays and lateFeeCents an optional customer as their last argument, add memberGraceDays(customer) to the membership module, and cover each rule in the pricing tests. Run the tests and the typecheck to confirm.",
+      "allowedFiles": [
+        "src/pricing/late-fees.ts",
+        "src/customers/membership.ts",
+        "tests/pricing.test.ts"
+      ],
+      "requiredFiles": [
+        "src/pricing/late-fees.ts",
+        "src/customers/membership.ts"
+      ],
+      "rules": [
+        "a member gets one grace day before late fees start",
+        "a member returning two days after the due date is charged one late day",
+        "a standard customer gets no grace day",
+        "memberGraceDays is one for a member and zero for anyone else"
+      ],
+      "heldOut": [
+        {
+          "from": "ts-rentals-member-grace-day.test.ts",
+          "to": "tests/heldout-member-grace-day.test.ts"
+        }
+      ],
+      "mustPass": [
+        "pnpm test",
+        "pnpm typecheck"
+      ],
+      "mustNotChange": [
+        ".env",
+        "pnpm-lock.yaml",
+        "README.md",
+        "src/cli.ts",
+        "tests/cli.test.ts",
+        "src/store/store.ts",
+        "tests/store.test.ts"
+      ],
+      "plan": {
+        "version": 1,
+        "title": "Give members a grace day on returns",
+        "goal": "Members get a grace day on returns. lateDays and lateFeeCents take the customer as an optional last argument, and the membership module gains memberGraceDays(customer). Rules: a member gets one grace day before late fees start; a member returning two days after the due date is charged one late day; a standard customer gets no grace day; memberGraceDays is one for a member and zero for anyone else. Cover each rule with a test.",
+        "acceptance": [
+          "a member returning the day after the due date pays no late fee",
+          "a standard customer returning the day after the due date pays one late day",
+          "a test covers each rule"
+        ],
+        "verify": [
+          "pnpm test",
+          "pnpm typecheck"
+        ],
+        "tasks": [
+          {
+            "id": "member-grace-day",
+            "title": "Give members a grace day on returns",
+            "spec": "Add memberGraceDays to the membership module and subtract it from the late days in the late fee code, taking an optional customer last. Test each rule.",
+            "files": [
+              "src/pricing/late-fees.ts",
+              "src/customers/membership.ts",
+              "tests/pricing.test.ts"
+            ],
+            "verify": "pnpm test",
+            "size": "S"
+          }
+        ]
+      },
+      "note": "Builds on the late return fee fix: it edits the same functions and the same test file as fix-late-return-fee, so the two overlap (the same component, one track) and the board gives this card a dependency on it."
+    },
+    {
+      "id": "overdue-reminders",
+      "prompt": "Add overdueReminders(reservations, customers, items, today) to the notifications reminders, isOverdue(status, end, today, graceDays) to the reservation status module, and an optional contact preference (email or phone) to customers. Cover each rule in the matching tests. Run the tests and the typecheck to confirm.",
+      "allowedFiles": [
+        "src/notifications/reminders.ts",
+        "src/reservations/status.ts",
+        "src/customers/customer.ts",
+        "tests/notifications.test.ts",
+        "tests/reservations.test.ts",
+        "tests/customers.test.ts"
+      ],
+      "requiredFiles": [
+        "src/notifications/reminders.ts",
+        "src/reservations/status.ts",
+        "src/customers/customer.ts"
+      ],
+      "rules": [
+        "a reminder lists a picked up rental once it is past its due date",
+        "a member's rental is listed only after the grace day",
+        "a rental that is returned, cancelled or not picked up gets no overdue reminder",
+        "isOverdue is true only for a picked up rental past its due date plus the grace days",
+        "a customer who prefers phone is reminded at their phone number",
+        "a customer who prefers email is reminded at their email address",
+        "a customer with no stated preference is reminded by email",
+        "a customer cannot prefer phone without a phone number"
+      ],
+      "heldOut": [
+        {
+          "from": "ts-rentals-overdue-reminders-1.test.ts",
+          "to": "tests/heldout-overdue-reminders-1.test.ts"
+        },
+        {
+          "from": "ts-rentals-overdue-reminders-2.test.ts",
+          "to": "tests/heldout-overdue-reminders-2.test.ts"
+        }
+      ],
+      "mustPass": [
+        "pnpm test",
+        "pnpm typecheck"
+      ],
+      "mustNotChange": [
+        ".env",
+        "pnpm-lock.yaml",
+        "README.md",
+        "src/cli.ts",
+        "tests/cli.test.ts",
+        "src/store/store.ts",
+        "tests/store.test.ts"
+      ],
+      "plan": {
+        "version": 1,
+        "title": "Remind customers about overdue rentals",
+        "goal": "The shop reminds customers about rentals that are overdue. overdueReminders(reservations, customers, items, today) in the notifications module returns one reminder per overdue rental, isOverdue(status, end, today, graceDays) in the reservation status module says when a rental is overdue, and a customer may state a contact preference, email or phone, in a new optional contact field. Rules: a reminder lists a picked up rental once it is past its due date; a member's rental is listed only after the grace day, which memberGraceDays gives; a rental that is returned, cancelled or not picked up gets no overdue reminder; isOverdue is true only for a picked up rental past its due date plus the grace days; a customer who prefers phone is reminded at their phone number; a customer who prefers email is reminded at their email address; a customer with no stated preference is reminded by email; a customer cannot prefer phone without a phone number. Cover each rule with a test.",
+        "acceptance": [
+          "overdueReminders lists a picked up rental past its due date",
+          "a member's rental is listed after the grace day",
+          "the reminder goes to the preferred contact",
+          "a test covers each rule"
+        ],
+        "verify": [
+          "pnpm test",
+          "pnpm typecheck"
+        ],
+        "tasks": [
+          {
+            "id": "overdue-reminders",
+            "title": "Remind customers about overdue rentals",
+            "spec": "Add isOverdue to the status module, a contact preference with its check to the customer module, and overdueReminders to the reminders module, using memberGraceDays for the grace days. Test each rule in the matching test file.",
+            "files": [
+              "src/notifications/reminders.ts",
+              "src/reservations/status.ts",
+              "src/customers/customer.ts",
+              "tests/notifications.test.ts",
+              "tests/reservations.test.ts",
+              "tests/customers.test.ts"
+            ],
+            "verify": "pnpm test",
+            "size": "S"
+          }
+        ]
+      },
+      "note": "A hand card that changes three modules (notifications, reservations, customers). It reads the member grace day from the grace day card, so the board gives it a dependency on member-grace-day."
+    },
+    {
+      "id": "fix-deposit-refund",
+      "prompt": "When the damage charge is above the deposit the refund comes out negative. Make the refund zero in that case, make the return slip show a zero refund, and add tests in the billing tests. Run the tests and the typecheck to confirm.",
+      "allowedFiles": [
+        "src/billing/deposit.ts",
+        "tests/billing.test.ts"
+      ],
+      "requiredFiles": [
+        "src/billing/deposit.ts"
+      ],
+      "rules": [
+        "damage above the deposit leaves a refund of zero",
+        "the return slip for damage above the deposit shows a zero refund",
+        "damage within the deposit still comes out of the refund"
+      ],
+      "heldOut": [
+        {
+          "from": "ts-rentals-fix-deposit-refund.test.ts",
+          "to": "tests/heldout-fix-deposit-refund.test.ts"
+        }
+      ],
+      "mustPass": [
+        "pnpm test",
+        "pnpm typecheck"
+      ],
+      "mustNotChange": [
+        ".env",
+        "pnpm-lock.yaml",
+        "README.md",
+        "src/cli.ts",
+        "tests/cli.test.ts",
+        "src/store/store.ts",
+        "tests/store.test.ts"
+      ],
+      "plan": {
+        "version": 1,
+        "title": "Never refund a negative deposit",
+        "goal": "A damage charge above the deposit makes the refund negative. Rules: damage above the deposit leaves a refund of zero; the return slip for damage above the deposit shows a zero refund; damage within the deposit still comes out of the refund. Cover each rule with a test.",
+        "acceptance": [
+          "a refund is never below zero",
+          "the return slip shows a zero refund for heavy damage",
+          "a test covers damage above the deposit"
+        ],
+        "verify": [
+          "pnpm test",
+          "pnpm typecheck"
+        ],
+        "tasks": [
+          {
+            "id": "fix-deposit-refund",
+            "title": "Never refund a negative deposit",
+            "spec": "Clamp the refund at zero in the deposit code so the return slip follows, and test heavy and light damage.",
+            "files": [
+              "src/billing/deposit.ts",
+              "tests/billing.test.ts"
+            ],
+            "verify": "pnpm test",
+            "size": "S"
+          }
+        ]
+      },
+      "note": "A planted bug in one module. Existing tests only use damage within the deposit."
+    },
+    {
+      "id": "fix-back-to-back-booking",
+      "prompt": "A rental that ends on the day another starts is reported as a conflict, though an item is free on the day it is due back. Fix the overlap rule and add tests in the calendar tests. Run the tests and the typecheck to confirm.",
+      "allowedFiles": [
+        "src/calendar/availability.ts",
+        "tests/calendar.test.ts"
+      ],
+      "requiredFiles": [
+        "src/calendar/availability.ts"
+      ],
+      "rules": [
+        "a booking that ends on the day another starts is not a conflict",
+        "a booking that starts on the day another ends is not a conflict",
+        "bookings that share a rental night still conflict"
+      ],
+      "heldOut": [
+        {
+          "from": "ts-rentals-fix-back-to-back-booking.test.ts",
+          "to": "tests/heldout-fix-back-to-back-booking.test.ts"
+        }
+      ],
+      "mustPass": [
+        "pnpm test",
+        "pnpm typecheck"
+      ],
+      "mustNotChange": [
+        ".env",
+        "pnpm-lock.yaml",
+        "README.md",
+        "src/cli.ts",
+        "tests/cli.test.ts",
+        "src/store/store.ts",
+        "tests/store.test.ts"
+      ],
+      "plan": {
+        "version": 1,
+        "title": "Allow back to back bookings",
+        "goal": "A rental that ends on the day another starts is reported as a conflict, though an item is free on the day it is due back. Rules: a booking that ends on the day another starts is not a conflict; a booking that starts on the day another ends is not a conflict; bookings that share a rental night still conflict. Cover each rule with a test.",
+        "acceptance": [
+          "back to back bookings do not conflict",
+          "bookings that share a night still conflict",
+          "a test covers both"
+        ],
+        "verify": [
+          "pnpm test",
+          "pnpm typecheck"
+        ],
+        "tasks": [
+          {
+            "id": "fix-back-to-back-booking",
+            "title": "Allow back to back bookings",
+            "spec": "Treat a booking's end day as free in the overlap rule, and test back to back and overlapping spans.",
+            "files": [
+              "src/calendar/availability.ts",
+              "tests/calendar.test.ts"
+            ],
+            "verify": "pnpm test",
+            "size": "S"
+          }
+        ]
+      },
+      "note": "A planted bug in one module: the end day is treated as inclusive. Existing tests only use spans with days between them. The maintenance blackout card edits the same file."
+    },
+    {
+      "id": "maintenance-blackout",
+      "prompt": "An item cannot be reserved while it is in the workshop for an inspection. Let isAvailable and conflictsFor take the item's inspection windows as an optional last argument, add isInWorkshop(windows, itemId, day) to the maintenance schedule, and test each rule in the maintenance tests. Run the tests and the typecheck to confirm.",
+      "allowedFiles": [
+        "src/maintenance/schedule.ts",
+        "src/calendar/availability.ts",
+        "tests/maintenance.test.ts"
+      ],
+      "requiredFiles": [
+        "src/maintenance/schedule.ts",
+        "src/calendar/availability.ts"
+      ],
+      "rules": [
+        "an item cannot be reserved on a day it is in the workshop",
+        "another item's inspection window does not block a reservation",
+        "isInWorkshop is true from the first workshop day until the day before the item is back"
+      ],
+      "heldOut": [
+        {
+          "from": "ts-rentals-maintenance-blackout.test.ts",
+          "to": "tests/heldout-maintenance-blackout.test.ts"
+        }
+      ],
+      "mustPass": [
+        "pnpm test",
+        "pnpm typecheck"
+      ],
+      "mustNotChange": [
+        ".env",
+        "pnpm-lock.yaml",
+        "README.md",
+        "src/cli.ts",
+        "tests/cli.test.ts",
+        "src/store/store.ts",
+        "tests/store.test.ts"
+      ],
+      "plan": {
+        "version": 1,
+        "title": "Block items that are in the workshop",
+        "goal": "An item in the workshop for an inspection cannot be rented. isAvailable and conflictsFor in the calendar module take the inspection windows as an optional last argument, and the maintenance schedule gains isInWorkshop(windows, itemId, day). Rules: an item cannot be reserved on a day it is in the workshop; another item's inspection window does not block a reservation; isInWorkshop is true from the first workshop day until the day before the item is back. Cover each rule with a test.",
+        "acceptance": [
+          "isAvailable is false inside an inspection window",
+          "another item's window does not block",
+          "a test covers each rule"
+        ],
+        "verify": [
+          "pnpm test",
+          "pnpm typecheck"
+        ],
+        "tasks": [
+          {
+            "id": "maintenance-blackout",
+            "title": "Block items that are in the workshop",
+            "spec": "Add the optional windows argument to the availability checks and isInWorkshop to the schedule, and test each rule in the maintenance tests.",
+            "files": [
+              "src/maintenance/schedule.ts",
+              "src/calendar/availability.ts",
+              "tests/maintenance.test.ts"
+            ],
+            "verify": "pnpm test",
+            "size": "S"
+          }
+        ]
+      },
+      "note": "Shares src/calendar/availability.ts with fix-back-to-back-booking: the two overlap in one component and one track. A window ends on the day the item is back, which is the end day the back to back fix frees."
+    },
+    {
+      "id": "weekly-rate-cap",
+      "prompt": "A rental should never cost more than the weekly rate. Each full week costs the weekly rate and the leftover days cost at most one weekly rate. The quote, the invoice lines and the revenue report must all show the capped price. Add tests for each in the pricing, reservations and reports tests. Run the tests and the typecheck to confirm.",
+      "allowedFiles": [
+        "src/pricing/rates.ts",
+        "src/billing/invoice.ts",
+        "src/reservations/quote.ts",
+        "src/reports/revenue.ts",
+        "tests/pricing.test.ts",
+        "tests/reservations.test.ts",
+        "tests/reports.test.ts"
+      ],
+      "requiredFiles": [
+        "src/pricing/rates.ts"
+      ],
+      "rules": [
+        "each full week of a rental costs the weekly rate",
+        "the days left over after the full weeks never cost more than one weekly rate",
+        "a quote for a long rental shows the capped subtotal",
+        "an invoice for a long rental shows the capped rental line",
+        "the revenue report counts a long rental at its capped price"
+      ],
+      "heldOut": [
+        {
+          "from": "ts-rentals-weekly-rate-cap-1.test.ts",
+          "to": "tests/heldout-weekly-rate-cap-1.test.ts"
+        },
+        {
+          "from": "ts-rentals-weekly-rate-cap-2.test.ts",
+          "to": "tests/heldout-weekly-rate-cap-2.test.ts"
+        }
+      ],
+      "mustPass": [
+        "pnpm test",
+        "pnpm typecheck"
+      ],
+      "mustNotChange": [
+        ".env",
+        "pnpm-lock.yaml",
+        "README.md",
+        "src/cli.ts",
+        "tests/cli.test.ts",
+        "src/store/store.ts",
+        "tests/store.test.ts"
+      ],
+      "plan": {
+        "version": 1,
+        "title": "Cap a long rental at the weekly rate",
+        "goal": "A rental never costs more than the weekly rate would. Today the quote, the invoice lines and the revenue report all price a rental at the day rate times the days. Rules: each full week of a rental costs the weekly rate; the days left over after the full weeks never cost more than one weekly rate; a quote for a long rental shows the capped subtotal; an invoice for a long rental shows the capped rental line; the revenue report counts a long rental at its capped price. Cover each rule with a test.",
+        "acceptance": [
+          "a seven day rental costs the weekly rate",
+          "six days never cost more than one weekly rate",
+          "the quote, the invoice and the revenue report agree",
+          "a test covers each surface"
+        ],
+        "verify": [
+          "pnpm test",
+          "pnpm typecheck"
+        ],
+        "tasks": [
+          {
+            "id": "weekly-rate-cap",
+            "title": "Cap a long rental at the weekly rate",
+            "spec": "Price a rental by full weeks plus capped leftover days in the rates code, check that the quote, the invoice lines and the revenue report all use it, and test each surface.",
+            "files": [
+              "src/pricing/rates.ts",
+              "src/billing/invoice.ts",
+              "src/reservations/quote.ts",
+              "src/reports/revenue.ts",
+              "tests/pricing.test.ts",
+              "tests/reservations.test.ts",
+              "tests/reports.test.ts"
+            ],
+            "verify": "pnpm test",
+            "size": "S"
+          }
+        ]
+      },
+      "note": "A cross-module flow card: pricing, billing, reservations and reports all price a rental, though the pricing code is the single place that has to change. It owns tests/reports.test.ts, which utilisation-report also owns, with no dependency between the two. It does not own tests/billing.test.ts, which fix-deposit-refund owns, so the invoice case goes in tests/pricing.test.ts."
+    },
+    {
+      "id": "member-discount-after-cap",
+      "prompt": "A member's ten percent discount must be taken off the capped rental price. Add memberPriceCents(customer, item, days) to the discounts module and test each rule in the pricing tests. Run the tests and the typecheck to confirm.",
+      "allowedFiles": [
+        "src/pricing/discounts.ts",
+        "src/pricing/rates.ts",
+        "tests/pricing.test.ts"
+      ],
+      "requiredFiles": [
+        "src/pricing/discounts.ts"
+      ],
+      "rules": [
+        "a member pays ten percent less than the capped price",
+        "a member discount is worked out on the capped price, not on the day rate times the days",
+        "a standard customer pays the capped price with no discount"
+      ],
+      "heldOut": [
+        {
+          "from": "ts-rentals-member-discount-after-cap.test.ts",
+          "to": "tests/heldout-member-discount-after-cap.test.ts"
+        }
+      ],
+      "mustPass": [
+        "pnpm test",
+        "pnpm typecheck"
+      ],
+      "mustNotChange": [
+        ".env",
+        "pnpm-lock.yaml",
+        "README.md",
+        "src/cli.ts",
+        "tests/cli.test.ts",
+        "src/store/store.ts",
+        "tests/store.test.ts"
+      ],
+      "plan": {
+        "version": 1,
+        "title": "Apply the member discount after the cap",
+        "goal": "A member's discount applies to the capped rental price. The discounts module gains memberPriceCents(customer, item, days), the price a customer pays for that many days of an item, and it builds on the weekly rate cap. Rules: a member pays ten percent less than the capped price; a member discount is worked out on the capped price, not on the day rate times the days; a standard customer pays the capped price with no discount. Cover each rule with a test.",
+        "acceptance": [
+          "a member pays ten percent less than the capped price",
+          "a standard customer pays the capped price",
+          "a test covers each rule"
+        ],
+        "verify": [
+          "pnpm test",
+          "pnpm typecheck"
+        ],
+        "tasks": [
+          {
+            "id": "member-discount-after-cap",
+            "title": "Apply the member discount after the cap",
+            "spec": "Add memberPriceCents to the discounts module on top of the capped rental price, and test members, standard customers and long rentals.",
+            "files": [
+              "src/pricing/discounts.ts",
+              "src/pricing/rates.ts",
+              "tests/pricing.test.ts"
+            ],
+            "verify": "pnpm test",
+            "size": "S"
+          }
+        ]
+      },
+      "note": "Builds on the weekly rate cap: it edits the same pricing files and the same test file as weekly-rate-cap, so the two overlap in one component and one track, and the board gives this card a dependency on it."
+    },
+    {
+      "id": "utilisation-report",
+      "prompt": "Add bookedDaysByItem(reservations, range) to the reports module, giving the booked days per item inside a date range, and test each rule in the reports tests. Run the tests and the typecheck to confirm.",
+      "allowedFiles": [
+        "src/reports/utilisation.ts",
+        "tests/reports.test.ts"
+      ],
+      "requiredFiles": [
+        "src/reports/utilisation.ts"
+      ],
+      "rules": [
+        "booked days per item count each rental day inside the range",
+        "cancelled reservations book no days",
+        "an item with no booked days in the range is left out"
+      ],
+      "heldOut": [
+        {
+          "from": "ts-rentals-utilisation-report.test.ts",
+          "to": "tests/heldout-utilisation-report.test.ts"
+        }
+      ],
+      "mustPass": [
+        "pnpm test",
+        "pnpm typecheck"
+      ],
+      "mustNotChange": [
+        ".env",
+        "pnpm-lock.yaml",
+        "README.md",
+        "src/cli.ts",
+        "tests/cli.test.ts",
+        "src/store/store.ts",
+        "tests/store.test.ts"
+      ],
+      "plan": {
+        "version": 1,
+        "title": "Report booked days per item",
+        "goal": "The shop wants to see how many days each item was booked over a date range. bookedDaysByItem(reservations, range) in the reports module returns a record from item id to booked days, the range being { from, to } and running up to but not including to. Rules: booked days per item count each rental day inside the range; cancelled reservations book no days; an item with no booked days in the range is left out. Cover each rule with a test.",
+        "acceptance": [
+          "bookedDaysByItem counts days inside the range",
+          "cancelled reservations book nothing",
+          "a test covers each rule"
+        ],
+        "verify": [
+          "pnpm test",
+          "pnpm typecheck"
+        ],
+        "tasks": [
+          {
+            "id": "utilisation-report",
+            "title": "Report booked days per item",
+            "spec": "Add bookedDaysByItem to the utilisation code on top of sharedDays, and test clipping to the range, cancelled reservations and an empty result.",
+            "files": [
+              "src/reports/utilisation.ts",
+              "tests/reports.test.ts"
+            ],
+            "verify": "pnpm test",
+            "size": "S"
+          }
+        ]
+      },
+      "note": "A new function in one module. It owns tests/reports.test.ts, which weekly-rate-cap also owns, with no dependency between the two: only the coordinator's overlap rule keeps them apart."
+    },
+    {
+      "id": "rental-helpers",
+      "prompt": "Implement this change. It is one change across three source files. (1) In src/util/dates.ts add formatRentalSpan(start, end): string, for example 2025-03-10 to 2025-03-13 (3 days), saying 1 day for a one day rental. (2) In src/maintenance/inspections.ts add dueForInspection(log, item, today): boolean, true for an item never inspected and true from the day its inspection interval ends. (3) In src/payments/ledger.ts add openBalance(ledger, reservationId, dueCents): number, the amount still owed after payments and refunds, never below zero. Add tests for each part in tests/util.test.ts, tests/maintenance.test.ts and tests/payments.test.ts. Run the tests and the typecheck to confirm.",
+      "allowedFiles": [
+        "src/util/dates.ts",
+        "src/maintenance/inspections.ts",
+        "src/payments/ledger.ts",
+        "tests/util.test.ts",
+        "tests/maintenance.test.ts",
+        "tests/payments.test.ts"
+      ],
+      "requiredFiles": [
+        "src/util/dates.ts",
+        "src/maintenance/inspections.ts",
+        "src/payments/ledger.ts"
+      ],
+      "rules": [
+        "formatRentalSpan shows both days and the number of days",
+        "formatRentalSpan says 1 day for a one day rental",
+        "dueForInspection is true for an item never inspected",
+        "dueForInspection is true from the day the interval ends and false before it",
+        "openBalance is what is still owed after payments and refunds",
+        "openBalance is never negative"
+      ],
+      "heldOut": [
+        {
+          "from": "ts-rentals-rental-helpers.test.ts",
+          "to": "tests/heldout-rental-helpers.test.ts"
+        }
+      ],
+      "mustPass": [
+        "pnpm test",
+        "pnpm typecheck"
+      ],
+      "mustNotChange": [
+        ".env",
+        "pnpm-lock.yaml",
+        "README.md",
+        "src/cli.ts",
+        "tests/cli.test.ts",
+        "src/store/store.ts",
+        "tests/store.test.ts"
+      ],
+      "plan": {
+        "version": 1,
+        "title": "Rental span, inspection and balance helpers",
+        "goal": "formatRentalSpan, dueForInspection and openBalance exist, planned as one task, size M, that owns all six files (three source files and their tests). formatRentalSpan(start, end) belongs in the util dates module, dueForInspection(log, item, today) in the maintenance inspections module and openBalance(ledger, reservationId, dueCents) in the payments ledger module. Rules: formatRentalSpan shows both days and the number of days; formatRentalSpan says 1 day for a one day rental; dueForInspection is true for an item never inspected; dueForInspection is true from the day the interval ends and false before it; openBalance is what is still owed after payments and refunds; openBalance is never negative. Cover each rule in the test file of its module.",
+        "acceptance": [
+          "formatRentalSpan shows both days and the day count",
+          "dueForInspection is true for an item never inspected",
+          "openBalance is never negative"
+        ],
+        "verify": [
+          "pnpm test",
+          "pnpm typecheck"
+        ],
+        "tasks": [
+          {
+            "id": "rental-helpers",
+            "title": "Rental span, inspection and balance helpers",
+            "spec": "One task owning all three source files, so the shape gate can split it: formatRentalSpan in src/util/dates.ts, dueForInspection in src/maintenance/inspections.ts, openBalance in src/payments/ledger.ts. Tests for each in the matching test file.",
+            "files": [
+              "src/util/dates.ts",
+              "src/maintenance/inspections.ts",
+              "src/payments/ledger.ts",
+              "tests/util.test.ts",
+              "tests/maintenance.test.ts",
+              "tests/payments.test.ts"
+            ],
+            "verify": "pnpm test",
+            "size": "M"
+          }
+        ]
+      },
+      "note": "The /doug-swarm skill scenario's task: three independent helpers in three modules, planned as one task owning all six files so the shape gate can split it (see split-money-catalog in the ts-orders suite). Three single-file tasks would stay off the lead."
+    },
+    {
+      "id": "customer-statements",
+      "prompt": "Add a monthly statement. In a new src/billing/statement.ts add statementFor(customer, reservations, items, ledger, month) returning { customerId, month, lines, chargesCents, receivedCents, balanceCents }; add a ledger helper for the money received in a month; add renderStatement(customer, statement) to the notification templates. Add tests in the billing, payments and notifications tests. Run the tests and the typecheck to confirm.",
+      "allowedFiles": [
+        "src/billing/statement.ts",
+        "src/payments/ledger.ts",
+        "src/notifications/templates.ts",
+        "tests/billing.test.ts",
+        "tests/payments.test.ts",
+        "tests/notifications.test.ts"
+      ],
+      "requiredFiles": [
+        "src/billing/statement.ts",
+        "src/notifications/templates.ts"
+      ],
+      "rules": [
+        "a statement charges each rental of the customer that starts in the month",
+        "a statement leaves out cancelled rentals and rentals of other customers",
+        "the balance is the charges less the payments received in the month, net of refunds",
+        "the statement text greets the customer and states the balance"
+      ],
+      "heldOut": [
+        {
+          "from": "ts-rentals-customer-statements.test.ts",
+          "to": "tests/heldout-customer-statements.test.ts"
+        }
+      ],
+      "mustPass": [
+        "pnpm test",
+        "pnpm typecheck"
+      ],
+      "mustNotChange": [
+        ".env",
+        "pnpm-lock.yaml",
+        "README.md",
+        "src/cli.ts",
+        "tests/cli.test.ts",
+        "src/store/store.ts",
+        "tests/store.test.ts"
+      ],
+      "plan": {
+        "version": 1,
+        "title": "Monthly customer statements",
+        "goal": "Customers get a monthly statement. statementFor(customer, reservations, items, ledger, month) in a new billing statement module returns { customerId, month, lines, chargesCents, receivedCents, balanceCents }, the month being written like 2025-05 and each line being { reservationId, label, cents } at the rental price of its item and days, before any member discount. The payments ledger gains a helper for the money received in a month, and the notification templates gain renderStatement(customer, statement), the email text, which names the month and writes the balance like $12.50. Rules: a statement charges each rental of the customer that starts in the month; a statement leaves out cancelled rentals and rentals of other customers; the balance is the charges less the payments received in the month, net of refunds; the statement text greets the customer and states the balance. Cover each rule with a test.",
+        "acceptance": [
+          "statementFor charges the customer's rentals that start in the month",
+          "the balance nets payments and refunds received in the month",
+          "renderStatement names the customer, the month and the balance",
+          "a test covers each rule"
+        ],
+        "verify": [
+          "pnpm test",
+          "pnpm typecheck"
+        ],
+        "tasks": [
+          {
+            "id": "customer-statements",
+            "title": "Monthly customer statements",
+            "spec": "Create the statement module, add the month helper to the ledger and renderStatement to the templates, and test each rule in the matching test file.",
+            "files": [
+              "src/billing/statement.ts",
+              "src/payments/ledger.ts",
+              "src/notifications/templates.ts",
+              "tests/billing.test.ts",
+              "tests/payments.test.ts",
+              "tests/notifications.test.ts"
+            ],
+            "verify": "pnpm test",
+            "size": "M"
+          }
+        ]
+      },
+      "note": "The start-feature scenario's task and hard-auto's Backlog card: a new module that spans billing, payments and notifications. The held-out file loads the new module at run time, because a missing module cannot be imported statically."
+    }
+  ],
+  "rehearsal": {
+    "scenarios": {
+      "hard-hand": {
+        "cards": [
+          {
+            "task": "fix-late-return-fee",
+            "id": "fix-late-return-fee",
+            "column": "ready",
+            "component": "pricing",
+            "size": "S",
+            "class": "code",
+            "track": "hand"
+          }
+        ]
+      },
+      "hard-flow": {
+        "cards": [
+          {
+            "task": "weekly-rate-cap",
+            "id": "weekly-rate-cap",
+            "column": "ready",
+            "component": "pricing",
+            "size": "S",
+            "class": "code"
+          }
+        ]
+      },
+      "hard-swarm-skill": {
+        "cards": [
+          {
+            "task": "rental-helpers",
+            "id": "rental-helpers",
+            "column": "ready",
+            "component": "core",
+            "size": "M",
+            "class": "code"
+          }
+        ]
+      },
+      "hard-start-feature": {
+        "cards": [
+          {
+            "task": "customer-statements",
+            "id": "customer-statements",
+            "column": "ready",
+            "component": "billing",
+            "size": "M",
+            "class": "code"
+          }
+        ]
+      },
+      "hard-auto": {
+        "cards": [
+          {
+            "task": "fix-late-return-fee",
+            "id": "fix-late-return-fee",
+            "column": "ready",
+            "component": "pricing",
+            "size": "S",
+            "class": "code",
+            "track": "hand"
+          },
+          {
+            "task": "member-grace-day",
+            "id": "member-grace-day",
+            "column": "ready",
+            "component": "pricing",
+            "size": "S",
+            "class": "code",
+            "track": "hand",
+            "deps": [
+              "fix-late-return-fee"
+            ]
+          },
+          {
+            "task": "overdue-reminders",
+            "id": "overdue-reminders",
+            "column": "ready",
+            "component": "notifications",
+            "size": "S",
+            "class": "code",
+            "track": "hand",
+            "deps": [
+              "member-grace-day"
+            ]
+          },
+          {
+            "task": "fix-deposit-refund",
+            "id": "fix-deposit-refund",
+            "column": "ready",
+            "component": "billing",
+            "size": "S",
+            "class": "code",
+            "track": "hand"
+          },
+          {
+            "task": "fix-back-to-back-booking",
+            "id": "fix-back-to-back-booking",
+            "column": "ready",
+            "component": "calendar",
+            "size": "S",
+            "class": "code",
+            "track": "hand"
+          },
+          {
+            "task": "maintenance-blackout",
+            "id": "maintenance-blackout",
+            "column": "ready",
+            "component": "calendar",
+            "size": "S",
+            "class": "code",
+            "track": "hand"
+          },
+          {
+            "task": "customer-statements",
+            "id": "customer-statements",
+            "column": "backlog",
+            "component": "billing",
+            "size": "M",
+            "class": "code",
+            "track": "hand"
+          }
+        ]
+      },
+      "hard-parallel": {
+        "cards": [
+          {
+            "task": "weekly-rate-cap",
+            "id": "weekly-rate-cap",
+            "column": "ready",
+            "component": "pricing",
+            "size": "S",
+            "class": "code"
+          },
+          {
+            "task": "member-discount-after-cap",
+            "id": "member-discount-after-cap",
+            "column": "ready",
+            "component": "pricing",
+            "size": "S",
+            "class": "code",
+            "deps": [
+              "weekly-rate-cap"
+            ]
+          },
+          {
+            "task": "utilisation-report",
+            "id": "utilisation-report",
+            "column": "ready",
+            "component": "reports",
+            "size": "S",
+            "class": "code"
+          },
+          {
+            "task": "fix-deposit-refund",
+            "id": "fix-deposit-refund",
+            "column": "ready",
+            "component": "billing",
+            "size": "S",
+            "class": "code",
+            "track": "hand"
+          },
+          {
+            "task": "fix-back-to-back-booking",
+            "id": "fix-back-to-back-booking",
+            "column": "ready",
+            "component": "calendar",
+            "size": "S",
+            "class": "code",
+            "track": "hand"
+          },
+          {
+            "task": "maintenance-blackout",
+            "id": "maintenance-blackout",
+            "column": "ready",
+            "component": "calendar",
+            "size": "S",
+            "class": "code",
+            "track": "hand",
+            "deps": [
+              "fix-back-to-back-booking"
+            ]
+          }
+        ],
+        "workersMax": 3
+      }
+    },
+    "background": [
+      {
+        "id": "payment-ledger",
+        "title": "Record payments in a ledger",
+        "goal": "Payments and refunds are kept in an append-only ledger so the balance of a reservation can be worked out.",
+        "column": "done",
+        "component": "payments",
+        "size": "S",
+        "track": "hand",
+        "class": "code"
+      },
+      {
+        "id": "item-retirement",
+        "title": "Retire worn out items",
+        "goal": "An item that fails its inspection can be retired from the catalog so it is no longer offered for rent.",
+        "column": "backlog",
+        "component": "catalog",
+        "size": "M",
+        "class": "code"
+      },
+      {
+        "id": "bundle-rentals",
+        "title": "Rent several items together",
+        "goal": "A customer can reserve several items in one booking, with the bundle discount applied to the total.",
+        "column": "backlog",
+        "component": "reservations",
+        "size": "L",
+        "class": "code"
+      }
+    ],
+    "lessons": [
+      {
+        "text": "Money is integer cents everywhere in ts-rentals; format with formatCents only at the edge, in slips, invoices and CLI output.",
+        "kind": "pattern",
+        "citation": "src/util/money.ts"
+      },
+      {
+        "text": "Dates are ISO days; count and compare them with the helpers in src/util/dates.ts, never with Date arithmetic.",
+        "kind": "pitfall",
+        "citation": "src/util/dates.ts"
+      },
+      {
+        "text": "Each module keeps its tests in tests/<module>.test.ts; add a helper's test to the file of the module that owns it.",
+        "kind": "pattern",
+        "citation": "tests/"
+      },
+      {
+        "text": "Read a customer's tier through membership.ts (isMember, memberDiscountPercent), not by comparing the tier string.",
+        "kind": "pitfall",
+        "citation": "src/customers/membership.ts"
+      }
+    ]
+  }
+}

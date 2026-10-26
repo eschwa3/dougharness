@@ -29,6 +29,9 @@
           "harmful": 0,
           "superseded_by": null,
           "stale": null,
+          "seen": 0,
+          "archived": null,
+          "archived_reason": null,
           "hasVector": true,
           "score": 0.015950487450055454,
           "sides": [
@@ -54,6 +57,9 @@
           "harmful": 0,
           "superseded_by": null,
           "stale": null,
+          "seen": 0,
+          "archived": null,
+          "archived_reason": null,
           "hasVector": true,
           "score": 0.015693221523441655,
           "sides": [
@@ -77,6 +83,9 @@
           "harmful": 0,
           "superseded_by": null,
           "stale": null,
+          "seen": 0,
+          "archived": null,
+          "archived_reason": null,
           "hasVector": true,
           "score": 0.015444122769101312,
           "sides": [
@@ -102,6 +111,9 @@
           "harmful": 0,
           "superseded_by": null,
           "stale": null,
+          "seen": 0,
+          "archived": null,
+          "archived_reason": null,
           "hasVector": true,
           "score": 0.015202808350834105,
           "sides": [
@@ -125,6 +137,9 @@
           "harmful": 0,
           "superseded_by": null,
           "stale": null,
+          "seen": 0,
+          "archived": null,
+          "archived_reason": null,
           "hasVector": true,
           "score": 0.015151515151515152,
           "sides": [
@@ -150,6 +165,9 @@
           "harmful": 0,
           "superseded_by": null,
           "stale": null,
+          "seen": 0,
+          "archived": null,
+          "archived_reason": null,
           "hasVector": false,
           "score": 0.015132431542169276,
           "sides": [
@@ -173,6 +191,9 @@
           "harmful": 0,
           "superseded_by": null,
           "stale": null,
+          "seen": 0,
+          "archived": null,
+          "archived_reason": null,
           "hasVector": true,
           "score": 0.014761364720034332,
           "sides": [
@@ -196,6 +217,9 @@
           "harmful": 0,
           "superseded_by": null,
           "stale": null,
+          "seen": 0,
+          "archived": null,
+          "archived_reason": null,
           "hasVector": true,
           "score": 0.014308525506667393,
           "sides": [
@@ -322,6 +346,9 @@
           "harmful": 0,
           "superseded_by": null,
           "stale": null,
+          "seen": 0,
+          "archived": null,
+          "archived_reason": null,
           "hasVector": true,
           "score": 0.015950487450055454,
           "sides": [
@@ -347,6 +374,9 @@
           "harmful": 0,
           "superseded_by": null,
           "stale": null,
+          "seen": 0,
+          "archived": null,
+          "archived_reason": null,
           "hasVector": true,
           "score": 0.015693221523441655,
           "sides": [
@@ -370,6 +400,9 @@
           "harmful": 0,
           "superseded_by": null,
           "stale": null,
+          "seen": 0,
+          "archived": null,
+          "archived_reason": null,
           "hasVector": true,
           "score": 0.015444122769101312,
           "sides": [
@@ -395,6 +428,9 @@
           "harmful": 0,
           "superseded_by": null,
           "stale": null,
+          "seen": 0,
+          "archived": null,
+          "archived_reason": null,
           "hasVector": true,
           "score": 0.015202808350834105,
           "sides": [
@@ -418,6 +454,9 @@
           "harmful": 0,
           "superseded_by": null,
           "stale": null,
+          "seen": 0,
+          "archived": null,
+          "archived_reason": null,
           "hasVector": true,
           "score": 0.015151515151515152,
           "sides": [
@@ -443,6 +482,9 @@
           "harmful": 0,
           "superseded_by": null,
           "stale": null,
+          "seen": 0,
+          "archived": null,
+          "archived_reason": null,
           "hasVector": false,
           "score": 0.015132431542169276,
           "sides": [
@@ -466,6 +508,9 @@
           "harmful": 0,
           "superseded_by": null,
           "stale": null,
+          "seen": 0,
+          "archived": null,
+          "archived_reason": null,
           "hasVector": true,
           "score": 0.014761364720034332,
           "sides": [
@@ -489,6 +534,9 @@
           "harmful": 0,
           "superseded_by": null,
           "stale": null,
+          "seen": 0,
+          "archived": null,
+          "archived_reason": null,
           "hasVector": true,
           "score": 0.01370393992187863,
           "sides": [
@@ -617,6 +665,9 @@
           "harmful": 0,
           "superseded_by": null,
           "stale": null,
+          "seen": 0,
+          "archived": null,
+          "archived_reason": null,
           "hasVector": true,
           "score": 0.023925731175083183,
           "sides": [
@@ -640,6 +691,9 @@
           "harmful": 0,
           "superseded_by": null,
           "stale": null,
+          "seen": 0,
+          "archived": null,
+          "archived_reason": null,
           "hasVector": true,
           "score": 0.02353983228516248,
           "sides": [
@@ -663,6 +717,9 @@
           "harmful": 0,
           "superseded_by": null,
           "stale": null,
+          "seen": 0,
+          "archived": null,
+          "archived_reason": null,
           "hasVector": true,
           "score": 0.022804212526251158,
           "sides": [
@@ -789,6 +846,9 @@
           "harmful": 0,
           "superseded_by": null,
           "stale": null,
+          "seen": 0,
+          "archived": null,
+          "archived_reason": null,
           "hasVector": true,
           "score": 0.015950487450055454,
           "sides": [
@@ -814,6 +874,9 @@
           "harmful": 0,
           "superseded_by": null,
           "stale": null,
+          "seen": 0,
+          "archived": null,
+          "archived_reason": null,
           "hasVector": true,
           "score": 0.015693221523441655,
           "sides": [
@@ -837,6 +900,9 @@
           "harmful": 0,
           "superseded_by": null,
           "stale": null,
+          "seen": 0,
+          "archived": null,
+          "archived_reason": null,
           "hasVector": true,
           "score": 0.015444122769101312,
           "sides": [
@@ -862,6 +928,9 @@
           "harmful": 0,
           "superseded_by": null,
           "stale": null,
+          "seen": 0,
+          "archived": null,
+          "archived_reason": null,
           "hasVector": true,
           "score": 0.015202808350834105,
           "sides": [
@@ -885,6 +954,9 @@
           "harmful": 0,
           "superseded_by": null,
           "stale": null,
+          "seen": 0,
+          "archived": null,
+          "archived_reason": null,
           "hasVector": true,
           "score": 0.015151515151515152,
           "sides": [
@@ -910,6 +982,9 @@
           "harmful": 0,
           "superseded_by": null,
           "stale": null,
+          "seen": 0,
+          "archived": null,
+          "archived_reason": null,
           "hasVector": false,
           "score": 0.015132431542169276,
           "sides": [
@@ -933,6 +1008,9 @@
           "harmful": 0,
           "superseded_by": null,
           "stale": null,
+          "seen": 0,
+          "archived": null,
+          "archived_reason": null,
           "hasVector": true,
           "score": 0.014761364720034332,
           "sides": [
@@ -956,6 +1034,9 @@
           "harmful": 0,
           "superseded_by": null,
           "stale": null,
+          "seen": 0,
+          "archived": null,
+          "archived_reason": null,
           "hasVector": true,
           "score": 0.013899710492191181,
           "sides": [
@@ -1186,6 +1267,9 @@
           "harmful": 0,
           "superseded_by": null,
           "stale": null,
+          "seen": 0,
+          "archived": null,
+          "archived_reason": null,
           "hasVector": true,
           "score": 0.9729797344533827,
           "sides": [
@@ -1210,6 +1294,9 @@
           "harmful": 0,
           "superseded_by": null,
           "stale": null,
+          "seen": 0,
+          "archived": null,
+          "archived_reason": null,
           "hasVector": true,
           "score": 0.9243307361318913,
           "sides": [
@@ -1235,6 +1322,9 @@
           "harmful": 0,
           "superseded_by": null,
           "stale": null,
+          "seen": 0,
+          "archived": null,
+          "archived_reason": null,
           "hasVector": true,
           "score": 0.8756817378103998,
           "sides": [
@@ -1261,6 +1351,9 @@
           "harmful": 0,
           "superseded_by": null,
           "stale": null,
+          "seen": 0,
+          "archived": null,
+          "archived_reason": null,
           "hasVector": true,
           "score": 0.8270327974830198,
           "sides": [
@@ -1285,6 +1378,9 @@
           "harmful": 0,
           "superseded_by": null,
           "stale": null,
+          "seen": 0,
+          "archived": null,
+          "archived_reason": null,
           "hasVector": true,
           "score": 0.7783837991615284,
           "sides": [
@@ -1309,6 +1405,9 @@
           "harmful": 0,
           "superseded_by": null,
           "stale": null,
+          "seen": 0,
+          "archived": null,
+          "archived_reason": null,
           "hasVector": true,
           "score": 0.6923079935796751,
           "sides": [
@@ -1333,6 +1432,9 @@
           "harmful": 0,
           "superseded_by": null,
           "stale": null,
+          "seen": 0,
+          "archived": null,
+          "archived_reason": null,
           "hasVector": true,
           "score": 0.6000000238418579,
           "sides": [
@@ -1357,6 +1459,9 @@
           "harmful": 0,
           "superseded_by": null,
           "stale": null,
+          "seen": 0,
+          "archived": null,
+          "archived_reason": null,
           "hasVector": true,
           "score": 0.48648986722669135,
           "sides": [
@@ -1486,6 +1591,9 @@
           "harmful": 0,
           "superseded_by": null,
           "stale": null,
+          "seen": 0,
+          "archived": null,
+          "archived_reason": null,
           "hasVector": true,
           "score": 0.9243307361318913,
           "sides": [
@@ -1511,6 +1619,9 @@
           "harmful": 0,
           "superseded_by": null,
           "stale": null,
+          "seen": 0,
+          "archived": null,
+          "archived_reason": null,
           "hasVector": true,
           "score": 0.8756817378103998,
           "sides": [
@@ -1537,6 +1648,9 @@
           "harmful": 0,
           "superseded_by": null,
           "stale": null,
+          "seen": 0,
+          "archived": null,
+          "archived_reason": null,
           "hasVector": true,
           "score": 0.8270327974830198,
           "sides": [
@@ -1561,6 +1675,9 @@
           "harmful": 0,
           "superseded_by": null,
           "stale": null,
+          "seen": 0,
+          "archived": null,
+          "archived_reason": null,
           "hasVector": true,
           "score": 0.7783837991615284,
           "sides": [
@@ -1585,6 +1702,9 @@
           "harmful": 0,
           "superseded_by": null,
           "stale": null,
+          "seen": 0,
+          "archived": null,
+          "archived_reason": null,
           "hasVector": true,
           "score": 0.6923079935796751,
           "sides": [
@@ -1609,6 +1729,9 @@
           "harmful": 0,
           "superseded_by": null,
           "stale": null,
+          "seen": 0,
+          "archived": null,
+          "archived_reason": null,
           "hasVector": true,
           "score": 0.6000000238418579,
           "sides": [
@@ -1633,6 +1756,9 @@
           "harmful": 0,
           "superseded_by": null,
           "stale": null,
+          "seen": 0,
+          "archived": null,
+          "archived_reason": null,
           "hasVector": true,
           "score": 0.48648986722669135,
           "sides": [
@@ -1659,6 +1785,9 @@
           "harmful": 0,
           "superseded_by": null,
           "stale": null,
+          "seen": 0,
+          "archived": null,
+          "archived_reason": null,
           "hasVector": false,
           "score": 0.015132431542169276,
           "sides": [
@@ -1787,6 +1916,9 @@
           "harmful": 0,
           "superseded_by": null,
           "stale": null,
+          "seen": 0,
+          "archived": null,
+          "archived_reason": null,
           "hasVector": true,
           "score": 0.9243307361318913,
           "sides": [
@@ -1812,6 +1944,9 @@
           "harmful": 0,
           "superseded_by": null,
           "stale": null,
+          "seen": 0,
+          "archived": null,
+          "archived_reason": null,
           "hasVector": true,
           "score": 0.8756817378103998,
           "sides": [
@@ -1941,6 +2076,9 @@
           "harmful": 0,
           "superseded_by": null,
           "stale": null,
+          "seen": 0,
+          "archived": null,
+          "archived_reason": null,
           "hasVector": true,
           "score": 0.9243307361318913,
           "sides": [
@@ -2069,6 +2207,9 @@
           "harmful": 0,
           "superseded_by": null,
           "stale": null,
+          "seen": 0,
+          "archived": null,
+          "archived_reason": null,
           "hasVector": true,
           "score": 1.4594696016800741,
           "sides": [
@@ -2093,6 +2234,9 @@
           "harmful": 0,
           "superseded_by": null,
           "stale": null,
+          "seen": 0,
+          "archived": null,
+          "archived_reason": null,
           "hasVector": true,
           "score": 1.386496104197837,
           "sides": [
@@ -2118,6 +2262,9 @@
           "harmful": 0,
           "superseded_by": null,
           "stale": null,
+          "seen": 0,
+          "archived": null,
+          "archived_reason": null,
           "hasVector": true,
           "score": 1.3135226067155998,
           "sides": [
@@ -2142,6 +2289,9 @@
           "harmful": 0,
           "superseded_by": null,
           "stale": null,
+          "seen": 0,
+          "archived": null,
+          "archived_reason": null,
           "hasVector": true,
           "score": 1.1675756987422927,
           "sides": [
@@ -2166,6 +2316,9 @@
           "harmful": 0,
           "superseded_by": null,
           "stale": null,
+          "seen": 0,
+          "archived": null,
+          "archived_reason": null,
           "hasVector": true,
           "score": 1.0384619903695127,
           "sides": [
@@ -2190,6 +2343,9 @@
           "harmful": 0,
           "superseded_by": null,
           "stale": null,
+          "seen": 0,
+          "archived": null,
+          "archived_reason": null,
           "hasVector": true,
           "score": 0.9000000357627869,
           "sides": [
@@ -2216,6 +2372,9 @@
           "harmful": 0,
           "superseded_by": null,
           "stale": null,
+          "seen": 0,
+          "archived": null,
+          "archived_reason": null,
           "hasVector": true,
           "score": 0.8270327974830198,
           "sides": [
@@ -2240,6 +2399,9 @@
           "harmful": 0,
           "superseded_by": null,
           "stale": null,
+          "seen": 0,
+          "archived": null,
+          "archived_reason": null,
           "hasVector": true,
           "score": 0.7297348008400371,
           "sides": [
@@ -2266,6 +2428,9 @@
           "harmful": 0,
           "superseded_by": null,
           "stale": null,
+          "seen": 0,
+          "archived": null,
+          "archived_reason": null,
           "hasVector": false,
           "score": 0.022698647313253915,
           "sides": [
@@ -2289,6 +2454,9 @@
           "harmful": 0,
           "superseded_by": null,
           "stale": null,
+          "seen": 0,
+          "archived": null,
+          "archived_reason": null,
           "hasVector": false,
           "score": 0.021151733357682233,
           "sides": [
@@ -2312,6 +2480,9 @@
           "harmful": 0,
           "superseded_by": null,
           "stale": null,
+          "seen": 0,
+          "archived": null,
+          "archived_reason": null,
           "hasVector": false,
           "score": 0.02009114270403158,
           "sides": [
@@ -2335,6 +2506,9 @@
           "harmful": 0,
           "superseded_by": null,
           "stale": null,
+          "seen": 0,
+          "archived": null,
+          "archived_reason": null,
           "hasVector": true,
           "score": 0.020555909882817948,
           "sides": [
@@ -2358,6 +2532,9 @@
           "harmful": 0,
           "superseded_by": null,
           "stale": null,
+          "seen": 0,
+          "archived": null,
+          "archived_reason": null,
           "hasVector": true,
           "score": 0.02027041113444547,
           "sides": [
@@ -2486,6 +2663,9 @@
           "harmful": 0,
           "superseded_by": null,
           "stale": null,
+          "seen": 0,
+          "archived": null,
+          "archived_reason": null,
           "hasVector": true,
           "score": 1.386496104197837,
           "sides": [
@@ -2511,6 +2691,9 @@
           "harmful": 0,
           "superseded_by": null,
           "stale": null,
+          "seen": 0,
+          "archived": null,
+          "archived_reason": null,
           "hasVector": true,
           "score": 1.3135226067155998,
           "sides": [
@@ -2535,6 +2718,9 @@
           "harmful": 0,
           "superseded_by": null,
           "stale": null,
+          "seen": 0,
+          "archived": null,
+          "archived_reason": null,
           "hasVector": true,
           "score": 1.1675756987422927,
           "sides": [
@@ -2559,6 +2745,9 @@
           "harmful": 0,
           "superseded_by": null,
           "stale": null,
+          "seen": 0,
+          "archived": null,
+          "archived_reason": null,
           "hasVector": true,
           "score": 1.0384619903695127,
           "sides": [
@@ -2583,6 +2772,9 @@
           "harmful": 0,
           "superseded_by": null,
           "stale": null,
+          "seen": 0,
+          "archived": null,
+          "archived_reason": null,
           "hasVector": true,
           "score": 0.9000000357627869,
           "sides": [
@@ -2712,6 +2904,9 @@
           "harmful": 0,
           "superseded_by": null,
           "stale": null,
+          "seen": 0,
+          "archived": null,
+          "archived_reason": null,
           "hasVector": true,
           "score": 0.48648986722669135,
           "sides": [
@@ -2736,6 +2931,9 @@
           "harmful": 0,
           "superseded_by": null,
           "stale": null,
+          "seen": 0,
+          "archived": null,
+          "archived_reason": null,
           "hasVector": true,
           "score": 0.4000000059604645,
           "sides": [
@@ -2760,6 +2958,9 @@
           "harmful": 0,
           "superseded_by": null,
           "stale": null,
+          "seen": 0,
+          "archived": null,
+          "archived_reason": null,
           "hasVector": true,
           "score": 0.29670344266262516,
           "sides": [
@@ -2784,6 +2985,9 @@
           "harmful": 0,
           "superseded_by": null,
           "stale": null,
+          "seen": 0,
+          "archived": null,
+          "archived_reason": null,
           "hasVector": true,
           "score": 0.1945959497903821,
           "sides": [
@@ -2810,6 +3014,9 @@
           "harmful": 0,
           "superseded_by": null,
           "stale": null,
+          "seen": 0,
+          "archived": null,
+          "archived_reason": null,
           "hasVector": true,
           "score": 0.14594696596741855,
           "sides": [
@@ -2836,6 +3043,9 @@
           "harmful": 0,
           "superseded_by": null,
           "stale": null,
+          "seen": 0,
+          "archived": null,
+          "archived_reason": null,
           "hasVector": true,
           "score": 0.09729797489519106,
           "sides": [
@@ -2860,6 +3070,9 @@
           "harmful": 0,
           "superseded_by": null,
           "stale": null,
+          "seen": 0,
+          "archived": null,
+          "archived_reason": null,
           "hasVector": true,
           "score": 0.04864898744759553,
           "sides": [
@@ -2883,6 +3096,9 @@
           "harmful": 0,
           "superseded_by": null,
           "stale": null,
+          "seen": 0,
+          "archived": null,
+          "archived_reason": null,
           "hasVector": true,
           "score": 0,
           "sides": [
@@ -2909,6 +3125,9 @@
           "harmful": 0,
           "superseded_by": null,
           "stale": null,
+          "seen": 0,
+          "archived": null,
+          "archived_reason": null,
           "hasVector": false,
           "score": 0.015132431542169276,
           "sides": [
@@ -2932,6 +3151,9 @@
           "harmful": 0,
           "superseded_by": null,
           "stale": null,
+          "seen": 0,
+          "archived": null,
+          "archived_reason": null,
           "hasVector": false,
           "score": 0.014101155571788156,
           "sides": [
@@ -2955,6 +3177,9 @@
           "harmful": 0,
           "superseded_by": null,
           "stale": null,
+          "seen": 0,
+          "archived": null,
+          "archived_reason": null,
           "hasVector": false,
           "score": 0.013394095136021052,
           "sides": [
@@ -2978,6 +3203,9 @@
           "harmful": 0,
           "superseded_by": null,
           "stale": null,
+          "seen": 0,
+          "archived": null,
+          "archived_reason": null,
           "hasVector": true,
           "score": 0.01370393992187863,
           "sides": [
@@ -3001,6 +3229,9 @@
           "harmful": 0,
           "superseded_by": null,
           "stale": null,
+          "seen": 0,
+          "archived": null,
+          "archived_reason": null,
           "hasVector": true,
           "score": 0.013513607422963647,
           "sides": [
@@ -3129,6 +3360,9 @@
           "harmful": 0,
           "superseded_by": null,
           "stale": null,
+          "seen": 0,
+          "archived": null,
+          "archived_reason": null,
           "hasVector": true,
           "score": 0.9729797344533827,
           "sides": [
@@ -3153,6 +3387,9 @@
           "harmful": 0,
           "superseded_by": null,
           "stale": null,
+          "seen": 0,
+          "archived": null,
+          "archived_reason": null,
           "hasVector": true,
           "score": 0.9243307361318913,
           "sides": [
@@ -3178,6 +3415,9 @@
           "harmful": 0,
           "superseded_by": null,
           "stale": null,
+          "seen": 0,
+          "archived": null,
+          "archived_reason": null,
           "hasVector": true,
           "score": 0.8756817378103998,
           "sides": [
@@ -3204,6 +3444,9 @@
           "harmful": 0,
           "superseded_by": null,
           "stale": null,
+          "seen": 0,
+          "archived": null,
+          "archived_reason": null,
           "hasVector": true,
           "score": 0.8270327974830198,
           "sides": [
@@ -3228,6 +3471,9 @@
           "harmful": 0,
           "superseded_by": null,
           "stale": null,
+          "seen": 0,
+          "archived": null,
+          "archived_reason": null,
           "hasVector": true,
           "score": 0.7783837991615284,
           "sides": [
@@ -3252,6 +3498,9 @@
           "harmful": 0,
           "superseded_by": null,
           "stale": null,
+          "seen": 0,
+          "archived": null,
+          "archived_reason": null,
           "hasVector": true,
           "score": 0.6923079935796751,
           "sides": [
@@ -3276,6 +3525,9 @@
           "harmful": 0,
           "superseded_by": null,
           "stale": null,
+          "seen": 0,
+          "archived": null,
+          "archived_reason": null,
           "hasVector": true,
           "score": 0.6000000238418579,
           "sides": [
@@ -3300,6 +3552,9 @@
           "harmful": 0,
           "superseded_by": null,
           "stale": null,
+          "seen": 0,
+          "archived": null,
+          "archived_reason": null,
           "hasVector": true,
           "score": 0.48648986722669135,
           "sides": [
@@ -3326,6 +3581,9 @@
           "harmful": 0,
           "superseded_by": null,
           "stale": null,
+          "seen": 0,
+          "archived": null,
+          "archived_reason": null,
           "hasVector": false,
           "score": 0.015132431542169276,
           "sides": [
@@ -3349,6 +3607,9 @@
           "harmful": 0,
           "superseded_by": null,
           "stale": null,
+          "seen": 0,
+          "archived": null,
+          "archived_reason": null,
           "hasVector": false,
           "score": 0.014101155571788156,
           "sides": [
@@ -3372,6 +3633,9 @@
           "harmful": 0,
           "superseded_by": null,
           "stale": null,
+          "seen": 0,
+          "archived": null,
+          "archived_reason": null,
           "hasVector": true,
           "score": 0.013899710492191181,
           "sides": [
@@ -3395,6 +3659,9 @@
           "harmful": 0,
           "superseded_by": null,
           "stale": null,
+          "seen": 0,
+          "archived": null,
+          "archived_reason": null,
           "hasVector": true,
           "score": 0.01370393992187863,
           "sides": [
@@ -3523,6 +3790,9 @@
           "harmful": 0,
           "superseded_by": null,
           "stale": null,
+          "seen": 0,
+          "archived": null,
+          "archived_reason": null,
           "hasVector": true,
           "score": 0.9729797344533827,
           "sides": [
@@ -3546,6 +3816,9 @@
           "harmful": 0,
           "superseded_by": null,
           "stale": null,
+          "seen": 0,
+          "archived": null,
+          "archived_reason": null,
           "hasVector": true,
           "score": 0.9243307361318913,
           "sides": [
@@ -3571,6 +3844,9 @@
           "harmful": 0,
           "superseded_by": null,
           "stale": null,
+          "seen": 0,
+          "archived": null,
+          "archived_reason": null,
           "hasVector": true,
           "score": 0.8756817378103998,
           "sides": [
@@ -3596,6 +3872,9 @@
           "harmful": 0,
           "superseded_by": null,
           "stale": null,
+          "seen": 0,
+          "archived": null,
+          "archived_reason": null,
           "hasVector": true,
           "score": 0.8270327974830198,
           "sides": [
@@ -3619,6 +3898,9 @@
           "harmful": 0,
           "superseded_by": null,
           "stale": null,
+          "seen": 0,
+          "archived": null,
+          "archived_reason": null,
           "hasVector": true,
           "score": 0.7783837991615284,
           "sides": [
@@ -3642,6 +3924,9 @@
           "harmful": 0,
           "superseded_by": null,
           "stale": null,
+          "seen": 0,
+          "archived": null,
+          "archived_reason": null,
           "hasVector": true,
           "score": 0.6923079935796751,
           "sides": [
@@ -3665,6 +3950,9 @@
           "harmful": 0,
           "superseded_by": null,
           "stale": null,
+          "seen": 0,
+          "archived": null,
+          "archived_reason": null,
           "hasVector": true,
           "score": 0.6000000238418579,
           "sides": [
@@ -3688,6 +3976,9 @@
           "harmful": 0,
           "superseded_by": null,
           "stale": null,
+          "seen": 0,
+          "archived": null,
+          "archived_reason": null,
           "hasVector": true,
           "score": 0.48648986722669135,
           "sides": [
@@ -3814,6 +4105,9 @@
           "harmful": 0,
           "superseded_by": null,
           "stale": null,
+          "seen": 0,
+          "archived": null,
+          "archived_reason": null,
           "hasVector": true,
           "score": 0.015950487450055454,
           "sides": [
@@ -3839,6 +4133,9 @@
           "harmful": 0,
           "superseded_by": null,
           "stale": null,
+          "seen": 0,
+          "archived": null,
+          "archived_reason": null,
           "hasVector": true,
           "score": 0.015693221523441655,
           "sides": [
@@ -3862,6 +4159,9 @@
           "harmful": 0,
           "superseded_by": null,
           "stale": null,
+          "seen": 0,
+          "archived": null,
+          "archived_reason": null,
           "hasVector": true,
           "score": 0.015444122769101312,
           "sides": [
@@ -3887,6 +4187,9 @@
           "harmful": 0,
           "superseded_by": null,
           "stale": null,
+          "seen": 0,
+          "archived": null,
+          "archived_reason": null,
           "hasVector": true,
           "score": 0.015202808350834105,
           "sides": [
@@ -3910,6 +4213,9 @@
           "harmful": 0,
           "superseded_by": null,
           "stale": null,
+          "seen": 0,
+          "archived": null,
+          "archived_reason": null,
           "hasVector": true,
           "score": 0.015151515151515152,
           "sides": [
@@ -3935,6 +4241,9 @@
           "harmful": 0,
           "superseded_by": null,
           "stale": null,
+          "seen": 0,
+          "archived": null,
+          "archived_reason": null,
           "hasVector": false,
           "score": 0.015132431542169276,
           "sides": [
@@ -3958,6 +4267,9 @@
           "harmful": 0,
           "superseded_by": null,
           "stale": null,
+          "seen": 0,
+          "archived": null,
+          "archived_reason": null,
           "hasVector": true,
           "score": 0.014761364720034332,
           "sides": [
@@ -3981,6 +4293,9 @@
           "harmful": 0,
           "superseded_by": null,
           "stale": null,
+          "seen": 0,
+          "archived": null,
+          "archived_reason": null,
           "hasVector": true,
           "score": 0.01370393992187863,
           "sides": [
@@ -4107,6 +4422,9 @@
           "harmful": 0,
           "superseded_by": null,
           "stale": null,
+          "seen": 0,
+          "archived": null,
+          "archived_reason": null,
           "hasVector": true,
           "score": 0.015950487450055454,
           "sides": [
@@ -4132,6 +4450,9 @@
           "harmful": 0,
           "superseded_by": null,
           "stale": null,
+          "seen": 0,
+          "archived": null,
+          "archived_reason": null,
           "hasVector": true,
           "score": 0.015693221523441655,
           "sides": [
@@ -4155,6 +4476,9 @@
           "harmful": 0,
           "superseded_by": null,
           "stale": null,
+          "seen": 0,
+          "archived": null,
+          "archived_reason": null,
           "hasVector": true,
           "score": 0.015444122769101312,
           "sides": [
@@ -4180,6 +4504,9 @@
           "harmful": 0,
           "superseded_by": null,
           "stale": null,
+          "seen": 0,
+          "archived": null,
+          "archived_reason": null,
           "hasVector": true,
           "score": 0.015202808350834105,
           "sides": [
@@ -4203,6 +4530,9 @@
           "harmful": 0,
           "superseded_by": null,
           "stale": null,
+          "seen": 0,
+          "archived": null,
+          "archived_reason": null,
           "hasVector": true,
           "score": 0.015151515151515152,
           "sides": [
@@ -4228,6 +4558,9 @@
           "harmful": 0,
           "superseded_by": null,
           "stale": null,
+          "seen": 0,
+          "archived": null,
+          "archived_reason": null,
           "hasVector": false,
           "score": 0.015132431542169276,
           "sides": [
@@ -4251,6 +4584,9 @@
           "harmful": 0,
           "superseded_by": null,
           "stale": null,
+          "seen": 0,
+          "archived": null,
+          "archived_reason": null,
           "hasVector": true,
           "score": 0.014761364720034332,
           "sides": [
@@ -4274,6 +4610,9 @@
           "harmful": 0,
           "superseded_by": null,
           "stale": null,
+          "seen": 0,
+          "archived": null,
+          "archived_reason": null,
           "hasVector": true,
           "score": 0.01370393992187863,
           "sides": [
@@ -4400,6 +4739,9 @@
           "harmful": 0,
           "superseded_by": null,
           "stale": null,
+          "seen": 0,
+          "archived": null,
+          "archived_reason": null,
           "hasVector": true,
           "score": 0.015950487450055454,
           "sides": [
@@ -4425,6 +4767,9 @@
           "harmful": 0,
           "superseded_by": null,
           "stale": null,
+          "seen": 0,
+          "archived": null,
+          "archived_reason": null,
           "hasVector": true,
           "score": 0.015693221523441655,
           "sides": [
@@ -4448,6 +4793,9 @@
           "harmful": 0,
           "superseded_by": null,
           "stale": null,
+          "seen": 0,
+          "archived": null,
+          "archived_reason": null,
           "hasVector": true,
           "score": 0.015444122769101312,
           "sides": [
@@ -4473,6 +4821,9 @@
           "harmful": 0,
           "superseded_by": null,
           "stale": null,
+          "seen": 0,
+          "archived": null,
+          "archived_reason": null,
           "hasVector": true,
           "score": 0.015202808350834105,
           "sides": [
@@ -4496,6 +4847,9 @@
           "harmful": 0,
           "superseded_by": null,
           "stale": null,
+          "seen": 0,
+          "archived": null,
+          "archived_reason": null,
           "hasVector": true,
           "score": 0.015151515151515152,
           "sides": [
@@ -4521,6 +4875,9 @@
           "harmful": 0,
           "superseded_by": null,
           "stale": null,
+          "seen": 0,
+          "archived": null,
+          "archived_reason": null,
           "hasVector": false,
           "score": 0.015132431542169276,
           "sides": [
@@ -4544,6 +4901,9 @@
           "harmful": 0,
           "superseded_by": null,
           "stale": null,
+          "seen": 0,
+          "archived": null,
+          "archived_reason": null,
           "hasVector": true,
           "score": 0.014761364720034332,
           "sides": [
@@ -4567,6 +4927,9 @@
           "harmful": 0,
           "superseded_by": null,
           "stale": null,
+          "seen": 0,
+          "archived": null,
+          "archived_reason": null,
           "hasVector": true,
           "score": 0.01370393992187863,
           "sides": [
@@ -4693,6 +5056,9 @@
           "harmful": 0,
           "superseded_by": null,
           "stale": null,
+          "seen": 0,
+          "archived": null,
+          "archived_reason": null,
           "hasVector": false,
           "score": 0.015950487450055454,
           "sides": [
@@ -4716,6 +5082,9 @@
           "harmful": 0,
           "superseded_by": null,
           "stale": null,
+          "seen": 0,
+          "archived": null,
+          "archived_reason": null,
           "hasVector": false,
           "score": 0.015693221523441655,
           "sides": [
@@ -4772,6 +5141,9 @@
           "harmful": 0,
           "superseded_by": null,
           "stale": null,
+          "seen": 0,
+          "archived": null,
+          "archived_reason": null,
           "hasVector": false,
           "score": 0.015950487450055454,
           "sides": [
@@ -4795,6 +5167,9 @@
           "harmful": 0,
           "superseded_by": null,
           "stale": null,
+          "seen": 0,
+          "archived": null,
+          "archived_reason": null,
           "hasVector": false,
           "score": 0.015693221523441655,
           "sides": [
@@ -4851,6 +5226,9 @@
           "harmful": 0,
           "superseded_by": null,
           "stale": null,
+          "seen": 0,
+          "archived": null,
+          "archived_reason": null,
           "hasVector": false,
           "score": 0.015950487450055454,
           "sides": [
@@ -4874,6 +5252,9 @@
           "harmful": 0,
           "superseded_by": null,
           "stale": null,
+          "seen": 0,
+          "archived": null,
+          "archived_reason": null,
           "hasVector": false,
           "score": 0.015693221523441655,
           "sides": [
@@ -4930,6 +5311,9 @@
           "harmful": 0,
           "superseded_by": null,
           "stale": null,
+          "seen": 0,
+          "archived": null,
+          "archived_reason": null,
           "hasVector": false,
           "score": 0.015950487450055454,
           "sides": [
@@ -4953,6 +5337,9 @@
           "harmful": 0,
           "superseded_by": null,
           "stale": null,
+          "seen": 0,
+          "archived": null,
+          "archived_reason": null,
           "hasVector": false,
           "score": 0.015693221523441655,
           "sides": [
@@ -5004,6 +5391,9 @@
           "harmful": 0,
           "superseded_by": null,
           "stale": null,
+          "seen": 0,
+          "archived": null,
+          "archived_reason": null,
           "hasVector": false,
           "score": 0.015950487450055454,
           "sides": [
@@ -5027,6 +5417,9 @@
           "harmful": 0,
           "superseded_by": null,
           "stale": null,
+          "seen": 0,
+          "archived": null,
+          "archived_reason": null,
           "hasVector": false,
           "score": 0.015693221523441655,
           "sides": [
@@ -5078,6 +5471,9 @@
           "harmful": 0,
           "superseded_by": null,
           "stale": null,
+          "seen": 0,
+          "archived": null,
+          "archived_reason": null,
           "hasVector": false,
           "score": 0.015950487450055454,
           "sides": [
@@ -5101,6 +5497,9 @@
           "harmful": 0,
           "superseded_by": null,
           "stale": null,
+          "seen": 0,
+          "archived": null,
+          "archived_reason": null,
           "hasVector": false,
           "score": 0.015693221523441655,
           "sides": [
@@ -5162,6 +5561,9 @@
           "harmful": 0,
           "superseded_by": null,
           "stale": null,
+          "seen": 0,
+          "archived": null,
+          "archived_reason": null,
           "hasVector": false,
           "score": 0.015950487450055454,
           "sides": [
@@ -5185,6 +5587,9 @@
           "harmful": 0,
           "superseded_by": null,
           "stale": null,
+          "seen": 0,
+          "archived": null,
+          "archived_reason": null,
           "hasVector": false,
           "score": 0.015693221523441655,
           "sides": [
@@ -5246,6 +5651,9 @@
           "harmful": 0,
           "superseded_by": null,
           "stale": null,
+          "seen": 0,
+          "archived": null,
+          "archived_reason": null,
           "hasVector": false,
           "score": 0.015950487450055454,
           "sides": [
@@ -5269,6 +5677,9 @@
           "harmful": 0,
           "superseded_by": null,
           "stale": null,
+          "seen": 0,
+          "archived": null,
+          "archived_reason": null,
           "hasVector": false,
           "score": 0.015693221523441655,
           "sides": [

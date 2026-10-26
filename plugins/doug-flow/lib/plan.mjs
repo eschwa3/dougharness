@@ -576,6 +576,46 @@ export function validatePlan(plan) {
       }
     });
   }
+  errors.push(...signatureErrors(plan));
+  return errors;
+}
+
+// Card planner-keeps-stated-signatures (2026-10-23, ts-orders swarm-skill): a signature the goal or an acceptance
+// line quotes in backticks (`name(...)...`) must reach every task spec that quotes the same name, character for
+// character after an optional `export `, `async `, `function ` prefix. Two different signatures for one name are
+// rejected, never guessed between. Non-string goal, spec, and acceptance entries are skipped.
+function signatureErrors(plan) {
+  const spans = (s) => (typeof s === "string" ? [...s.matchAll(/`([^`\n]+)`/g)].map((m) => m[1].trim()) : []);
+  const strip = (s) => s.replace(/^export\s+/, "").replace(/^async\s+/, "").replace(/^function\s+/, "").replace(/\s*;\s*$/, "").trim();
+  // A stated signature is a call form that carries a return type (its last `)` is followed by `:`); an untyped call
+  // is an example, never compared.
+  const nameOf = (s) => (/\)\s*:/.test(s.slice(s.lastIndexOf(")"))) ? /^([A-Za-z_$][\w$]*)\(/.exec(s)?.[1] : undefined);
+  const texts = [plan.goal, ...(Array.isArray(plan.acceptance) ? plan.acceptance.map((a) => (a && typeof a === "object" ? a.text : a)) : [])];
+  const stated = new Map(); // name -> signatures (distinct)
+  for (const text of texts) {
+    for (const span of spans(text)) {
+      const sig = strip(span);
+      const name = nameOf(sig);
+      if (!name) continue;
+      if (!stated.has(name)) stated.set(name, []);
+      if (!stated.get(name).includes(sig)) stated.get(name).push(sig);
+    }
+  }
+  const errors = [];
+  for (const [name, sigs] of stated) {
+    if (sigs.length > 1) errors.push(`the goal and acceptance state ${name} two ways, ${sigs.map((s) => `\`${s}\``).join(" and ")}: a stated signature reaches the plan verbatim, so state one`);
+  }
+  if (!Array.isArray(plan.tasks)) return errors;
+  for (const t of plan.tasks) {
+    if (!t || typeof t !== "object") continue;
+    for (const span of spans(t.spec)) {
+      const sig = strip(span);
+      const name = nameOf(sig);
+      const want = name && stated.get(name);
+      if (!want || want.length !== 1 || want[0] === sig) continue;
+      errors.push(`task ${t.id} spec states \`${sig}\` but the plan states \`${want[0]}\`: a stated signature reaches the task spec verbatim`);
+    }
+  }
   return errors;
 }
 

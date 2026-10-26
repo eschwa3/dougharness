@@ -23,10 +23,11 @@
 //   autopilot.mjs end
 // --dir <d> names the project (default cwd). Exit 0 done; 1 no run or unknown card; 2 bad usage.
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { loadModels } from "../lib/models.mjs";
 import { AUTOPILOT_FILE, STEPS, clearable, readAutopilot } from "../lib/autopilot-view.mjs";
 import { contextThreshold } from "../lib/context.mjs";
@@ -34,6 +35,7 @@ import { classifyNotification, pickCards, queenLabel, renameQueenMeta, workersMa
 import { nextReadyCards } from "../lib/board.mjs";
 import { SEATS } from "../lib/card-loop.mjs";
 import { planFor, reportPathFor } from "../lib/plan.mjs";
+import { readMemoryConfig, readMemoryStaleDays } from "../lib/embeddings.mjs";
 
 const argv = process.argv.slice(2);
 const opts = {};
@@ -482,6 +484,165 @@ switch (cmd) {
             process.stderr.write(`autopilot: warning: cannot write ${noteDest}: ${e.code || e.message}\n`);
           }
         }
+      }
+    }
+    if (kind === "hand" && parsed !== null) {
+      const rep = parsed.report ?? parsed;
+      if (rep && typeof rep === "object" && rep.outcome === "stopped") {
+        try {
+          const mem = await import("../lib/memory.mjs");
+          const written = JSON.stringify(rep, null, 2) + "\n";
+          const readOr = (p) => {
+            try {
+              return readFileSync(p, "utf8");
+            } catch {
+              return "";
+            }
+          };
+          const ids = mem.runAgentIds((Array.isArray(c.journals) ? c.journals : []).map(readOr));
+          const blocks = mem.attributeBlocks(readOr(join(dir, ".doug/.state/blocks.jsonl")), ids);
+          let condition = null;
+          try {
+            const parsedCondition = JSON.parse(readFileSync(join(dir, ".doug/.state/reports", c.id, "condition.json"), "utf8"));
+            if (parsedCondition && typeof parsedCondition === "object" && !Array.isArray(parsedCondition)) condition = parsedCondition;
+          } catch {
+            condition = null;
+          }
+          const row = mem.stopOutcomeRow({
+            card: c.id,
+            report: rep,
+            reportHash: createHash("sha256").update(written).digest("hex"),
+            reportPath: join(dir, ".doug/.state/reports", c.id, "card-report.json"),
+            run,
+            blocks,
+            condition,
+          });
+          const m = mem.openMemory(dir);
+          try {
+            mem.recordOutcomes(m, [row]);
+          } finally {
+            m.close();
+          }
+        } catch (e) {
+          process.stderr.write(`autopilot: warning: cannot record the stop row for ${c.id}: ${e.message || e}\n`);
+        }
+      }
+    }
+    if (kind === "hand" && parsed !== null) {
+      try {
+        const mem = await import("../lib/memory.mjs");
+        const rep = parsed.report ?? parsed;
+        const readOr = (p) => {
+          try {
+            return readFileSync(p, "utf8");
+          } catch {
+            return "";
+          }
+        };
+        const sid = process.env.CLAUDE_CODE_SESSION_ID;
+        const jp = journalPath(run);
+        const journalText = jp ? readOr(jp) : "";
+        let queenArgs = null;
+        try {
+          queenArgs = JSON.parse(readFileSync(join(dir, ".doug/.state/reports", c.id, "queen-args.json"), "utf8"));
+        } catch {
+          // no saved args: no briefs
+        }
+        const seatRuns = mem.journalSeatRuns(journalText);
+        const briefs = mem.replayBriefs(queenArgs, seatRuns);
+        const ids = mem.runAgentIds([journalText]);
+        const blocks = mem.attributeBlocks(readOr(join(dir, ".doug/.state/blocks.jsonl")), ids);
+        const denials = mem.attributeDenials(sid ? readOr(join(dir, ".doug/.state/trace", `${sid.replace(/[^A-Za-z0-9_.-]/g, "_")}.jsonl`)) : "", ids);
+        const scan = await mem.historyScanner(dir);
+        const entries = [{ kind: "report", source: "card-report.json", value: rep }];
+        for (const b of blocks) entries.push({ kind: "block", source: "blocks.jsonl", value: b });
+        for (const d of denials) entries.push({ kind: "denial", source: "trace", value: d });
+        seatRuns.forEach((r, i) => {
+          if (briefs[i] !== null) entries.push({ kind: "brief", seat: r.seat, round: r.round, source: "replay:card-loop.mjs", value: briefs[i] });
+          entries.push({ kind: "hand-back", seat: r.seat, round: r.round, source: "journal.jsonl", value: r.result });
+        });
+        mem.writeRunHistory(dir, { card: c.id, run, entries, scan });
+      } catch (e) {
+        process.stderr.write(`autopilot: warning: cannot write the run history for ${c.id}: ${e.message || e}\n`);
+      }
+    }
+    if (kind === "flow" && parsed !== null && typeof parsed === "object" && !Array.isArray(parsed) && parsed.ok === false && !parsed.paused) {
+      try {
+        const mem = await import("../lib/memory.mjs");
+        const readOr = (p) => {
+          try {
+            return readFileSync(p, "utf8");
+          } catch {
+            return "";
+          }
+        };
+        const written = JSON.stringify(parsed, null, 2) + "\n";
+        const ids = mem.runAgentIds((Array.isArray(c.journals) ? c.journals : []).map(readOr));
+        const blocks = mem.attributeBlocks(readOr(join(dir, ".doug/.state/blocks.jsonl")), ids);
+        const levels = Array.isArray(parsed.levels) ? parsed.levels : [];
+        let stopClass = null;
+        let stopReason = null;
+        for (const lv of levels) {
+          const t = (Array.isArray(lv?.tasks) ? lv.tasks : []).find((x) => x && typeof x.stopReason === "string" && x.stopReason.trim() !== "");
+          if (t) {
+            stopClass = t.stopClass ?? null;
+            stopReason = t.stopReason;
+            break;
+          }
+        }
+        if (stopReason === null) {
+          stopReason = "the run stopped";
+          if (parsed.stoppedAtLevel !== undefined && parsed.stoppedAtLevel !== null) {
+            stopReason += ` at level ${parsed.stoppedAtLevel}`;
+            const lv = levels.find((x) => x && x.index === parsed.stoppedAtLevel) ?? levels[parsed.stoppedAtLevel];
+            const why = lv?.integration?.reason;
+            if (typeof why === "string" && why.trim() !== "") stopReason += `: ${why}`;
+          }
+        }
+        const row = {
+          ...mem.stopOutcomeRow({
+            card: c.id,
+            report: { outcome: "stopped", reason: stopClass, detail: stopReason },
+            reportHash: createHash("sha256").update(written).digest("hex"),
+            reportPath: join(dir, reportPathFor(c.id)),
+            run,
+            blocks,
+            memoryConfig: mem.memoryConfig({ embeddings: readMemoryConfig(dir).embeddings, staleDays: readMemoryStaleDays(dir), track: "flow" }),
+          }),
+          track: "flow",
+        };
+        const m = mem.openMemory(dir);
+        try {
+          mem.recordOutcomes(m, [row]);
+        } finally {
+          m.close();
+        }
+      } catch (e) {
+        process.stderr.write(`autopilot: warning: cannot record the stop row for ${c.id}: ${e.message || e}\n`);
+      }
+    }
+    if (kind === "flow" && parsed !== null && typeof parsed === "object" && !Array.isArray(parsed) && (parsed.ok === true || parsed.ok === false) && !parsed.paused) {
+      try {
+        const mem = await import("../lib/memory.mjs");
+        const readOr = (p) => {
+          try {
+            return readFileSync(p, "utf8");
+          } catch {
+            return "";
+          }
+        };
+        const sid = process.env.CLAUDE_CODE_SESSION_ID;
+        const jp = journalPath(run);
+        const ids = mem.runAgentIds([jp ? readOr(jp) : ""]);
+        const blocks = mem.attributeBlocks(readOr(join(dir, ".doug/.state/blocks.jsonl")), ids);
+        const denials = mem.attributeDenials(sid ? readOr(join(dir, ".doug/.state/trace", `${sid.replace(/[^A-Za-z0-9_.-]/g, "_")}.jsonl`)) : "", ids);
+        const scan = await mem.historyScanner(dir);
+        const entries = [{ kind: "report", source: "last-report.json", value: parsed }];
+        for (const b of blocks) entries.push({ kind: "block", source: "blocks.jsonl", value: b });
+        for (const d of denials) entries.push({ kind: "denial", source: "trace", value: d });
+        mem.writeRunHistory(dir, { card: c.id, run, entries, scan });
+      } catch (e) {
+        process.stderr.write(`autopilot: warning: cannot write the run history for ${c.id}: ${e.message || e}\n`);
       }
     }
     const v = classifyNotification(kind, { status: "completed", result: parsed === null ? text : parsed });

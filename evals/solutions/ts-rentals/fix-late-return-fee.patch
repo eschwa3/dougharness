@@ -1,0 +1,41 @@
+diff --git a/src/pricing/late-fees.ts b/src/pricing/late-fees.ts
+index d737627..d4398f2 100644
+--- a/src/pricing/late-fees.ts
++++ b/src/pricing/late-fees.ts
+@@ -7,9 +7,9 @@ import type { Cents } from "../util/money.js";
+ /** A late day costs this percentage of the day rate. */
+ export const LATE_FEE_PERCENT = 150;
+ 
+-/** How many late days a return costs, given the due day and the day the item came back. */
++/** How many late days a return costs: none on the due day or before, then one per day after it. */
+ export function lateDays(due: Day, returned: Day): number {
+-  return Math.max(0, daysBetween(due, returned) + 1);
++  return Math.max(0, daysBetween(due, returned));
+ }
+ 
+ /** The fee for a number of late days. */
+diff --git a/tests/pricing.test.ts b/tests/pricing.test.ts
+index a66c5c3..45c6043 100644
+--- a/tests/pricing.test.ts
++++ b/tests/pricing.test.ts
+@@ -63,6 +63,20 @@ describe("late fees", () => {
+   });
+ });
+ 
++describe("late days", () => {
++  it("charges nothing for a return on the due day", () => {
++    expect(lateDays("2025-03-13", "2025-03-13")).toBe(0);
++    expect(lateFeeCents(drill, "2025-03-13", "2025-03-13")).toBe(0);
++  });
++  it("charges one late day for a return the day after the due day", () => {
++    expect(lateDays("2025-03-13", "2025-03-14")).toBe(1);
++    expect(lateFeeCents(drill, "2025-03-13", "2025-03-14")).toBe(2250);
++  });
++  it("charges three late days for a return three days after the due day", () => {
++    expect(lateDays("2025-03-13", "2025-03-16")).toBe(3);
++  });
++});
++
+ describe("more pricing", () => {
+   it("prices every seeded item for one day at its day rate", () => {
+     for (const item of seedCatalog()) expect(rentalCostCents(item, 1)).toBe(item.dayRateCents);

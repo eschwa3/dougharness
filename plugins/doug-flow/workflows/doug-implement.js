@@ -3,7 +3,7 @@ export const meta = {
   description: 'Implement an approved Doug plan: one implementer per task in its own worktree, then verify, review, and integrate',
   whenToUse: 'After /doug-plan produced .doug/plan.json and the user approved it with /doug-approve. Pass the plan JSON as args.',
   phases: [
-    { title: 'Implement', detail: 'one implementer per task, fresh context, own worktree (with swarm on, a lead splits a full-shape task into worker briefs, workers implement them in parallel, and the lead merges); a task marked reuse checks out its recorded branch instead; a task whose dependency did not integrate is never launched; a block the checks can describe is fixed in place until the task budget, the fix-attempt ceiling, a pass that made no new commit, or two consecutive passes raising a new blocker stops it' },
+    { title: 'Implement', detail: 'one implementer per task, fresh context, own worktree (with swarm on, a lead splits a full-shape task into worker briefs, workers implement them in parallel, and the lead merges); a task marked reuse rebuilds the own commits of its recorded branch on the current base instead; a task whose dependency did not integrate is never launched; a block the checks can describe is fixed in place until the task budget, the fix-attempt ceiling, a pass that made no new commit, or two consecutive passes raising a new blocker stops it' },
     { title: 'Verify', detail: 'a separate verifier runs the task command in the worktree on the first pass; a fix pass runs one focused check over the fix delta instead, and the full verifier again only when the verifier is the stage that blocked; a task whose crew names more testers gets extra verifiers in parallel' },
     { title: 'Review', detail: 'spec compliance, then quality, against the diff on the first pass; on a fix pass the focused check carries scope and regression risk unless the reviewer is the stage that blocked; a task whose crew names two reviewers gets a second one in parallel with a distinct brief' },
     { title: 'Adversary', detail: 'codex-review (a different model, read-only) explores freely on the first pass and confirms the open findings on later passes, under one material blocker gate; when it cannot run, a Claude adversary on plan.adversary.fallback stands in; blockers stop integration' },
@@ -117,7 +117,7 @@ const roleModels = (plan.models && plan.models.roles) || {}
 // The adversary row may name "codex": the review runs on Codex (plan.adversary.command) and the Claude agent
 // that launches it and relays the verdict is only a relay, so it runs on haiku. `relay` is that agent's model.
 const ADVERSARY_RELAY_MODEL = 'haiku'
-// Checking out a reused branch is mechanical, so it runs on the same small model as the adversary relay.
+// Rebuilding a reused branch is a scripted run of listed git commands, so it runs on the same small model as the adversary relay.
 const CHECKOUT_MODEL = ADVERSARY_RELAY_MODEL
 // The fix-loop supervisor (card fix-loop-supervisor) runs on the `cheap` tier of the Models table; a table without
 // one puts it on the relay model, since reading a task's passes and writing a brief is small work.
@@ -706,6 +706,10 @@ function droppedWhy(f, task) {
 // Applies one pass to the ledger, stage by stage in the order the stages ran, and returns the ids that opened,
 // were confirmed fixed, and came back. A stage confirms an open entry by running and not reporting it: its own
 // stage, the focused check, and the confirmation adversary all count, and only on a pass that made a new commit.
+function explicitMinor(f) {
+  return ['minor', 'nit', 'note'].includes(String(f.severity == null ? '' : f.severity).trim().toLowerCase())
+}
+
 function updateLedger(ledger, r, pass, newCommit) {
   const opened = []
   const fixed = []
@@ -734,7 +738,7 @@ function updateLedger(ledger, r, pass, newCommit) {
         if (e.status !== 'open' || e.openedPass === pass || touched.has(e.id)) continue
         const covers = e.stage === stage || stage === 'check' || (stage === 'adversary' && pass > 1)
         if (!covers) continue
-        if (reReports.some(f => matchFinding(ledger, f) === e)) continue
+        if (reReports.some(f => !explicitMinor(f) && matchFinding(ledger, f) === e)) continue
         e.status = 'fixed'
         e.fixedPass = pass
         e.fixedCommit = r.commit || null
@@ -745,6 +749,10 @@ function updateLedger(ledger, r, pass, newCommit) {
     for (const f of reReports) {
       const entry = matchFinding(ledger, f)
       if (entry) {
+        // Card stall-on-repeat-minor (2026-10-25 decision, run wf_d9199b24-d9e): a re-report whose severity is
+        // explicitly minor/nit/note neither reopens a fixed entry nor keeps an open one open. Free text and
+        // blocker/major re-reports (and severity-less ones) still do.
+        if (explicitMinor(f)) continue
         touched.add(entry.id)
         if (f.evidence) entry.evidence = f.evidence
         if (entry.status === 'fixed') {
@@ -848,7 +856,7 @@ function implementPrompt(task, baseBranch, opts) {
     `Task ${task.id}: ${task.title}`,
     `Spec:`,
     task.spec,
-    ...(typeof task.lessons === 'string' && task.lessons ? ['', `Lessons from earlier runs on this repository (memory; each cites where it was learned):`, String(task.lessons).slice(0, 2000)] : []),
+    ...(typeof task.lessons === 'string' && task.lessons ? ['', `Lessons from earlier runs on this repository (memory; each cites where it was learned):`, String(task.lessons)] : []),
     ...(typeof task.codeContext === 'string' && task.codeContext ? ['', `Code the semantic index found relevant to this task (path:lines; read these first, they are not the files you own):`, String(task.codeContext).slice(0, 2000)] : []),
     ``,
     `Files you own (you may create or edit ONLY these): ${task.files.join(', ')}`,
@@ -876,11 +884,17 @@ function reusePrompt(task, baseBranch) {
     `Files the task owns: ${task.files.join(', ')}`,
     ``,
     `Steps, all inside your own worktree:`,
-    `1. git checkout ${task.reuse}. If git refuses because the branch is checked out in another worktree, that worktree is a leftover of the earlier pass under .claude/worktrees: find it with git worktree list --porcelain, remove it with git worktree remove --force <path>, and check out again.`,
+    `1. Put ${task.reuse} on the current base ${baseBranch}, because the earlier pass may have been cut from an integration branch that no longer exists. If any git checkout below refuses because the branch is checked out in another worktree, that worktree is a leftover of the earlier pass under .claude/worktrees: find it with git worktree list --porcelain, remove it with git worktree remove --force <path>, and run the checkout again.`,
+    `   a. List the branch's own commits: git log --no-merges --reverse --format=%H ${baseBranch}..${task.reuse}`,
+    `   b. For each, read its files with git show --name-only --format= <sha>. A commit with no files is dropped. A commit touching only files the task does not own belongs to another task: drop it. A commit touching both files the task owns and files it does not own means the branch carries work the task does not own: change nothing and return blocked=true with a reason naming the commit and the file. A commit touching only owned files is kept.`,
+    `   Then run git merge-base --is-ancestor ${baseBranch} ${task.reuse}. If it fails with exit 128 (the branch or the base does not exist), return blocked=true naming the missing one. When it exits 0 and step b kept every listed commit, the branch already sits on the current base: just git checkout ${task.reuse} and go to step 2. Otherwise rebuild it:`,
+    `   c. git checkout --detach ${baseBranch}`,
+    `   d. git cherry-pick -x each kept commit, in order. When a pick is empty because the base already has the change, run git cherry-pick --skip. On a conflict, run git cherry-pick --abort and return blocked=true with a reason naming the commit and the conflicting files (the branch ref was never moved, so the reviewed work stays intact).`,
+    `   e. git checkout -B ${task.reuse} to point the branch at the rebuilt HEAD (no base argument).`,
     plan.install
       ? `2. Run the project's install command (${plan.install}) before the checks run. Installing is not a file change; do not commit anything it changes. Should you commit at all, ${NO_TRAILERS}`
       : `2. If the task's verification command needs dependencies, run the project's install command. Installing is not a file change; do not commit anything it changes. Should you commit at all, ${NO_TRAILERS}`,
-    `3. Return taskId="${task.id}", branch="${task.reuse}", worktreePath = the absolute path of your worktree (git rev-parse --show-toplevel), filesTouched = the output of git diff --name-only ${baseBranch}...HEAD, commandsRun with real exit statuses, commit = the output of git rev-parse HEAD, summary "reused ${task.reuse} at <commit>", blocked=false. Report blocked=true with the reason only if the branch does not exist or cannot be checked out.`,
+    `3. Return taskId="${task.id}", branch="${task.reuse}", worktreePath = the absolute path of your worktree (git rev-parse --show-toplevel), filesTouched = the output of git diff --name-only ${baseBranch}...HEAD, commandsRun with real exit statuses, commit = the output of git rev-parse HEAD, summary "reused ${task.reuse} at <commit>", blocked=false. Report blocked=true with the reason only if the branch does not exist, cannot be checked out, or step 1 told you to.`,
   ].join('\n')
 }
 
@@ -902,7 +916,7 @@ function leadPrompt(task, baseBranch, opts) {
     `Task ${task.id}: ${task.title}`,
     `Spec:`,
     task.spec,
-    ...(typeof task.lessons === 'string' && task.lessons ? ['', `Lessons from earlier runs on this repository (memory; each cites where it was learned):`, String(task.lessons).slice(0, 2000)] : []),
+    ...(typeof task.lessons === 'string' && task.lessons ? ['', `Lessons from earlier runs on this repository (memory; each cites where it was learned):`, String(task.lessons)] : []),
     ...(typeof task.codeContext === 'string' && task.codeContext ? ['', `Code the semantic index found relevant to this task (path:lines; read these first, they are not the files you own):`, String(task.codeContext).slice(0, 2000)] : []),
     ``,
     `Files the task owns: ${task.files.join(', ')}`,
@@ -937,7 +951,7 @@ function workerPrompt(task, brief, n, lead) {
     `Brief ${brief.id}: ${brief.title}`,
     `Spec:`,
     brief.spec,
-    ...(typeof task.lessons === 'string' && task.lessons ? ['', `Lessons from earlier runs on this repository (memory; each cites where it was learned):`, String(task.lessons).slice(0, 2000)] : []),
+    ...(typeof task.lessons === 'string' && task.lessons ? ['', `Lessons from earlier runs on this repository (memory; each cites where it was learned):`, String(task.lessons)] : []),
     ...(typeof task.codeContext === 'string' && task.codeContext ? ['', `Code the semantic index found relevant to this task (path:lines; read these first, they are not the files you own):`, String(task.codeContext).slice(0, 2000)] : []),
     ...(typeof lead.interfaces === 'string' && lead.interfaces ? ['', `Interfaces the briefs export or consume (the lead's design; conform to it, do not redesign it):`, lead.interfaces.slice(0, 2000)] : []),
     ...(siblings.length ? ['', `Sibling briefs of this task (their files are not yours to touch; conform to what they export):`, ...siblings.map(s => `  - ${s.id}: ${s.title} (${(Array.isArray(s.files) ? s.files : []).join(', ')})`)] : []),
@@ -1029,7 +1043,7 @@ function fixPrompt(task, r, pass, baseBranch, ledger, brief) {
     `Task ${task.id}: ${task.title}`,
     `Spec:`,
     task.spec,
-    ...(typeof task.lessons === 'string' && task.lessons ? ['', `Lessons from earlier runs on this repository (memory; each cites where it was learned):`, String(task.lessons).slice(0, 2000)] : []),
+    ...(typeof task.lessons === 'string' && task.lessons ? ['', `Lessons from earlier runs on this repository (memory; each cites where it was learned):`, String(task.lessons)] : []),
     ...(typeof task.codeContext === 'string' && task.codeContext ? ['', `Code the semantic index found relevant to this task (path:lines; read these first, they are not the files you own):`, String(task.codeContext).slice(0, 2000)] : []),
     ``,
     `Files you own (you may create or edit ONLY these): ${task.files.join(', ')}`,
@@ -1139,7 +1153,7 @@ function verifyPrompt(task, impl, baseBranch, seat = 1) {
     `Task ${task.id}: ${task.title}`,
     `Spec:`,
     task.spec,
-    ...(typeof task.lessons === 'string' && task.lessons ? ['', `Lessons from earlier runs on this repository (memory; each cites where it was learned):`, LESSONS_NOT_SPEC, String(task.lessons).slice(0, 2000)] : []),
+    ...(typeof task.lessons === 'string' && task.lessons ? ['', `Lessons from earlier runs on this repository (memory; each cites where it was learned):`, LESSONS_NOT_SPEC, String(task.lessons)] : []),
     ``,
     `Plan acceptance criteria (the spec must be consistent with these; a line starting with $ is the command that checks the criterion above it and exits 0 when it holds):`,
     ...acceptanceEntries(plan.acceptance || []).flatMap(a => a.command ? [`- ${a.text}`, `  $ ${a.command}`] : [`- ${a.text}`]),
@@ -1172,7 +1186,7 @@ function checkPrompt(task, impl, prevCommit, baseBranch, ledger) {
     `Task ${task.id}: ${task.title}`,
     `Spec:`,
     task.spec,
-    ...(typeof task.lessons === 'string' && task.lessons ? ['', `Lessons from earlier runs on this repository (memory; each cites where it was learned):`, LESSONS_NOT_SPEC, String(task.lessons).slice(0, 2000)] : []),
+    ...(typeof task.lessons === 'string' && task.lessons ? ['', `Lessons from earlier runs on this repository (memory; each cites where it was learned):`, LESSONS_NOT_SPEC, String(task.lessons)] : []),
     ``,
     `Plan acceptance criteria (the spec must be consistent with these; a line starting with $ is the command that checks the criterion above it and exits 0 when it holds):`,
     ...acceptanceEntries(plan.acceptance || []).flatMap(a => a.command ? [`- ${a.text}`, `  $ ${a.command}`] : [`- ${a.text}`]),
@@ -1300,7 +1314,7 @@ function reviewPrompt(task, impl, baseBranch, seat = 1) {
     `Task ${task.id}: ${task.title}`,
     `Spec:`,
     task.spec,
-    ...(typeof task.lessons === 'string' && task.lessons ? ['', `Lessons from earlier runs on this repository (memory; each cites where it was learned):`, LESSONS_NOT_SPEC, String(task.lessons).slice(0, 2000)] : []),
+    ...(typeof task.lessons === 'string' && task.lessons ? ['', `Lessons from earlier runs on this repository (memory; each cites where it was learned):`, LESSONS_NOT_SPEC, String(task.lessons)] : []),
     `Owned files: ${task.files.join(', ')}`,
     `Plan acceptance criteria:`,
     ...acceptanceEntries(plan.acceptance || []).flatMap(a => a.command ? [`- ${a.text}`, `  $ ${a.command}`] : [`- ${a.text}`]),
@@ -1343,7 +1357,7 @@ function adversaryPrompt(task, impl, baseBranch, pass, ledger) {
     `Task ${task.id}: ${task.title}`,
     ``,
     guard(task.spec),
-    ...(typeof task.lessons === 'string' && task.lessons ? ['', `Lessons from earlier runs on this repository (memory; each cites where it was learned):`, LESSONS_NOT_SPEC, String(task.lessons).slice(0, 2000)] : []).map(guard),
+    ...(typeof task.lessons === 'string' && task.lessons ? ['', `Lessons from earlier runs on this repository (memory; each cites where it was learned):`, LESSONS_NOT_SPEC, String(task.lessons)] : []).map(guard),
     ``,
     ...(pass > 1 ? confirmationLines(pass, ledger, impl).map(guard) : [`This is the first pass of this task: explore freely and try to refute the change however you can.`]),
     ``,
@@ -1406,7 +1420,7 @@ function fallbackAdversaryPrompt(task, impl, baseBranch, why, pass, ledger) {
     `Task ${task.id}: ${task.title}`,
     `Spec:`,
     task.spec,
-    ...(typeof task.lessons === 'string' && task.lessons ? ['', `Lessons from earlier runs on this repository (memory; each cites where it was learned):`, LESSONS_NOT_SPEC, String(task.lessons).slice(0, 2000)] : []),
+    ...(typeof task.lessons === 'string' && task.lessons ? ['', `Lessons from earlier runs on this repository (memory; each cites where it was learned):`, LESSONS_NOT_SPEC, String(task.lessons)] : []),
     `Owned files: ${task.files.join(', ')}`,
     `Plan acceptance criteria:`,
     ...acceptanceEntries(plan.acceptance || []).flatMap(a => a.command ? [`- ${a.text}`, `  $ ${a.command}`] : [`- ${a.text}`]),
@@ -1866,11 +1880,12 @@ function isReady(r) {
   if (r.impl && r.impl.partial) return false
   // A finding the ledger already recorded as fixed and that came back keeps the task out even when every stage
   // passed. This is deliberately unconditional: updateLedger reopens on any re-report matched by id or fingerprint,
-  // whatever that re-report's own `blocking` flag or severity says - a passing check's free-text "F1: still returns
-  // 1..." reopens F1 ("still reopens and keeps entries on a real re-report"), and so does a passing-verdict
-  // adversary's *minor*-severity issue naming the same id ("blocks the pass when a finding the ledger recorded as
-  // fixed comes back"). Gating this on the reporting finding's own blocking flag would silently let either of those
-  // real reappearances through. A 'waived' report only stays out of the re-report list (card d-waiver-structural-rule)
+  // whatever that re-report's own `blocking` flag says, except that an explicit minor/nit/note severity no longer
+  // reopens (card stall-on-repeat-minor, 2026-10-25) - a passing check's free-text "F1: still returns
+  // 1..." reopens F1 ("still reopens and keeps entries on a real re-report"), and so does an adversary's
+  // blocker-severity issue naming the same id ("blocks the pass when a finding the ledger recorded as fixed comes
+  // back"). Gating this on the reporting finding's own blocking flag would silently let those real reappearances
+  // through. A 'waived' report only stays out of the re-report list (card d-waiver-structural-rule)
   // when the ledger's own entry for that id is itself a self-declared non-blocking note (confirmsFinding above); a
   // disputed waiver against a blocking entry reaches here as an ordinary re-report and can reopen or keep an entry
   // open exactly the same way.

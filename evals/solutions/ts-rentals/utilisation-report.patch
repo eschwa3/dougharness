@@ -1,0 +1,58 @@
+diff --git a/src/reports/utilisation.ts b/src/reports/utilisation.ts
+index 7e0905e..e00a242 100644
+--- a/src/reports/utilisation.ts
++++ b/src/reports/utilisation.ts
+@@ -1,3 +1,4 @@
++import type { Reservation } from "../reservations/reservation.js";
+ import { addDays, compareDays, daysBetween } from "../util/dates.js";
+ import type { Day } from "../util/dates.js";
+ 
+@@ -24,3 +25,14 @@ export function nextRange(range: DateRange): DateRange {
+   const length = rangeDays(range);
+   return { from: range.to, to: addDays(range.to, length) };
+ }
++
++/** Booked days per item inside a range. Cancelled reservations book nothing, and an item with no booked days is left out. */
++export function bookedDaysByItem(reservations: Reservation[], range: DateRange): Record<string, number> {
++  const booked: Record<string, number> = {};
++  for (const reservation of reservations) {
++    if (reservation.status === "cancelled") continue;
++    const days = sharedDays(reservation, range);
++    if (days > 0) booked[reservation.itemId] = (booked[reservation.itemId] ?? 0) + days;
++  }
++  return booked;
++}
+diff --git a/tests/reports.test.ts b/tests/reports.test.ts
+index 8ab86c2..835f0f4 100644
+--- a/tests/reports.test.ts
++++ b/tests/reports.test.ts
+@@ -1,7 +1,7 @@
+ import { describe, it, expect } from "vitest";
+ import { seedCatalog } from "../src/catalog/catalog.js";
+ import { revenueByCategory, revenueCents, reservationRevenueCents } from "../src/reports/revenue.js";
+-import { nextRange, rangeDays, sharedDays } from "../src/reports/utilisation.js";
++import { bookedDaysByItem, nextRange, rangeDays, sharedDays } from "../src/reports/utilisation.js";
+ import { cancel, createReservation } from "../src/reservations/reservation.js";
+ 
+ const items = seedCatalog();
+@@ -65,3 +65,20 @@ describe("more reports", () => {
+     expect(sharedDays({ start: "2025-03-01", end: "2025-03-10" }, { from: "2025-03-10", to: "2025-03-20" })).toBe(0);
+   });
+ });
++
++describe("utilisation", () => {
++  const range = { from: "2025-03-01", to: "2025-03-15" };
++  it("counts the booked days per item inside the range", () => {
++    expect(bookedDaysByItem([drillRental, sawRental, cameraRental], range)).toEqual({ "itm-0001": 3, "itm-0002": 2 });
++  });
++  it("adds up several reservations of one item and clips them to the range", () => {
++    const clipped = make("res-0020", 0, "2025-03-13", "2025-03-20");
++    expect(bookedDaysByItem([drillRental, clipped], range)).toEqual({ "itm-0001": 5 });
++  });
++  it("books no days for a cancelled reservation", () => {
++    expect(bookedDaysByItem([cancel(drillRental), sawRental], range)).toEqual({ "itm-0002": 2 });
++  });
++  it("leaves out an item with no booked days in the range", () => {
++    expect(bookedDaysByItem([cameraRental], range)).toEqual({});
++  });
++});

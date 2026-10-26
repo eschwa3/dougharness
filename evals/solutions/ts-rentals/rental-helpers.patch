@@ -1,0 +1,135 @@
+diff --git a/src/maintenance/inspections.ts b/src/maintenance/inspections.ts
+index 93d73c9..1808540 100644
+--- a/src/maintenance/inspections.ts
++++ b/src/maintenance/inspections.ts
+@@ -1,4 +1,7 @@
++import type { Item } from "../catalog/item.js";
++import { compareDays } from "../util/dates.js";
+ import type { Day } from "../util/dates.js";
++import { nextInspectionDay } from "./schedule.js";
+ 
+ export interface Inspection {
+   itemId: string;
+@@ -31,3 +34,10 @@ export function passRate(log: Inspection[], itemId: string): number {
+   if (mine.length === 0) return 1;
+   return mine.filter((i) => i.passed).length / mine.length;
+ }
++
++/** True when an item is due for an inspection on `today`: never inspected, or its interval since the last one has run out. */
++export function dueForInspection(log: Inspection[], item: Item, today: Day): boolean {
++  const last = lastInspectionDay(log, item.id);
++  if (last === undefined) return true;
++  return compareDays(nextInspectionDay(item, last), today) <= 0;
++}
+diff --git a/src/payments/ledger.ts b/src/payments/ledger.ts
+index e3e768d..ceab36a 100644
+--- a/src/payments/ledger.ts
++++ b/src/payments/ledger.ts
+@@ -47,3 +47,8 @@ export function refundedCents(ledger: Ledger, reservationId: string): Cents {
+ export function netPaidCents(ledger: Ledger, reservationId: string): Cents {
+   return paidCents(ledger, reservationId) - refundedCents(ledger, reservationId);
+ }
++
++/** What a customer still owes on a reservation, given the amount due: the amount less what was kept, never below zero. */
++export function openBalance(ledger: Ledger, reservationId: string, dueCents: Cents): Cents {
++  return Math.max(0, dueCents - netPaidCents(ledger, reservationId));
++}
+diff --git a/src/util/dates.ts b/src/util/dates.ts
+index 5207d4d..daf9583 100644
+--- a/src/util/dates.ts
++++ b/src/util/dates.ts
+@@ -44,6 +44,12 @@ export function isWeekend(day: Day): boolean {
+   return w === 0 || w === 6;
+ }
+ 
++/** A rental span for a slip or a list: "2025-03-10 to 2025-03-13 (3 days)". */
++export function formatRentalSpan(start: Day, end: Day): string {
++  const days = daysBetween(start, end);
++  return `${start} to ${end} (${days} ${days === 1 ? "day" : "days"})`;
++}
++
+ /** Every day from `from` up to but not including `to`. */
+ export function eachDay(from: Day, to: Day): Day[] {
+   const days: Day[] = [];
+diff --git a/tests/maintenance.test.ts b/tests/maintenance.test.ts
+index c002b59..25a4273 100644
+--- a/tests/maintenance.test.ts
++++ b/tests/maintenance.test.ts
+@@ -1,6 +1,6 @@
+ import { describe, it, expect } from "vitest";
+ import { seedCatalog } from "../src/catalog/catalog.js";
+-import { failedInspections, inspectionsFor, lastInspectionDay, passRate, recordInspection } from "../src/maintenance/inspections.js";
++import { dueForInspection, failedInspections, inspectionsFor, lastInspectionDay, passRate, recordInspection } from "../src/maintenance/inspections.js";
+ import type { Inspection } from "../src/maintenance/inspections.js";
+ import { inspectionIntervalDays, inspectionWindow, nextInspectionDay } from "../src/maintenance/schedule.js";
+ 
+@@ -49,6 +49,19 @@ describe("inspections", () => {
+   });
+ });
+ 
++describe("due for inspection", () => {
++  const log = recordInspection([], check("itm-0001", "2025-01-01", true));
++  it("is due for an item that was never inspected", () => {
++    expect(dueForInspection([], drill, "2025-01-01")).toBe(true);
++    expect(dueForInspection(log, camera, "2025-01-01")).toBe(true);
++  });
++  it("is not due before the interval has run out and is due from that day", () => {
++    expect(dueForInspection(log, drill, "2025-03-31")).toBe(false);
++    expect(dueForInspection(log, drill, "2025-04-01")).toBe(true);
++    expect(dueForInspection(log, drill, "2025-06-01")).toBe(true);
++  });
++});
++
+ describe("more maintenance", () => {
+   it("starts the next interval from the last inspection", () => {
+     expect(nextInspectionDay(tent, "2025-01-01")).toBe("2025-06-30");
+diff --git a/tests/payments.test.ts b/tests/payments.test.ts
+index a96fcc2..dce8af1 100644
+--- a/tests/payments.test.ts
++++ b/tests/payments.test.ts
+@@ -1,5 +1,5 @@
+ import { describe, it, expect } from "vitest";
+-import { netPaidCents, paidCents, paymentsFor, recordPayment, refundedCents } from "../src/payments/ledger.js";
++import { netPaidCents, openBalance, paidCents, paymentsFor, recordPayment, refundedCents } from "../src/payments/ledger.js";
+ import type { Ledger, Payment } from "../src/payments/ledger.js";
+ import { planRefund, refundEntry, refundableCents } from "../src/payments/refunds.js";
+ 
+@@ -68,3 +68,14 @@ describe("more payments", () => {
+     expect(refundEntry(ledger, "pay-9", "res-1", 0, "2025-03-15")).toBeNull();
+   });
+ });
++
++describe("open balance", () => {
++  it("is what is still owed after payments and refunds", () => {
++    expect(openBalance(ledger, "res-1", 10000)).toBe(3500);
++    expect(openBalance(ledger, "res-2", 900)).toBe(0);
++    expect(openBalance(ledger, "res-3", 1200)).toBe(1200);
++  });
++  it("is never negative", () => {
++    expect(openBalance(ledger, "res-1", 5000)).toBe(0);
++  });
++});
+diff --git a/tests/util.test.ts b/tests/util.test.ts
+index 35da254..d54b129 100644
+--- a/tests/util.test.ts
++++ b/tests/util.test.ts
+@@ -1,5 +1,5 @@
+ import { describe, it, expect } from "vitest";
+-import { addDays, compareDays, dayNumber, daysBetween, eachDay, fromDayNumber, isDay, isWeekend, weekday } from "../src/util/dates.js";
++import { addDays, compareDays, dayNumber, daysBetween, eachDay, formatRentalSpan, fromDayNumber, isDay, isWeekend, weekday } from "../src/util/dates.js";
+ import { formatId, idNumber, nextId } from "../src/util/ids.js";
+ import { formatCents, isCents, minCents, parseCents, percentOf, sumCents } from "../src/util/money.js";
+ import { fill, padRight, pluralise, titleCase } from "../src/util/text.js";
+@@ -141,3 +141,12 @@ describe("edge cases", () => {
+     expect(fill("{a}-{a}", { a: "x" })).toBe("x-x");
+   });
+ });
++
++describe("rental span", () => {
++  it("shows both days and the number of days", () => {
++    expect(formatRentalSpan("2025-03-10", "2025-03-13")).toBe("2025-03-10 to 2025-03-13 (3 days)");
++  });
++  it("says one day for a one day rental", () => {
++    expect(formatRentalSpan("2025-03-10", "2025-03-11")).toBe("2025-03-10 to 2025-03-11 (1 day)");
++  });
++});

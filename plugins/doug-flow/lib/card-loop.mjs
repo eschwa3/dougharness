@@ -59,7 +59,11 @@ export const BRIEF_RULES = {
     seats: ["tester", "coder", "reviewer"],
   },
   "lessons-verbatim": {
-    text: "Return the memory.mjs brief-lessons block for this card verbatim in lessons; never paraphrase it.",
+    text: "Run memory.mjs brief-lessons <card-id> <repo-root>, passing the REPO ROOT named in this brief as [dir], and return its block for this card verbatim in lessons; never paraphrase it.",
+    seats: ["lead"],
+  },
+  "lessons-fetch": {
+    text: "For each indexed lesson the card needs, run memory.mjs lesson show <id> <repo-root> --card <card-id>, passing the REPO ROOT named in this brief as [dir], and append its output verbatim to lessons below the brief-lessons block; never cut or paraphrase a fetched lesson.",
     seats: ["lead"],
   },
   "facts-cited": {
@@ -104,7 +108,7 @@ export const BRIEF_RULES = {
   },
   "no-trailers": {
     text: "Commit without Co-Authored-By or Claude-Session trailers.",
-    seats: ["commit"],
+    seats: ["tester", "coder", "reviewer", "commit"],
   },
   "commit-foreground": {
     text: "Run git commit in the foreground with the Bash tool timeout set to 600000 ms: the pre-commit hook runs the full unit suite and takes over the 2-minute default.",
@@ -121,6 +125,11 @@ export const BRIEF_RULES = {
   "gate-no-git-writes": {
     text: "Run the gate commands only. Never run git add, git commit, or any other command that writes to git; the commit seat is the only seat that commits.",
     seats: ["gate"],
+  },
+  "gate-reinstall-missing-deps": {
+    text: "Before the gate commands, check that node_modules exists in the card worktree. Only when it is missing, run the INSTALL COMMAND and report it as the first commands item, then run the gate. Never install when node_modules is present.",
+    seats: ["gate"],
+    when: "install",
   },
   "gate-timeout-is-load": {
     text: "When verify.mjs prints `exit timeout` for a command, report that command with timedOut: true; a timeout is load, not a red or a block, so leave blocked unset.",
@@ -406,6 +415,7 @@ const effectiveMutations = (s) => (s.lane === "lean" ? [] : s.material.mutations
 
 function ruleApplies(rule, seat, s) {
   if (!rule.seats.includes(seat)) return false;
+  if (rule.when === "install") return s.install !== null && s.install !== undefined;
   if (rule.when === "full") return s.lane === "full";
   if (rule.when === "tests-only") return s.lane === "tests-only";
   if (rule.when === "mutations") {
@@ -440,7 +450,12 @@ function buildBrief(s) {
     gate: fixing && s.fixFor === "gate" ? cp(s.lastGate) : null,
     redTests: cp(s.redTests),
     answers: (s.answers || [])
-      .filter((a) => a.seat === seat && (a.round === undefined || a.round <= (s.seatRuns[seat] || 0) + 1))
+      .filter(
+        (a) =>
+          (a.seat === seat && (a.round === undefined || a.round <= (s.seatRuns[seat] || 0) + 1)) ||
+          // A reviewer answer reaches the build seat once the reviewer round it targets has run.
+          (seat === buildSeat(s) && a.seat === "reviewer" && (a.round ?? 1) <= (s.seatRuns.reviewer || 0)),
+      )
       .map((a) => ({ question: a.question, answer: a.answer })),
     writeTestsFirst: seat === "coder" && s.counters.coderRounds === 0 && (s.lane === "lean" || !s.testerAgent),
     researchNote: s.researchNote,
@@ -450,6 +465,7 @@ function buildBrief(s) {
     brief.install = s.install;
     brief.base = s.base;
   }
+  if (seat === "gate" && s.install) brief.install = s.install;
   if (seat === "gate" || seat === "reviewer") brief.gateCommand = s.gateCommand;
   if (seat === "commit") brief.gateTree = s.gateTree;
   return brief;
@@ -838,6 +854,18 @@ export function next(state, handBack) {
       // An evidenced major gets the same one fix pass; a major without evidence and a minor stay advisory.
       const majors = findings.filter((f) => f.severity === "major" && nonBlank(f.evidence));
       if (blockers.length === 0 && majors.length === 0) return advance(s, "gate", "ok", { acc });
+      // A reviewer round that carried a user answer and still has an open finding gets one extra coder round.
+      const answered = (s.answers || []).some(
+        (a) => a.seat === "reviewer" && (a.round ?? 1) <= (s.seatRuns.reviewer || 0),
+      );
+      if (s.counters.fixPasses >= 1 && answered && !s.answerCoderUsed) {
+        return advance(s, buildSeat(s), "blockers", {
+          acc,
+          fixFor: "review",
+          answerCoderUsed: true,
+          lastFindings: findings.filter((f) => f.severity !== "minor"),
+        });
+      }
       if (s.counters.fixPasses >= 1) {
         if (blockers.length > 0) {
           return stopWith(
@@ -863,7 +891,16 @@ export function next(state, handBack) {
       const lastGate = { commands: cp(H.commands), gateLine: H.gateLine };
       const waited = { ...s.acc, lockWaitMs: (s.acc.lockWaitMs || 0) + (Number.isInteger(H.lockWaitMs) ? H.lockWaitMs : 0) };
       s.acc = waited;
-      if (H.commands.every((c) => c.exitCode === 0)) {
+      const isInstall = (c) => s.install && typeof c.command === "string" && c.command.trim() === `cd ${s.worktree} && ${s.install}`;
+      const failedInstall = H.commands.find((c) => isInstall(c) && c.exitCode !== 0);
+      if (failedInstall) {
+        return stopWith({ ...s, lastGate }, "setup-failed", `gate reinstall exited ${failedInstall.exitCode === null ? "without a code" : failedInstall.exitCode}`);
+      }
+      const nonInstall = H.commands.filter((c) => !isInstall(c));
+      if (nonInstall.every((c) => c.exitCode === 0)) {
+        if (!nonInstall.some((c) => typeof c.command === "string" && c.command.includes(s.gateCommand))) {
+          return stopWith({ ...s, lastGate }, "hand-back-invalid", `gate hand-back has no run of the gate command ${s.gateCommand}`);
+        }
         return advance(s, "commit", "ok", { lastGate, gateTree: H.tree, acc: { ...waited, gateLine: H.gateLine } });
       }
       const redGates = s.counters.redGates + 1;
@@ -902,15 +939,17 @@ export function briefPrompt(brief, { repoRoot, worktreePath } = {}) {
     out.push("ANSWERS FROM THE USER (to your design questions; build on them):\n" + bullets(b.answers.map((a) => `Q: ${a.question} A: ${a.answer}`)));
   }
   out.push("WORKTREE: " + worktreePath);
+  if (b.seat === "lead" && typeof repoRoot === "string" && repoRoot !== "") out.push("REPO ROOT: " + repoRoot);
   if (b.seat === "setup") {
     out.push(
       "SETUP:\n" +
         `Create the card worktree: git -C ${repoRoot} worktree add -b ${b.branch} ${worktreePath} ${b.base}\n` +
         (b.install
-          ? `Then run the install command in ${worktreePath}: ${b.install}`
+          ? `Then run the install command as this one literal command: cd ${worktreePath} && ${b.install}`
           : "There is no install command; skip the install and report install as null."),
     );
   }
+  if (b.seat === "gate" && b.install) out.push(`INSTALL COMMAND: cd ${worktreePath} && ${b.install}`);
   if (b.researchNote) out.push("RESEARCH NOTE:" + (b.researchNote.includes("\n") ? "\n" : " ") + b.researchNote);
   if (b.lessons) out.push("LESSONS BLOCK verbatim:\n" + b.lessons);
   if (b.facts.length > 0) out.push("FACTS (with sources):\n" + bullets(b.facts.map((f) => `${f.text} [${f.source}]`)));

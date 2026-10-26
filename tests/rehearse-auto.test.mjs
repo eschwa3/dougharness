@@ -35,12 +35,13 @@ describe("card report-save-wrapper: the implement-stage prompts name the result 
 // Card autopilot part D: the `auto` scenario runs a bare `/doug-next --auto` (unlimited, card autopilot-unlimited) over
 // two Ready hand cards with no gate prompt between them, and leaves one Backlog card untouched. Everything here uses fixtures and the fake claude; nothing spawns the real binary.
 describe("card autopilot: the auto scenario's registry entries", () => {
-  it("SCENARIOS includes auto, and ESTIMATES.auto has gate 0.5 and build 8.0 with a source saying two hand builds, unmeasured", () => {
+  it("SCENARIOS includes auto, and ESTIMATES.auto has gate 0.5 and build 3.0 with a source citing the measured 2026-10-08 pass ($2.69)", () => {
     expect(SCENARIOS).toContain("auto");
-    expect(ESTIMATES.auto.stages).toEqual({ gate: 0.5, build: 8.0 });
-    expect(scenarioTotal("auto")).toBeCloseTo(8.5, 10);
-    expect(ESTIMATES.auto.source).toContain("two hand builds");
-    expect(ESTIMATES.auto.source).toContain("unmeasured");
+    expect(ESTIMATES.auto.stages).toEqual({ gate: 0.5, build: 3.0 });
+    expect(scenarioTotal("auto")).toBeCloseTo(3.5, 10);
+    expect(ESTIMATES.auto.source).toContain("$2.69");
+    expect(ESTIMATES.auto.source).toContain("2026-10-08");
+    expect(ESTIMATES.auto.source).not.toContain("unmeasured");
   });
   it("SCENARIO_STAGES.auto is a gate session then a build session, both on a bare /doug-next --auto (unlimited)", () => {
     const [gate, build] = SCENARIO_STAGES.auto;
@@ -62,7 +63,7 @@ describe("card autopilot: the auto scenario's registry entries", () => {
     const claudeBin = makeFakeClaude("", { marker });
     const r = await run(process.execPath, [cli, "auto"], { env: { ...process.env, DOUG_REHEARSE_CLAUDE: claudeBin } });
     expect(r.status).toBe(2);
-    expect(r.stdout).toContain("$8.50");
+    expect(r.stdout).toContain("$3.50");
     expect(existsSync(marker)).toBe(false);
   });
   it("rehearsalNote has an auto wording that starts with 'Rehearsal auto'", () => {
@@ -190,6 +191,22 @@ describe("card autopilot: assertAutoBuilt", () => {
     const result = await inLib("assertAutoBuilt", { dir, baseline, stream: cleanStream() });
     expect(result.ok).toBe(false);
     expect(result.message).toContain("add-truncate");
+  });
+  it.skipIf(!existsSync(CLI))("an unlanded card's failure names its queen's stop (reason, seat, detail) from card-report.json, not only a missing commit (card ts-orders-rehearsal-scenario-fixes)", async () => {
+    const { dir, baseline } = await inLib("prepareFixture", { scenario: "auto", tempPrefix: TEST_PREFIX });
+    tempDirs.push(dir);
+    await landCard(dir, "fix-hours", fixDurationBug, "fix: hours multiplier");
+    mkdirSync(join(dir, ".doug/.state/reports/add-truncate"), { recursive: true });
+    writeFileSync(
+      join(dir, ".doug/.state/reports/add-truncate/card-report.json"),
+      JSON.stringify({ ok: false, outcome: "stopped", reason: "reviewer-blocker-open", stoppedAt: "reviewer", detail: "blocker still open after one fix pass: F1" }),
+    );
+    const result = await inLib("assertAutoBuilt", { dir, baseline, stream: cleanStream() });
+    expect(result.ok).toBe(false);
+    expect(result.message).toContain("add-truncate");
+    expect(result.message).toContain("reviewer-blocker-open");
+    expect(result.message).toContain("reviewer");
+    expect(result.message).toContain("blocker still open after one fix pass: F1");
   });
   it.skipIf(!existsSync(CLI))("fails naming fix-hours when only the second card is Done", async () => {
     const { dir, baseline } = await inLib("prepareFixture", { scenario: "auto", tempPrefix: TEST_PREFIX });
@@ -1003,14 +1020,14 @@ describe("card doug-start-skill: the last stage's end assertions", () => {
 // (fix-hours, component duration) and one hand card (add-truncate, component strings) run at once under
 // workers.max 2. Fakes only: nothing here spawns the real claude, and the live run waits for the user's approval.
 describe("card parallel-card-queens: the parallel scenario's registry entries (R01)", () => {
-  it("SCENARIOS includes parallel; ESTIMATES.parallel is gate 0.5 and build 9.0, with an unmeasured source", () => {
+  it("SCENARIOS includes parallel; ESTIMATES.parallel is gate 0.5 and build 5.0, with a source citing the measured 2026-10-13 pass ($4.32)", () => {
     expect(SCENARIOS).toContain("parallel");
-    expect(ESTIMATES.parallel.stages).toEqual({ gate: 0.5, build: 9.0 });
-    expect(scenarioTotal("parallel")).toBeCloseTo(9.5, 10);
-    expect(ESTIMATES.parallel.source).toContain("unmeasured");
-    expect(ESTIMATES.parallel.source).toContain("$4.15");
-    expect(ESTIMATES.parallel.source).toContain("$2.16");
-    expect(estimateLines().some((l) => l.includes("parallel") && l.includes("$9.50"))).toBe(true);
+    expect(ESTIMATES.parallel.stages).toEqual({ gate: 0.5, build: 5.0 });
+    expect(scenarioTotal("parallel")).toBeCloseTo(5.5, 10);
+    expect(ESTIMATES.parallel.source).toContain("$4.32");
+    expect(ESTIMATES.parallel.source).toContain("2026-10-13");
+    expect(ESTIMATES.parallel.source).not.toContain("unmeasured");
+    expect(estimateLines().some((l) => l.includes("parallel") && l.includes("$5.50"))).toBe(true);
   });
   it("SCENARIO_STAGES.parallel is a gate session then a build session on a bare /doug-next --auto", () => {
     const stages = SCENARIO_STAGES.parallel;
@@ -1030,7 +1047,7 @@ describe("card parallel-card-queens: the parallel scenario's registry entries (R
     const claudeBin = makeFakeClaude("", { marker });
     const r = await run(process.execPath, [cli, "parallel"], { env: { ...process.env, DOUG_REHEARSE_CLAUDE: claudeBin } });
     expect(r.status).toBe(2);
-    expect(r.stdout).toContain("$9.50");
+    expect(r.stdout).toContain("$5.50");
     expect(existsSync(marker)).toBe(false);
   });
 });
@@ -1169,6 +1186,22 @@ describe("card parallel-card-queens: assertParallelBuilt (R04)", () => {
     const result = await inLib("assertParallelBuilt", { dir, baseline, stream });
     expect(result.ok).toBe(false);
     expect(result.message).toMatch(/doug-implement|before|land/i);
+  });
+  // The live doug-next launches each queen by its per-card script (Workflow({ scriptPath: .doug/.state/reports/<id>/queen.js })),
+  // whose path names neither doug-implement nor card-queen (card ts-orders-rehearsal-scenario-fixes).
+  const perCardQueen = (id) => toolUse("Workflow", { scriptPath: `/fixture/.doug/.state/reports/${id}/queen.js`, args: { card: id } });
+  it.skipIf(!existsSync(CLI))("passes when both queens are launched through their per-card queen.js scriptPath before the first land", async () => {
+    const { dir, baseline } = await buildBoth();
+    const stream = cannedStream({ plugins: ["doug-flow"], commands: ["doug-flow:doug-next"] }) + perCardQueen("fix-hours") + perCardQueen("add-truncate") + handLand() + flowLand();
+    const result = await inLib("assertParallelBuilt", { dir, baseline, stream });
+    expect(result.ok, result.message).toBe(true);
+  });
+  it.skipIf(!existsSync(CLI))("fails when a per-card queen.js launch comes after the first land", async () => {
+    const { dir, baseline } = await buildBoth();
+    const flowLate = cannedStream({ plugins: ["doug-flow"], commands: ["doug-flow:doug-next"] }) + perCardQueen("add-truncate") + handLand() + perCardQueen("fix-hours") + flowLand();
+    expect((await inLib("assertParallelBuilt", { dir, baseline, stream: flowLate })).ok).toBe(false);
+    const handLate = cannedStream({ plugins: ["doug-flow"], commands: ["doug-flow:doug-next"] }) + perCardQueen("fix-hours") + flowLand() + perCardQueen("add-truncate") + handLand();
+    expect((await inLib("assertParallelBuilt", { dir, baseline, stream: handLate })).ok).toBe(false);
   });
   it.skipIf(!existsSync(CLI))("fails when no queen was launched at all", async () => {
     const { dir, baseline } = await buildBoth();

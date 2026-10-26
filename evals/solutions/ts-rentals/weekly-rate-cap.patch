@@ -1,0 +1,100 @@
+diff --git a/src/pricing/rates.ts b/src/pricing/rates.ts
+index 3c47403..7a75fde 100644
+--- a/src/pricing/rates.ts
++++ b/src/pricing/rates.ts
+@@ -9,9 +9,14 @@ export function billableDays(start: Day, end: Day): number {
+   return Math.max(1, daysBetween(start, end));
+ }
+ 
+-/** The rental charge for a number of days at the item's day rate. */
++/** Days in a rental week. */
++export const DAYS_PER_WEEK = 7;
++
++/** The rental charge for a number of days: each full week costs the weekly rate, and the days left over never cost more than one weekly rate. */
+ export function rentalCostCents(item: Item, days: number): Cents {
+-  return item.dayRateCents * days;
++  const weeks = Math.floor(days / DAYS_PER_WEEK);
++  const leftover = days - weeks * DAYS_PER_WEEK;
++  return weeks * item.weekRateCents + Math.min(leftover * item.dayRateCents, item.weekRateCents);
+ }
+ 
+ /** The rental charge for a pickup and due day. */
+diff --git a/tests/pricing.test.ts b/tests/pricing.test.ts
+index a66c5c3..fd399cc 100644
+--- a/tests/pricing.test.ts
++++ b/tests/pricing.test.ts
+@@ -1,5 +1,7 @@
+ import { describe, it, expect } from "vitest";
++import { buildInvoice, invoiceLines } from "../src/billing/invoice.js";
+ import { seedCatalog } from "../src/catalog/catalog.js";
++import { createReservation } from "../src/reservations/reservation.js";
+ import { makeCustomer } from "../src/customers/customer.js";
+ import { upgradeToMember } from "../src/customers/membership.js";
+ import { afterDiscount, bundleDiscountCents, memberDiscountCents, percentOffCents } from "../src/pricing/discounts.js";
+@@ -63,6 +65,32 @@ describe("late fees", () => {
+   });
+ });
+ 
++describe("weekly rate cap", () => {
++  it("charges the weekly rate for each full week", () => {
++    expect(rentalCostCents(drill, 7)).toBe(7500);
++    expect(rentalCostCents(drill, 14)).toBe(15000);
++    expect(rentalCostCents(saw, 21)).toBe(60000);
++  });
++  it("caps the days left over at one weekly rate", () => {
++    expect(rentalCostCents(drill, 5)).toBe(7500);
++    expect(rentalCostCents(drill, 6)).toBe(7500);
++    expect(rentalCostCents(drill, 12)).toBe(15000);
++  });
++  it("adds the leftover days at the day rate when that is cheaper", () => {
++    expect(rentalCostCents(drill, 8)).toBe(9000);
++    expect(rentalCostCents(drill, 10)).toBe(12000);
++  });
++  it("prices a pickup and due day with the cap", () => {
++    expect(costForSpan(drill, "2025-03-10", "2025-03-16")).toBe(7500);
++    expect(costForSpan(drill, "2025-03-10", "2025-03-27")).toBe(7500 * 2 + 1500 * 3);
++  });
++  it("puts the capped rental on the invoice", () => {
++    const res = createReservation({ id: "res-0100", item: drill, customerId: "cus-0001", start: "2025-03-10", end: "2025-03-16" }, []);
++    expect(invoiceLines(res, drill)).toEqual([{ label: "Cordless drill, 6 days", cents: 7500 }]);
++    expect(buildInvoice("inv-0100", res, drill).subtotalCents).toBe(7500);
++  });
++});
++
+ describe("more pricing", () => {
+   it("prices every seeded item for one day at its day rate", () => {
+     for (const item of seedCatalog()) expect(rentalCostCents(item, 1)).toBe(item.dayRateCents);
+diff --git a/tests/reports.test.ts b/tests/reports.test.ts
+index 8ab86c2..ce882aa 100644
+--- a/tests/reports.test.ts
++++ b/tests/reports.test.ts
+@@ -31,6 +31,12 @@ describe("revenue", () => {
+   it("splits revenue by category", () => {
+     expect(revenueByCategory([drillRental, sawRental, cameraRental], items)).toEqual({ tool: 12500, camera: 6000 });
+   });
++  it("counts a long rental at the weekly cap", () => {
++    const long = make("res-0010", 0, "2025-04-01", "2025-04-08");
++    expect(reservationRevenueCents(long, items[0])).toBe(7500);
++    expect(revenueCents([long, cameraRental], items)).toBe(13500);
++    expect(revenueByCategory([long], items)).toEqual({ tool: 7500 });
++  });
+ });
+ 
+ describe("date ranges", () => {
+diff --git a/tests/reservations.test.ts b/tests/reservations.test.ts
+index 5380a2c..898610b 100644
+--- a/tests/reservations.test.ts
++++ b/tests/reservations.test.ts
+@@ -108,6 +108,12 @@ describe("more reservation rules", () => {
+   it("prices a five day rental at the day rate times the days", () => {
+     expect(quoteFor(saw, "2025-03-10", "2025-03-15").totalCents).toBe(20000);
+   });
++  it("caps a long rental at the weekly rate", () => {
++    const quote = quoteFor(drill, "2025-03-10", "2025-03-16");
++    expect(quote.subtotalCents).toBe(7500);
++    expect(quote.totalCents).toBe(7500);
++    expect(quoteFor(drill, "2025-03-10", "2025-03-27").totalCents).toBe(7500 * 2 + 1500 * 3);
++  });
+   it("names the item and the days on the first quote line", () => {
+     expect(quoteFor(saw, "2025-03-10", "2025-03-11").lines[0].label).toBe("Tile saw, 1 day");
+   });

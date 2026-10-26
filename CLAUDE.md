@@ -7,7 +7,7 @@ Guardrails are enforced by hooks configured in `.doug/config.json`; this file ca
 ```sh
 pnpm install --frozen-lockfile              # install
 pnpm typecheck                              # typecheck
-pnpm test:unit                              # tests, minus the live Codex test
+pnpm test:unit                              # tests, minus Codex-live, e2e, and rehearse (pnpm test:rehearse)
 pnpm exec vitest run <path/to/file.test.ts> # single test file
 pnpm test                                   # full suite; codex-live.test.ts calls Codex and fails on a usage limit
 pnpm build                                  # build

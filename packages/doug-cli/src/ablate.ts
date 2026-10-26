@@ -130,8 +130,8 @@ export interface Ablation {
 }
 
 // The three install conditions, then the orchestration arms in evals/run.mjs (compared against pipeline).
-const CONDITION_ORDER = ["baseline", "gates", "full", "pipeline", "swarm", "swarm-cheap", "crew", "swarm-crew", "memory"];
-const ARM_CONDITIONS = ["swarm", "swarm-cheap", "crew", "swarm-crew"];
+const CONDITION_ORDER = ["baseline", "gates", "full", "pipeline", "swarm", "swarm-cheap", "crew", "swarm-crew", "testers", "memory"];
+const ARM_CONDITIONS = ["swarm", "swarm-cheap", "crew", "swarm-crew", "testers"];
 // The memory arm (card memory-measure) is compared against pipeline separately from the other arms above: on
 // five measures, not four (mean turns joins the other four), with its own swarm-rule verdict line.
 const MEMORY_CONDITION = "memory";

@@ -25,7 +25,9 @@ export function trackedTempDir(prefix) {
 // A fake `claude` executable: writes a marker file (if given) and/or its argv (if given), then prints the given
 // stream-json lines and exits 0. No extension and a shebang, like packages/doug-codex/tests/helpers.ts's fake
 // codex, so `spawnSync(bin, ...)` runs it directly.
-export function makeFakeClaude(streamText = "", { marker = null, argvFile = null } = {}) {
+// Options: exitCode (default 0), stderr (text written to stderr before exiting), killSignal (the child kills itself
+// with this signal after writing stderr instead of exiting).
+export function makeFakeClaude(streamText = "", { marker = null, argvFile = null, exitCode = 0, stderr = "", killSignal = null } = {}) {
   const dir = trackedTempDir("fake-claude-");
   const bin = join(dir, "claude");
   const lines = String(streamText)
@@ -38,7 +40,8 @@ export function makeFakeClaude(streamText = "", { marker = null, argvFile = null
     marker ? `require("node:fs").writeFileSync(${JSON.stringify(marker)}, "spawned");` : "",
     argvFile ? `require("node:fs").writeFileSync(${JSON.stringify(argvFile)}, JSON.stringify(process.argv.slice(2)));` : "",
     lines,
-    "process.exit(0);",
+    stderr ? `process.stderr.write(${JSON.stringify(String(stderr))});` : "",
+    killSignal ? `process.kill(process.pid, ${JSON.stringify(killSignal)}); setTimeout(() => {}, 5000);` : `process.exit(${Number(exitCode)});`,
   ].join("\n");
   writeFileSync(bin, script);
   chmodSync(bin, 0o755);

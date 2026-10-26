@@ -3171,6 +3171,54 @@ describe("rehearsal records are not landings (card rehearsal-failure-not-landed)
     expect(readFileSync(txt, "utf8")).toBe(before);
     expect(existsSync(join(stateDir(dir, "first"), "landing-block.pending"))).toBe(false);
   });
+  // Card ts-orders-rehearsal-scenario-fixes: the header names the fixture the rehearsal ran on; a print-only rehearsal block has no word cap.
+  it("the live-runs header names the fixture a rehearsal ran on: runEntry and handEntry take `fixture`, default ts-basic, start stays an empty repo", () => {
+    const tail = "(scripts/rehearse.mjs); the commit and gate below are the fixture's, not this repository's.";
+    const hand = (rehearsal, fixture) => handEntry({ card: { id: "fix-hours", title: "Fix hours" }, commit: "47fe70c", gate: "g", record: ".doug/board.json", date: "2026-10-22", rehearsal, rehearsalOutcome: "passed", ...(fixture ? { fixture } : {}) });
+    const flow = (rehearsal, fixture) => runEntry({ card: { id: "first", title: "First" }, report: { plan: "P", integrationBranch: "none", ok: true, levels: [] }, mergeCommit: "abc1234", record: ".doug/board.json", date: "2026-10-22", rehearsal, rehearsalOutcome: "passed", ...(fixture ? { fixture } : {}) });
+    expect(hand("hand", "ts-orders")).toContain(`on the ts-orders fixture ${tail}`);
+    expect(hand("hand", "ts-orders")).not.toContain("ts-basic");
+    expect(flow("flow", "ts-orders")).toContain("on the ts-orders fixture (scripts/rehearse.mjs)");
+    expect(flow("swarm", "ts-orders")).not.toContain("ts-basic");
+    expect(hand("hand")).toContain(`on the ts-basic fixture ${tail}`);
+    expect(flow("flow")).toContain("on the ts-basic fixture (scripts/rehearse.mjs)");
+    expect(hand("start", "ts-orders")).toContain("on an empty git repo");
+    expect(hand("start", "ts-orders")).not.toContain("ts-orders");
+  });
+  it("record --rehearsal-fixture <name> writes that fixture in the live-runs header, on both forms; without it the header reads ts-basic", () => {
+    const livetext = (dir) => readFileSync(join(dir, "docs/live-runs.md"), "utf8");
+    const hand = project();
+    const h = run(handArgs(hand, ["--rehearsal", "hand", "--rehearsal-outcome", "passed", "--rehearsal-fixture", "ts-orders"]), hand);
+    expect(h.status, h.stderr).toBe(0);
+    expect(livetext(hand)).toContain("on the ts-orders fixture (scripts/rehearse.mjs)");
+    expect(livetext(hand)).not.toContain("ts-basic");
+    const flow = project();
+    const f = run(["record", "first", reportFile(flow), flow, "--summary", "Test summary.", "--rehearsal", "flow", "--rehearsal-outcome", "passed", "--rehearsal-fixture", "ts-orders"], flow);
+    expect(f.status, f.stderr).toBe(0);
+    expect(livetext(flow)).toContain("on the ts-orders fixture (scripts/rehearse.mjs)");
+    expect(livetext(flow)).not.toContain("ts-basic");
+    const plain = project();
+    expect(run(handArgs(plain, ["--rehearsal", "hand", "--rehearsal-outcome", "passed"]), plain).status).toBe(0);
+    expect(livetext(plain)).toContain("on the ts-basic fixture (scripts/rehearse.mjs)");
+  });
+  it("a rehearsal record with a landing block over 100 words still records and exits 0, on both forms; a non-rehearsal block over 100 is still refused", () => {
+    const long = "word ".repeat(120).trim();
+    const livetext = (dir) => readFileSync(join(dir, "docs/live-runs.md"), "utf8");
+    const hand = project();
+    const h = run(handArgs(hand, ["--rehearsal", "start", "--rehearsal-outcome", "passed", "--note", long]), hand);
+    expect(h.status, h.stderr).toBe(0);
+    expect(h.stderr).not.toContain("the limit is 100");
+    expect(livetext(hand)).toContain("Rehearsal start for card `first`");
+    expect(existsSync(join(stateDir(hand, "first"), "landing-block.txt"))).toBe(false);
+    const flow = project();
+    const f = run(["record", "first", reportFile(flow), flow, "--summary", "Test summary.", "--rehearsal", "swarm", "--rehearsal-outcome", "failed", "--note", long], flow);
+    expect(f.status, f.stderr).toBe(0);
+    expect(livetext(flow)).toContain("Rehearsal swarm for card `first`");
+    const real = project();
+    const r = run(handArgs(real, ["--note", long]), real);
+    expect(r.status).toBe(1);
+    expect(r.stderr).toMatch(/landing block is \d+ words; the limit is 100/);
+  });
   it("R3 --rehearsal without --rehearsal-outcome, or with another value, exits 2 naming the flag and writes nothing, on both forms", () => {
     for (const extra of [["--rehearsal", "hand"], ["--rehearsal", "hand", "--rehearsal-outcome", "landed"]]) {
       const hand = project();
@@ -4222,5 +4270,181 @@ describe("board.mjs labels init (card board-label-groups-migrate)", () => {
   });
   it("labels without --check or init still exits 2", () => {
     expect(run(["labels", project(newBoard())]).status).toBe(2);
+  });
+});
+
+// Card record-forced-landing: a plan landed after `plan.mjs done --force` is recorded as landed, with land's own acceptance.
+describe("record of a forced landing (card record-forced-landing)", () => {
+  const run = (args, dir) => spawnSync(process.execPath, [cli, ...args], { cwd: dir, encoding: "utf8", env: { ...process.env, CLAUDE_PROJECT_DIR: "", CLAUDE_CODE_SESSION_ID: "" } });
+  const okTask = { id: "a", implemented: true, verified: true, reviewed: true };
+  // The ci-e2e shape: not ok, integration objects carry no acceptance key.
+  const forcedReport = { plan: "First", integrationBranch: "doug/x", ok: false, stoppedAtLevel: 1, levels: [{ index: 0, tasks: [okTask], integration: { ok: true } }, { index: 1, tasks: [okTask] }] };
+  const greenReport = { plan: "First", integrationBranch: "doug/x", ok: true, levels: [{ index: 0, tasks: [okTask], integration: { ok: true, acceptance: [{ text: "pnpm test:unit", ok: true }] } }] };
+  const landed = { mergeCommit: "abc1234", acceptance: [1, 2, 3].map((n) => ({ text: `check ${n}`, command: `true ${n}`, ok: true, durationMs: 1 })) };
+  const plan = (card, extra) => ({ card, status: "done", tasks: [], ...extra });
+  function setup(report, planObj) {
+    const dir = project();
+    mkdirSync(join(dir, ".doug"), { recursive: true });
+    if (planObj) writeFileSync(join(dir, ".doug/plan.json"), JSON.stringify(planObj));
+    const file = join(dir, "r.json");
+    writeFileSync(file, JSON.stringify(report));
+    return { dir, file };
+  }
+  const rec = (dir, file) => run(["record", "first", file, dir, "--wall", "2 min", "--commit", "abc1234", "--summary", "Test summary."], dir);
+  const outcome = (stdout) => stdout.replace(/\n+$/, "").split("\n").slice(-3)[1];
+  const saved = (dir) => readFileSync(join(dir, ".doug/.state/reports/first/landing-block.txt"), "utf8");
+  const log = (dir) => readFileSync(join(dir, "docs/live-runs.md"), "utf8");
+
+  it("forced landing prints landed, not stopped", () => {
+    const { dir, file } = setup(forcedReport, plan("first", { landed }));
+    const r = rec(dir, file);
+    expect(r.status, r.stderr).toBe(0);
+    expect(outcome(r.stdout)).toMatch(/^Outcome: landed first at abc1234, /);
+    expect(outcome(r.stdout)).not.toContain("stopped");
+    expect(saved(dir)).toMatch(/Outcome: landed first at abc1234/);
+    expect(saved(dir)).not.toContain("stopped");
+  });
+  it("forced landing takes the acceptance count from plan.landed.acceptance", () => {
+    const { dir, file } = setup(forcedReport, plan("first", { landed }));
+    const r = rec(dir, file);
+    expect(r.status, r.stderr).toBe(0);
+    expect(outcome(r.stdout)).toContain("acceptance 3/3");
+    expect(outcome(r.stdout)).not.toContain("acceptance 0/0");
+    expect(saved(dir)).toContain("acceptance 3/3");
+  });
+  it("forced landing's live-runs Outcome row says landed", () => {
+    const { dir, file } = setup(forcedReport, plan("first", { landed }));
+    expect(rec(dir, file).status).toBe(0);
+    const text = log(dir);
+    expect(text).toMatch(/\| Outcome \| landed/);
+    expect(text).not.toMatch(/\| Outcome \| stopped/);
+  });
+  it("a not-ok report with a done plan that has no landed key stays stopped", () => {
+    const { dir, file } = setup(forcedReport, plan("first", {}));
+    const r = rec(dir, file);
+    expect(r.status, r.stderr).toBe(0);
+    expect(outcome(r.stdout)).toMatch(/^Outcome: stopped first at abc1234/);
+    expect(log(dir)).toContain("| Outcome | stopped at level 1 |");
+  });
+  it("a landed plan for another card leaves first's not-ok record as stopped", () => {
+    const { dir, file } = setup(forcedReport, plan("second", { landed }));
+    const r = rec(dir, file);
+    expect(r.status, r.stderr).toBe(0);
+    expect(outcome(r.stdout)).toMatch(/^Outcome: stopped first at abc1234/);
+    expect(log(dir)).toContain("| Outcome | stopped at level 1 |");
+  });
+  it("a green report with a landed plan keeps Outcome green", () => {
+    const { dir, file } = setup(greenReport, plan("first", { landed }));
+    const r = rec(dir, file);
+    expect(r.status, r.stderr).toBe(0);
+    expect(log(dir)).toContain("| Outcome | green |");
+  });
+});
+
+// Card summary-forced-landing: summary shares record's forced-landing detection; a batch card counts its own acceptance.
+describe("summary and batch record of a forced landing (card summary-forced-landing)", () => {
+  const run = (args, dir) => spawnSync(process.execPath, [cli, ...args], { cwd: dir, encoding: "utf8", env: { ...process.env, CLAUDE_PROJECT_DIR: "", CLAUDE_CODE_SESSION_ID: "" } });
+  const okTask = { id: "a", implemented: true, verified: true, reviewed: true };
+  const forcedReport = { plan: "First", integrationBranch: "doug/x", ok: false, stoppedAtLevel: 1, levels: [{ index: 0, tasks: [okTask], integration: { ok: true } }, { index: 1, tasks: [okTask] }] };
+  const landed = { mergeCommit: "abc1234", acceptance: [1, 2, 3].map((n) => ({ text: `check ${n}`, command: `true ${n}`, ok: true, durationMs: 1 })) };
+  const plan = (card, extra) => ({ card, status: "done", tasks: [], ...extra });
+  const acc = (text) => ({ text, command: "true", ok: true, durationMs: 1 });
+  function setup(report, planObj) {
+    const dir = project();
+    mkdirSync(join(dir, ".doug"), { recursive: true });
+    if (planObj) writeFileSync(join(dir, ".doug/plan.json"), JSON.stringify(planObj));
+    const file = join(dir, "r.json");
+    writeFileSync(file, JSON.stringify(report));
+    return { dir, file };
+  }
+  const sum = (dir, file, commit, card = "first") => run(["summary", file, dir, "--summary", "Test summary.", "--card", card, ...(commit === null ? [] : ["--commit", commit ?? "abc1234"]), "--wall", "2 min"], dir);
+  const rec = (dir, file, card, extra = []) => run(["record", card, file, dir, "--wall", "2 min", "--summary", "Test summary.", ...extra], dir);
+  const lines = (stdout) => stdout.replace(/\n+$/, "").split("\n");
+  const firstLine = (stdout) => lines(stdout).find((l) => l.startsWith("First:"));
+  const outcome = (stdout) => lines(stdout).slice(-3)[1];
+  const saved = (dir) => readFileSync(join(dir, ".doug/.state/reports/first/landing-block.txt"), "utf8");
+  const log = (dir) => readFileSync(join(dir, "docs/live-runs.md"), "utf8");
+
+  it("summary of a forced landing says landed after done --force on its first line", () => {
+    const { dir, file } = setup(forcedReport, plan("first", { landed }));
+    const r = sum(dir, file);
+    expect(r.status, r.stderr).toBe(0);
+    expect(firstLine(r.stdout)).toMatch(/^First: landed after plan\.mjs done --force; last run stopped at level 1/);
+    expect(firstLine(r.stdout)).not.toMatch(/^First: stopped/);
+  });
+  it("summary's computed block says landed for a forced landing", () => {
+    const { dir, file } = setup(forcedReport, plan("first", { landed }));
+    const r = sum(dir, file);
+    expect(r.status, r.stderr).toBe(0);
+    expect(outcome(r.stdout)).toContain("Outcome: landed first at abc1234");
+    expect(outcome(r.stdout)).not.toContain("stopped");
+    expect(saved(dir)).toContain("Outcome: landed first at abc1234");
+    expect(saved(dir)).not.toContain("stopped");
+  });
+  it("summary's forced block takes land's acceptance count", () => {
+    const { dir, file } = setup(forcedReport, plan("first", { landed }));
+    const r = sum(dir, file);
+    expect(r.status, r.stderr).toBe(0);
+    expect(outcome(r.stdout)).toContain("acceptance 3/3 at land");
+    expect(outcome(r.stdout)).not.toContain("acceptance 0/0");
+  });
+  it("summary with a --commit that does not match landed.mergeCommit stays stopped", () => {
+    const { dir, file } = setup(forcedReport, plan("first", { landed }));
+    const r = sum(dir, file, "def5678");
+    expect(r.status, r.stderr).toBe(0);
+    expect(firstLine(r.stdout)).toMatch(/^First: stopped at level 1/);
+    expect(outcome(r.stdout)).toContain("Outcome: stopped first at def5678");
+  });
+  it("summary of a not-ok report with no landed key stays stopped", () => {
+    const { dir, file } = setup(forcedReport, plan("first", {}));
+    const r = sum(dir, file);
+    expect(r.status, r.stderr).toBe(0);
+    expect(firstLine(r.stdout)).toMatch(/^First: stopped at level 1/);
+    expect(outcome(r.stdout)).toContain("Outcome: stopped first at abc1234");
+  });
+
+  it("record with a --commit that does not match landed.mergeCommit stays stopped", () => {
+    const { dir, file } = setup(forcedReport, plan("first", { landed }));
+    const r = rec(dir, file, "first", ["--commit", "def5678"]);
+    expect(r.status, r.stderr).toBe(0);
+    expect(outcome(r.stdout)).toMatch(/^Outcome: stopped first at def5678/);
+    expect(log(dir)).toContain("| Outcome | stopped at level 1 |");
+  });
+  it("a rehearsal record is never treated as a forced landing", () => {
+    const { dir, file } = setup(forcedReport, plan("first", { landed }));
+    const r = rec(dir, file, "first", ["--commit", "abc1234", "--rehearsal", "x", "--rehearsal-outcome", "passed"]);
+    expect(r.status, r.stderr).toBe(0);
+    expect(outcome(r.stdout)).toContain("acceptance 0/0");
+    expect(outcome(r.stdout)).not.toContain("at land");
+    expect(log(dir)).toMatch(/\| Outcome \| rehearsal x passed/);
+  });
+  it("record with no --commit counts as a match for a forced landing", () => {
+    const { dir, file } = setup(forcedReport, plan("first", { landed }));
+    const r = rec(dir, file, "first");
+    expect(r.status, r.stderr).toBe(0);
+    expect(outcome(r.stdout)).toMatch(/^Outcome: landed first,/);
+    expect(log(dir)).toContain("| Outcome | landed after plan.mjs done --force");
+  });
+
+  const batch = (accept) => ({ cards: ["first", "second"], status: "done", tasks: [], landed: { mergeCommit: "abc1234", acceptance: accept } });
+  it("a batch plan's forced record counts only the card's own tagged acceptance", () => {
+    const p = batch([acc("[first] one"), acc("[first] two"), acc("[second] three")]);
+    const a = setup(forcedReport, p);
+    const ra = rec(a.dir, a.file, "first", ["--commit", "abc1234"]);
+    expect(ra.status, ra.stderr).toBe(0);
+    expect(outcome(ra.stdout)).toContain("acceptance 2/2 at land");
+    expect(outcome(ra.stdout)).not.toContain("3/3");
+    const b = setup(forcedReport, p);
+    const rb = rec(b.dir, b.file, "second", ["--commit", "abc1234"]);
+    expect(rb.status, rb.stderr).toBe(0);
+    expect(outcome(rb.stdout)).toContain("acceptance 1/1 at land");
+    expect(outcome(rb.stdout)).not.toContain("3/3");
+  });
+  it("a batch card with no entry tagged for it says the count is the plan's", () => {
+    const p = batch([acc("one"), acc("two"), acc("three")]);
+    const a = setup(forcedReport, p);
+    const r = rec(a.dir, a.file, "first", ["--commit", "abc1234"]);
+    expect(r.status, r.stderr).toBe(0);
+    expect(outcome(r.stdout)).toContain("acceptance 3/3 at land (the plan's)");
   });
 });

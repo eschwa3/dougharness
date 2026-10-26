@@ -11,14 +11,15 @@
 // can supersede a lesson (superseded_by) but never delete or rewrite its text — two triggers on the table enforce
 // that in the database itself, not just in this module's API.
 import { createRequire } from "node:module";
-import { fileURLToPath } from "node:url";
-import { mkdirSync, existsSync, readFileSync, statSync, readdirSync, writeFileSync } from "node:fs";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { mkdirSync, existsSync, readFileSync, statSync, readdirSync, writeFileSync, appendFileSync } from "node:fs";
 import { dirname, resolve, join } from "node:path";
 import { createHash } from "node:crypto";
 import { homedir } from "node:os";
 import { request as httpRequest } from "node:http";
 import { request as httpsRequest } from "node:https";
-import { classifyBlocks, adversaryBlocks } from "./board.mjs";
+import { classifyBlocks, adversaryBlocks, addCard } from "./board.mjs";
+import { initialState, currentAction, next as cardLoopNext, briefPrompt } from "./card-loop.mjs";
 import { transcriptUsage, projectSlug, CODEX_PRICES, CODEX_DEFAULT_MODEL } from "./cost.mjs";
 import { MODELS_HEADING } from "./models.mjs";
 
@@ -61,7 +62,15 @@ const LESSON_KINDS = ["feedback", "project", "pitfall", "pattern"];
 // verified is null on a hand row even though the gate passed: no independent verifier ran on that track, and
 // the gate's own text lives in the `gate` column instead. A consumer that averages fix_passes or counts
 // blocks across both tracks must filter on track. wall_clock, gate, and note only exist on a hand row; they
-// are null on a flow row.
+// are null on a flow row. Exception (card memory-outcome-arms): `reflect --hand --rounds <n>` (not a dry run)
+// writes passes n and fix_passes n - 1 onto the landing's hand row; without --rounds both stay null, since the
+// default of 1 round is not a measurement. A later `record --hand` of the same commit keeps those values (the
+// upsert only replaces passes and fix_passes when the new row carries passes).
+//
+// memory_config (v10, card memory-outcome-arms): the canonical JSON (keys sorted) of the memoryConfig() the row
+// ran under, copied from condition.json; null on an unstamped row. It travels with the condition columns. A flow
+// row is stamped with memoryConfig({ track: "flow" }) (delivery "index+fetch" with fetchTokens, cards memory-flow-index-fetch, memory-atomic-lessons) when recorded
+// through `memory.mjs record <report.json>`; a hand row carries the hand stamp (delivery "index+fetch").
 //
 // partial (v5, card worker-context-handoff): 1 when the task's own outcome was still partial after its one
 // resume (graceful degradation on a context limit, never a verification failure), 0 when it was not, null on a
@@ -77,8 +86,10 @@ const LESSON_KINDS = ["feedback", "project", "pitfall", "pattern"];
 // ran under (`<class>/default` until exploration exists); assigned_by is `'policy'` or `'explore'`;
 // explore_probability is the explore arm's assignment probability, null otherwise. backfilled is 1 only for a
 // row `memory.mjs condition backfill` stamped after the fact, 0 for every other row (including an unstamped
-// hand row, which has never been touched by either path). On today's flow track these seven columns are always
-// null: a flow row is never stamped by `condition open`/`record --hand` — that wiring is a later card.
+// hand row, which has never been touched by either path).
+// A stopped hand card report yields a stop row (stopOutcomeRow below): track 'hand', run 'stop:<report hash>', stop_class and
+// stop_reason from the report, commit_sha null. On the flow track these seven columns are null: a flow
+// row is never stamped by `condition open`/`record --hand` (its memory_config alone is stamped, see above).
 const OUTCOMES_COLUMNS_SQL = `
   id INTEGER PRIMARY KEY,
   recorded TEXT NOT NULL,
@@ -124,6 +135,7 @@ const OUTCOMES_COLUMNS_SQL = `
   assigned_by TEXT,
   explore_probability REAL,
   backfilled INTEGER NOT NULL DEFAULT 0,
+  memory_config TEXT,
   UNIQUE(run, task)
 `;
 
@@ -150,7 +162,10 @@ const LESSONS_COLUMNS_SQL = `
   embedding_model TEXT,
   embedding_dims INTEGER,
   embedding BLOB,
-  stale TEXT
+  stale TEXT,
+  seen INTEGER NOT NULL DEFAULT 0,
+  archived TEXT,
+  archived_reason TEXT
 `;
 
 const LESSONS_TRIGGERS_SQL = `
@@ -423,6 +438,61 @@ function migrateV8ToV9(db) {
   }
 }
 
+// v9 had no memory_config column on outcomes (card memory-outcome-arms): the canonical JSON of the memory
+// configuration a row ran under, copied from condition.json's memoryConfig. Additive like v8->v9: one guarded
+// ALTER, then the version bump; old rows stay null. OUTCOMES_COLUMNS_SQL carries memory_config for a v1 store's
+// rebuild, so this step is a no-op there instead of a duplicate-column error.
+const V10_MEMORY_COLUMNS = [["memory_config", "TEXT"]];
+
+function migrateV9ToV10(db) {
+  db.exec("BEGIN");
+  try {
+    const cols = db.prepare("PRAGMA table_info(outcomes)").all().map((c) => c.name);
+    for (const [name, type] of V10_MEMORY_COLUMNS) {
+      if (!cols.includes(name)) db.exec(`ALTER TABLE outcomes ADD COLUMN ${name} ${type};`);
+    }
+    db.exec("PRAGMA user_version = 10");
+    db.exec("COMMIT");
+  } catch (err) {
+    db.exec("ROLLBACK");
+    throw err;
+  }
+}
+
+// v10 had no seen column on lessons (card memory-reflect-supersede): how many times a reflect pass judged a
+// proposal a repeat of the lesson. One guarded ALTER (LESSONS_COLUMNS_SQL already carries seen for a rebuilt
+// store), then the version bump. seen is not in the no-rewrite trigger's column list.
+function migrateV10ToV11(db) {
+  db.exec("BEGIN");
+  try {
+    const cols = db.prepare("PRAGMA table_info(lessons)").all().map((c) => c.name);
+    if (!cols.includes("seen")) db.exec("ALTER TABLE lessons ADD COLUMN seen INTEGER NOT NULL DEFAULT 0;");
+    db.exec("PRAGMA user_version = 11");
+    db.exec("COMMIT");
+  } catch (err) {
+    db.exec("ROLLBACK");
+    throw err;
+  }
+}
+
+// v11 had no archived status on lessons (card memory-feedback-rank): archived is an ISO time (NULL = live) and
+// archived_reason names the counters that met the archive rule. Two guarded ALTERs (LESSONS_COLUMNS_SQL already
+// carries both for a rebuilt store), then the version bump. Neither is in the no-rewrite trigger's column list,
+// and the no-delete trigger is unchanged: an archived row is kept.
+function migrateV11ToV12(db) {
+  db.exec("BEGIN");
+  try {
+    const cols = db.prepare("PRAGMA table_info(lessons)").all().map((c) => c.name);
+    if (!cols.includes("archived")) db.exec("ALTER TABLE lessons ADD COLUMN archived TEXT;");
+    if (!cols.includes("archived_reason")) db.exec("ALTER TABLE lessons ADD COLUMN archived_reason TEXT;");
+    db.exec("PRAGMA user_version = 12");
+    db.exec("COMMIT");
+  } catch (err) {
+    db.exec("ROLLBACK");
+    throw err;
+  }
+}
+
 export function openMemory(dir) {
   const file = memoryPath(dir);
   mkdirSync(dirname(file), { recursive: true });
@@ -431,7 +501,7 @@ export function openMemory(dir) {
   const version = db.prepare("PRAGMA user_version").get().user_version;
   if (version === 0) {
     db.exec(SCHEMA_SQL);
-    db.exec("PRAGMA user_version = 9");
+    db.exec("PRAGMA user_version = 12");
   } else if (version === 1) {
     migrateV1ToV2(db);
     migrateV2ToV3(db);
@@ -441,6 +511,9 @@ export function openMemory(dir) {
     migrateV6ToV7(db);
     migrateV7ToV8(db);
     migrateV8ToV9(db);
+    migrateV9ToV10(db);
+    migrateV10ToV11(db);
+    migrateV11ToV12(db);
   } else if (version === 2) {
     migrateV2ToV3(db);
     migrateV3ToV4(db);
@@ -449,6 +522,9 @@ export function openMemory(dir) {
     migrateV6ToV7(db);
     migrateV7ToV8(db);
     migrateV8ToV9(db);
+    migrateV9ToV10(db);
+    migrateV10ToV11(db);
+    migrateV11ToV12(db);
   } else if (version === 3) {
     migrateV3ToV4(db);
     migrateV4ToV5(db);
@@ -456,29 +532,56 @@ export function openMemory(dir) {
     migrateV6ToV7(db);
     migrateV7ToV8(db);
     migrateV8ToV9(db);
+    migrateV9ToV10(db);
+    migrateV10ToV11(db);
+    migrateV11ToV12(db);
   } else if (version === 4) {
     migrateV4ToV5(db);
     migrateV5ToV6(db);
     migrateV6ToV7(db);
     migrateV7ToV8(db);
     migrateV8ToV9(db);
+    migrateV9ToV10(db);
+    migrateV10ToV11(db);
+    migrateV11ToV12(db);
   } else if (version === 5) {
     migrateV5ToV6(db);
     migrateV6ToV7(db);
     migrateV7ToV8(db);
     migrateV8ToV9(db);
+    migrateV9ToV10(db);
+    migrateV10ToV11(db);
+    migrateV11ToV12(db);
   } else if (version === 6) {
     migrateV6ToV7(db);
     migrateV7ToV8(db);
     migrateV8ToV9(db);
+    migrateV9ToV10(db);
+    migrateV10ToV11(db);
+    migrateV11ToV12(db);
   } else if (version === 7) {
     migrateV7ToV8(db);
     migrateV8ToV9(db);
+    migrateV9ToV10(db);
+    migrateV10ToV11(db);
+    migrateV11ToV12(db);
   } else if (version === 8) {
     migrateV8ToV9(db);
-  } else if (version !== 9) {
+    migrateV9ToV10(db);
+    migrateV10ToV11(db);
+    migrateV11ToV12(db);
+  } else if (version === 9) {
+    migrateV9ToV10(db);
+    migrateV10ToV11(db);
+    migrateV11ToV12(db);
+  } else if (version === 10) {
+    migrateV10ToV11(db);
+    migrateV11ToV12(db);
+  } else if (version === 11) {
+    migrateV11ToV12(db);
+  } else if (version !== 12) {
     db.close();
-    throw new Error(`memory store ${file} is user_version ${version}; this code understands up to version 9`);
+    throw new Error(`memory store ${file} is user_version ${version}; this code understands up to version 12`);
   }
   return {
     file,
@@ -512,7 +615,7 @@ export function probeSqliteFts5() {
 // Read-only look at the store for `doug doctor`: creates nothing, migrates nothing, never throws.
 export function inspectMemory(dir) {
   const file = memoryPath(dir);
-  const out = { file, exists: false, userVersion: null, maxUserVersion: 9, quickCheck: null, error: null };
+  const out = { file, exists: false, userVersion: null, maxUserVersion: 12, quickCheck: null, error: null };
   if (!existsSync(file)) return out;
   out.exists = true;
   let db;
@@ -616,6 +719,20 @@ export function supersedeLesson(m, oldId, newId) {
   return getLesson(m, oldId);
 }
 
+// The one live-lesson predicate: not superseded, not stale, not archived. Every reader of "live" lessons uses it.
+export const LIVE_LESSON_SQL = "superseded_by IS NULL AND stale IS NULL AND archived IS NULL";
+export const isLiveLesson = (row) => !row.superseded_by && !row.stale && !row.archived;
+
+// Restores an archived lesson (card memory-archived-readers): clears archived and archived_reason, the way back
+// from reflect --harmful's archive. Neither column is protected by lessons_no_rewrite; nothing is deleted.
+export function unarchiveLesson(m, id) {
+  const row = getLesson(m, id);
+  if (!row) throw new Error(`lesson ${id} does not exist`);
+  if (!row.archived) throw new Error(`lesson ${id} is not archived`);
+  m.prepare("UPDATE lessons SET archived = NULL, archived_reason = NULL WHERE id = ?").run(id);
+  return getLesson(m, id);
+}
+
 // Clears a stale mark (set by recallLessons's citation re-check) so the lesson is a candidate again — the way
 // back once a checkout is fixed up or the mark turns out to be wrong. `stale` is not one of the columns the
 // lessons_no_rewrite trigger protects, so this is an ordinary UPDATE, not a special case.
@@ -631,6 +748,42 @@ export function listLessons(m, { includeSuperseded = false } = {}) {
     ? m.prepare("SELECT * FROM lessons ORDER BY created ASC, id ASC").all()
     : m.prepare("SELECT * FROM lessons WHERE superseded_by IS NULL ORDER BY created ASC, id ASC").all();
   return rows.map(lessonRowToObject);
+}
+
+// Ids of every lesson fetched with `lesson show --card`: the {"id": ...} lines of every
+// <dir>/.doug/.state/reports/*/fetched.jsonl. Never throws; unreadable files and bad lines are skipped.
+export function readFetchedLessonIds(dir) {
+  const ids = new Set();
+  let cards = [];
+  try {
+    cards = readdirSync(join(dir, ".doug", ".state", "reports"));
+  } catch {
+    return ids;
+  }
+  for (const card of cards) {
+    let text;
+    try {
+      text = readFileSync(join(dir, ".doug", ".state", "reports", card, "fetched.jsonl"), "utf8");
+    } catch {
+      continue;
+    }
+    for (const line of text.split("\n")) {
+      try {
+        const id = JSON.parse(line)?.id;
+        if (typeof id === "string") ids.add(id);
+      } catch {}
+    }
+  }
+  return ids;
+}
+
+// Live lessons no run has confirmed (ADR 0019): helpful = 0 and harmful = 0 and never fetched. Read-only.
+export function listUnconfirmedLessons(m, { fetchedIds = new Set() } = {}) {
+  return m
+    .prepare(`SELECT id, kind, created, text FROM lessons WHERE ${LIVE_LESSON_SQL} AND helpful = 0 AND harmful = 0 ORDER BY created ASC, id ASC`)
+    .all()
+    .filter((r) => !fetchedIds.has(r.id))
+    .map((r) => ({ id: r.id, kind: r.kind, created: r.created, title: lessonTitle(r.text) }));
 }
 
 // Whitespace-split tokens, each quoted for FTS5 MATCH and OR'd together; shared by searchLessons and
@@ -698,7 +851,7 @@ export function lessonsNeedingEmbedding(m, { model, dims }) {
   const rows = m
     .prepare(
       `SELECT * FROM lessons
-       WHERE superseded_by IS NULL AND stale IS NULL
+       WHERE ${LIVE_LESSON_SQL}
          AND (embedding IS NULL OR embedding_model IS NOT ? OR embedding_dims IS NOT ?)
        ORDER BY created ASC, id ASC`
     )
@@ -930,20 +1083,21 @@ function recallRows(m, provider, nowMs, staleDays, sig) {
   // No live row holds a vector under this model/dims: nothing to decode, and no blob is read.
   const any = m
     .prepare(
-      "SELECT 1 AS x FROM lessons WHERE superseded_by IS NULL AND stale IS NULL AND embedding IS NOT NULL AND embedding_model = ? AND embedding_dims = ? LIMIT 1"
+      `SELECT 1 AS x FROM lessons WHERE ${LIVE_LESSON_SQL} AND embedding IS NOT NULL AND embedding_model = ? AND embedding_dims = ? LIMIT 1`
     )
     .get(provider.model, provider.dims);
   if (!any) return null;
 
   const stmt = m.prepare(
-    `SELECT id, created, confirmed, scope,
+    `SELECT id, created, confirmed, scope, harmful, helpful, citation,
             CASE WHEN embedding_model = ? AND embedding_dims = ? THEN embedding END AS emb
      FROM lessons
-     WHERE superseded_by IS NULL AND stale IS NULL AND ${SQL_OUTSIDE_WINDOW} = 0`
+     WHERE ${LIVE_LESSON_SQL} AND ${SQL_OUTSIDE_WINDOW} = 0`
   );
   const ids = [];
   const anchorMs = [];
   const scopeRaw = [];
+  const fbInfo = [];
   const vecs = [];
   let bytes = 0;
   const cutoffMs = (cutoffJd - 2440587.5) * 86400000;
@@ -952,6 +1106,7 @@ function recallRows(m, provider, nowMs, staleDays, sig) {
     ids.push(r.id);
     anchorMs.push(new Date(r.confirmed || r.created).getTime());
     scopeRaw.push(r.scope);
+    fbInfo.push({ harmful: r.harmful, helpful: r.helpful, citation: r.citation });
     const vec = blobToFloats(r.emb);
     vecs.push(vec);
     if (vec) bytes += vec.byteLength;
@@ -964,6 +1119,7 @@ function recallRows(m, provider, nowMs, staleDays, sig) {
     ids,
     anchorMs: Float64Array.from(anchorMs),
     scopeRaw,
+    fbInfo,
     vecs,
     live: new Uint8Array(ids.length).fill(1),
     bytes,
@@ -1007,7 +1163,7 @@ function followOwnWrites(m, entry, written, confirmedIso, sigBefore) {
 // count outside the window by exactly ageDaysOf's rule, the live total, and the oldest hidden age in whole days.
 export function windowHidden(m, { staleDays = 30, now = new Date() } = {}) {
   const nowMs = (now instanceof Date ? now : new Date(now)).getTime();
-  const rows = m.prepare("SELECT created, confirmed FROM lessons WHERE superseded_by IS NULL AND stale IS NULL").all();
+  const rows = m.prepare(`SELECT created, confirmed FROM lessons WHERE ${LIVE_LESSON_SQL}`).all();
   let count = 0;
   let oldest = -Infinity;
   for (const r of rows) {
@@ -1035,8 +1191,51 @@ export function windowNote(hidden, staleDays = 30) {
 // returned unchecked (checked: false in the result) rather than either throwing (no checkoutDir given) or
 // marking every row stale forever (a wrong one given). Never throws for a provider or checkout problem (a
 // database problem may still throw, same as every other export here). See design #2 in the memory-recall card.
+// Feedback in recall scoring (card memory-feedback-rank, ADR 0019). harmful (the lead's explicit mark) and the
+// lesson's evidence class (by citation) multiply the score; helpful enters only as a capped, optionally decayed
+// term that ships off (helpfulCap 0), because it rises on every verified use and would feed itself. harmful 0,
+// weight 1 and helpfulCap 0 leave the score exactly as before. The multiplier is applied to the score's
+// magnitude (score + |score| * (factor - 1)) so a negative cosine is lowered by a factor under 1, not raised.
+export const RECALL_FEEDBACK = {
+  harmfulPenalty: 0.01,
+  helpfulCap: 0,
+  helpfulStep: 0.05,
+  helpfulDecay: 0,
+  evidenceWeights: { report: 1, history: 1, file: 1, none: 1 },
+};
+
+export function evidenceClassOf(lesson) {
+  const c = lesson && typeof lesson.citation === "string" ? lesson.citation : "";
+  if (!c) return "none";
+  if (c.startsWith("report:")) return "report";
+  if (c.startsWith("history:")) return "history";
+  return "file";
+}
+
+function mergeFeedback(over) {
+  const o = over || {};
+  return { ...RECALL_FEEDBACK, ...o, evidenceWeights: { ...RECALL_FEEDBACK.evidenceWeights, ...(o.evidenceWeights || {}) } };
+}
+
+function feedbackScore(score, info, fb) {
+  if (!info) return score;
+  const harmful = Number(info.harmful) || 0;
+  let factor = 1;
+  if (harmful > 0) factor *= 1 / (1 + fb.harmfulPenalty * harmful);
+  const w = fb.evidenceWeights[evidenceClassOf(info)];
+  if (w !== undefined && w !== 1) factor *= w;
+  if (fb.helpfulCap > 0) {
+    const h = Math.max(0, Number(info.helpful) || 0);
+    const d = fb.helpfulDecay;
+    const eff = d > 0 && d < 1 ? (1 - Math.pow(d, h)) / (1 - d) : h;
+    factor *= 1 + fb.helpfulStep * Math.min(eff, fb.helpfulCap);
+  }
+  return factor === 1 ? score : score + Math.abs(score) * (factor - 1);
+}
+
 export async function recallLessons(m, query, opts = {}) {
   const { files = [], k = 8, now = new Date(), provider = null, checkoutDir = null, staleDays = 30, detectedProvider = null } = opts;
+  const fb = mergeFeedback(opts.feedback);
   const nowDate = now instanceof Date ? now : new Date(now);
   const nowIsoStr = nowDate.toISOString();
   const nowMs = nowDate.getTime();
@@ -1050,10 +1249,10 @@ export async function recallLessons(m, query, opts = {}) {
   if (match) {
     const rows = m
       .prepare(
-        `SELECT l.id, l.created, l.confirmed, l.scope,
+        `SELECT l.id, l.created, l.confirmed, l.scope, l.harmful, l.helpful, l.citation,
                 (l.embedding IS NOT NULL AND l.embedding_model = ? AND l.embedding_dims = ?) AS has_match
          FROM lessons_fts f JOIN lessons l ON l.id = f.id
-         WHERE lessons_fts MATCH ? AND l.superseded_by IS NULL AND l.stale IS NULL
+         WHERE lessons_fts MATCH ? AND ${LIVE_LESSON_SQL}
          ORDER BY bm25(lessons_fts) LIMIT 50`
       )
       .all(provider ? provider.model : null, provider ? provider.dims : null, match);
@@ -1061,7 +1260,7 @@ export async function recallLessons(m, query, opts = {}) {
       const age = ageDaysOf(r.confirmed || r.created, nowMs);
       if (!(age <= staleDays)) continue;
       bm25Ranked.push(r.id);
-      bm25Info.set(r.id, { scope: r.scope, hasMatch: !!r.has_match, age });
+      bm25Info.set(r.id, { scope: r.scope, hasMatch: !!r.has_match, age, fb: { harmful: r.harmful, helpful: r.helpful, citation: r.citation } });
     }
   }
 
@@ -1123,7 +1322,7 @@ export async function recallLessons(m, query, opts = {}) {
   // model, or the caller detected a usable provider; hybrid reports how many live in-window rows lack a vector.
   // The existence check is bounded and only runs when no other term already decided it.
   const hasAnyVector = (db) =>
-    !!db.prepare("SELECT 1 AS x FROM lessons WHERE superseded_by IS NULL AND stale IS NULL AND embedding IS NOT NULL LIMIT 1").get();
+    !!db.prepare(`SELECT 1 AS x FROM lessons WHERE ${LIVE_LESSON_SQL} AND embedding IS NOT NULL LIMIT 1`).get();
   const degraded = mode === "keyword-only" && (!!provider || hasAnyVector(m) || !!detectedProvider);
   const coverage = {};
   if (mode === "hybrid") {
@@ -1147,21 +1346,27 @@ export async function recallLessons(m, query, opts = {}) {
   // object per stored vector.
   const bm25Only = (id) => {
     const info = bm25Info.get(id);
-    return { id, score: weigh(info.age, info.scope, 1 / (60 + bm25Rank.get(id) + 1)), sides: ["bm25"] };
+    return { id, score: feedbackScore(weigh(info.age, info.scope, 1 / (60 + bm25Rank.get(id) + 1)), info.fb, fb), sides: ["bm25"] };
   };
   let candidates;
   if (mode === "hybrid") {
     // (e) vectored lessons by cosine x recency x scope, then BM25 hits with no vector, in BM25 order.
     const order = Int32Array.from(cosine);
     const scores = new Float64Array(rows.n);
-    for (const r of cosine) scores[r] = weigh(ages[r], rows.scopeRaw[r], cosineScores[r]);
+    for (const r of cosine) scores[r] = feedbackScore(weigh(ages[r], rows.scopeRaw[r], cosineScores[r]), rows.fbInfo[r], fb);
     order.sort((x, y) => scores[y] - scores[x] || idCmp(rows.ids[x], rows.ids[y]));
     const dense = { length: order.length, at: (j) => {
       const r = order[j];
       const id = rows.ids[r];
       return { id, score: scores[r], sides: bm25Rank.has(id) ? ["bm25", "vector"] : ["vector"] };
     } };
-    const appended = bm25Ranked.filter((id) => !bm25Info.get(id).hasMatch).map(bm25Only);
+    // The tail keeps BM25 order (not the recency-weighted score), reordered only by the feedback factor: the sort
+    // key is the rank score 1/(60+rank) through feedbackScore, so a harmful twin falls below its harmful-0 twin.
+    const appended = bm25Ranked
+      .filter((id) => !bm25Info.get(id).hasMatch)
+      .map((id, pos) => ({ cand: bm25Only(id), pos, key: feedbackScore(1 / (60 + bm25Rank.get(id) + 1), bm25Info.get(id).fb, fb) }))
+      .sort((a, b) => b.key - a.key || a.pos - b.pos)
+      .map((x) => x.cand);
     candidates = {
       length: dense.length + appended.length,
       at: (j) => (j < dense.length ? dense.at(j) : appended[j - dense.length]),
@@ -1259,6 +1464,72 @@ export function renderLessons(lessons) {
   return text.length ? { text: text.join("\n"), ids } : { text: null, ids: [] };
 }
 
+// The lesson index (card memory-progressive-access, ADR 0019 retrieval): one line per lesson in rank order carrying
+// the id, a one-line title, the kind and the token cost of the WHOLE text (chars / 4, the repo's rule), so the lead
+// can fetch the full text of the lessons a card needs with `memory.mjs lesson show <id>`. A line that would push the
+// running total past `cap` is skipped (not stopped at) and its id is reported in `omitted`: no silent filter.
+const INDEX_TITLE_CHARS = 100;
+export const lessonTokens = (text) => Math.ceil(String(text).length / 4);
+export function lessonTitle(text) {
+  const first = String(text).split("\n").find((l) => l.trim() !== "") ?? "";
+  const line = first.trim().replace(/\s+/g, " ");
+  if (line.length <= INDEX_TITLE_CHARS) return line;
+  const slice = line.slice(0, INDEX_TITLE_CHARS);
+  const sp = slice.lastIndexOf(" ");
+  return (sp > 0 ? slice.slice(0, sp) : slice).trimEnd() + "…";
+}
+export function renderLessonIndex(lessons, { cap = LESSONS_CHAR_CAP } = {}) {
+  const text = [];
+  const ids = [];
+  const omitted = [];
+  let length = 0;
+  for (const lesson of Array.isArray(lessons) ? lessons : []) {
+    const line = `- [${lesson.id}] ${lessonTitle(lesson.text)} (${lesson.kind}, ~${lessonTokens(lesson.text)} tokens)`;
+    const nextLength = length + (text.length ? 1 : 0) + line.length;
+    if (nextLength > cap) {
+      omitted.push(lesson.id);
+      continue;
+    }
+    text.push(line);
+    ids.push(lesson.id);
+    length = nextLength;
+  }
+  return { text: text.length ? text.join("\n") : null, ids, omitted };
+}
+
+// The flow track's delivery (card memory-atomic-lessons): the index, then the full text of the top lessons in
+// rank order up to FLOW_FETCH_TOKENS (chars / 4, rounded up, per lesson). A lesson whose full text would pass the
+// remaining budget is skipped (not stopped at), stays in the index, is named on a `not fetched` line and is never
+// cut. Fetched lessons use the `lesson show` form. `ids` are the FETCHED ids in rank order (what the run credits as
+// used), `indexIds` every indexed id, `omitted` the ids the index cap dropped, `unfetched` the indexed ids over budget.
+export const FLOW_FETCH_TOKENS = 4000;
+export function renderFlowLessons(lessons, { indexCap = LESSONS_CHAR_CAP, fetchTokens = FLOW_FETCH_TOKENS } = {}) {
+  const index = renderLessonIndex(lessons, { cap: indexCap });
+  if (index.text === null) return { text: null, ids: [], indexIds: [], omitted: index.omitted, unfetched: [] };
+  const byId = new Map((Array.isArray(lessons) ? lessons : []).map((l) => [l.id, l]));
+  const fetched = [];
+  const unfetched = [];
+  let used = 0;
+  for (const id of index.ids) {
+    const lesson = byId.get(id);
+    const tokens = lessonTokens(lesson.text);
+    if (used + tokens > fetchTokens) {
+      unfetched.push(id);
+      continue;
+    }
+    used += tokens;
+    fetched.push(lesson);
+  }
+  const parts = [index.text];
+  if (index.omitted.length) parts.push(`index: omitted ${index.omitted.length} lessons over the ${indexCap}-character index budget: ${index.omitted.join(", ")}`);
+  if (unfetched.length) parts.push(`not fetched (over the ~${fetchTokens}-token fetch budget): ${unfetched.join(", ")}`);
+  let text = parts.join("\n");
+  if (fetched.length) {
+    text += "\n\n" + fetched.map((l) => `lesson ${l.id} (${l.kind}, ~${lessonTokens(l.text)} tokens)\ncitation: ${l.citation || "none"}\n\n${l.text}`).join("\n\n");
+  }
+  return { text, ids: fetched.map((l) => l.id), indexIds: index.ids, omitted: index.omitted, unfetched };
+}
+
 // The lessons a session starts with when no card query exists (card memory-every-session): live, non-stale
 // lessons confirmed-or-created within staleDays, ordered by helpful minus harmful desc, then confirmed-or-created
 // desc, then id ascending. No provider, no citation re-check, nothing written.
@@ -1268,7 +1539,7 @@ export function topLessons(m, { k = 5, staleDays = 30, now = new Date() } = {}) 
     .prepare(
       `SELECT id, text, kind, scope, citation, source_agent, source_model, task, card, commit_sha, created, confirmed,
               helpful, harmful, superseded_by, stale
-       FROM lessons WHERE superseded_by IS NULL AND stale IS NULL`
+       FROM lessons WHERE ${LIVE_LESSON_SQL}`
     )
     .all()
     .map(lessonRowToObject)
@@ -1424,7 +1695,7 @@ function findPlanTask(plan, id) {
 }
 
 export function outcomeRows(report, opts) {
-  const { plan = null, classes = [], run = null, reportHash, reportPath = null, card = null, commit = null, cost = null, now = nowIso() } = opts || {};
+  const { plan = null, classes = [], run = null, reportHash, reportPath = null, card = null, commit = null, cost = null, now = nowIso(), memoryConfig: flowMemoryConfig = null } = opts || {};
   const allBlocks = classifyBlocks(report, classes).map((b) => ({
     id: b.id,
     pass: b.pass,
@@ -1494,8 +1765,9 @@ export function outcomeRows(report, opts) {
         gate: null,
         note: null,
         partial: toIntOrNull(task.partial),
-        // The seven condition columns (card outcomes-condition-columns) are always null on a flow row today —
-        // see the comment above OUTCOMES_COLUMNS_SQL. backfilled is 0, never null: it is NOT NULL DEFAULT 0.
+        // The seven condition columns (card outcomes-condition-columns) are null on a flow row — see the comment
+        // above OUTCOMES_COLUMNS_SQL; memory_config is the flow stamp when the caller passes one (card
+        // memory-flow-index-fetch). backfilled is 0, never null: it is NOT NULL DEFAULT 0.
         harness_commit: null,
         config_hash: null,
         class: null,
@@ -1503,6 +1775,7 @@ export function outcomeRows(report, opts) {
         assigned_by: null,
         explore_probability: null,
         backfilled: 0,
+        memory_config: flowMemoryConfig ? JSON.stringify(sortKeysDeep(flowMemoryConfig)) : null,
       });
     }
   }
@@ -1600,7 +1873,296 @@ export function handOutcomeRow({ card, commit, wallClock = null, gate = null, no
     assigned_by: condition ? condition.assignedBy ?? null : null,
     explore_probability: condition ? condition.exploreProbability ?? null : null,
     backfilled: 0,
+    memory_config: condition && condition.memoryConfig ? JSON.stringify(sortKeysDeep(condition.memoryConfig)) : null,
   };
+}
+
+function sortKeysDeep(v) {
+  if (Array.isArray(v)) return v.map(sortKeysDeep);
+  if (v && typeof v === "object") return Object.fromEntries(Object.keys(v).sort().map((k) => [k, sortKeysDeep(v[k])]));
+  return v;
+}
+
+// The memory configuration an outcome row is stamped with (card memory-outcome-arms, ADR 0019 Measurement), so
+// outcomes can be compared per configuration. Pure: the caller reads the project config. Excludes baseUrl and
+// apiKeyEnv (where the provider lives, not what it computes). MEMORY_STAGE names the recall/ranking/delivery
+// generation: a card that changes recall or ranking for every track bumps it, which starts a new arm. A change to one
+// track's delivery alone (card memory-atomic-lessons: the flow track) changes that track's stamp fields instead.
+export const MEMORY_STAGE = "progressive-access";
+
+// `track` names the delivery the row's briefs actually got (card memory-flow-index-fetch): a hand card's briefs
+// carry the index plus a lead fetch; a flow task's briefs (plan.mjs) carry the index plus the full text of the top
+// lessons up to FLOW_FETCH_TOKENS (card memory-atomic-lessons), told apart from the hand stamp by fetch/fetchTokens. Any other track throws
+// rather than claiming a delivery.
+export function memoryConfig({ embeddings = null, staleDays = 30, track = "hand" } = {}) {
+  if (track !== "hand" && track !== "flow") throw new Error(`memoryConfig: unknown track ${JSON.stringify(track)}`);
+  const emb = embeddings ? { provider: embeddings.provider ?? null, model: embeddings.model ?? null, dims: embeddings.dims ?? null } : null;
+  if (track === "flow") {
+    return { stage: MEMORY_STAGE, embeddings: emb, staleDays, k: 8, delivery: "index+fetch", indexChars: LESSONS_CHAR_CAP, fetch: "top-k", fetchTokens: FLOW_FETCH_TOKENS };
+  }
+  return {
+    stage: MEMORY_STAGE,
+    embeddings: emb,
+    staleDays,
+    k: 8,
+    delivery: "index+fetch",
+    indexChars: LESSONS_CHAR_CAP,
+  };
+}
+
+// One stopped hand card report, one row (card memory-record-stops, ADR 0019 gap 3): run = 'stop:<first 12 hex of
+// the report hash>', so recording the same report again updates the same row, a different stop of the card adds
+// a row, and a later landing ('hand:<commit>') sits beside it. stop_class is the report's typed `reason` and
+// stop_reason its prose `detail` (the reason when detail is blank). `blocks` are the blocks.jsonl lines
+// attributed to the run, kept as {at, hook, agent, class, reason}. Every other column is null as on handOutcomeRow.
+export function stopOutcomeRow({ card, report, reportHash, reportPath = null, run = null, blocks = [], now = nowIso(), condition = null, memoryConfig: stamp = null } = {}) {
+  if (!card) throw new Error("stopOutcomeRow requires card");
+  if (!report || report.outcome !== "stopped") throw new Error("stopOutcomeRow requires a stopped report");
+  if (!reportHash) throw new Error("stopOutcomeRow requires reportHash");
+  const detail = typeof report.detail === "string" && report.detail.trim() !== "" ? report.detail : null;
+  return {
+    ...handOutcomeRow({ card, commit: "x", now, condition }),
+    ...(!(condition && condition.memoryConfig) && stamp ? { memory_config: JSON.stringify(sortKeysDeep(stamp)) } : {}),
+    run: `stop:${String(reportHash).slice(0, 12)}`,
+    run_id: run ?? null,
+    report_hash: reportHash,
+    report_path: reportPath,
+    commit_sha: null,
+    stop_class: report.reason ?? null,
+    stop_reason: detail ?? report.reason ?? null,
+    blocks: blocks.map((b) => ({ at: b.at ?? null, hook: b.hook ?? null, agent: b.agent ?? null, class: b.class ?? null, reason: b.reason ?? null })),
+  };
+}
+
+// The agent id a blocks.jsonl line belongs to: a string `agentId` field, else the id in a subagent-stop reason.
+export function blockAgentId(line) {
+  if (!line || typeof line !== "object") return null;
+  if (typeof line.agentId === "string" && line.agentId !== "") return line.agentId;
+  const m = typeof line.reason === "string" ? /Subagent \S+ \(([^)\s]+)\)/.exec(line.reason) : null;
+  return m ? m[1] : null;
+}
+
+function parseJsonLines(text) {
+  const out = [];
+  for (const raw of String(text ?? "").split("\n")) {
+    if (raw.trim() === "") continue;
+    try {
+      const v = JSON.parse(raw);
+      if (v !== null && typeof v === "object" && !Array.isArray(v)) out.push(v);
+    } catch {
+      // malformed line: skipped
+    }
+  }
+  return out;
+}
+
+// Every agentId on any parseable line of the given queen journal texts.
+export function runAgentIds(journalTexts) {
+  const ids = new Set();
+  for (const t of journalTexts ?? []) for (const v of parseJsonLines(t)) if (typeof v.agentId === "string" && v.agentId !== "") ids.add(v.agentId);
+  return ids;
+}
+
+// The parsed blocks.jsonl lines whose agent id is one of the run's, in file order. A main-session line has none.
+export function attributeBlocks(ledgerText, agentIds) {
+  return parseJsonLines(ledgerText).filter((v) => {
+    const id = blockAgentId(v);
+    return id !== null && agentIds.has(id);
+  });
+}
+
+// Run history (card memory-run-history, ADR 0019 L0): an append-only file per card run under
+// .doug/.state/history/<card>/<run>.jsonl. Capture depth (ADR 0019 line 30, Open there, decided here for the artifact
+// slice): copy the text of Doug's own run artifacts (card report, attributed gate blocks and trace denials, each
+// seat's hand-back from the queen journal, each seat's brief re-rendered by replaying lib/card-loop.mjs); never copy
+// Claude Code transcripts and never reference into the Claude Code store. Each entry is secret-scanned on its WHOLE
+// text first (a hit replaces the entire entry), then capped at HISTORY_ENTRY_MAX_BYTES keeping the head; each run
+// file is capped at HISTORY_RUN_MAX_BYTES with a final 'cap' line counting the dropped entries (no silent filter).
+// No age bound: files are never deleted or rewritten.
+export const HISTORY_DIR_RELPATH = ".doug/.state/history";
+export const HISTORY_ENTRY_MAX_BYTES = 65536;
+export const HISTORY_RUN_MAX_BYTES = 1048576;
+
+export function historyEntry({ kind, seat = null, round = null, source, value }, { scan, maxBytes = HISTORY_ENTRY_MAX_BYTES } = {}) {
+  const text0 = typeof value === "string" ? value : String(JSON.stringify(value === undefined ? null : value, null, 2));
+  const bytes = Buffer.byteLength(text0, "utf8");
+  const base = { kind, seat, round, source, bytes };
+  let redacted = null;
+  if (typeof scan !== "function") redacted = "no-scanner";
+  else {
+    try {
+      const hit = scan(text0);
+      if (hit) redacted = typeof hit.rule === "string" && hit.rule !== "" ? hit.rule : "secret";
+    } catch {
+      redacted = "scan-error";
+    }
+  }
+  if (redacted !== null) return { ...base, truncated: false, redacted, text: `[redacted: ${redacted}]` };
+  if (bytes <= maxBytes) return { ...base, truncated: false, redacted: null, text: text0 };
+  const buf = Buffer.from(text0, "utf8");
+  let cut = maxBytes;
+  while (cut > 0 && (buf[cut] & 0xc0) === 0x80) cut--;
+  return { ...base, truncated: true, redacted: null, text: buf.subarray(0, cut).toString("utf8") };
+}
+
+// Seat runs of a queen Workflow journal, in started-line order: {seat, round, agentId, result}.
+export function journalSeatRuns(journalText) {
+  try {
+    const started = [];
+    const results = new Map();
+    for (const v of parseJsonLines(journalText)) {
+      if (v.type === "started" && typeof v.key === "string") started.push(v);
+      else if (v.type === "result" && typeof v.key === "string") results.set(v.key, v.result);
+    }
+    return started.map((v) => {
+      const parts = String(v.label ?? "").split(":");
+      const last = parts[parts.length - 1];
+      const round = /^\d+$/.test(last) ? Number(last) : null;
+      return { seat: parts[0], round, agentId: v.agentId ?? null, result: results.has(v.key) ? results.get(v.key) ?? null : null };
+    });
+  } catch {
+    return [];
+  }
+}
+
+// Each seat run's brief, re-rendered by replaying the card-loop contract over the runs' hand-backs; null from the
+// first seat that does not match the contract's next seat (or on any error).
+export function replayBriefs(queenArgs, seatRuns) {
+  const runs = Array.isArray(seatRuns) ? seatRuns : [];
+  const out = runs.map(() => null);
+  try {
+    if (queenArgs === null || typeof queenArgs !== "object" || queenArgs.card === null || typeof queenArgs.card !== "object") return out;
+    let s = initialState(queenArgs.card, queenArgs.options);
+    for (let i = 0; i < runs.length; i++) {
+      const a = currentAction(s);
+      if (a.kind !== "seat" || a.seat !== runs[i].seat) break;
+      out[i] = briefPrompt(a.brief, { repoRoot: queenArgs.repoRoot, worktreePath: queenArgs.worktreePath });
+      s = cardLoopNext(s, runs[i].result).state;
+    }
+  } catch {
+    // out keeps null from the failing seat on
+  }
+  return out;
+}
+
+// The parsed trace lines that are PermissionDenied events of one of the run's agents, in file order.
+export function attributeDenials(traceText, agentIds) {
+  try {
+    return parseJsonLines(traceText).filter((v) => v.event === "PermissionDenied" && typeof v.agent === "string" && agentIds.has(v.agent));
+  } catch {
+    return [];
+  }
+}
+
+const historySafe = (x) => String(x).replace(/[^A-Za-z0-9_.-]/g, "_").replace(/\.{2,}/g, "_").slice(0, 120) || "_";
+
+// Writes <dir>/.doug/.state/history/<card>/<run>.jsonl once; an existing file is never touched.
+export function writeRunHistory(dir, { card, run, entries, scan, maxEntryBytes = HISTORY_ENTRY_MAX_BYTES, maxRunBytes = HISTORY_RUN_MAX_BYTES }) {
+  const path = join(dir, HISTORY_DIR_RELPATH, historySafe(card), historySafe(run) + ".jsonl");
+  const lines = [];
+  let used = 0;
+  let truncated = 0;
+  let dropped = 0;
+  for (const e of entries) {
+    const h = historyEntry(e, { scan, maxBytes: maxEntryBytes });
+    const line = JSON.stringify({ kind: h.kind, card, run, seat: h.seat, round: h.round, source: h.source, bytes: h.bytes, truncated: h.truncated, redacted: h.redacted, text: h.text });
+    const size = Buffer.byteLength(line) + 1;
+    if (dropped === 0 && used + size <= maxRunBytes) {
+      lines.push(line);
+      used += size;
+      if (h.truncated) truncated++;
+    } else dropped++;
+  }
+  if (dropped > 0) lines.push(JSON.stringify({ kind: "cap", card, run, dropped, maxRunBytes }));
+  mkdirSync(dirname(path), { recursive: true });
+  try {
+    writeFileSync(path, lines.map((l) => l + "\n").join(""), { flag: "wx" });
+  } catch (e) {
+    if (e && e.code === "EEXIST") return { path, written: false, lines: 0, truncated: 0, dropped: 0 };
+    throw e;
+  }
+  return { path, written: true, lines: lines.length - (dropped > 0 ? 1 : 0), truncated, dropped };
+}
+
+// The run-history secret scanner both writers use (autopilot report, reflect --hand), so redaction cannot drift:
+// .doug/config.json `secrets`; enabled === false scans nothing; otherwise the vendored secret-rules scanner. An
+// import failure returns undefined, which reads every entry as redacted 'no-scanner'.
+export async function historyScanner(dir) {
+  let secrets = {};
+  try {
+    secrets = JSON.parse(readFileSync(join(dir, ".doug/config.json"), "utf8")).secrets ?? {};
+  } catch {
+    // no config: defaults
+  }
+  if (secrets && secrets.enabled === false) return () => null;
+  try {
+    const sr = await import(pathToFileURL(join(dir, ".doug/hooks/lib/secret-rules.mjs")).href);
+    return (t) => sr.scanText(t, secrets ?? {});
+  } catch {
+    return undefined;
+  }
+}
+
+// History fetch (card memory-progressive-access, ADR 0019 L0 citation form history:<card>/<file>:<line>).
+// <ref> = [history:]<card>[/<run>[.jsonl]][:<line>]; ids are limited to safe name characters so a ref can never leave
+// the history directory.
+export function parseHistoryRef(ref) {
+  const bad = () => new Error(`bad history id: ${JSON.stringify(ref)}`);
+  if (typeof ref !== "string") throw bad();
+  let rest = ref.startsWith("history:") ? ref.slice("history:".length) : ref;
+  let line = null;
+  const colon = rest.lastIndexOf(":");
+  if (colon !== -1) {
+    const n = rest.slice(colon + 1);
+    if (!/^[0-9]+$/.test(n) || Number(n) < 1) throw bad();
+    line = Number(n);
+    rest = rest.slice(0, colon);
+  }
+  const parts = rest.split("/");
+  if (parts.length > 2) throw bad();
+  const [card, runRaw] = parts;
+  const run = runRaw === undefined ? null : runRaw.replace(/\.jsonl$/, "");
+  for (const part of [card, run]) {
+    if (part === null) continue;
+    if (!/^[A-Za-z0-9_.-]+$/.test(part) || part.includes("..")) throw bad();
+  }
+  if (line !== null && run === null) throw bad();
+  return { card, run, line };
+}
+
+export function readRunHistory(dir, { card, run = null, line = null }) {
+  const root = join(dir, HISTORY_DIR_RELPATH);
+  const cardDir = join(root, card);
+  const parseLines = (path) =>
+    readFileSync(path, "utf8")
+      .split("\n")
+      .filter((l) => l !== "")
+      .map((l) => JSON.parse(l));
+  if (run === null) {
+    if (!existsSync(cardDir)) throw new Error(`no history for card ${card}`);
+    const runs = readdirSync(cardDir)
+      .filter((f) => f.endsWith(".jsonl"))
+      .map((f) => f.slice(0, -".jsonl".length))
+      .sort()
+      .map((r) => {
+        const entries = parseLines(join(cardDir, r + ".jsonl")).filter((e) => e.kind !== "cap");
+        return { run: r, entries: entries.length, tokens: entries.reduce((n, e) => n + lessonTokens(e.text ?? ""), 0) };
+      });
+    return { card, runs };
+  }
+  const file = join(cardDir, run + ".jsonl");
+  if (!existsSync(file)) throw new Error(`no history for ${card}/${run}`);
+  const lines = parseLines(file);
+  if (line !== null) {
+    if (line > lines.length) throw new Error(`no line ${line} in ${card}/${run} (${lines.length} lines)`);
+    const e = lines[line - 1];
+    return { ...e, line, tokens: lessonTokens(e.text ?? "") };
+  }
+  const entries = lines.map((e, i) => {
+    if (e.kind === "cap") return { line: i + 1, kind: "cap", dropped: e.dropped, maxRunBytes: e.maxRunBytes };
+    return { line: i + 1, kind: e.kind, seat: e.seat, round: e.round, source: e.source, bytes: e.bytes, truncated: e.truncated, redacted: e.redacted, tokens: lessonTokens(e.text ?? "") };
+  });
+  return { card, run, tokens: entries.reduce((n, e) => n + (e.tokens ?? 0), 0), entries };
 }
 
 const OUTCOME_COLUMNS = [
@@ -1608,21 +2170,25 @@ const OUTCOME_COLUMNS = [
   "models", "implemented", "verified", "reviewed", "review_issues", "review_issue_count", "adversary_verdict",
   "adversary_blocked", "adversary_source", "blocks", "passes", "fix_passes", "stop_reason", "stop_class", "in_scope",
   "budget_spent", "tokens", "usd", "codex_usd", "commit_sha", "track", "wall_clock", "gate", "note", "partial",
-  "harness_commit", "config_hash", "class", "arm", "assigned_by", "explore_probability", "backfilled",
+  "harness_commit", "config_hash", "class", "arm", "assigned_by", "explore_probability", "backfilled", "memory_config",
 ];
 
 const JSON_COLUMNS = new Set(["files", "models", "review_issues", "blocks", "budget_spent", "tokens"]);
 
-// The seven condition columns (card outcomes-condition-columns) upsert atomically, all seven together, keyed on
+// The eight condition columns (seven from card outcomes-condition-columns, plus memory_config) upsert atomically, all eight together, keyed on
 // whether the *new* row carries a harness_commit — never column-by-column (a plain per-column COALESCE let a
 // re-record with no condition zero out an existing stamp's `backfilled` flag while keeping its old
 // harness_commit, mixing half of one stamp with half of another, since `backfilled` defaults to 0, not null,
 // when a caller omits it). When `excluded.harness_commit` is null (this row carries no condition), every one of
-// the seven columns keeps the existing row's value untouched; otherwise every one of the seven takes the new
+// the eight columns keeps the existing row's value untouched; otherwise every one of the eight takes the new
 // row's value, including `backfilled` (a fresh `condition open`/`record --hand` stamp legitimately replaces an
 // older backfilled placeholder with backfilled 0). This is what keeps a `condition backfill` stamp — or any
 // other already-recorded stamp — intact across a later re-record for the same run+task that carries none.
-const CONDITION_COLUMNS = new Set(["harness_commit", "config_hash", "class", "arm", "assigned_by", "explore_probability", "backfilled"]);
+const CONDITION_COLUMNS = new Set(["harness_commit", "config_hash", "class", "arm", "assigned_by", "explore_probability", "backfilled", "memory_config"]);
+
+// passes and fix_passes upsert as a pair keyed on the new row's passes (card memory-record-keeps-rounds): a
+// re-record whose row carries no passes (a hand row) keeps the measured pair `reflect --hand --rounds` wrote.
+const ROUND_COLUMNS = new Set(["passes", "fix_passes"]);
 
 export function recordOutcomes(m, rows) {
   let inserted = 0;
@@ -1642,7 +2208,9 @@ export function recordOutcomes(m, rows) {
         .map((c) =>
           CONDITION_COLUMNS.has(c)
             ? `${c} = CASE WHEN excluded.harness_commit IS NULL THEN outcomes.${c} ELSE excluded.${c} END`
-            : `${c} = excluded.${c}`
+            : ROUND_COLUMNS.has(c)
+              ? `${c} = CASE WHEN excluded.passes IS NULL THEN outcomes.${c} ELSE excluded.${c} END`
+              : `${c} = excluded.${c}`
         )
         .join(", ");
       m.prepare(
@@ -1680,6 +2248,58 @@ export function listOutcomes(m, { run = null, task = null } = {}) {
   });
 }
 
+// Compare outcome arms by memory configuration (card memory-outcome-arms, ADR 0019 Measurement). Reads outcomes and
+// reflections only. One arm per distinct memory_config, ordered by the arm's earliest recorded row; rows with no
+// memory_config are counted in `unstamped` and belong to no arm. landings are rows with a commit, stops rows with
+// no commit and either a stop_class or a `stop:` run (a stop row with no typed cause). An arm is compared (`ready`) once it has `min` landings; until then its four metrics
+// are null: landRate = landings / (landings + stops); fixRounds = mean fix_passes over landings that have one
+// (n of them; mean null when n is 0); harmfulPerLanding = harmful marks of the reflections joined to a landing
+// by card and commit_sha, per landing; costPerLanding = mean usd over priced landings (null when none).
+export function compareMemoryArms(m, { min = 12 } = {}) {
+  const rows = m.prepare("SELECT * FROM outcomes ORDER BY recorded ASC, id ASC").all();
+  const byConfig = new Map();
+  let unstamped = 0;
+  for (const row of rows) {
+    if (row.memory_config === null || row.memory_config === undefined) {
+      unstamped++;
+      continue;
+    }
+    if (!byConfig.has(row.memory_config)) byConfig.set(row.memory_config, []);
+    byConfig.get(row.memory_config).push(row);
+  }
+  const reflections = m.prepare("SELECT card, commit_sha, counters FROM reflections WHERE card IS NOT NULL AND commit_sha IS NOT NULL").all();
+  const harmfulOf = (r) => {
+    try {
+      const h = JSON.parse(r.counters).harmful;
+      return Array.isArray(h) ? h.length : 0;
+    } catch {
+      return 0;
+    }
+  };
+  const arms = [];
+  for (const [config, armRows] of byConfig) {
+    const landed = armRows.filter((r) => r.commit_sha !== null && r.commit_sha !== undefined);
+    const stops = armRows.filter((r) => (r.commit_sha === null || r.commit_sha === undefined) && ((r.stop_class !== null && r.stop_class !== undefined) || (typeof r.run === "string" && r.run.startsWith("stop:")))).length;
+    const landings = landed.length;
+    const ready = landings >= min;
+    const arm = { config, landings, stops, ready, landRate: null, fixRounds: null, harmfulPerLanding: null, costPerLanding: null, priced: null };
+    if (ready) {
+      arm.landRate = landings / (landings + stops);
+      const fixes = landed.map((r) => r.fix_passes).filter((v) => typeof v === "number");
+      arm.fixRounds = { mean: fixes.length ? fixes.reduce((a, b) => a + b, 0) / fixes.length : null, n: fixes.length };
+      const keys = new Set(landed.map((r) => `${r.task}\u0000${r.commit_sha}`));
+      let harmful = 0;
+      for (const r of reflections) if (keys.has(`${r.card}\u0000${r.commit_sha}`)) harmful += harmfulOf(r);
+      arm.harmfulPerLanding = harmful / landings;
+      const usds = landed.map((r) => r.usd).filter((v) => typeof v === "number");
+      arm.priced = usds.length;
+      arm.costPerLanding = usds.length ? usds.reduce((a, b) => a + b, 0) / usds.length : null;
+    }
+    arms.push(arm);
+  }
+  return { min, unstamped, arms, comparable: arms.filter((a) => a.ready).length >= 2 };
+}
+
 // --- reflect (card memory-reflect) ------------------------------------------------------------------------------
 // A cheap-row LLM pass, run after `memory.mjs record`, that proposes at most 3 lessons from one report and bumps
 // helpful/harmful counters on lessons the report's tasks used. Everything here is pure and unit-testable except
@@ -1704,6 +2324,11 @@ export const REFLECT_SCHEMA = {
           task: { type: "string" },
           scope: { type: "array", items: { type: "string" } },
           notDerivableBecause: { type: "string" },
+          // Optional (card memory-reflect-supersede, ADR 0019 card 8): the id of one existing lesson listed in the
+          // prompt that this proposal repeats (nothing new is written, that lesson's seen count rises) or
+          // supersedes (it contradicts or corrects it). Never both; code checks the id is live and listed.
+          repeats: { type: "string" },
+          supersedes: { type: "string" },
           // Optional (card reflect-offers-claude-md): the CLAUDE.md bullet this lesson would be, only when it is a
           // rule a future session should follow.
           claudeMd: {
@@ -1734,6 +2359,13 @@ function reflectionRowToObject(row) {
     bumped: parseJsonColumn(row.bumped, []),
     rejected: parseJsonColumn(row.rejected, []),
   };
+}
+
+// The archive rule (card memory-feedback-rank, ADR 0019): harmful at least min and at least helpful. Archived
+// rows are kept (never deleted) and hidden from recall; ARCHIVE_HARMFUL_MIN is the bench-checked threshold.
+export const ARCHIVE_HARMFUL_MIN = 2;
+export function meetsArchiveRule({ harmful, helpful }, min = ARCHIVE_HARMFUL_MIN) {
+  return harmful >= min && harmful >= helpful;
 }
 
 // Deterministic, no LLM. harmful is an explicit mark (card reflect-harmful-irrelevant-lessons): only an id in
@@ -1825,6 +2457,12 @@ export function buildReflectPrompt(report, { blocks = [], plan = null, existingL
   );
   lines.push("- notDerivableBecause must say why the lesson is not something a reader could already get by reading the code; never restate a fact already sitting verbatim in a file.");
   lines.push("- never propose a lesson whose text is already covered by one of the existing lessons listed below.");
+  lines.push(
+    "- supersedes is optional: set it to the id of one existing lesson listed below when your new lesson contradicts or corrects that lesson. The old lesson is then retired in favour of yours."
+  );
+  lines.push(
+    "- repeats is optional: set it to the id of one existing lesson listed below when your lesson says the same thing as that lesson. Nothing new is written and that lesson's seen count rises. Never set both repeats and supersedes."
+  );
   lines.push("- propose at most 3 lessons; an empty list is a perfectly good answer when nothing here is worth remembering.");
   lines.push("- a task marked partial=true below ran out of context, not verification; propose no lesson that blames its code or its tests for that.");
   const headings = dir ? claudeMdHeadings(dir) : [];
@@ -1854,7 +2492,7 @@ export function buildReflectPrompt(report, { blocks = [], plan = null, existingL
     }
   }
   lines.push("");
-  lines.push("Existing lessons (never propose a near-duplicate of one of these):");
+  lines.push("Existing lessons (never propose a near-duplicate of one of these; name one in repeats or supersedes when it applies):");
   const shownLessons = mostRecentLessons(existingLessons, REFLECT_PROMPT_LESSON_CAP);
   if (existingLessons.length > REFLECT_PROMPT_LESSON_CAP) {
     lines.push(`(showing the ${REFLECT_PROMPT_LESSON_CAP} most recently created/confirmed of ${existingLessons.length} total; older lessons are not shown)`);
@@ -1967,17 +2605,20 @@ export function jaccard(a, b) {
 //  - Jaccard similarity over lower-cased word tokens (length >= 3) at or above REFLECT_DUPLICATE_JACCARD against
 //    every non-superseded existing lesson or a row appended earlier in this same pass (`existingLessons` and
 //    `appendedRows`), so two near-identical proposals in one pass only ever add the first.
-// Returns { duplicate: <live lesson row> } (bump), { rejected: <superseded lesson row> }, or null (not a dup).
-function findReflectDuplicate(m, proposal, { existingLessons, appendedRows }) {
+// Returns { duplicate: <live lesson row> } (an identical hash: a repeat), { similar: <lesson row> } (word overlap,
+// never merged), { rejected: <superseded lesson row> }, or null (not a dup). skipSimilarity: a model judgement
+// (supersedes) was given, so word overlap is not consulted.
+function findReflectDuplicate(m, proposal, { existingLessons, appendedRows, skipSimilarity = false }) {
   const proposalId = computeLessonId({ kind: proposal.kind, citation: proposal.citation || null, text: proposal.text });
   const collision = getLesson(m, proposalId);
   if (collision) return collision.superseded_by ? { rejected: collision } : { duplicate: collision };
   for (const row of appendedRows) {
     if (row.id === proposalId) return { duplicate: row };
   }
+  if (skipSimilarity) return null;
   const tokens = reflectTokens(proposal.text);
   for (const lesson of [...existingLessons, ...appendedRows]) {
-    if (jaccard(tokens, reflectTokens(lesson.text)) >= REFLECT_DUPLICATE_JACCARD) return { duplicate: lesson };
+    if (jaccard(tokens, reflectTokens(lesson.text)) >= REFLECT_DUPLICATE_JACCARD) return { similar: lesson };
   }
   return null;
 }
@@ -1985,7 +2626,7 @@ function findReflectDuplicate(m, proposal, { existingLessons, appendedRows }) {
 // Filters C.1-C.4, in order. C.5 (at most 3 appended) is enforced by the caller, but only against a proposal
 // this function has already said ok:true and not a duplicate — a would-be duplicate past the cap still bumps.
 // Returns { ok:true }, { ok:true, duplicate:<lesson row> } (bump instead of append), or { ok:false, reason }.
-function evaluateReflectProposal(m, report, blocks, proposal, { dir, existingLessons, appendedRows }) {
+function evaluateReflectProposal(m, report, blocks, proposal, { dir, existingLessons, appendedRows, judgement = null }) {
   if (!proposal || typeof proposal !== "object") return { ok: false, reason: "proposal is not an object" };
   const { kind, text, citation, task, notDerivableBecause } = proposal;
   if (kind !== "pitfall" && kind !== "pattern") return { ok: false, reason: `kind must be "pitfall" or "pattern", got ${JSON.stringify(kind)}` };
@@ -2002,16 +2643,24 @@ function evaluateReflectProposal(m, report, blocks, proposal, { dir, existingLes
   if (typeof notDerivableBecause !== "string" || !notDerivableBecause.trim()) return { ok: false, reason: "notDerivableBecause is empty" };
   const derivableCheck = checkReflectDerivable(proposal, dir);
   if (!derivableCheck.ok) return derivableCheck;
-  const dup = findReflectDuplicate(m, proposal, { existingLessons, appendedRows });
+  // A valid repeats judgement: nothing new is written, the named lesson's seen count rises.
+  if (judgement && judgement.kind === "repeats") return { ok: true, duplicate: judgement.target };
+  const dup = findReflectDuplicate(m, proposal, { existingLessons, appendedRows, skipSimilarity: Boolean(judgement) });
   if (dup && dup.rejected) return { ok: false, reason: `addLesson id collision with a superseded lesson ${dup.rejected.id}` };
+  // An identical hash is a code fact, not a similarity score: a repeat of the colliding lesson.
   if (dup && dup.duplicate) return { ok: true, duplicate: dup.duplicate };
+  // The similarity score never merges (ADR 0019 card 8): with no judgement a near-duplicate is dropped.
+  if (dup && dup.similar) {
+    return { ok: false, reason: `near-duplicate of ${dup.similar.id} (word overlap >= ${REFLECT_DUPLICATE_JACCARD}); no repeats or supersedes judgement` };
+  }
+  if (judgement && judgement.kind === "supersedes") return { ok: true, supersedes: judgement.target };
   return { ok: true };
 }
 
 // Cost (D): prefer the real per-message transcript at <claudeDir>/projects/<projectSlug(dir)>/<sessionId>.jsonl,
 // same as cost.mjs prices every other agent; fall back to the envelope's own total_cost_usd (a client-side
 // estimate) when the transcript is missing or its model is unpriced; null with no source when neither is usable.
-function computeReflectCost({ dir, claudeDir, sessionId, totalCostUsd }) {
+export function computeReflectCost({ dir, claudeDir, sessionId, totalCostUsd }) {
   const resolvedClaudeDir = claudeDir || join(homedir(), ".claude");
   if (sessionId) {
     const file = join(resolvedClaudeDir, "projects", projectSlug(dir), `${sessionId}.jsonl`);
@@ -2133,7 +2782,7 @@ export async function runReflect(m, report, opts = {}) {
     now = nowIso(),
   } = opts;
   if (!reportHash) throw new Error("runReflect requires a reportHash");
-  if (typeof propose !== "function") throw new Error("runReflect requires a propose function");
+  if (typeof propose !== "function" && !dryRun) throw new Error("runReflect requires a propose function");
 
   const existing = m.prepare("SELECT * FROM reflections WHERE report_hash = ?").get(reportHash);
   if (existing) return { alreadyReflected: true, row: reflectionRowToObject(existing) };
@@ -2160,12 +2809,23 @@ export async function runReflect(m, report, opts = {}) {
   }
 
   let counters;
+  const archived = [];
   if (dryRun) {
     counters = computeReflectCounters(m, blocks, report, { apply: false, harmfulIds });
   } else {
     m.exec("BEGIN");
     try {
       counters = computeReflectCounters(m, blocks, report, { apply: true, harmfulIds });
+      for (const id of counters.harmful) {
+        const row = getLesson(m, id);
+        if (!row || row.archived || !meetsArchiveRule(row)) continue;
+        m.prepare("UPDATE lessons SET archived = ?, archived_reason = ? WHERE id = ?").run(
+          now,
+          `harmful ${row.harmful}, helpful ${row.helpful}`,
+          id
+        );
+        archived.push(id);
+      }
       m.prepare(
         `INSERT INTO reflections (report_hash, recorded, run, card, commit_sha, model, counters, proposed, appended, bumped, rejected, usd, usd_source, session_id)
          VALUES (?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, NULL, NULL, NULL)`
@@ -2179,6 +2839,30 @@ export async function runReflect(m, report, opts = {}) {
 
   const existingLessons = listLessons(m);
   const prompt = buildReflectPrompt(report, { blocks, plan, existingLessons, dir });
+
+  // A dry run with no propose makes no model call: it reports the counters it would credit and the prompt it would send, and spends nothing.
+  if (dryRun && typeof propose !== "function") {
+    return {
+      ok: true,
+      dryRun: true,
+      reportHash,
+      prompt,
+      counters,
+      archived: [],
+      proposed: null,
+      appended: [],
+      bumped: [],
+      rejected: [],
+      claudeMd: [],
+      claudeMdDropped: [],
+      notes: [],
+      superseded: [],
+      usd: 0,
+      usdSource: "none",
+      model,
+      sessionId: null,
+    };
+  }
 
   let proposeResult = null;
   let proposeError = null;
@@ -2205,6 +2889,7 @@ export async function runReflect(m, report, opts = {}) {
       dryRun,
       reportHash,
       counters,
+      archived,
       proposed: null,
       appended: [],
       bumped: [],
@@ -2213,6 +2898,8 @@ export async function runReflect(m, report, opts = {}) {
       usdSource: null,
       claudeMd: [],
       claudeMdDropped: [],
+      notes: [],
+      superseded: [],
       model,
       sessionId: null,
       reason: proposeError.message,
@@ -2227,13 +2914,25 @@ export async function runReflect(m, report, opts = {}) {
   const suggestions = new Map(); // lesson id -> { lesson text, claudeMd suggestion } for appended lessons only
   const bumped = [];
   const rejected = [];
+  const notes = [];
+  const superseded = [];
+  const shownIds = new Set(mostRecentLessons(existingLessons, REFLECT_PROMPT_LESSON_CAP).map((l) => l.id));
+  const supersededThisPass = new Set();
   for (const proposal of proposals) {
-    const verdict = evaluateReflectProposal(m, report, blocks, proposal, { dir, existingLessons, appendedRows });
+    const judged = judgeReflectProposal(m, proposal, { shownIds, supersededThisPass, notes });
+    if (judged.reject) {
+      rejected.push({ text: proposal && typeof proposal.text === "string" ? proposal.text : null, reason: judged.reject });
+      continue;
+    }
+    const verdict = evaluateReflectProposal(m, report, blocks, proposal, { dir, existingLessons, appendedRows, judgement: judged.judgement });
     if (verdict.duplicate) {
-      // The 3-item cap (C.5) limits appends, never evaluation: a near-duplicate found past the cap still bumps
-      // the lesson it matches, it is just never counted against the 3.
-      if (!dryRun) m.prepare("UPDATE lessons SET helpful = helpful + 1 WHERE id = ?").run(verdict.duplicate.id);
+      // The 3-item cap (C.5) limits appends, never evaluation: a repeat found past the cap still bumps seen on
+      // the lesson it names, it is just never counted against the 3. A repeat bumps seen, never helpful.
+      if (!dryRun) m.prepare("UPDATE lessons SET seen = seen + 1 WHERE id = ?").run(verdict.duplicate.id);
       bumped.push(verdict.duplicate.id);
+      if (judged.judgement && judged.judgement.kind === "supersedes") {
+        notes.push(`supersedes ${judged.judgement.target.id} ignored: the proposal is an exact repeat of ${verdict.duplicate.id}`);
+      }
       continue;
     }
     if (!verdict.ok) {
@@ -2248,6 +2947,10 @@ export async function runReflect(m, report, opts = {}) {
       const dryId = computeLessonId({ kind: proposal.kind, citation: proposal.citation || null, text: proposal.text });
       appendedRows.push({ id: dryId, text: proposal.text, kind: proposal.kind });
       suggestions.set(dryId, { text: proposal.text, claudeMd: proposal.claudeMd });
+      if (verdict.supersedes) {
+        superseded.push({ old: verdict.supersedes.id, new: dryId });
+        supersededThisPass.add(verdict.supersedes.id);
+      }
       continue;
     }
     const reportTask = findReportTask(report, proposal.task);
@@ -2263,6 +2966,15 @@ export async function runReflect(m, report, opts = {}) {
     });
     appendedRows.push(row);
     suggestions.set(row.id, { text: proposal.text, claudeMd: proposal.claudeMd });
+    if (verdict.supersedes) {
+      try {
+        supersedeLesson(m, verdict.supersedes.id, row.id);
+        superseded.push({ old: verdict.supersedes.id, new: row.id });
+        supersededThisPass.add(verdict.supersedes.id);
+      } catch (err) {
+        notes.push(`supersedes ${verdict.supersedes.id} not applied: ${err && err.message ? err.message : String(err)}`);
+      }
+    }
   }
 
   let claudeMd = [];
@@ -2298,15 +3010,639 @@ export async function runReflect(m, report, opts = {}) {
     dryRun,
     reportHash,
     counters,
+    archived,
     proposed: proposals.length,
     appended: appendedRows.map((r) => r.id),
     bumped,
     rejected,
     claudeMd,
     claudeMdDropped,
+    notes,
+    superseded,
     usd: cost.usd,
     usdSource: cost.usdSource,
     model,
     sessionId,
   };
+}
+
+// The judgement fields of one reflect proposal (card memory-reflect-supersede). A target is valid only when it is
+// one of the lessons the prompt listed, is live, and was not superseded earlier in this pass. An invalid id is
+// ignored with a note and the proposal goes on as if the field were absent. Both fields set is a rejection.
+function judgeReflectProposal(m, proposal, { shownIds, supersededThisPass, notes }) {
+  const field = (name) => (proposal && typeof proposal[name] === "string" && proposal[name].trim() ? proposal[name].trim() : null);
+  const repeatsId = field("repeats");
+  const supersedesId = field("supersedes");
+  if (repeatsId && supersedesId) return { reject: "repeats and supersedes are both set; name one lesson in one field" };
+  const check = (name, id) => {
+    const row = getLesson(m, id);
+    let why = null;
+    if (!row) why = "no such lesson";
+    else if (row.superseded_by || supersededThisPass.has(id)) why = "already superseded";
+    else if (!shownIds.has(id)) why = "not listed in the prompt";
+    if (why) {
+      notes.push(`${name} ${id} ignored: ${why}`);
+      return null;
+    }
+    return row;
+  };
+  if (repeatsId) {
+    const target = check("repeats", repeatsId);
+    return { judgement: target ? { kind: "repeats", target } : null };
+  }
+  if (supersedesId) {
+    const target = check("supersedes", supersedesId);
+    return { judgement: target ? { kind: "supersedes", target } : null };
+  }
+  return { judgement: null };
+}
+
+// --- failure lessons (card memory-failure-lessons, ADR 0019 lines 39-41 and 60) -------------------------------------
+// Reflection over the failure slice of the run history: stopped reports, blocks classed `real`, and denials. A
+// pitfall cites the exact history line (history:<card>/<run>:<line>); a repeat of a pitfall is the model's `repeats`
+// judgement and lands in an append-only occurrence ledger (never in helpful, never from word similarity), which
+// learn.mjs counts by distinct cards and sessions.
+
+export const PITFALL_LEDGER_RELPATH = ".doug/.state/memory/pitfalls.jsonl";
+
+const FAILURE_ITEM_TEXT_MAX = 4000;
+const FAILURE_PROMPT_MAX = 16000;
+const FAILURE_TAIL_MAX = 1000;
+const FAILURE_APPEND_MAX = 3;
+
+function parseJsonObject(text) {
+  try {
+    const v = JSON.parse(text);
+    return v !== null && typeof v === "object" && !Array.isArray(v) ? v : null;
+  } catch {
+    return null;
+  }
+}
+
+function failureItemText(kind, v, raw) {
+  const parts = [];
+  if (kind === "stop") {
+    for (const k of ["reason", "stoppedAt", "detail", "error"]) if (typeof v[k] === "string" && v[k]) parts.push(`${k}: ${v[k]}`);
+    if (!parts.length) parts.push(`report: ${raw}`);
+  } else if (kind === "block") {
+    if (typeof v.reason === "string") parts.push(`reason: ${v.reason}`);
+    for (const f of Array.isArray(v.failures) ? v.failures : []) {
+      if (!f || typeof f !== "object") continue;
+      const tail = typeof f.tail === "string" ? f.tail.slice(-FAILURE_TAIL_MAX) : "";
+      parts.push(`command: ${f.command ?? ""} (exit ${f.exit ?? "?"}${f.timedOut ? ", timed out" : ""})${tail ? `\n${tail}` : ""}`);
+    }
+  } else {
+    parts.push(`tool: ${v.tool ?? ""}`);
+    if (v.detail !== undefined) parts.push(`detail: ${typeof v.detail === "string" ? v.detail : JSON.stringify(v.detail)}`);
+  }
+  return parts.join("\n");
+}
+
+// The failure slice of one card's run history; never throws. See ADR 0019 lines 40 and 50: a block that is not
+// `real` is counted in `hidden` by class, and an entry that cannot be parsed in `unreadable`.
+export function failureSlice(dir, card, { session = null } = {}) {
+  const out = { items: [], hidden: {}, unreadable: 0 };
+  try {
+    const cardName = historySafe(card);
+    const cardDir = join(dir, HISTORY_DIR_RELPATH, cardName);
+    if (!existsSync(cardDir)) return out;
+    const files = readdirSync(cardDir).filter((f) => f.endsWith(".jsonl")).sort();
+    for (const file of files) {
+      const run = file.slice(0, -".jsonl".length);
+      let text;
+      try {
+        text = readFileSync(join(cardDir, file), "utf8");
+      } catch {
+        continue;
+      }
+      const entries = [];
+      for (const raw of text.split("\n")) {
+        if (raw === "") continue;
+        const e = parseJsonObject(raw);
+        entries.push(e && typeof e.kind === "string" ? { kind: e.kind, text: typeof e.text === "string" ? e.text : "" } : null);
+      }
+      const parsed = entries.map((e) => (e && (e.kind === "report" || e.kind === "block" || e.kind === "denial") ? parseJsonObject(e.text) : null));
+      const sessionOf = (v) => (v && typeof v.session === "string" && v.session !== "" ? v.session : null);
+      const runSession = parsed.map(sessionOf).find((s) => s !== null) ?? null;
+      entries.forEach((e, i) => {
+        if (!e) return;
+        const v = parsed[i];
+        let kind = null;
+        if (e.kind === "report") {
+          if (!v) return void out.unreadable++;
+          if (v.outcome === "stopped" || (v.ok === false && !v.paused)) kind = "stop";
+        } else if (e.kind === "block") {
+          if (!v) return void out.unreadable++;
+          if (v.class === "real") kind = "block";
+          else {
+            const cls = typeof v.class === "string" && v.class ? v.class : "unclassified";
+            out.hidden[cls] = (out.hidden[cls] ?? 0) + 1;
+          }
+        } else if (e.kind === "denial") kind = "denial";
+        if (!kind) return;
+        const body = v ?? {};
+        out.items.push({
+          ref: `history:${cardName}/${run}:${i + 1}`,
+          kind,
+          card: cardName,
+          run,
+          line: i + 1,
+          session: sessionOf(v) ?? runSession ?? (typeof session === "string" && session !== "" ? session : null),
+          text: failureItemText(kind, body, e.text),
+        });
+      });
+    }
+  } catch {
+    // fail open: whatever was read so far
+  }
+  return out;
+}
+
+// Occurrence ledger: one JSON line per {lesson, citation} (de-duplicated), append-only.
+export function readPitfallOccurrences(dir) {
+  let text;
+  try {
+    text = readFileSync(join(dir, PITFALL_LEDGER_RELPATH), "utf8");
+  } catch {
+    return [];
+  }
+  const seen = new Set();
+  const out = [];
+  for (const v of parseJsonLines(text)) {
+    if (typeof v.lesson !== "string" || typeof v.citation !== "string") continue;
+    const key = `${v.lesson}\u0000${v.citation}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(v);
+  }
+  return out;
+}
+
+export function recordPitfallOccurrence(dir, occ) {
+  const { lesson, citation, card = null, run = null, session = null, at = nowIso() } = occ ?? {};
+  if (typeof lesson !== "string" || typeof citation !== "string") throw new Error("recordPitfallOccurrence needs a lesson and a citation");
+  if (readPitfallOccurrences(dir).some((o) => o.lesson === lesson && o.citation === citation)) return { written: false };
+  const path = join(dir, PITFALL_LEDGER_RELPATH);
+  mkdirSync(dirname(path), { recursive: true });
+  appendFileSync(path, JSON.stringify({ lesson, citation, card, run, session, at }) + "\n", "utf8");
+  return { written: true };
+}
+
+export const FAILURE_REFLECT_SCHEMA = {
+  type: "object",
+  required: ["lessons"],
+  properties: {
+    lessons: {
+      type: "array",
+      items: {
+        type: "object",
+        required: ["kind", "text", "citation", "notDerivableBecause"],
+        properties: {
+          kind: { enum: ["pitfall"] },
+          text: { type: "string" },
+          citation: { type: "string" },
+          notDerivableBecause: { type: "string" },
+          scope: { type: "array", items: { type: "string" } },
+          repeats: { type: "string" },
+        },
+      },
+    },
+  },
+};
+
+export function buildFailureReflectPrompt(slice, { existingLessons = [] } = {}) {
+  const lines = [
+    "You are the reflection pass of a coding harness, reading the FAILURES of one card: stopped runs, gate blocks classed real, and permission denials.",
+    "Propose at most 3 lessons of kind \"pitfall\": a short, specific rule that would have prevented the failure. Each lesson's `citation` must be exactly the ref of one item below (a history:<card>/<run>:<line> string). Do not cite anything else.",
+    "`notDerivableBecause` says why the rule cannot be read from the repository's code or docs. Skip failures that are plain test failures with no transferable lesson.",
+    "When an item is a repeat of an existing pitfall listed below, set `repeats` to that pitfall's id instead of inventing a new rule; do not reword an existing pitfall as a new one.",
+    "",
+  ];
+  const items = slice.items ?? [];
+  lines.push(`Failure items (${items.length}):`);
+  let used = 0;
+  let shown = 0;
+  for (const item of items) {
+    let t = String(item.text ?? "");
+    if (t.length > FAILURE_ITEM_TEXT_MAX) t = t.slice(0, FAILURE_ITEM_TEXT_MAX) + " [cut]";
+    const block = `\n[${item.ref}] kind: ${item.kind}\n${t}`;
+    if (used + block.length > FAILURE_PROMPT_MAX) break;
+    lines.push(block);
+    used += block.length;
+    shown++;
+  }
+  if (shown < items.length) lines.push(`\n(${items.length - shown} more item(s) left out by the ${FAILURE_PROMPT_MAX}-character cap)`);
+  const hidden = Object.entries(slice.hidden ?? {});
+  if (hidden.length) lines.push(`\nBlocks not shown (not real): ${hidden.map(([k, n]) => `${k} ${n}`).join(", ")}.`);
+  const pitfalls = existingLessons.filter((l) => l.kind === "pitfall" && !l.superseded_by);
+  lines.push("", `Existing pitfalls (${pitfalls.length}), which \`repeats\` may name:`);
+  for (const l of pitfalls) lines.push(`${l.id}: ${l.text}`);
+  return lines.join("\n");
+}
+
+export async function runFailureReflect(m, opts = {}) {
+  const { dir = process.cwd(), card, session = null, propose, dryRun = false, model = null, claudeDir, now = nowIso() } = opts;
+  if (typeof card !== "string" || !card) throw new Error("runFailureReflect requires a card");
+  if (typeof propose !== "function" && !dryRun) throw new Error("runFailureReflect requires a propose function");
+  const slice = failureSlice(dir, card, { session });
+  const base = { items: slice.items.length, hidden: slice.hidden, unreadable: slice.unreadable };
+  if (!slice.items.length) return { ok: true, dryRun, ...base, appended: [], repeated: [], rejected: [] };
+
+  const key = "failures:" + createHash("sha256").update(slice.items.map((i) => i.ref).sort().join("\n")).digest("hex");
+  const existing = m.prepare("SELECT * FROM reflections WHERE report_hash = ?").get(key);
+  if (existing) return { alreadyReflected: true, ...base, row: reflectionRowToObject(existing) };
+
+  const prompt = buildFailureReflectPrompt(slice, { existingLessons: listLessons(m) });
+  // A dry run with no propose makes no model call: it returns the prompt it would send and spends nothing.
+  if (dryRun && typeof propose !== "function") {
+    return { ok: true, dryRun: true, ...base, prompt, proposed: null, appended: [], repeated: [], rejected: [], usd: 0, usdSource: "none", model };
+  }
+  let result;
+  try {
+    result = await propose(prompt);
+    if (!result || !Array.isArray(result.lessons)) throw new Error("the failure pass returned no lessons array");
+  } catch (err) {
+    return { ok: false, dryRun, ...base, appended: [], repeated: [], rejected: [{ text: null, reason: err.message }], reason: err.message };
+  }
+
+  const byRef = new Map(slice.items.map((i) => [i.ref, i]));
+  const appended = [];
+  const appendedIds = new Set();
+  const repeated = [];
+  const rejected = [];
+  const occur = (lesson, item) => {
+    if (!dryRun) recordPitfallOccurrence(dir, { lesson, citation: item.ref, card: item.card, run: item.run, session: item.session, at: now });
+    if (!repeated.includes(lesson)) repeated.push(lesson);
+  };
+  for (const p of result.lessons) {
+    const text = p && typeof p.text === "string" ? p.text : null;
+    const reject = (reason) => rejected.push({ text, reason });
+    if (!p || typeof p !== "object") {
+      reject("proposal is not an object");
+      continue;
+    }
+    if (p.kind !== "pitfall") {
+      reject(`kind must be "pitfall", got ${JSON.stringify(p.kind)}`);
+      continue;
+    }
+    if (!text || !text.trim()) {
+      reject("text is empty");
+      continue;
+    }
+    if (typeof p.notDerivableBecause !== "string" || !p.notDerivableBecause.trim()) {
+      reject("notDerivableBecause is empty");
+      continue;
+    }
+    const item = typeof p.citation === "string" ? byRef.get(p.citation) : undefined;
+    if (!item) {
+      reject(`citation ${JSON.stringify(p.citation)} is not a failure item of this card's history`);
+      continue;
+    }
+    const derivable = checkReflectDerivable(p, dir);
+    if (!derivable.ok) {
+      reject(derivable.reason);
+      continue;
+    }
+    if (p.repeats !== undefined && p.repeats !== null && p.repeats !== "") {
+      const target = typeof p.repeats === "string" ? getLesson(m, p.repeats) : null;
+      if (!target || target.kind !== "pitfall" || target.superseded_by) {
+        reject(`repeats ${JSON.stringify(p.repeats)} is not a live pitfall lesson`);
+        continue;
+      }
+      occur(target.id, item);
+      continue;
+    }
+    const id = computeLessonId({ kind: "pitfall", citation: item.ref, text });
+    const collision = getLesson(m, id);
+    if (collision || appendedIds.has(id)) {
+      if (collision && collision.superseded_by) reject(`addLesson id collision with a superseded lesson ${id}`);
+      else occur(id, item);
+      continue;
+    }
+    if (appended.length >= FAILURE_APPEND_MAX) {
+      reject(`at most ${FAILURE_APPEND_MAX} lessons appended per reflection`);
+      continue;
+    }
+    if (dryRun) {
+      appended.push(id);
+      appendedIds.add(id);
+      continue;
+    }
+    const row = addLesson(m, {
+      text,
+      kind: "pitfall",
+      scope: Array.isArray(p.scope) ? p.scope : [],
+      citation: item.ref,
+      source: { agent: "reflect", model },
+      card: item.card,
+    });
+    appended.push(row.id);
+    appendedIds.add(row.id);
+    recordPitfallOccurrence(dir, { lesson: row.id, citation: item.ref, card: item.card, run: item.run, session: item.session, at: now });
+  }
+
+  const sessionId = result.sessionId || null;
+  const cost = computeReflectCost({ dir, claudeDir, sessionId, totalCostUsd: typeof result.totalCostUsd === "number" ? result.totalCostUsd : null });
+  if (!dryRun) {
+    m.prepare(
+      `INSERT INTO reflections (report_hash, recorded, run, card, commit_sha, model, counters, proposed, appended, bumped, rejected, usd, usd_source, session_id)
+       VALUES (?, ?, NULL, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    ).run(key, now, card, model, JSON.stringify({ helpful: [], harmful: [], unknown: [] }), result.lessons.length, JSON.stringify(appended), JSON.stringify(repeated), JSON.stringify(rejected), cost.usd, cost.usdSource, sessionId);
+  }
+  return { ok: true, dryRun, ...base, proposed: result.lessons.length, appended, repeated, rejected, usd: cost.usd, usdSource: cost.usdSource, model, sessionId, key };
+}
+
+// The on-demand cited project model (card memory-project-model, ADR 0019 L2): `memory.mjs model regen` asks one
+// cheap-row model call for statements about this project learned from runs, each citing live lessons or run
+// history, and keeps only statements whose every citation resolves in code. The whole file stays under the cap.
+export const PROJECT_MODEL_CHAR_CAP = 2000;
+export const PROJECT_MODEL_RELPATH = ".doug/project-model.md";
+const PROJECT_MODEL_SECTIONS = [
+  ["failure-patterns", "Failure patterns"],
+  ["conventions", "Conventions"],
+  ["open-risks", "Open risks"],
+];
+const PROJECT_MODEL_LESSON_TEXT_MAX = 500;
+
+export const PROJECT_MODEL_SCHEMA = {
+  type: "object",
+  required: ["statements"],
+  properties: {
+    statements: {
+      type: "array",
+      items: {
+        type: "object",
+        required: ["section", "text", "citations"],
+        properties: {
+          section: { enum: PROJECT_MODEL_SECTIONS.map(([key]) => key) },
+          text: { type: "string" },
+          citations: { type: "array", items: { type: "string" }, minItems: 1 },
+        },
+      },
+    },
+  },
+};
+
+// Every run-history ref `<card>/<run>` under .doug/.state/history, in directory order.
+export function listRunHistoryRefs(dir) {
+  const root = join(dir, HISTORY_DIR_RELPATH);
+  const refs = [];
+  try {
+    for (const card of readdirSync(root).sort()) {
+      let files = [];
+      try {
+        files = readdirSync(join(root, card)).filter((f) => f.endsWith(".jsonl")).sort();
+      } catch {
+        continue;
+      }
+      for (const f of files) refs.push(`${card}/${f.slice(0, -".jsonl".length)}`);
+    }
+  } catch {
+    return [];
+  }
+  return refs;
+}
+
+export function buildProjectModelPrompt({ lessons = [], runs = [] } = {}) {
+  const lines = [
+    "You write the project model of a coding harness: what is true about THIS project now, learned from its runs only. Three sections: failure-patterns (what keeps going wrong), conventions (conventions learned from runs), open-risks (what is still unresolved or fragile).",
+    "Write short factual statements. Each statement has a `section` (failure-patterns, conventions or open-risks), a `text`, and `citations`: one or more lesson ids (the 16 hex characters in brackets below) or run-history refs (`<card>/<run>` or `<card>/<run>:<line>`, exactly as listed below). You must cite; a statement whose every citation is not exactly one of the ids or refs below is dropped by code.",
+    "Do not restate CLAUDE.md, the ADRs or board cards: link to them by path or card id instead. A statement that should become a rule is not written here; rules go through the proposal path.",
+    `Keep the whole document under ${PROJECT_MODEL_CHAR_CAP} characters, header included: a handful of dense statements, each worth its line. Prefer statements that cite several lessons.`,
+    "",
+    `Live lessons (${lessons.length}):`,
+  ];
+  for (const l of lessons) {
+    const text = String(l.text ?? "").replace(/\s+/g, " ").trim();
+    const shown = text.length > PROJECT_MODEL_LESSON_TEXT_MAX ? text.slice(0, PROJECT_MODEL_LESSON_TEXT_MAX) + "..." : text;
+    lines.push(`- [${l.id}] (${l.kind}) ${shown}`);
+  }
+  lines.push("", `Run history refs (${runs.length}):`);
+  for (const r of runs) lines.push(`- ${r}`);
+  return lines.join("\n") + "\n";
+}
+
+// A citation resolves when it is the id of a live (not superseded) lesson, or a history ref with a run whose file
+// (and line, when named) exists. Anything else, including a thrown parse or read, is unresolved. A statement with
+// any unresolved citation is dropped whole.
+function citationResolver(m, dir) {
+  return (c) => {
+    if (typeof c !== "string") return false;
+    if (/^[0-9a-f]{16}$/.test(c)) {
+      const row = getLesson(m, c);
+      return !!row && !row.superseded_by;
+    }
+    try {
+      const ref = parseHistoryRef(c);
+      if (ref.run === null) return false;
+      readRunHistory(dir, ref);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+}
+
+export function checkProjectModelCitations(m, dir, statements) {
+  const resolves = citationResolver(m, dir);
+  const kept = [];
+  const dropped = [];
+  for (const s of statements) {
+    const cites = Array.isArray(s && s.citations) ? s.citations : [];
+    if (cites.length > 0 && cites.every(resolves)) kept.push(s);
+    else dropped.push({ text: s && s.text, reason: "unresolved", citations: cites });
+  }
+  return { kept, dropped };
+}
+
+// The on-demand idea pass (card memory-idea-proposals, ADR 0019 L3): `memory.mjs ideas` asks one cheap-row model
+// call over live lessons, run history and pitfall occurrences for idea cards and priority reviews. Ideas are
+// filed to Backlog only, cited, capped per pass; reviews go to a jsonl file for the user. Never Ready.
+export const IDEA_CAP = 3;
+export const PRIORITY_REVIEWS_RELPATH = ".doug/.state/memory/priority-reviews.jsonl";
+const IDEAS_LESSON_TEXT_MAX = 500;
+
+export const IDEAS_SCHEMA = {
+  type: "object",
+  required: ["ideas", "reviews"],
+  properties: {
+    ideas: {
+      type: "array",
+      items: {
+        type: "object",
+        required: ["id", "title", "goal", "component", "size", "citations"],
+        properties: {
+          id: { type: "string" },
+          title: { type: "string" },
+          goal: { type: "string" },
+          component: { type: "string" },
+          size: { type: "string" },
+          citations: { type: "array", items: { type: "string" }, minItems: 1 },
+        },
+      },
+    },
+    reviews: {
+      type: "array",
+      items: {
+        type: "object",
+        required: ["text", "cards", "citations"],
+        properties: {
+          text: { type: "string" },
+          cards: { type: "array", items: { type: "string" }, minItems: 1 },
+          citations: { type: "array", items: { type: "string" }, minItems: 1 },
+        },
+      },
+    },
+  },
+};
+
+export function buildIdeasPrompt({ lessons = [], runs = [], pitfalls = [], cards = [] } = {}) {
+  const lines = [
+    "You look over the lessons and run history of a coding harness and propose follow-up work for its user: idea cards and priority reviews.",
+    "Look for recurring failures, repeated manual steps and unfinished follow-ups. An idea is filed only when it is realistic drift (a form a model or a person would plausibly write) or when one card would close the whole class; otherwise propose nothing.",
+    "Each idea has an `id` (kebab-case, not any card id listed below), `title`, `goal` (name the defect or gap plainly), `component`, `size` and `citations`. Do not duplicate a card listed below.",
+    "Each review (`text`, `cards`, `citations`) groups Backlog cards for the user to look at, for example Backlog cards that share a recurring pitfall. `cards` may name Backlog cards only. Never propose a change to Ready.",
+    "You must cite: `citations` are lesson ids (the 16 hex characters in brackets below) or run-history refs (`<card>/<run>` or `<card>/<run>:<line>`), exactly as listed below. An item with any citation not exactly one of them, or with none, is dropped by code.",
+    "",
+    `Live lessons (${lessons.length}):`,
+  ];
+  for (const l of lessons) {
+    const text = String(l.text ?? "").replace(/\s+/g, " ").trim();
+    const shown = text.length > IDEAS_LESSON_TEXT_MAX ? text.slice(0, IDEAS_LESSON_TEXT_MAX) + "..." : text;
+    lines.push(`- [${l.id}] (${l.kind}) ${shown}`);
+  }
+  lines.push("", `Run history refs (${runs.length}):`);
+  for (const r of runs) lines.push(`- ${r}`);
+  lines.push("", `Pitfall occurrences (${pitfalls.length}):`);
+  for (const p of pitfalls) lines.push(`- lesson ${p.lesson} (card ${p.card ?? "?"}, run ${p.run ?? "?"}): ${p.citation ?? ""}`);
+  lines.push("", `Existing Backlog and Ready cards (${cards.length}):`);
+  for (const c of cards) lines.push(`- ${c.id} (${c.column}): ${c.title}`);
+  return lines.join("\n") + "\n";
+}
+
+export function checkIdeaCitations(m, dir, items) {
+  const resolves = citationResolver(m, dir);
+  const kept = [];
+  const dropped = [];
+  for (const it of items) {
+    const cites = Array.isArray(it && it.citations) ? it.citations : [];
+    if (cites.length > 0 && cites.every(resolves)) kept.push(it);
+    else dropped.push({ id: it && it.id, text: it && it.text, reason: "unresolved", citations: cites });
+  }
+  return { kept, dropped };
+}
+
+export const IDEA_ID_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
+
+// Pure: files up to `cap` ideas as new Backlog cards appended after every existing card.
+export function fileIdeaCards(board, ideas, { cap = IDEA_CAP, date } = {}) {
+  let next = board;
+  const filed = [];
+  const skipped = [];
+  for (const it of ideas) {
+    if (typeof it.id !== "string" || !IDEA_ID_RE.test(it.id)) {
+      skipped.push({ id: it.id, reason: "id is not kebab-case" });
+      continue;
+    }
+    if (filed.length >= cap) {
+      skipped.push({ id: it.id, reason: "over cap" });
+      continue;
+    }
+    const cites = Array.isArray(it.citations) ? it.citations.join(", ") : "";
+    try {
+      const added = addCard(
+        next,
+        {
+          id: it.id,
+          title: it.title,
+          component: it.component,
+          size: it.size,
+          track: "hand",
+          deps: [],
+          column: "backlog",
+          goal: `Memory-proposed (memory.mjs ideas, ${date}): ${it.goal} Evidence: ${cites}.`,
+        },
+        { date }
+      );
+      const cards = added.cards.slice();
+      cards[cards.length - 1] = { ...cards[cards.length - 1], source: `memory-proposed: ${cites}` };
+      next = { ...added, cards };
+      filed.push(it.id);
+    } catch (err) {
+      skipped.push({ id: it.id, reason: String(err && err.message ? err.message : err).split("\n").slice(0, 2).join(" ") });
+    }
+  }
+  return { board: next, filed, skipped };
+}
+
+export function readPriorityReviews(dir) {
+  const file = join(dir, PRIORITY_REVIEWS_RELPATH);
+  if (!existsSync(file)) return [];
+  const out = [];
+  try {
+    for (const line of readFileSync(file, "utf8").split("\n")) {
+      if (!line.trim()) continue;
+      try {
+        const r = JSON.parse(line);
+        if (r && typeof r === "object") out.push(r);
+      } catch {
+        // malformed line: skip
+      }
+    }
+  } catch {
+    return [];
+  }
+  return out;
+}
+
+function reviewKey(r) {
+  const cards = Array.isArray(r && r.cards) ? r.cards : [];
+  return JSON.stringify([[...new Set(cards)].sort(), String((r && r.text) ?? "").replace(/\s+/g, " ").trim()]);
+}
+
+export function checkPriorityReviews(board, reviews, { cap = IDEA_CAP, recorded = [] } = {}) {
+  const backlog = new Set(board.cards.filter((c) => c.column === "backlog").map((c) => c.id));
+  const seen = new Set(recorded.map(reviewKey));
+  const kept = [];
+  const dropped = [];
+  for (const r of reviews) {
+    const key = reviewKey(r);
+    if (seen.has(key)) {
+      dropped.push({ text: r && r.text, reason: "already recorded" });
+      continue;
+    }
+    const cards = Array.isArray(r && r.cards) ? r.cards : [];
+    if (cards.length > 0 && cards.every((id) => backlog.has(id)) && kept.length < cap) {
+      kept.push(r);
+      seen.add(key);
+    } else dropped.push({ text: r && r.text, reason: kept.length >= cap && cards.every((id) => backlog.has(id)) ? "over cap" : "not all backlog cards" });
+  }
+  return { kept, dropped };
+}
+
+export function renderProjectModel(statements, { date = new Date().toISOString().slice(0, 10) } = {}) {
+  const header =
+    `Generated by \`memory.mjs model regen\` on ${date}; do not edit by hand. Each statement cites a lesson (\`memory.mjs lesson show <id>\`) or a run record (\`memory.mjs history show <ref>\`).`;
+  const build = (list) => {
+    const out = ["# Project model", "", header, ""];
+    for (const [key, title] of PROJECT_MODEL_SECTIONS) {
+      const inSection = list.filter((s) => s.section === key);
+      if (!inSection.length) continue;
+      out.push(`## ${title}`);
+      for (const s of inSection) out.push(`- ${s.text} [${s.citations.join(", ")}]`);
+    }
+    return out.join("\n") + "\n";
+  };
+  const known = statements.filter((s) => PROJECT_MODEL_SECTIONS.some(([key]) => key === s.section));
+  const priority = known.map((s, i) => ({ s, i })).sort((a, b) => b.s.citations.length - a.s.citations.length || a.i - b.i);
+  const chosen = new Set();
+  for (const { s } of priority) {
+    const trial = known.filter((x) => chosen.has(x) || x === s);
+    if (build(trial).length > PROJECT_MODEL_CHAR_CAP) break;
+    chosen.add(s);
+  }
+  const kept = known.filter((s) => chosen.has(s));
+  const overCap = statements.filter((s) => !chosen.has(s));
+  const text = build(kept);
+  return { text, chars: text.length, kept, overCap };
 }

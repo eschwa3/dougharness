@@ -21,10 +21,11 @@ estimated or inferred:
 
 **lessons** (the lessons table): `total` (every row, superseded included), `live` (not superseded), `helpful`
 (live rows with `helpful > 0`), `harmful` (live rows with `harmful > 0`), `stale` (live rows with `stale` set),
-and `repeated`: live lessons grouped by near-duplicate text (`memory.mjs`'s own `jaccard` and
-`REFLECT_DUPLICATE_JACCARD` = 0.6 - the same threshold `memory.mjs reflect` uses to bump a lesson instead of
-appending one) into clusters of >= 2, plus any lesson on its own with `helpful >= 3`. Both paths report a
-`count` of at least 2, so a proposal can treat `count >= 2` as one test regardless of which path produced it.
+and `pitfalls`: each live (not superseded) `pitfall` lesson with at least one row in the occurrence ledger
+(`.doug/.state/memory/pitfalls.jsonl`, written by `memory.mjs reflect --failures`), as
+`{ id, text, cards, sessions, citations, files }`: `cards` the distinct occurrence cards, `sessions` the distinct
+non-null sessions, `files` the repo-relative files those cards' run history reports as changed
+(`cardFilesTouched`). Helpful counters and text similarity are no signal.
 
 **trace** (every `.jsonl` file under `.doug/.state/trace/`, or `traceDir` when given): `files` (the file list),
 `denials`, `unmatched`, `skills` (skill invocations - a `PreToolUse` line whose `tool` is `Skill`, counted by
@@ -68,12 +69,15 @@ happens not to cover would otherwise go uncounted rather than merely unproposed.
 `learn.mjs propose [dir] [--json]` collects signals, then renders each candidate change as
 `{ id, kind, target, reason, evidence, diff }`, `diff` a unified diff against the target file's current
 content (or `null` when there is nothing to diff - a limit hit, or a text-only finding). Every proposal's
-`evidence` carries the concrete numbers it was derived from. Four kinds:
+`evidence` carries the concrete numbers it was derived from. Four kinds (a promote is kind `promote`, or kind `rule` when it has known files):
 
-- **promote**: a repeated lesson (`count >= 2`) of kind `feedback` or `pitfall`, whose text is not already in
-  CLAUDE.md (whitespace-normalised, case-folded substring match), becomes one `- ` bullet added under
-  `## Working agreement` (feedback) or `## Gotchas` (pitfall). Refused with `diff: null` when the result would
-  put CLAUDE.md at or over its own 60-line limit (the file's header already asks for under 60).
+- **promote**: a `pitfall` lesson that `memory.mjs reflect --failures` recorded in the occurrence ledger
+  (`.doug/.state/memory/pitfalls.jsonl`) for at least 3 distinct cards over at least 2 distinct sessions (a null
+  session never counts). Helpful counters and text similarity are no trigger. When the cited cards' run history
+  names the files they changed, the proposal is kind `rule`: a new `.claude/rules/pitfall-<id>.md` scoped by those
+  files (`paths:` frontmatter, the lesson text and its citations as the body). With no known files it is a `- `
+  bullet under `## Gotchas`, skipped when the text is already in CLAUDE.md and refused with `diff: null` when the
+  result would put CLAUDE.md at or over its own 60-line limit.
 - **demote**: a Bash denial repeated `count >= 2` whose `detail` matches one of a small fixed table of known
   CLAUDE.md rules (see `DEMOTE_RULES` in `lib/learn.mjs`: the branch `-D` rule, the raw `pnpm test` rule, the
   commit-trailer rule) becomes a diff to `.doug/config.json` enabling that rule's config key, when the exact
@@ -81,7 +85,7 @@ content (or `null` when there is nothing to diff - a limit hit, or a text-only f
   path, so this diff can never be applied by `learn.mjs apply` - the proposal says so, and applying it is
   always a by-hand edit.
 - **delete**: a CLAUDE.md `- ` rule line under Working agreement or Gotchas that no denial's `detail`, no
-  repeated lesson's text, and no adversary block's `description` shares a key phrase with (the rule's
+  pitfall lesson's text, and no adversary block's `description` shares a key phrase with (the rule's
   backticked tokens, plus its first 4 significant words - a documented heuristic, not a semantic match: a rule
   paraphrased with none of those tokens is missed, which only ever makes `delete` too cautious, never too
   eager) becomes a diff removing that line. Only proposed once there are at least 10 outcome rows and at least

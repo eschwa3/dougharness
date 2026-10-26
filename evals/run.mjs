@@ -4,13 +4,13 @@
 //   gates     permissions + hooks
 //   full      permissions + hooks + generated CLAUDE.md
 // Every condition gets the same permission allowlist so the only variables are hooks and CLAUDE.md.
-// Six more conditions are orchestration arms (pipeline, swarm, swarm-cheap, crew, swarm-crew, memory; see ARMS
+// Seven more conditions are orchestration arms (pipeline, swarm, swarm-cheap, crew, swarm-crew, testers, memory; see ARMS
 // below): they run the doug-implement workflow on a task's plan and land it, so the swarm, the crew, and memory
 // recall are measured against the fixed pipeline on the same tasks with the same permissions.
 // Results go to evals/out/<timestamp>.json. Costs real tokens; use --dry-run to see the plan.
 //
 // Usage: node evals/run.mjs [--tasks id,id]
-//          [--conditions baseline,gates,full,pipeline,swarm,swarm-cheap,crew,swarm-crew,memory] [--runs 1]
+//          [--conditions baseline,gates,full,pipeline,swarm,swarm-cheap,crew,swarm-crew,testers,memory] [--runs 1]
 //          [--max-turns 30] [--max-budget-usd 15] [--judge auto|codex|claude|off] [--judge-model opus] [--dry-run]
 //
 // Task fields beyond allowedFiles, heldOut, mustPass, mustNotChange, mustNotExist, plan (see tasks/ts-basic.json):
@@ -29,6 +29,7 @@ import { fileURLToPath } from "node:url";
 import { matchAny } from "../plugins/doug-gates/lib/glob.mjs";
 import { scopeViolations } from "../plugins/doug-gates/lib/scope.mjs";
 import { unwrapReport } from "../plugins/doug-flow/lib/plan.mjs";
+import { reportLine, postCompletion } from "../scripts/report-back.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = join(here, "..");
@@ -847,7 +848,7 @@ async function main() {
     console.log("Dry run. Nothing executed.");
     return;
   }
-  if (!existsSync(CLI)) throw new Error("Build the CLI first: pnpm build");
+  if (plan.length > 0 && !existsSync(CLI)) throw new Error("Build the CLI first: pnpm build");
   const resolvedJudge = opts.judge === "auto" ? judgeAvailable() : opts.judge;
 
   const results = [];
@@ -923,12 +924,29 @@ async function main() {
     console.log(`  ${c.padEnd(11)} ${ok}/${rs.length}  scope violations ${scope}  ${cost.toFixed(3)}  ${(wall / 60000).toFixed(1)} min${hiddenSummary}${defectsSummary}`);
   }
   console.log(`\nDetails: ${file}`);
+  return { file, results };
+}
+
+// The completion verdict posted by the main block: PASS only when every session passed (0/0 stays PASS).
+export function completionReport(results, resultPath) {
+  const ok = results.filter((r) => r.success).length;
+  const n = results.length;
+  const costUsd = results.reduce((a, r) => a + (r.costUsd || 0), 0);
+  return { kind: "eval run", passed: ok === n, summary: `${ok}/${n} sessions passed`, costUsd, resultPath };
 }
 
 // Run only when executed directly; evals/tests imports the scorer from this file.
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
-  main().catch((err) => {
-    console.error(err.stack || String(err));
-    process.exit(1);
-  });
+  main()
+    .then(async (out) => {
+      // A dry run returns nothing and posts nothing.
+      if (!out) return;
+      await postCompletion(reportLine(completionReport(out.results, out.file)));
+    })
+    .catch(async (err) => {
+      console.error(err.stack || String(err));
+      const first = String(err?.message ?? err).split("\n")[0];
+      await postCompletion(reportLine({ kind: "eval run", passed: false, summary: `crashed: ${first}`, costUsd: null, resultPath: null }));
+      process.exit(1);
+    });
 }

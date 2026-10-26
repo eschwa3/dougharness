@@ -110,13 +110,15 @@ export function failingTestFilesFrom(output, dir) {
 //    them is in the standing tests_red_by_design claim (`redByDesignClaimFiles`).
 // 2. 'load-timeout' — at least one command timed out or was dropped for budget, and no failed command's
 //    captured output names a failing test file.
-// 3. 'race' — the working tree (`changedFiles(dir)`, as a set) differs now from `changedAtStart`. Either
+// 3. 'test-count' — the test-count ratchet is the block's only problem (`countProblems > 0` and it equals
+//    `totalProblems`).
+// 4. 'race' — the working tree (`changedFiles(dir)`, as a set) differs now from `changedAtStart`. Either
 //    side being unknown (null: no git, or git unavailable) is never a race. Skipped entirely once
 //    `budgetDeadline` (the gate's own hook-timeout deadline, gateBudget() in stop-gate.mjs) has already
 //    passed (review pass 2, item 4): a second `git status` here is exactly the kind of extra work that
 //    could push a slow gate past the platform's own hook timeout, discarding its block message (F1) — a
 //    deadline already blown is not worth spending on a label, so this falls through to 'real' instead.
-// 4. 'real' — otherwise.
+// 5. 'real' — otherwise.
 //
 // Never throws (review pass 2, item 2 MAJOR): this call sits between the gate's decision to block and the
 // blockStop call that carries it out (stop-gate.mjs), so an unguarded throw here would fail the *whole gate*
@@ -141,10 +143,10 @@ export function classifyFinalBlock({ countProblems, totalProblems, preVerificati
       if (allNamed.every((f) => claimSet.has(f))) return "expected-red";
     }
 
-    // card block-ledger-failing-output: the test-count ratchet is the block's only problem.
     const timedOutOrDropped = (Array.isArray(results) ? results : []).some((r) => r.timedOut || r.skipped === "budget");
     if (timedOutOrDropped && allNamed.length === 0) return "load-timeout";
 
+    // card block-ledger-failing-output: the test-count ratchet is the block's only problem.
     if (typeof countProblems === "number" && countProblems > 0 && totalProblems === countProblems) return "test-count";
 
     if (Array.isArray(changedAtStart) && !(typeof budgetDeadline === "number" && Date.now() >= budgetDeadline)) {

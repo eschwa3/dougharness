@@ -56,3 +56,7 @@ for (const sig of ["SIGTERM", "SIGINT"]) {
 
 // card recall-fallback-warning: no test reaches a real local Ollama; the probe default is a closed port unless a test passes its own in the child env.
 process.env.DOUG_OLLAMA_BASE_URL = "http://127.0.0.1:9";
+
+// card detached-run-report-back: the runners post to the launching session when CLAUDE_CODE_MESSAGING_SOCKET is set; a test must never post into the session it runs under. A test that needs a socket passes a fake one in the child env.
+delete process.env.CLAUDE_CODE_MESSAGING_SOCKET;
+delete process.env.CLAUDE_CODE_MESSAGING_TOKEN;

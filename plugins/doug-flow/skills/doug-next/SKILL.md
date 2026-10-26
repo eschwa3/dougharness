@@ -33,6 +33,8 @@ If `.doug/plan.json` is already a draft whose `card` is this id (or whose `cards
 
 A size L card with no `docs/specs/<card-id>/spec.md` is offered feature mode first (ADR 0012): before the planner, ask with `AskUserQuestion` whether to run `/doug-start <id>` (specification, optional pseudocode, architecture, refinement) or plan now; `/doug-start <id>` ends this loop and the card stays In flow. S and M cards go straight to the plan, and any card can still run `/doug-start <id>` on request. Under autopilot the offer is not asked and the card goes straight to the plan.
 
+Batch: ask the offer for each such card before any planner is spawned; a card answered `/doug-start <id>` is dropped from the batch and stays In flow for `/doug-start <id>`, and the rest of the batch goes on (one card left is a plain single-card run; none left ends this loop).
+
 If the card's goal depends on a fact outside the repository (a Claude Code hook contract, a CLI's output format, a third-party API), invoke the `research` skill first and add `Research note: <path>` to the planner's prompt; the planner writes the facts it relied on into the plan's goal with their sources.
 
 The planner runs on the `plan` row (see "Who does the work" above): read it with the `plan.mjs models` command, `node "${CLAUDE_PLUGIN_ROOT}/scripts/plan.mjs" models` (`roles.plan.model`, `roles.plan.effort`), and pass that row's model on every planner spawn below (omit `model` when the row says `inherit`).

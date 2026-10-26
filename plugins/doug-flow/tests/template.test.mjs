@@ -347,12 +347,69 @@ describe("workflow template", () => {
     const slice = source.slice(start, source.indexOf("\n}\n", start) + 3);
     const reusePrompt = new Function("plan", CONSTS + slice + "\nreturn reusePrompt;")({ title: "P", install: "pnpm install --frozen-lockfile" });
     const text = reusePrompt({ id: "a", title: "A", reuse: "doug/task-a", files: ["x.ts"] }, "main");
-    expect(text).toContain("git checkout doug/task-a");
+    expect(text).toContain("git checkout --detach main");
+    expect(text).toContain("git checkout -B doug/task-a");
     expect(text).toContain("git worktree remove --force");
     expect(text).toContain("Do not implement");
     expect(text).toContain("pnpm install --frozen-lockfile");
     expect(text).toContain("git diff --name-only main...HEAD");
     expect(text).toContain('branch="doug/task-a"');
+  });
+  it("rebuilds the reused branch on the current base: own commits listed, owned-files filter, detached picks, then checkout -B (card replan-reuse-stale-base)", () => {
+    const start = source.indexOf("function reusePrompt(");
+    const slice = source.slice(start, source.indexOf("\n}\n", start) + 3);
+    const reusePrompt = new Function("plan", CONSTS + slice + "\nreturn reusePrompt;")({ title: "P", install: "pnpm install --frozen-lockfile" });
+    const text = reusePrompt({ id: "a", title: "A", reuse: "doug/task-a", files: ["x.ts", "x.test.ts"] }, "doug/integ");
+    const list = text.indexOf("git log --no-merges --reverse --format=%H doug/integ..doug/task-a");
+    const filter = text.indexOf("git show --name-only --format=");
+    const detach = text.indexOf("git checkout --detach doug/integ");
+    const pick = text.indexOf("git cherry-pick -x");
+    const move = text.indexOf("git checkout -B doug/task-a");
+    expect(list).toBeGreaterThanOrEqual(0);
+    expect(filter).toBeGreaterThanOrEqual(0);
+    expect(detach).toBeGreaterThanOrEqual(0);
+    expect(pick).toBeGreaterThanOrEqual(0);
+    expect(move).toBeGreaterThanOrEqual(0);
+    expect(list).toBeLessThan(detach);
+    expect(detach).toBeLessThan(pick);
+    // The branch moves only after every pick: checkout -B comes after cherry-pick -x and takes no base argument.
+    expect(move).toBeGreaterThan(pick);
+    expect(text).not.toContain("git checkout -B doug/task-a doug/integ");
+    // Drop rule and mixed-commit block rule, as exact sentences.
+    expect(text).toContain("belongs to another task: drop it");
+    expect(text).toContain("change nothing and return blocked=true with a reason naming the commit and the file");
+    expect(text).toContain("A commit with no files is dropped.");
+    // Empty pick is skipped; a conflict aborts and blocks.
+    expect(text).toContain("git cherry-pick --skip");
+    const abort = text.indexOf("git cherry-pick --abort");
+    expect(abort).toBeGreaterThanOrEqual(0);
+    expect(text.slice(abort)).toMatch(/blocked=true/);
+    // Order (round 3): leftover-worktree rule first, then the listing (a, b), then the shortcut sentence; is-ancestor
+    // no longer precedes the listing as a gate by itself.
+    const anc = text.indexOf("git merge-base --is-ancestor doug/integ doug/task-a");
+    expect(anc).toBeGreaterThanOrEqual(0);
+    const leftover = text.indexOf("If any git checkout below refuses because the branch is checked out in another worktree");
+    expect(leftover).toBeGreaterThanOrEqual(0);
+    expect(leftover).toBeLessThan(anc);
+    // Exit 128 (missing branch or base) blocks, in one sentence.
+    const e128 = text.indexOf("exit 128");
+    expect(e128).toBeGreaterThanOrEqual(0);
+    const e128Sentence = text.slice(e128, text.indexOf(".", e128));
+    expect(e128Sentence).toContain("blocked=true");
+    // The listing precedes the plain-checkout shortcut, which needs ancestor AND nothing dropped.
+    const shortcut = text.indexOf("git checkout doug/task-a");
+    expect(shortcut).toBeGreaterThanOrEqual(0);
+    expect(list).toBeLessThan(shortcut);
+    const shortSentence = text.slice(text.lastIndexOf(".", shortcut), text.indexOf(".", shortcut));
+    expect(shortSentence).toContain("exits 0");
+    expect(shortSentence).toContain("kept every listed commit");
+    // Step 3 reports the head of the rebuilt branch.
+    expect(text).toContain("commit = the output of git rev-parse HEAD");
+    // The old plain-checkout first step is gone.
+    expect(text).not.toMatch(/1\. git checkout doug\/task-a\./);
+    // The leftover-worktree rule still applies.
+    expect(text).toContain("git worktree remove --force");
+    expect(text).toContain("git diff --name-only doug/integ...HEAD");
   });
   it("E1: tells the checkout agent to install unconditionally when plan.install is set, keeping today's conditional wording when it isn't (card reused-s-task-worktree-install)", () => {
     const start = source.indexOf("function reusePrompt(");
@@ -821,7 +878,7 @@ describe("fix loop", () => {
     expect(source).toMatch(/workers:\s*r\.impl && Array\.isArray\(r\.impl\.workers\) \? r\.impl\.workers : null/);
     expect(source).toMatch(/swarm: swarmReport\(r\.task, r\.impl\)/);
     expect(source).toMatch(/plan\.swarm === true \? \{ lead: describeTier\('lead'\), worker: describeTier\('worker'\) \}/);
-    const leadPrompt = new Function("plan", fnSlice("function leadPrompt(") + "\nreturn leadPrompt;")(defaultPlan);
+    const leadPrompt = new Function("plan", CONSTS + fnSlice("function leadPrompt(") + "\nreturn leadPrompt;")(defaultPlan);
     const text = leadPrompt(task, "main");
     for (const s of ["git checkout -b doug/task-a main", "no file is in two briefs", "never widen", "blocked=true"]) expect(text).toContain(s);
     const workerPrompt = new Function("plan", CONSTS + fnSlice("function workerPrompt(") + "\nreturn workerPrompt;")(defaultPlan);
@@ -908,6 +965,17 @@ describe("fix loop", () => {
     // The lead's path may appear only on the step-6 return line, never in an instruction to go there.
     const withPath = text.split("\n").filter((l) => l.includes(goneLead));
     expect(withPath).toEqual([`6. Return taskId="a", branch="doug/task-a", worktreePath="${goneLead}".`]);
+  });
+
+  it("card swarm-shape-rule-stated: the doug-swarm planner prompt states the shape gate (two source files, never size S)", () => {
+    const text = readFileSync(join(root, "skills/doug-swarm/SKILL.md"), "utf8");
+    const start = text.indexOf('Agent({ subagent_type: "doug-flow:planner"');
+    expect(start).toBeGreaterThan(-1);
+    const prompt = text.slice(start, text.indexOf("return the rendered plan.", start));
+    expect(prompt).toMatch(/two or more source files/);
+    expect(prompt).toMatch(/not counting (their |its )?tests/);
+    expect(prompt).toMatch(/size-S task[^.]*(never|not)[^.]*lead/);
+    expect(prompt).toContain("(a size-S task keeps a single implementer)");
   });
 
   it("card swarm-topology: a deterministic shape gate, a required splitReason, and interface context in every brief", async () => {
@@ -2889,7 +2957,7 @@ describe("fix loop", () => {
       "fix:a": (i) => ({ ...implResult, commit: `c${i + 2}` }),
       "adversary:a": (i) =>
         i === 1
-          ? { taskId: "a", ran: true, verdict: "pass", summary: "ok", issues: [{ severity: "minor", file: "src/x.ts", line: 3, description: "F1: still returns 1 on the empty input", evidence: null }], commandsRun: [], error: null }
+          ? { taskId: "a", ran: true, verdict: "fail", summary: "bad", issues: [{ severity: "blocker", file: "src/x.ts", line: 3, description: "F1: still returns 1 on the empty input", evidence: null }], commandsRun: [], error: null }
           : { taskId: "a", ran: true, verdict: "pass", summary: "ok", issues: [], commandsRun: [], error: null },
     });
     // Card flow-adversary-parallel: the pass-1 adversary now runs (index 0), so the confirmation adversary is call 1; one more agent fits.
@@ -2906,6 +2974,59 @@ describe("fix loop", () => {
     expect(fixes[1].prompt).toContain("F1 [verify/verification]");
     expect(fixes[1].prompt).toContain("(reappeared after being fixed)");
     expect(r.stopReason).toBeNull();
+  });
+
+  // Card stall-on-repeat-minor (run wf_d9199b24-d9e): a minor re-report of a ledger entry is not a blocker, so it
+  // neither reopens a fixed entry nor keeps an open one open.
+  describe("card stall-on-repeat-minor: only a blocking re-report reopens or keeps an entry open", () => {
+    const DESC = "measurement was not taken on a quiet machine";
+    const entry = (status) => ({ id: "F1", fingerprint: `adversary|src/x.ts|${DESC}`, stage: "adversary", invariant: "spec", severity: "blocker", file: "src/x.ts", line: 3, description: DESC, evidence: null, status, openedPass: 1, fixedPass: status === "fixed" ? 2 : null, fixedCommit: status === "fixed" ? "c2" : null, confirmedBy: status === "fixed" ? "adversary" : null, reappeared: false });
+    const adversaryPass = (verdict, severity) => ({ stages: ["adversary"], commit: "c3", stageResults: { adversary: { ran: true, verdict, summary: "s", issues: [{ severity, file: "src/x.ts", line: 3, description: DESC, evidence: null }], commandsRun: [], error: null } } });
+
+    it("T1: a minor re-report of a fixed blocker (adversary not blocked) does not reopen it", () => {
+      const { updateLedger } = ledgerModule();
+      const ledger = [entry("fixed")];
+      const u = updateLedger(ledger, adversaryPass("pass", "minor"), 3, true);
+      expect(u.reopened).toEqual([]);
+      expect(ledger[0]).toMatchObject({ status: "fixed", reappeared: false });
+    });
+
+    it("T1 end to end: a fixed blocker that the confirmation adversary re-reports only as minor lets the task integrate", async () => {
+      const { agent } = scripted({
+        "implement:a": () => implResult,
+        "verify:a": () => ({ taskId: "a", passed: true, findings: [] }),
+        "review:a": () => passingReview,
+        "check:a": () => passingCheck,
+        "fix:a": (i) => ({ ...implResult, commit: `c${i + 2}` }),
+        "adversary:a": (i) =>
+          i === 0
+            ? { taskId: "a", ran: true, verdict: "fail", summary: "bad", issues: [{ severity: "blocker", file: "src/x.ts", line: 3, description: DESC, evidence: null }], commandsRun: [], error: null }
+            : { taskId: "a", ran: true, verdict: "pass", summary: "ok", issues: [{ severity: "minor", file: "src/x.ts", line: 3, description: DESC, evidence: null }], commandsRun: [], error: null },
+      });
+      const r = await loadLoop({ agent, fixAttempts: 3, adversary: { command: "x", timeoutMs: 1 }, plan: { ...defaultPlan, budget: { agents: 13 } } }).runTask(task, "main");
+      expect(r.stopReason).toBeNull();
+      expect(r.attempts[r.attempts.length - 1].ready).toBe(true);
+      const f1 = r.ledger.find((e) => e.id === "F1");
+      expect(f1.status).toBe("fixed");
+      expect(f1.reappeared).toBe(false);
+      expect(JSON.stringify(r)).not.toContain("a fixed finding reappeared");
+    });
+
+    it("T2 (control): the same re-report as a blocker still reopens the fixed entry", () => {
+      const { updateLedger } = ledgerModule();
+      const ledger = [entry("fixed")];
+      const u = updateLedger(ledger, adversaryPass("fail", "blocker"), 3, true);
+      expect(u.reopened).toEqual(["F1"]);
+      expect(ledger[0]).toMatchObject({ status: "open", reappeared: true });
+    });
+
+    it("T3: an open blocker re-reported on the next pass only as a minor is marked fixed, not kept open", () => {
+      const { updateLedger } = ledgerModule();
+      const ledger = [entry("open")];
+      const u = updateLedger(ledger, adversaryPass("pass", "minor"), 2, true);
+      expect(u.fixed).toEqual(["F1"]);
+      expect(ledger[0]).toMatchObject({ status: "fixed", fixedPass: 2 });
+    });
   });
 
   // Card flow-budget-after-parallel-adversary. The costliest realistic shape that still reaches every fix pass: the
@@ -3064,7 +3185,7 @@ describe("fix loop", () => {
   });
 
   it("keeps a task out of integration while the ledger still holds an open finding", async () => {
-    // Pass 2 blocks on the adversary first: it re-reports F1 as minor, which blocks no stage, and the check that
+    // Pass 2 blocks on the adversary first: it re-reports F1 as a major (passes with notes, blocks no stage), and the check that
     // follows never mentions it. The entry stays open, so the pass is not ready however well the stages went.
     const { agent, calls } = scripted({
       "implement:a": () => implResult,
@@ -3075,7 +3196,7 @@ describe("fix loop", () => {
       "adversary:a": (i) =>
         i === 0
           ? { taskId: "a", ran: true, verdict: "fail", summary: "off by one", issues: [{ severity: "blocker", file: "src/x.ts", line: 3, description: "returns 1 on the empty input", evidence: "got 1" }], commandsRun: [], error: null }
-          : { taskId: "a", ran: true, verdict: "pass", summary: "ok", issues: [{ severity: "minor", file: "src/x.ts", line: 3, description: "F1: the empty input still reads oddly", evidence: null }], commandsRun: [], error: null },
+          : { taskId: "a", ran: true, verdict: "pass", summary: "ok", issues: [{ severity: "major", file: "src/x.ts", line: 3, description: "F1: the empty input still reads oddly", evidence: null }], commandsRun: [], error: null },
     });
     const r = await loadLoop({ agent, fixAttempts: 1, adversary: { command: "x", timeoutMs: 1 } }).runTask(task, "main");
     expect(r.attempts[1].stages).toEqual(["fix", "adversary", "check"]);
@@ -3915,7 +4036,7 @@ describe("fix loop", () => {
     expect(later).toContain("F2 [adversary/data-integrity] fixed in abcdef1, confirmed by check (pass 2)");
   });
 
-  it("adds the lessons header and text to implementPrompt, leadPrompt, workerPrompt, and fixPrompt only when task.lessons is set, and caps it at 2000 characters (card memory-recall #2)", () => {
+  it("adds the lessons header and text to implementPrompt, leadPrompt, workerPrompt, and fixPrompt only when task.lessons is set, and carries a 10,000-character block whole (cards memory-recall #2, memory-atomic-lessons)", () => {
     const header = "Lessons from earlier runs on this repository (memory; each cites where it was learned):";
     const withLessons = { ...task, lessons: "- [abc0000000000000] a lesson learned earlier (pattern)" };
 
@@ -3941,22 +4062,14 @@ describe("fix loop", () => {
     expect(fixPrompt(withLessons, r, 2, "main", [])).toContain(header);
     expect(fixPrompt(task, r, 2, "main", [])).not.toContain(header);
 
-    // The workflow re-slices at 2000 characters, the belt to plan.mjs json's own cap; each of the four prompts
-    // does its own slicing (review minor 3: mutating just one, e.g. leadPrompt's, left the suite green before).
-    const long = "x".repeat(2500);
+    // Card memory-atomic-lessons: a flow task's lessons are the index plus the fetched full text (up to ~4,000 tokens),
+    // so no prompt re-cuts them at 2000 characters; each of the four prompts is checked on its own.
+    const long = "x".repeat(10000);
     const longTask = { ...task, lessons: long };
-    const capped = implementPrompt(longTask, "main");
-    expect(capped).toContain(long.slice(0, 2000));
-    expect(capped).not.toContain(long.slice(0, 2001));
-    const leadCapped = leadPrompt(longTask, "main");
-    expect(leadCapped).toContain(long.slice(0, 2000));
-    expect(leadCapped).not.toContain(long.slice(0, 2001));
-    const workerCapped = workerPrompt(longTask, brief, 1, lead);
-    expect(workerCapped).toContain(long.slice(0, 2000));
-    expect(workerCapped).not.toContain(long.slice(0, 2001));
-    const fixCapped = fixPrompt(longTask, r, 2, "main", []);
-    expect(fixCapped).toContain(long.slice(0, 2000));
-    expect(fixCapped).not.toContain(long.slice(0, 2001));
+    expect(implementPrompt(longTask, "main")).toContain(long);
+    expect(leadPrompt(longTask, "main")).toContain(long);
+    expect(workerPrompt(longTask, brief, 1, lead)).toContain(long);
+    expect(fixPrompt(longTask, r, 2, "main", [])).toContain(long);
   });
 
   // Card flow-review-prompts-lessons: the per-task checking prompts carry the same lessons block as the implement prompts.
@@ -3992,7 +4105,7 @@ describe("fix loop", () => {
     };
 
     for (const [name, render] of Object.entries(renderers)) {
-      it(`${name} carries the lessons header and text only when task.lessons is set, and caps it at 2000 characters`, () => {
+      it(`${name} carries the lessons header and text only when task.lessons is set, and carries a 10,000-character block whole`, () => {
         const lessons = "- [abc0000000000000] a lesson learned earlier (pattern)";
         const withLessons = render({ ...task, lessons });
         expect(withLessons).toContain(header);
@@ -4005,10 +4118,8 @@ describe("fix loop", () => {
         expect(render(task)).not.toContain(notSpec);
         expect(render({ ...task, lessons: "" })).not.toContain(notSpec);
 
-        const long = "x".repeat(2500);
-        const capped = render({ ...task, lessons: long });
-        expect(capped).toContain(long.slice(0, 2000));
-        expect(capped).not.toContain(long.slice(0, 2001));
+        const long = "x".repeat(10000);
+        expect(render({ ...task, lessons: long })).toContain(long);
       });
     }
 
@@ -5424,10 +5535,8 @@ describe("fix loop", () => {
       expect(ledger.find((e) => e.id === "F2").status).toBe("fixed");
     });
 
-    // P3 was dropped: it would have made a non-blocking re-report of a passing stage never reopen a fixed entry,
-    // but that contradicts "still reopens and keeps entries on a real re-report" (~line 2503) and "blocks the
-    // pass when a finding the ledger recorded as fixed comes back" (~line 2186), which pin unconditional
-    // reopening on any re-report as deliberate. P1 + P2 alone close the incident.
+    // P3 was dropped as a rule for passing stages, but card stall-on-repeat-minor (2026-10-25 decision) narrows
+    // unconditional reopening: an explicit minor/nit/note re-report no longer reopens; free text and blocker/major still do.
 
     it("G (guard): a genuinely reappeared blocker still reopens and holds readiness - a failed check reporting 'F2: still returns 1' against a fixed F2 reopens it [mutation MG]", () => {
       const { updateLedger } = ledgerModule();
@@ -6345,6 +6454,12 @@ describe("plugin layout", () => {
   });
   it("tells the planner an acceptance command never repeats a verify command (card flow-suite-dedupe)", () => {
     expect(readFileSync(join(root, "agents/planner.md"), "utf8")).toContain("never repeats a verify command");
+  });
+  it("tells the planner a stated signature reaches the plan verbatim, quoted in backticks in an acceptance line (card planner-keeps-stated-signatures)", () => {
+    // 2026-10-23, ts-orders swarm-skill: the request stated byCategory(products: Product[]): Record<string, string[]>,
+    // the plan said byCategory(catalog: Catalog): Map<string, Product[]>, and the held-out test failed.
+    const text = readFileSync(join(root, "agents/planner.md"), "utf8");
+    for (const s of ["verbatim", "never changes a stated contract", "in backticks", "acceptance line"]) expect(text, s).toContain(s);
   });
   it("tells the planner that a consumer task depends on its producer, so it lands in a later level (card planner-producer-level)", () => {
     // 2026-09-07, board-reorder (4 runs): a page task that PUTs to a route another task adds, in the same level,
@@ -8132,7 +8247,9 @@ describe("card autopilot: doug-next and doug-hand skill text", () => {
     expect(text).not.toContain("all four scenarios");
     // Card parallel-card-queens B13 (changed pin, stated reason: the parallel scenario makes it seven).
     expect(text).not.toContain("all six scenarios");
-    expect(text).toContain("all seven scenarios");
+    // Card fixture-repo-scenarios (changed pin, stated reason: init, board, memory, decide and swarm-skill make it twelve).
+    expect(text).not.toContain("all seven scenarios");
+    expect(text).toContain("all twelve scenarios");
   });
 });
 
@@ -8464,6 +8581,24 @@ describe("card memory-every-session: doug-hand recalls into every brief", () => 
     expect(s1).toBeGreaterThan(research);
     expect(s1).toBeLessThan(text.indexOf(NEXT));
     expect(s1).toBeLessThan(h4);
+  });
+
+  it("M18: the fetch sentence appears once, verbatim, after S1 and before S2 in the same paragraph, and S1, S2, S3 are unchanged", () => {
+    const FETCH =
+      'Then fetch the full text of each indexed lesson the card needs with `node "${CLAUDE_PLUGIN_ROOT}/scripts/memory.mjs" lesson show <id> --card <id>` and paste each output verbatim below that block in the same briefs; never cut or paraphrase a fetched lesson.';
+    const text = hand();
+    expect(count(text, FETCH), "fetch sentence must appear once").toBe(1);
+    const s1 = text.indexOf(S1);
+    const f = text.indexOf(FETCH);
+    const s2 = text.indexOf(S2);
+    expect(f).toBeGreaterThan(s1);
+    expect(f).toBeLessThan(s2);
+    expect(text.slice(s1 + S1.length, f).trim()).toBe("");
+    expect(paragraphOf(text, "Then recall memory for the card")).toContain(FETCH);
+    expect(text.indexOf(FETCH)).toBeLessThan(text.indexOf("## 4. Record and land"));
+    expect(count(text, S1)).toBe(1);
+    expect(count(text, S2)).toBe(1);
+    expect(count(text, S3)).toBe(1);
   });
 
   it("step 3 carries one separate sentence saying the lean lane and a tests-only card get the same brief-lessons block", () => {
@@ -9019,5 +9154,87 @@ describe("card doug-start-l-card-offer: L-card feature-mode offer", () => {
     const slice = source.slice(start, source.indexOf("\n}\n", start) + 3);
     const text = new Function("plan", CONSTS + slice + "\nreturn implementPrompt;")({ title: "P", install: null })({ id: "a", title: "A", spec: "do a", files: ["x.ts"] }, "main");
     expect(text).toContain(SENTENCE);
+  });
+});
+
+describe("card l-card-offer-in-batch: the L-card offer in a batch", () => {
+  const skill = (name) => readFileSync(join(root, "skills", name, "SKILL.md"), "utf8");
+  const once = (text, sentence) => text.split(sentence).length - 1;
+  const NEXT_BATCH = "Batch: ask the offer for each such card before any planner is spawned; a card answered `/doug-start <id>` is dropped from the batch and stays In flow for `/doug-start <id>`, and the rest of the batch goes on (one card left is a plain single-card run; none left ends this loop).";
+  const HAND_BATCH = "Batch: ask the offer for each such card before 2b; a card answered `/doug-start <id>` is dropped from the batch and stays In flow for `/doug-start <id>`, and the rest of the batch goes on (one card left is a plain single-card run; none left ends this loop).";
+
+  it("doug-next carries the batch sentence once, after the offer and before the research paragraph", () => {
+    const t = skill("doug-next");
+    expect(once(t, NEXT_BATCH)).toBe(1);
+    expect(NEXT_BATCH).toContain("is dropped from the batch and stays In flow");
+    expect(NEXT_BATCH).toContain("the rest of the batch goes on");
+    const i = t.indexOf("## 2. Plan");
+    const sec = t.slice(i, t.indexOf("\n## ", i + 1));
+    const b = sec.indexOf(NEXT_BATCH);
+    expect(b).toBeGreaterThan(sec.indexOf("`/doug-start <id>` ends this loop and the card stays In flow."));
+    expect(b).toBeLessThan(sec.indexOf("If the card's goal depends on a fact outside the repository"));
+  });
+
+  it("doug-hand carries the batch sentence once, after the offer and before 2b", () => {
+    const t = skill("doug-hand");
+    expect(once(t, HAND_BATCH)).toBe(1);
+    expect(HAND_BATCH).toContain("is dropped from the batch and stays In flow");
+    expect(HAND_BATCH).toContain("the rest of the batch goes on");
+    const b = t.indexOf(HAND_BATCH);
+    expect(b).toBeGreaterThan(t.indexOf("`/doug-start <id>` ends this loop and the card stays In flow."));
+    expect(b).toBeLessThan(t.indexOf("## 2b. Shape: by hand, or a swarm"));
+  });
+});
+
+describe("card memory-hand-stop-rows: doug-hand records a stopped run", () => {
+  it("doug-hand records a stopped by-hand run with memory.mjs record <id> --hand --stop <reason>", () => {
+    const hand = readFileSync(join(root, "skills/doug-hand/SKILL.md"), "utf8");
+    expect(hand).toContain('memory.mjs" record <id> --hand --stop <reason>');
+    expect(hand).toContain("--detail");
+    expect(hand).toContain("user-stopped");
+  });
+});
+
+// Card gate-shows-file-in-chat: before a gate that asks about a written file, the lead puts the file's text in the chat.
+describe("card gate-shows-file-in-chat: gates show the file in the chat first", () => {
+  const read = (f) => readFileSync(join(root, "skills", f, "SKILL.md"), "utf8");
+  const section = (text, title) => text.split(/^## /m).slice(1).find((p) => p.startsWith(title)) ?? "";
+  const phaseOf = (sec, name) => sec.split(/^### /m).slice(1).find((p) => new RegExp(`^\\d\\.\\s+${name}\\b`).test(p)) ?? "";
+  const rule =
+    "Show the file first: before every gate that asks about a phase file, put the file's complete text in the chat, verbatim, in a fenced code block, before the AskUserQuestion. Never replace it with a summary or a path, and never truncate it (a very long file may go over more than one message).";
+  const ref = "show the file first (phase rules)";
+
+  it("doug-start's Phase rules pin the show-the-file rule, with no cap and the questions in the AskUserQuestion", () => {
+    const rules = section(read("doug-start"), "Phase rules");
+    expect(rules).toContain(rule);
+    expect(rules).toContain("the questions themselves go in the AskUserQuestion");
+  });
+
+  it("the rerun rule shows the diff in the chat in a fenced code block before the replace / keep / revise question", () => {
+    const rules = section(read("doug-start"), "Phase rules");
+    expect(rules).toContain("show `git diff --no-index` of the two in the chat, in a fenced code block, before the AskUserQuestion");
+  });
+
+  it("each project-mode phase gate that approves a file refers to the rule: Idea, Architecture, Scope", () => {
+    const sec = section(read("doug-start"), "Project mode");
+    for (const name of ["Idea", "Architecture", "Scope"]) {
+      expect(phaseOf(sec, name).toLowerCase(), `project phase ${name}`).toContain(ref);
+    }
+    expect(phaseOf(sec, "Architecture")).toContain("the proposal's ADR diff");
+  });
+
+  it("each feature-mode phase gate refers to the rule: Specification, Pseudocode, Architecture, Refinement", () => {
+    const sec = section(read("doug-start"), "Feature mode");
+    for (const name of ["Specification", "Pseudocode", "Architecture", "Refinement"]) {
+      expect(phaseOf(sec, name).toLowerCase(), `feature phase ${name}`).toContain(ref);
+    }
+    expect(phaseOf(sec, "Refinement")).toContain("the plan's complete `show` output in the chat");
+  });
+
+  it("doug-hand's 2b swarm approval puts the complete plan.mjs show output in the chat in a fenced block, not a summary", () => {
+    const hand = read("doug-hand");
+    expect(hand).toContain(
+      "put the complete output of `plan.mjs show` in the chat, verbatim, in a fenced code block, before the AskUserQuestion (never a summary instead)",
+    );
   });
 });

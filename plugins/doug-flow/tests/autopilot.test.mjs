@@ -1,12 +1,13 @@
 import { describe, it, expect, vi, beforeAll } from "vitest";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, existsSync, realpathSync, lstatSync, rmSync, statSync, utimesSync } from "node:fs";
+import { mkdtempSync, mkdirSync, copyFileSync, writeFileSync, readFileSync, readdirSync, existsSync, realpathSync, lstatSync, rmSync, statSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { readAutopilot, autopilotView, autopilotLines, parseAutopilot } from "../lib/autopilot-view.mjs";
 import * as core from "../lib/autopilot-core.mjs";
-import { initialState, currentAction } from "../lib/card-loop.mjs";
+import { initialState, currentAction, next as loopNext, briefPrompt } from "../lib/card-loop.mjs";
+import { openMemory, listOutcomes } from "../lib/memory.mjs";
 
 // Card autopilot-live-queue: the lead's autopilot state file (.doug/.state/autopilot.json), its writer script, and
 // the shared pure view the pane and the board page both render. Test names carry the contract's mutation ids.
@@ -2254,5 +2255,685 @@ describe("card queen-research-note-promotion", () => {
     writeFileSync(noteFile(dir2), NOTE);
     rep(dir2, flat({ researchNote: noteFile(dir2) }));
     expect(readFileSync(noteFile(dir2), "utf8")).toBe(NOTE);
+  });
+});
+
+// Card memory-record-stops: `autopilot.mjs report` writes one outcome row for a stopped hand card report, with the
+// blocks.jsonl lines of the run's own agents; a done report writes none; a failure never changes the verdict.
+describe("card memory-record-stops: report writes a stop row", () => {
+  const memoryScript = join(here, "..", "scripts", "memory.mjs");
+  const CARD = { id: "h3", column: "ready", track: "hand", component: "cli", title: "H3", size: "S", class: "code", goal: "Change packages/doug-cli/src/c.ts." };
+  const slugOf = (d) => d.replace(/[^A-Za-z0-9]/g, "-");
+  const A1 = "a1111111111111111";
+  const A2 = "a2222222222222222";
+  function proj() {
+    const dir = tmp();
+    const home = tmp();
+    mkdirSync(join(dir, ".doug/.state"), { recursive: true });
+    mkdirSync(join(dir, "plugins"), { recursive: true });
+    mkdirSync(join(dir, "packages"), { recursive: true });
+    writeFileSync(join(dir, ".doug/board.json"), JSON.stringify({ version: 1, columns: [{ id: "ready", title: "Ready" }, { id: "done", title: "Done" }], components: ["cli"], cards: [CARD] }));
+    ap(dir, "start", "--cards", "h3", "--usd-cap", "10", "--wall-cap", "100");
+    const argsFile = join(dir, "h3-args.json");
+    writeFileSync(argsFile, JSON.stringify({ card: "h3", seed: "s" }));
+    const env = { ...process.env, CLAUDE_PROJECT_DIR: dir, HOME: home, CLAUDE_CODE_SESSION_ID: "sidx" };
+    const r = spawnSync(process.execPath, [script, "launched", "h3", "--run", "wf_h3", "--kind", "hand", "--worktree", join(dir, "wt-h3"), "--args-file", argsFile, "--dir", dir], { encoding: "utf8", env });
+    expect(r.status).toBe(0);
+    const jdir = join(home, ".claude", "projects", slugOf(dir), "sidx", "subagents", "workflows", "wf_h3");
+    mkdirSync(jdir, { recursive: true });
+    writeFileSync(join(jdir, "journal.jsonl"), JSON.stringify({ type: "started", key: "k", agentId: A1, label: "coder:1" }) + "\n{broken\n");
+    return dir;
+  }
+  const rep = (dir, value) => {
+    const f = join(dir, "res.json");
+    writeFileSync(f, JSON.stringify(value));
+    return ap(dir, "report", "--run", "wf_h3", "--file", f);
+  };
+  const stopped = (extra = {}) => ({ card: { id: "h3" }, outcome: "stopped", reason: "hook-blocked", stoppedAt: "reviewer", detail: "protect-paths refused X", history: [], ...extra });
+  const rows = (dir) => {
+    const m = openMemory(dir);
+    try {
+      return listOutcomes(m, { task: "h3" });
+    } finally {
+      m.close();
+    }
+  };
+
+  it("M1: a stopped report yields a stop row with stop_class and stop_reason from the report", () => {
+    const dir = proj();
+    const r = rep(dir, stopped());
+    expect(r.status).toBe(0);
+    const got = rows(dir);
+    expect(got).toHaveLength(1);
+    expect(got[0].run).toMatch(/^stop:/);
+    expect(got[0].stop_class).toBe("hook-blocked");
+    expect(got[0].stop_reason).toBe("protect-paths refused X");
+    expect(got[0].commit_sha).toBeNull();
+    expect(got[0].track).toBe("hand");
+    expect(got[0].run_id).toBe("wf_h3");
+  });
+
+  it("M2: reporting the same stopped result twice leaves exactly one stop row", () => {
+    const dir = proj();
+    rep(dir, stopped());
+    rep(dir, stopped());
+    const got = rows(dir);
+    expect(got).toHaveLength(1);
+    expect(got[0].run.startsWith("stop:")).toBe(true);
+  });
+
+  it("a queen-wrapped stopped result is unwrapped and recorded once", () => {
+    const dir = proj();
+    rep(dir, { summary: "s", agentCount: 3, result: { report: stopped() } });
+    const got = rows(dir);
+    expect(got).toHaveLength(1);
+    expect(got[0].stop_class).toBe("hook-blocked");
+  });
+
+  it("M3: a different stop of the same card adds its own row", () => {
+    const dir = proj();
+    rep(dir, stopped());
+    rep(dir, stopped({ reason: "design-decision", detail: "which one?" }));
+    const got = rows(dir);
+    expect(got).toHaveLength(2);
+    expect(got.map((g) => g.stop_class).sort()).toEqual(["design-decision", "hook-blocked"]);
+  });
+
+  it("M4: a later landing adds its own row and keeps the stop row", () => {
+    const dir = proj();
+    rep(dir, stopped());
+    const r = spawnSync(process.execPath, [memoryScript, "record", "h3", "--hand", dir, "--commit", "sha77"], { encoding: "utf8", cwd: dir, env: { ...process.env, CLAUDE_PROJECT_DIR: dir } });
+    expect(r.status).toBe(0);
+    const got = rows(dir);
+    expect(got).toHaveLength(2);
+    const stop = got.find((g) => g.run.startsWith("stop:"));
+    expect(stop.stop_class).toBe("hook-blocked");
+    expect(stop.stop_reason).toBe("protect-paths refused X");
+    expect(stop.commit_sha).toBeNull();
+    expect(got.find((g) => g.run === "hand:sha77")).toBeTruthy();
+  });
+
+  it("M6: blocks.jsonl lines of the run's own agents land in the row; other agents and main-session lines do not", () => {
+    const dir = proj();
+    const mk = (o) => JSON.stringify(o);
+    writeFileSync(
+      join(dir, ".doug/.state/blocks.jsonl"),
+      [
+        mk({ hook: "subagent-stop", at: "T-mine", agent: "doug-flow:coder", class: "real", reason: `[doug] Subagent doug-flow:coder (${A1}) cannot report done: red` }),
+        mk({ hook: "subagent-stop", at: "T-other", agent: "doug-flow:coder", class: "real", reason: `[doug] Subagent doug-flow:coder (${A2}) cannot report done: red` }),
+        mk({ hook: "stop-gate", at: "T-main", agent: null, class: "real", reason: "gate red" }),
+      ].join("\n") + "\n",
+    );
+    expect(rep(dir, stopped()).status).toBe(0);
+    const got = rows(dir);
+    expect(got).toHaveLength(1);
+    expect(got[0].blocks).toHaveLength(1);
+    expect(got[0].blocks[0].at).toBe("T-mine");
+    expect(got[0].blocks[0].class).toBe("real");
+  });
+
+  it("memory-pin-gaps: a block of an agent seen only in a resumed run's later journal is attributed to the stop row", () => {
+    const dir = proj();
+    const home = JSON.parse(readFileSync(join(dir, ".doug/.state/autopilot.json"), "utf8")).cards[0].journals[0].split("/.claude/")[0];
+    const env = { ...process.env, CLAUDE_PROJECT_DIR: dir, HOME: home, CLAUDE_CODE_SESSION_ID: "sidx" };
+    const r = spawnSync(process.execPath, [script, "resumed", "h3", "--run", "wf_h3b", "--dir", dir], { encoding: "utf8", env });
+    expect(r.status).toBe(0);
+    const jdir = join(home, ".claude", "projects", slugOf(dir), "sidx", "subagents", "workflows", "wf_h3b");
+    mkdirSync(jdir, { recursive: true });
+    writeFileSync(join(jdir, "journal.jsonl"), JSON.stringify({ type: "started", key: "k", agentId: A2, label: "coder:2" }) + "\n");
+    const mk = (o) => JSON.stringify(o);
+    writeFileSync(
+      join(dir, ".doug/.state/blocks.jsonl"),
+      [
+        mk({ hook: "subagent-stop", at: "T-first", agent: "doug-flow:coder", class: "real", reason: `[doug] Subagent doug-flow:coder (${A1}) cannot report done: red` }),
+        mk({ hook: "subagent-stop", at: "T-resumed", agent: "doug-flow:coder", class: "real", reason: `[doug] Subagent doug-flow:coder (${A2}) cannot report done: red` }),
+      ].join("\n") + "\n",
+    );
+    const f = join(dir, "res.json");
+    writeFileSync(f, JSON.stringify(stopped()));
+    expect(ap(dir, "report", "--run", "wf_h3b", "--file", f).status).toBe(0);
+    const got = rows(dir);
+    expect(got).toHaveLength(1);
+    expect(got[0].run_id).toBe("wf_h3b");
+    expect(got[0].blocks.map((b) => b.at).sort()).toEqual(["T-first", "T-resumed"]);
+  });
+
+  it("an absent blocks.jsonl still yields a row with no blocks", () => {
+    const dir = proj();
+    expect(rep(dir, stopped()).status).toBe(0);
+    const got = rows(dir);
+    expect(got).toHaveLength(1);
+    expect(got[0].blocks).toEqual([]);
+  });
+
+  it("M7: a done report writes no outcome row", () => {
+    const dir = proj();
+    const r = rep(dir, { card: { id: "h3" }, outcome: "done", history: [] });
+    expect(r.status).toBe(0);
+    expect(existsSync(join(dir, ".doug/.state/memory"))).toBe(false);
+  });
+
+  it("M8: a memory failure warns on stderr and leaves the verdict and exit status alone", () => {
+    const ok = proj();
+    const base = rep(ok, stopped());
+    const dir = proj();
+    writeFileSync(join(dir, ".doug/.state/memory"), "not a directory");
+    const r = rep(dir, stopped());
+    expect(r.status).toBe(0);
+    expect(r.stdout).toBe(base.stdout);
+    expect(r.stdout.trim()).not.toBe("");
+    expect(r.stderr).toContain("cannot record the stop row for h3");
+  });
+
+  // Card memory-outcome-arms: a stop row carries the condition stamp (memory configuration included) so a stop-or-land
+  // rate can be computed per memory arm.
+  const writeCondition = (dir, text) => {
+    mkdirSync(join(dir, ".doug/.state/reports/h3"), { recursive: true });
+    writeFileSync(join(dir, ".doug/.state/reports/h3/condition.json"), text);
+  };
+  const MEMORY_CONFIG = { stage: "baseline", embeddings: null, staleDays: 14, k: 8, lessonChars: 400, totalChars: 2000 };
+  const CONDITION = { harnessCommit: "abc123", configHash: "cfg1", class: "code", arm: "code/default", assignedBy: "policy", exploreProbability: null, openedAt: "2026-10-18T00:00:00.000Z", memoryConfig: MEMORY_CONFIG };
+
+  it("memory-outcome-arms: a stop row copies the condition.json stamp, memory_config in sorted-key JSON", () => {
+    const dir = proj();
+    writeCondition(dir, JSON.stringify(CONDITION));
+    expect(rep(dir, stopped()).status).toBe(0);
+    const got = rows(dir);
+    expect(got).toHaveLength(1);
+    expect(got[0].harness_commit).toBe("abc123");
+    expect(got[0].config_hash).toBe("cfg1");
+    expect(got[0].class).toBe("code");
+    expect(got[0].arm).toBe("code/default");
+    expect(got[0].memory_config).toBe(
+      '{"embeddings":null,"k":8,"lessonChars":400,"stage":"baseline","staleDays":14,"totalChars":2000}'
+    );
+  });
+
+  it("memory-outcome-arms: with no condition.json the stop row is still recorded with a null memory_config and harness_commit", () => {
+    const dir = proj();
+    expect(rep(dir, stopped()).status).toBe(0);
+    const got = rows(dir);
+    expect(got).toHaveLength(1);
+    expect(got[0].stop_class).toBe("hook-blocked");
+    expect(got[0].memory_config).toBeNull();
+    expect(got[0].harness_commit).toBeNull();
+  });
+
+  it("memory-outcome-arms: an unparsable condition.json still records the stop row, unstamped", () => {
+    const dir = proj();
+    writeCondition(dir, "{not json");
+    const r = rep(dir, stopped());
+    expect(r.status).toBe(0);
+    const got = rows(dir);
+    expect(got).toHaveLength(1);
+    expect(got[0].stop_class).toBe("hook-blocked");
+    expect(got[0].memory_config).toBeNull();
+    expect(got[0].harness_commit).toBeNull();
+  });
+});
+
+// Card memory-run-history: `autopilot.mjs report` writes an append-only run-history file for a hand card report
+// (done or stopped): the card report, the run's own gate blocks and trace denials, and each seat's replayed brief
+// and journal hand-back, redacted and capped. A failure never changes the verdict.
+describe("card memory-run-history: report writes the run history", () => {
+  const CARD = { id: "h3", column: "ready", track: "hand", component: "cli", title: "H3", size: "M", class: "code", goal: "Change packages/doug-cli/src/c.ts." };
+  const slugOf = (d) => d.replace(/[^A-Za-z0-9]/g, "-");
+  const WT = "/abs/worktree/h3";
+  const MUT = [{ id: "M1", case: "case one", mutation: "remove the check", test: "T01" }];
+  const HBS = [
+    { seat: "setup", worktree: WT, branch: "card/h3", install: null },
+    { seat: "lead", lessons: "LESSON-ONE", facts: [{ text: "the fact", source: "docs/x.md:3" }], unverified: [], testFiles: ["a.test.mjs"], mutations: MUT },
+    { seat: "tester", files: ["a.test.mjs"], tests_red_by_design: ["a.test.mjs"], mutationResults: [{ id: "M1", failed: true, test: "T01", assertion: "expected x" }] },
+  ];
+  const AG = ["a1111111111111111", "a2222222222222222", "a3333333333333333"];
+  const OTHER = "a9999999999999999";
+  // Secret fixture built at runtime so the secret-scan hook does not refuse this file.
+  const GH = "gh" + "p_" + "A1b2C3d4".repeat(5);
+  const L = (o) => JSON.stringify(o);
+  const secretRules = join(here, "..", "..", "doug-gates", "lib", "secret-rules.mjs");
+  const QA = () => ({ card: CARD, options: {}, repoRoot: "/abs/repo", worktreePath: WT });
+
+  // The briefs the real card-loop renders for the three seats, computed by the test itself.
+  function expectedBriefs() {
+    let s = initialState(CARD, {});
+    return HBS.map((hb) => {
+      const a = currentAction(s);
+      const b = briefPrompt(a.brief, { repoRoot: "/abs/repo", worktreePath: WT });
+      s = loopNext(s, hb).state;
+      return b;
+    });
+  }
+  function journalFor(hbs, agents, tag = "") {
+    const lines = [];
+    hbs.forEach((hb, i) => lines.push(L({ type: "started", key: "k" + i, agentId: agents[i], label: `${hb.seat}:h3:1` })));
+    hbs.forEach((hb, i) => lines.push(L({ type: "result", key: "k" + i, agentId: agents[i], result: tag ? { ...hb, tag } : hb })));
+    return lines.join("\n") + "\n";
+  }
+  function proj({ vendored = true, config } = {}) {
+    const dir = tmp();
+    const home = tmp();
+    mkdirSync(join(dir, ".doug/.state"), { recursive: true });
+    mkdirSync(join(dir, "plugins"), { recursive: true });
+    mkdirSync(join(dir, "packages"), { recursive: true });
+    writeFileSync(join(dir, ".doug/board.json"), JSON.stringify({ version: 1, columns: [{ id: "ready", title: "Ready" }, { id: "done", title: "Done" }], components: ["cli"], cards: [CARD] }));
+    if (vendored) {
+      mkdirSync(join(dir, ".doug/hooks/lib"), { recursive: true });
+      copyFileSync(secretRules, join(dir, ".doug/hooks/lib/secret-rules.mjs"));
+    }
+    if (config) writeFileSync(join(dir, ".doug/config.json"), JSON.stringify(config));
+    ap(dir, "start", "--cards", "h3", "--usd-cap", "10", "--wall-cap", "100");
+    const argsFile = join(dir, "h3-args.json");
+    writeFileSync(argsFile, JSON.stringify(QA()));
+    const env = { ...process.env, CLAUDE_PROJECT_DIR: dir, HOME: home, CLAUDE_CODE_SESSION_ID: "sidx" };
+    const r = spawnSync(process.execPath, [script, "launched", "h3", "--run", "wf_h3", "--kind", "hand", "--worktree", WT, "--args-file", argsFile, "--dir", dir], { encoding: "utf8", env });
+    expect(r.status).toBe(0);
+    const jdir = (run) => join(home, ".claude", "projects", slugOf(dir), "sidx", "subagents", "workflows", run);
+    mkdirSync(jdir("wf_h3"), { recursive: true });
+    writeFileSync(join(jdir("wf_h3"), "journal.jsonl"), journalFor(HBS, AG));
+    return { dir, home, env, jdir };
+  }
+  const rep = (p, value, run = "wf_h3") => {
+    const f = join(p.dir, "res.json");
+    writeFileSync(f, JSON.stringify(value));
+    return spawnSync(process.execPath, [script, "report", "--run", run, "--file", f, "--dir", p.dir], { encoding: "utf8", env: p.env });
+  };
+  const stopped = (extra = {}) => ({ card: { id: "h3" }, outcome: "stopped", reason: "hook-blocked", stoppedAt: "reviewer", detail: "protect-paths refused X", history: [], ...extra });
+  const histPath = (dir, run = "wf_h3") => join(dir, ".doug/.state/history/h3", run + ".jsonl");
+  const hist = (dir, run) => readFileSync(histPath(dir, run), "utf8").split("\n").filter((x) => x !== "").map((x) => JSON.parse(x));
+
+  it("M2: a stopped report writes a report line whose text parses to the report", () => {
+    const p = proj();
+    const r = rep(p, stopped());
+    expect(r.status).toBe(0);
+    const lines = hist(p.dir);
+    const reports = lines.filter((l) => l.kind === "report");
+    expect(reports).toHaveLength(1);
+    expect(reports[0].card).toBe("h3");
+    expect(reports[0].run).toBe("wf_h3");
+    expect(reports[0].source).toBe("card-report.json");
+    expect(reports[0].redacted).toBeNull();
+    const parsed = JSON.parse(reports[0].text);
+    expect(parsed.outcome).toBe("stopped");
+    expect(parsed.reason).toBe("hook-blocked");
+    expect(parsed.detail).toBe("protect-paths refused X");
+  });
+
+  it("M3: a done report writes the history file with its report line, and never opens the memory database", () => {
+    const p = proj();
+    const r = rep(p, { card: { id: "h3" }, outcome: "done", history: [] });
+    expect(r.status).toBe(0);
+    const reports = hist(p.dir).filter((l) => l.kind === "report");
+    expect(reports).toHaveLength(1);
+    expect(JSON.parse(reports[0].text).outcome).toBe("done");
+    expect(existsSync(join(p.dir, ".doug/.state/memory"))).toBe(false);
+  });
+
+  it("a queen-wrapped result is unwrapped before the report line is written", () => {
+    const p = proj();
+    rep(p, { summary: "s", agentCount: 3, result: { report: stopped() } });
+    const reports = hist(p.dir).filter((l) => l.kind === "report");
+    expect(reports).toHaveLength(1);
+    expect(JSON.parse(reports[0].text).outcome).toBe("stopped");
+  });
+
+  it("writes, in order, the report, the run's blocks and denials, then each seat's replayed brief and journal hand-back", () => {
+    const p = proj();
+    writeFileSync(
+      join(p.dir, ".doug/.state/blocks.jsonl"),
+      [
+        L({ hook: "subagent-stop", at: "T-mine", agent: "doug-flow:coder", class: "real", reason: `[doug] Subagent doug-flow:coder (${AG[1]}) cannot report done: red` }),
+        L({ hook: "subagent-stop", at: "T-other", agent: "doug-flow:coder", class: "real", reason: `[doug] Subagent doug-flow:coder (${OTHER}) cannot report done: red` }),
+        L({ hook: "stop-gate", at: "T-main", agent: null, class: "real", reason: "gate red" }),
+      ].join("\n") + "\n",
+    );
+    mkdirSync(join(p.dir, ".doug/.state/trace"), { recursive: true });
+    const mineDenial = { t: "2026-10-18T10:00:00.000Z", event: "PermissionDenied", session: "sidx", agent: AG[2], agentType: "doug-flow:tester", tool: "Bash", toolUseId: "tu1", detail: "rm -rf x", ok: false, reason: "denied" };
+    writeFileSync(
+      join(p.dir, ".doug/.state/trace/sidx.jsonl"),
+      [
+        L(mineDenial),
+        L({ t: "2026-10-18T10:00:01.000Z", event: "PreToolUse", session: "sidx", agent: AG[2], tool: "Bash", detail: "ls" }),
+        L({ t: "2026-10-18T10:00:02.000Z", event: "PermissionDenied", session: "sidx", agent: OTHER, tool: "Bash", detail: "other" }),
+        "{broken",
+      ].join("\n") + "\n",
+    );
+    expect(rep(p, stopped()).status).toBe(0);
+    const lines = hist(p.dir);
+    expect(lines.map((l) => l.kind)).toEqual(["report", "block", "denial", "brief", "hand-back", "brief", "hand-back", "brief", "hand-back"]);
+    // M7: only the run's own ledger line.
+    expect(JSON.parse(lines[1].text).at).toBe("T-mine");
+    expect(lines[1].source).toBe("blocks.jsonl");
+    expect(lines.filter((l) => l.kind === "block")).toHaveLength(1);
+    // M8: only the run's own PermissionDenied line.
+    expect(JSON.parse(lines[2].text)).toEqual(mineDenial);
+    expect(lines[2].source).toBe("trace");
+    expect(lines.filter((l) => l.kind === "denial")).toHaveLength(1);
+    // Seats: setup, lead, tester, each brief replayed from the contract, each hand-back from the journal.
+    const exp = expectedBriefs();
+    const seatLines = lines.slice(3);
+    HBS.forEach((hb, i) => {
+      const brief = seatLines[2 * i];
+      const back = seatLines[2 * i + 1];
+      expect(brief.seat).toBe(hb.seat);
+      expect(brief.round).toBe(1);
+      expect(brief.source).toBe("replay:card-loop.mjs");
+      expect(brief.text).toBe(exp[i]);
+      expect(back.seat).toBe(hb.seat);
+      expect(back.round).toBe(1);
+      expect(back.source).toBe("journal.jsonl");
+      expect(JSON.parse(back.text)).toEqual(hb);
+    });
+  });
+
+  it("with no blocks.jsonl, trace file or queen-args the run still gets its report and hand-backs, with no briefs", () => {
+    const p = proj();
+    rmSync(join(p.dir, ".doug/.state/reports/h3/queen-args.json"));
+    expect(rep(p, stopped()).status).toBe(0);
+    expect(hist(p.dir).map((l) => l.kind)).toEqual(["report", "hand-back", "hand-back", "hand-back"]);
+  });
+
+  it("M16: only the reported run's own journal is read, not every journal of the card", () => {
+    const p = proj();
+    const resumed = spawnSync(process.execPath, [script, "resumed", "h3", "--run", "wf_h3b", "--dir", p.dir], { encoding: "utf8", env: p.env });
+    expect(resumed.status).toBe(0);
+    mkdirSync(p.jdir("wf_h3b"), { recursive: true });
+    writeFileSync(join(p.jdir("wf_h3b"), "journal.jsonl"), journalFor(HBS.slice(0, 2), ["a5555555555555555", "a6666666666666666"], "FROM-H3B"));
+    writeFileSync(
+      join(p.dir, ".doug/.state/blocks.jsonl"),
+      L({ hook: "subagent-stop", at: "T-first-run", agent: "doug-flow:coder", class: "real", reason: `[doug] Subagent doug-flow:coder (${AG[0]}) cannot report done: red` }) + "\n",
+    );
+    expect(rep(p, stopped(), "wf_h3b").status).toBe(0);
+    expect(existsSync(histPath(p.dir, "wf_h3"))).toBe(false);
+    const lines = hist(p.dir, "wf_h3b");
+    const backs = lines.filter((l) => l.kind === "hand-back");
+    expect(backs).toHaveLength(2);
+    expect(backs.map((b) => JSON.parse(b.text).tag)).toEqual(["FROM-H3B", "FROM-H3B"]);
+    expect(lines.filter((l) => l.kind === "block")).toHaveLength(0);
+  });
+
+  it("history is append-only: reporting the same run again leaves the file byte-identical", () => {
+    const p = proj();
+    rep(p, stopped());
+    const before = readFileSync(histPath(p.dir));
+    expect(rep(p, stopped({ detail: "a different detail" })).status).toBe(0);
+    expect(readFileSync(histPath(p.dir)).equals(before)).toBe(true);
+  });
+
+  it("redaction: a secret in the report redacts that whole entry only, and the other entries stay", () => {
+    const p = proj();
+    expect(rep(p, stopped({ detail: "leaked " + GH })).status).toBe(0);
+    const lines = hist(p.dir);
+    const report = lines.find((l) => l.kind === "report");
+    expect(report.redacted).toBe("githubToken");
+    expect(report.text).toBe("[redacted: githubToken]");
+    expect(readFileSync(histPath(p.dir), "utf8")).not.toContain(GH);
+    expect(lines.filter((l) => l.kind === "hand-back").every((l) => l.redacted === null)).toBe(true);
+  });
+
+  it("M17: secrets.enabled false in .doug/config.json turns scanning off; the default scans", () => {
+    const off = proj({ config: { secrets: { enabled: false } } });
+    expect(rep(off, stopped({ detail: "leaked " + GH })).status).toBe(0);
+    const offReport = hist(off.dir).find((l) => l.kind === "report");
+    expect(offReport.redacted).toBeNull();
+    expect(JSON.parse(offReport.text).detail).toBe("leaked " + GH);
+    const on = proj();
+    expect(rep(on, stopped({ detail: "leaked " + GH })).status).toBe(0);
+    expect(hist(on.dir).find((l) => l.kind === "report").redacted).toBe("githubToken");
+  });
+
+  it("fails closed when the vendored scanner is missing: every entry is '[redacted: no-scanner]'", () => {
+    const p = proj({ vendored: false });
+    expect(rep(p, stopped()).status).toBe(0);
+    const lines = hist(p.dir);
+    expect(lines.length).toBeGreaterThanOrEqual(4);
+    expect(lines.every((l) => l.redacted === "no-scanner" && l.text === "[redacted: no-scanner]")).toBe(true);
+  });
+
+  it("M15: a history failure warns on stderr and leaves the verdict and exit status alone", () => {
+    const ok = proj();
+    const base = rep(ok, stopped());
+    const p = proj();
+    writeFileSync(join(p.dir, ".doug/.state/history"), "not a directory");
+    const r = rep(p, stopped());
+    expect(r.status).toBe(0);
+    expect(r.stdout).toBe(base.stdout);
+    expect(r.stdout.trim()).not.toBe("");
+    expect(r.stderr).toContain("cannot write the run history for h3");
+  });
+});
+
+// Card memory-run-coverage: `autopilot.mjs report` also covers a flow queen: a stopped flow report (ok false, not
+// paused) yields one stop row, and a landed or stopped flow report writes its run history with the hand path's
+// redaction and caps. A paused report writes neither.
+describe("card memory-run-coverage: report covers a flow queen", () => {
+  const memoryScript = join(here, "..", "scripts", "memory.mjs");
+  const secretRules = join(here, "..", "..", "doug-gates", "lib", "secret-rules.mjs");
+  const FLOW = { id: "f1", column: "ready", component: "gates", title: "F1", size: "M", class: "code", goal: "Flow goal for f1." };
+  const slugOf = (d) => d.replace(/[^A-Za-z0-9]/g, "-");
+  const A1 = "a1111111111111111";
+  const A2 = "a2222222222222222";
+  // Secret fixture built at runtime so the secret-scan hook does not refuse this file.
+  const GH = "gh" + "p_" + "A1b2C3d4".repeat(5);
+  function proj({ vendored = true } = {}) {
+    const dir = tmp();
+    const home = tmp();
+    mkdirSync(join(dir, ".doug/.state"), { recursive: true });
+    mkdirSync(join(dir, "plugins"), { recursive: true });
+    mkdirSync(join(dir, "packages"), { recursive: true });
+    writeFileSync(join(dir, ".doug/board.json"), JSON.stringify({ version: 1, columns: [{ id: "ready", title: "Ready" }, { id: "done", title: "Done" }], components: ["gates"], cards: [FLOW] }));
+    if (vendored) {
+      mkdirSync(join(dir, ".doug/hooks/lib"), { recursive: true });
+      copyFileSync(secretRules, join(dir, ".doug/hooks/lib/secret-rules.mjs"));
+    }
+    ap(dir, "start", "--cards", "f1", "--usd-cap", "10", "--wall-cap", "100");
+    const argsFile = join(dir, "f1-args.json");
+    writeFileSync(argsFile, JSON.stringify({ card: "f1", seed: "s" }));
+    const env = { ...process.env, CLAUDE_PROJECT_DIR: dir, HOME: home, CLAUDE_CODE_SESSION_ID: "sidx" };
+    const r = spawnSync(process.execPath, [script, "launched", "f1", "--run", "wf_f1", "--kind", "flow", "--worktree", join(dir, "wt-f1"), "--args-file", argsFile, "--dir", dir], { encoding: "utf8", env });
+    expect(r.status).toBe(0);
+    const jdir = join(home, ".claude", "projects", slugOf(dir), "sidx", "subagents", "workflows", "wf_f1");
+    mkdirSync(jdir, { recursive: true });
+    writeFileSync(join(jdir, "journal.jsonl"), JSON.stringify({ type: "started", key: "k", agentId: A1, label: "implement:t1" }) + "\n");
+    return { dir, home, env };
+  }
+  const rep = (p, value) => {
+    const f = join(p.dir, "res.json");
+    writeFileSync(f, JSON.stringify(value));
+    return spawnSync(process.execPath, [script, "report", "--run", "wf_f1", "--file", f, "--dir", p.dir], { encoding: "utf8", env: p.env });
+  };
+  const task = (id, extra = {}) => ({ id, implemented: true, verified: true, reviewed: true, reviewIssues: [], ...extra });
+  const stoppedFlow = (extra = {}) => ({
+    ok: false,
+    stoppedAtLevel: 1,
+    levels: [
+      { index: 0, tasks: [task("t0")] },
+      { index: 1, tasks: [task("t1", { verified: false, stopClass: "gate-red", stopReason: "typecheck failed twice" }), task("t2", { verified: false, stopClass: "other", stopReason: "later one" })] },
+    ],
+    ...extra,
+  });
+  const rows = (dir) => {
+    const m = openMemory(dir);
+    try {
+      return listOutcomes(m, { task: "f1" });
+    } finally {
+      m.close();
+    }
+  };
+  const histPath = (dir) => join(dir, ".doug/.state/history/f1/wf_f1.jsonl");
+  const hist = (dir) => readFileSync(histPath(dir), "utf8").split("\n").filter((x) => x !== "").map((x) => JSON.parse(x));
+
+  it("a stopped flow report yields one flow stop row with the first stopped task's stopClass and stopReason", () => {
+    const p = proj();
+    const r = rep(p, stoppedFlow());
+    expect(r.status).toBe(0);
+    expect(r.stdout).toMatch(/^autopilot: f1 ask/m);
+    const got = rows(p.dir);
+    expect(got).toHaveLength(1);
+    expect(got[0].track).toBe("flow");
+    expect(got[0].card).toBe("f1");
+    expect(got[0].task).toBe("f1");
+    expect(got[0].run).toMatch(/^stop:[0-9a-f]{12}$/);
+    expect(got[0].run_id).toBe("wf_f1");
+    expect(got[0].commit_sha).toBeNull();
+    expect(got[0].stop_class).toBe("gate-red");
+    expect(got[0].stop_reason).toBe("typecheck failed twice");
+    expect(got[0].report_path).toBe(join(p.dir, ".doug/.state/reports/f1/last-report.json"));
+  });
+
+  it("a stopped flow report's stop row carries the flow memory_config stamp", () => {
+    const p = proj();
+    expect(rep(p, stoppedFlow()).status).toBe(0);
+    const got = rows(p.dir);
+    expect(got).toHaveLength(1);
+    expect(got[0].memory_config).not.toBeNull();
+    const cfg = JSON.parse(got[0].memory_config);
+    expect(cfg.delivery).toBe("index+fetch");
+    expect(cfg.fetch).toBe("top-k");
+    expect(cfg.fetchTokens).toBe(4000);
+    expect(cfg.k).toBe(8);
+  });
+
+  it("a flow stop row and a later flow landing share one memory_config and arms shows one arm with 1 landing, 1 stop, unstamped 0", () => {
+    const p = proj();
+    rep(p, stoppedFlow());
+    const landed = join(p.dir, "landed.json");
+    writeFileSync(landed, JSON.stringify({ ok: true, levels: [{ index: 0, tasks: [task("t1")] }] }));
+    const env = { ...process.env, CLAUDE_PROJECT_DIR: p.dir };
+    const r = spawnSync(process.execPath, [memoryScript, "record", landed, p.dir, "--run", "wf_f1", "--card", "f1", "--commit", "sha77"], { encoding: "utf8", cwd: p.dir, env });
+    expect(r.status, r.stderr).toBe(0);
+    const m = openMemory(p.dir);
+    let all;
+    try {
+      all = listOutcomes(m, {});
+    } finally {
+      m.close();
+    }
+    const stop = all.find((g) => g.run.startsWith("stop:"));
+    const land = all.find((g) => g.commit_sha === "sha77");
+    expect(stop.memory_config).not.toBeNull();
+    expect(stop.memory_config).toBe(land.memory_config);
+    const a = spawnSync(process.execPath, [memoryScript, "arms", p.dir, "--json"], { encoding: "utf8", cwd: p.dir, env });
+    expect(a.status, a.stderr).toBe(0);
+    const arms = JSON.parse(a.stdout);
+    expect(arms.unstamped).toBe(0);
+    expect(arms.arms).toHaveLength(1);
+    expect(arms.arms[0].landings).toBe(1);
+    expect(arms.arms[0].stops).toBe(1);
+  });
+
+  it("reporting the same stopped flow result twice leaves exactly one stop row", () => {
+    const p = proj();
+    rep(p, stoppedFlow());
+    rep(p, stoppedFlow());
+    const got = rows(p.dir);
+    expect(got).toHaveLength(1);
+    expect(got[0].run.startsWith("stop:")).toBe(true);
+  });
+
+  it("a paused or landed flow report records no stop row", () => {
+    const p = proj();
+    expect(rep(p, { ok: false, paused: true, levels: [] }).status).toBe(0);
+    expect(existsSync(join(p.dir, ".doug/.state/memory"))).toBe(false);
+    expect(rep(p, { ok: true, levels: [] }).status).toBe(0);
+    expect(existsSync(join(p.dir, ".doug/.state/memory"))).toBe(false);
+  });
+
+  it("a later flow landing keeps the flow stop row", () => {
+    const p = proj();
+    rep(p, stoppedFlow());
+    const landed = join(p.dir, "landed.json");
+    writeFileSync(landed, JSON.stringify({ ok: true, levels: [{ index: 0, tasks: [task("t1")] }] }));
+    const r = spawnSync(process.execPath, [memoryScript, "record", landed, p.dir, "--run", "wf_f1", "--card", "f1", "--commit", "sha77"], { encoding: "utf8", cwd: p.dir, env: { ...process.env, CLAUDE_PROJECT_DIR: p.dir } });
+    expect(r.status, r.stderr).toBe(0);
+    const m = openMemory(p.dir);
+    let all;
+    try {
+      all = listOutcomes(m, {});
+    } finally {
+      m.close();
+    }
+    const stop = all.find((g) => g.run.startsWith("stop:"));
+    expect(stop).toBeTruthy();
+    expect(stop.stop_class).toBe("gate-red");
+    expect(stop.commit_sha).toBeNull();
+    expect(all.some((g) => g.commit_sha === "sha77")).toBe(true);
+  });
+
+  it("a flow stop with no stopped task names the level and the integration reason", () => {
+    const p = proj();
+    rep(p, { ok: false, stoppedAtLevel: 2, levels: [{ index: 0, tasks: [task("t0")] }, { index: 1, tasks: [task("t1")] }, { index: 2, tasks: [task("t2")], integration: { ok: false, reason: "merge conflict in a.mjs" } }] });
+    const got = rows(p.dir);
+    expect(got).toHaveLength(1);
+    expect(got[0].stop_class).toBeNull();
+    expect(got[0].stop_reason).toBe("the run stopped at level 2: merge conflict in a.mjs");
+  });
+
+  it("a flow stop row carries the blocks of the run's own agents only", () => {
+    const p = proj();
+    const mk = (o) => JSON.stringify(o);
+    writeFileSync(
+      join(p.dir, ".doug/.state/blocks.jsonl"),
+      [
+        mk({ hook: "subagent-stop", at: "T-mine", agent: "doug-flow:implementer", class: "real", reason: `[doug] Subagent doug-flow:implementer (${A1}) cannot report done: red` }),
+        mk({ hook: "subagent-stop", at: "T-other", agent: "doug-flow:implementer", class: "real", reason: `[doug] Subagent doug-flow:implementer (${A2}) cannot report done: red` }),
+        mk({ hook: "stop-gate", at: "T-main", agent: null, class: "real", reason: "gate red" }),
+      ].join("\n") + "\n",
+    );
+    expect(rep(p, stoppedFlow()).status).toBe(0);
+    const got = rows(p.dir);
+    expect(got).toHaveLength(1);
+    expect(got[0].blocks).toHaveLength(1);
+    expect(got[0].blocks[0].at).toBe("T-mine");
+  });
+
+  it("a stopped flow report writes its run history", () => {
+    const p = proj();
+    expect(rep(p, stoppedFlow()).status).toBe(0);
+    const reports = hist(p.dir).filter((l) => l.kind === "report");
+    expect(reports).toHaveLength(1);
+    expect(reports[0].card).toBe("f1");
+    expect(reports[0].run).toBe("wf_f1");
+    expect(reports[0].source).toBe("last-report.json");
+    expect(reports[0].redacted).toBeNull();
+    const parsed = JSON.parse(reports[0].text);
+    expect(parsed.ok).toBe(false);
+    expect(parsed.stoppedAtLevel).toBe(1);
+  });
+
+  it("a landed flow report writes its run history and never opens the memory database", () => {
+    const p = proj();
+    expect(rep(p, { ok: true, levels: [], marker: "FLOW-LAND" }).status).toBe(0);
+    const reports = hist(p.dir).filter((l) => l.kind === "report");
+    expect(reports).toHaveLength(1);
+    expect(JSON.parse(reports[0].text).marker).toBe("FLOW-LAND");
+    expect(existsSync(join(p.dir, ".doug/.state/memory"))).toBe(false);
+  });
+
+  it("flow history redacts a report carrying a secret", () => {
+    const p = proj();
+    expect(rep(p, stoppedFlow({ leak: GH })).status).toBe(0);
+    const reports = hist(p.dir).filter((l) => l.kind === "report");
+    expect(reports).toHaveLength(1);
+    expect(typeof reports[0].redacted).toBe("string");
+    expect(reports[0].redacted).not.toBe("no-scanner");
+    expect(reports[0].text).toBe(`[redacted: ${reports[0].redacted}]`);
+    expect(readFileSync(histPath(p.dir), "utf8")).not.toContain(GH);
+  });
+
+  it("flow history caps an oversized report entry", () => {
+    const p = proj();
+    expect(rep(p, { ok: true, levels: [], pad: "x".repeat(70000) }).status).toBe(0);
+    const reports = hist(p.dir).filter((l) => l.kind === "report");
+    expect(reports).toHaveLength(1);
+    expect(reports[0].truncated).toBe(true);
+    expect(reports[0].bytes).toBeGreaterThan(65536);
+    expect(Buffer.byteLength(reports[0].text)).toBeLessThanOrEqual(65536);
+    expect(reports[0].text.startsWith("{")).toBe(true);
+  });
+
+  it("a paused flow report writes no run history", () => {
+    const p = proj();
+    expect(rep(p, { ok: false, paused: true, levels: [] }).status).toBe(0);
+    expect(existsSync(histPath(p.dir))).toBe(false);
   });
 });

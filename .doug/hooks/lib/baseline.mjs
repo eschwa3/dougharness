@@ -258,6 +258,15 @@ export function writeAgentStart(dir, cfg, sessionId, agentId) {
   try {
     const fp = treeFingerprint(dir, cfg, changedFiles(dir));
     if (!fp) return;
+    // card worktree-skip-origin-at-start: origin/HEAD's sha at start (null when unset), for the worktree skip.
+    let originHead = null;
+    try {
+      const o = execFileSync("git", ["rev-parse", "--verify", "-q", "refs/remotes/origin/HEAD^{commit}"], { cwd: dir, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], timeout: 5000 }).trim();
+      if (/^[0-9a-f]{7,64}$/.test(o)) originHead = o;
+    } catch {
+      originHead = null;
+    }
+    fp.originHead = originHead;
     const file = agentStartFile(dir, sessionId, agentId);
     mkdirSync(join(file, ".."), { recursive: true });
     writeFileSync(file, JSON.stringify(fp));

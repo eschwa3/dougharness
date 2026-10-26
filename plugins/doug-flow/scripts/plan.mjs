@@ -179,18 +179,18 @@ function cachingProvider(provider) {
 async function attachLessons(plan, dir, provider) {
   if (!existsSync(join(dir, MEMORY_DB_RELPATH))) return plan;
   try {
-    const { openMemory, recallLessons, degradedWarning, degradedReason, renderLessons } = await import("../lib/memory.mjs");
+    const { openMemory, LIVE_LESSON_SQL, recallLessons, degradedWarning, degradedReason, renderFlowLessons } = await import("../lib/memory.mjs");
     const staleDays = readMemoryStaleDays(dir);
     const m = openMemory(dir);
     try {
       const detectedProvider = await detectOnce(provider);
       // An empty lesson store has nothing to degrade (a code-index-only database, say): no warning for it.
-      const hasLessons = m.prepare("SELECT 1 FROM lessons WHERE superseded_by IS NULL AND stale IS NULL LIMIT 1").get() !== undefined;
+      const hasLessons = m.prepare(`SELECT 1 FROM lessons WHERE ${LIVE_LESSON_SQL} LIMIT 1`).get() !== undefined;
       const tasks = [];
       for (const task of plan.tasks) {
         const taskRecall = await recallLessons(m, `${task.title}\n${task.spec}`, { files: task.files, k: 8, checkoutDir: dir, provider, staleDays, detectedProvider });
         if (hasLessons) warnOnce(degradedWarning(taskRecall, { what: "memory recall", detectedProvider }));
-        const taskLessons = renderLessons(taskRecall.lessons);
+        const taskLessons = renderFlowLessons(taskRecall.lessons);
         const lessonsText = taskLessons.text !== null && taskRecall.degraded ? `(recall was keyword-only: ${degradedReason(taskRecall, detectedProvider)})\n${taskLessons.text}` : taskLessons.text;
         tasks.push(taskLessons.text === null ? task : { ...task, lessons: lessonsText, lessonIds: taskLessons.ids });
       }

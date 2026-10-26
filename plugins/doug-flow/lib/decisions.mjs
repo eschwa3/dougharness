@@ -10,7 +10,7 @@
 // when a matching file is read. Source: https://code.claude.com/docs/en/memory.md#path-specific-rules
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
-import { unifiedDiff, writeProposals, countLines, insertBulletUnderHeading, removeExactLine } from "./learn.mjs";
+import { unifiedDiff, writeProposals, countLines, insertBulletUnderHeading, removeExactLine, renderRule } from "./learn.mjs";
 
 const DECISIONS_RELDIR = "docs/decisions";
 const RULES_RELDIR = ".claude/rules";
@@ -155,9 +155,7 @@ export function proposeRule({ dir, name, paths = [], body, now = new Date() } = 
   if (!validRuleName(name)) return { ok: false, reason: `"${name}" is not a valid rule name (expected [a-z0-9][a-z0-9-]*, optionally one /subdir level)` };
   if (!String(body || "").trim()) return { ok: false, reason: "body is required" };
   const relPath = `${RULES_RELDIR}/${name}.md`;
-  const trimmedBody = String(body).replace(/\s+$/, "");
-  const list = Array.isArray(paths) ? paths.filter((p) => String(p || "").trim()) : [];
-  const content = list.length ? `---\npaths:\n${list.map((p) => `  - "${p}"`).join("\n")}\n---\n\n${trimmedBody}\n` : `${trimmedBody}\n`;
+  const content = renderRule(paths, body);
   const exists = existsSync(join(dir, relPath));
   const built = buildProposal(dir, relPath, content, { kind: "rule", id: "01", reason: `${exists ? "update" : "new"} rule ${relPath}` });
   if (!built.ok) return built;

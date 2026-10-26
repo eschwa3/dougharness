@@ -19,7 +19,8 @@ The Walking skeleton writes no phase file; it is done when the `walking-skeleton
 
 - Only a committed phase file counts as done: a phase file that exists but is uncommitted means that phase is still waiting at its gate, so the next run re-asks that gate, showing the file, and does not move on.
 - A phase file is written by the lead (this session). The spec-writer and researcher agents return text and write nothing.
-- Before writing a phase, check whether its file exists. If it does, write the new text to `.doug/.state/scratch/<name>.new`, show `git diff --no-index` of the two, and ask (AskUserQuestion: replace / keep / revise). Never overwrite a phase file without that answer.
+- Before writing a phase, check whether its file exists. If it does, write the new text to `.doug/.state/scratch/<name>.new`, show `git diff --no-index` of the two in the chat, in a fenced code block, before the AskUserQuestion, and ask (AskUserQuestion: replace / keep / revise). Never overwrite a phase file without that answer.
+- Show the file first: before every gate that asks about a phase file, put the file's complete text in the chat, verbatim, in a fenced code block, before the AskUserQuestion. Never replace it with a summary or a path, and never truncate it (a very long file may go over more than one message). After the block the lead may add a few lines (assumptions, open questions); the questions themselves go in the AskUserQuestion.
 - The gate after each phase asks AskUserQuestion with the options approve / revise / stop. Approve: commit the phase file (a plain message, no trailers) and go to the next phase. Revise: take the user's note, redraft, show the diff, ask again. Stop: leave the file uncommitted and end; a later `/doug-start` resumes at the first missing phase file.
 - At every gate the lead calls AskUserQuestion, even when the session looks non-interactive; a denied or unanswered call ends the phase there, and the lead does nothing past it (it names the phase that is waiting).
 
@@ -31,7 +32,7 @@ Start here: if `.doug/config.json` is missing, run `doug init --yes` first. It w
 
 Writes `docs/product/idea.md` (problem, users, success, non-goals). Spawn the spec-writer with the user's idea and ask it for those four sections:
 `Agent({ subagent_type: "doug-flow:spec-writer", prompt: "<the user's idea verbatim>. Draft docs/product/idea.md with sections: problem, users, success, non-goals. Return the file text." })`
-Write the file, then ask at the AskUserQuestion gate (approve / revise / stop).
+Write the file, show the file first (Phase rules), then ask at the AskUserQuestion gate (approve / revise / stop).
 
 ### 2. Architecture
 
@@ -39,7 +40,7 @@ Writes `docs/product/architecture.md` plus the ADR `docs/decisions/0001-stack.md
 `Agent({ subagent_type: "doug-flow:researcher", prompt: "<one stack question>. Cite each fact with its source." })`
 Then spawn the architect on the `plan` row's model (`node "${CLAUDE_PLUGIN_ROOT}/scripts/plan.mjs" models`; omit `model` when it says `inherit`):
 `Agent({ subagent_type: "architect", model: "<the plan row's model>", prompt: "<the approved idea and the research>. Return the text of docs/product/architecture.md and, separately, the body of the stack ADR without its title line." })`
-Write `docs/product/architecture.md` from its returned text. `docs/decisions/` is proposal-only, so the lead never Writes it directly. Save the ADR body under `.doug/.state/scratch/` and run `node "${CLAUDE_PLUGIN_ROOT}/scripts/memory.mjs" decision propose --title "Stack" --file <body>`, which renders the diff for `docs/decisions/0001-stack.md` under `.doug/.state/learn/` and writes nothing else. Then ask at the AskUserQuestion gate (approve / revise / stop). On approve, run `node "${CLAUDE_PLUGIN_ROOT}/scripts/learn.mjs" apply <proposal-file>`, which writes the ADR, and commit. Unapproved, the proposal stays pending and the ADR does not exist.
+Write `docs/product/architecture.md` from its returned text. `docs/decisions/` is proposal-only, so the lead never Writes it directly. Save the ADR body under `.doug/.state/scratch/` and run `node "${CLAUDE_PLUGIN_ROOT}/scripts/memory.mjs" decision propose --title "Stack" --file <body>`, which renders the diff for `docs/decisions/0001-stack.md` under `.doug/.state/learn/` and writes nothing else. Show the file first (Phase rules) for `architecture.md` and for the proposal's ADR diff, then ask at the AskUserQuestion gate (approve / revise / stop). On approve, run `node "${CLAUDE_PLUGIN_ROOT}/scripts/learn.mjs" apply <proposal-file>`, which writes the ADR, and commit. Unapproved, the proposal stays pending and the ADR does not exist.
 
 ### 3. Walking skeleton
 
@@ -49,7 +50,7 @@ Writes the first card with `doug board add` (id `walking-skeleton`, size S, clas
 
 Writes `docs/product/scope.md` (v1 in one paragraph, then one line per card) and the board cards. Spawn the spec-writer with the approved idea and architecture; it returns the text of `scope.md` and the card list as one line per card (id, title, goal, size, class, column):
 `Agent({ subagent_type: "doug-flow:spec-writer", prompt: "<idea and architecture paths>. Draft docs/product/scope.md and its card list: id, title, goal, size, class, column. Return the file text." })`
-The lead never drafts the scope; it writes the returned `scope.md` and runs `doug board add` only for each card the user approved. A card counts as approved at the gate, or in advance in the conversation. Cards are written with `doug board add`, never by a script editing `.doug/board.json`. Put at most 7 to Ready for v1 and the rest to Backlog, each with a size; a large card then goes through feature mode (`/doug-start <card-id>`). Show the board (`doug board list`) and ask at the AskUserQuestion gate (approve / revise / stop).
+The lead never drafts the scope; it writes the returned `scope.md` and runs `doug board add` only for each card the user approved. A card counts as approved at the gate, or in advance in the conversation. Cards are written with `doug board add`, never by a script editing `.doug/board.json`. Put at most 7 to Ready for v1 and the rest to Backlog, each with a size; a large card then goes through feature mode (`/doug-start <card-id>`). Show the file first (Phase rules) for `scope.md`, show the board (`doug board list`) and ask at the AskUserQuestion gate (approve / revise / stop).
 
 ## Feature mode
 
@@ -59,21 +60,21 @@ Files live under `docs/specs/<card-id>/`. A goal with no card id gets a short ke
 
 Writes `spec.md`: what must be true when the work is done, as outcomes a command can check, plus non-goals and open questions.
 `Agent({ subagent_type: "doug-flow:spec-writer", prompt: "<card goal or the user's goal verbatim>. Draft docs/specs/<card-id>/spec.md: outcomes, non-goals, open questions. Return the file text." })`
-Write the file, then ask at the AskUserQuestion gate (approve / revise / stop).
+Write the file, show the file first (Phase rules), then ask at the AskUserQuestion gate (approve / revise / stop).
 
 ### 2. Pseudocode (optional)
 
-Writes `pseudocode.md`, only when the user asks for it at this gate (AskUserQuestion: write it / skip). Skip leaves no file and goes to Architecture; a missing `pseudocode.md` counts as skipped once `architecture.md` exists, or when the user said they skipped it; resuming with only `spec.md` asks write / skip once. When written, spawn the spec-writer again for the algorithm in plain steps, and gate it as above.
+Writes `pseudocode.md`, only when the user asks for it at this gate (AskUserQuestion: write it / skip). Skip leaves no file and goes to Architecture; a missing `pseudocode.md` counts as skipped once `architecture.md` exists, or when the user said they skipped it; resuming with only `spec.md` asks write / skip once. When written, spawn the spec-writer again for the algorithm in plain steps, and gate it as above: show the file first (Phase rules).
 
 ### 3. Architecture
 
-Writes `architecture.md` in the shape of the architect agent: modules, files, interfaces, the test for each. Every file it names will be owned by a plan task, so name each exactly. Spawn the project's `architect` agent on the `plan` row's model with `spec.md` (and `pseudocode.md` if present) and the code it touches: `Agent({ subagent_type: "architect", model: "<the plan row's model>", prompt: "<the spec path>. Return the text of docs/specs/<card-id>/architecture.md." })`. The lead writes its returned text to the file and never drafts it. Then ask at the AskUserQuestion gate (approve / revise / stop).
+Writes `architecture.md` in the shape of the architect agent: modules, files, interfaces, the test for each. Every file it names will be owned by a plan task, so name each exactly. Spawn the project's `architect` agent on the `plan` row's model with `spec.md` (and `pseudocode.md` if present) and the code it touches: `Agent({ subagent_type: "architect", model: "<the plan row's model>", prompt: "<the spec path>. Return the text of docs/specs/<card-id>/architecture.md." })`. The lead writes its returned text to the file and never drafts it. Show the file first (Phase rules), then ask at the AskUserQuestion gate (approve / revise / stop).
 
 ### 4. Refinement
 
 The planner writes an approvable plan whose tasks own the files `architecture.md` names. Read the `plan` row with `node "${CLAUDE_PLUGIN_ROOT}/scripts/plan.mjs" models` and pass its model (omit `model` when it says `inherit`):
 `Agent({ subagent_type: "doug-flow:planner", model: "<the plan row's model>", prompt: "<card goal>. Spec: docs/specs/<card-id>/spec.md. Architecture: docs/specs/<card-id>/architecture.md. Scripts: ${CLAUDE_PLUGIN_ROOT}/scripts. Write .doug/plan.json as a draft and return the rendered plan." })`
-Set the card when the argument was a board card id (`node "${CLAUDE_PLUGIN_ROOT}/scripts/plan.mjs" set card <card-id>`), render it (`node "${CLAUDE_PLUGIN_ROOT}/scripts/plan.mjs" show`) and ask at the AskUserQuestion gate (approve / revise / stop). The plan is approved with `/doug-approve`, by the user; this skill never approves it.
+Set the card when the argument was a board card id (`node "${CLAUDE_PLUGIN_ROOT}/scripts/plan.mjs" set card <card-id>`), render it (`node "${CLAUDE_PLUGIN_ROOT}/scripts/plan.mjs" show`), show the file first (Phase rules), meaning the plan's complete `show` output in the chat, and ask at the AskUserQuestion gate (approve / revise / stop). The plan is approved with `/doug-approve`, by the user; this skill never approves it.
 
 ### 5. Completion
 

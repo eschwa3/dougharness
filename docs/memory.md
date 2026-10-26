@@ -90,6 +90,14 @@ path — only `condition backfill` ever sets it to `1`). Without a `condition.js
 `No condition.json for <card-id>: this landing is unstamped (memory.mjs condition open <card-id> writes
 one before the brief).` `--json` carries `"stamped": true|false` on the result object instead of that line.
 
+**`record <card-id> --hand --stop <reason> [dir] [--detail <text>] [--json]`** records a stopped by-hand run as
+exactly one stop row (`run` `stop:<12 hex>`, `commit_sha` null, `stop_class` the reason, `stop_reason` the
+detail or the reason). Condition columns and `memory_config` come from `condition.json` as for a landing;
+without one it still records and prints an unstamped line (`--json`: `"stamped": false`). The identity hashes
+only the card, reason, detail and the condition's `openedAt`, so recording the same stop again updates the
+same row. `--stop` with no value or together with `--commit` exits 2. A flow stop row carries the flow
+track's `memory_config` stamp, like a flow landing.
+
 ## `memory.mjs recall`
 
 ```
@@ -108,6 +116,24 @@ header line — `recall: hybrid via <provider> <model>/<dims>` or `recall: keywo
 one line per lesson (`id  score  kind  text`); `--json` returns the full `{ mode, reason, provider, checked,
 lessons }` shape. Returned lessons never carry the embedding blob or its model/dims columns (multi-KB per
 lesson) — only `hasVector: boolean`, whether one is stored.
+
+**Feedback in the score (card memory-feedback-rank, ADR 0019).** Two terms multiply the score on every path
+(keyword-only, hybrid dense, and the unvectored BM25 tail, which stays in BM25 order and is reordered only by this
+factor): `harmful` (the lead's explicit `--harmful` mark) divides it by `1 + harmfulPenalty x harmful` (shipped
+`harmfulPenalty` 0.01, the largest bench value with no loss; harmful 0 leaves the score exactly as before), and the
+lesson's evidence class, taken from its citation (`report:` is `report`, `history:` is `history`, any other
+citation is `file`, none is `none`), multiplies it by that class's weight (shipped 1 for all four, because the
+bench showed no gain). The factor is applied to the score's magnitude, so a negative cosine is lowered too, never
+raised. `helpful` does not enter the shipped score: it rises on every verified use and would feed itself; a capped
+or decayed helpful term exists behind the `feedback` option of `recallLessons` (`helpfulCap`, `helpfulDecay`) and
+ships off. The defaults are `RECALL_FEEDBACK` in `lib/memory.mjs`; `node evals/bench-memory.mjs feedback` measures
+the arms (docs/memory-benchmark.md section 12).
+
+**Archive.** A lesson with `harmful >= 2` and `harmful >= helpful` (`ARCHIVE_HARMFUL_MIN`, `meetsArchiveRule`) is
+archived by `memory.mjs reflect --harmful` in the same transaction as the counters (not on a dry run): `archived`
+(schema v12) gets the time and `archived_reason` names the counts. An archived lesson is hidden from recall, the
+window note, `topLessons` and the vector cache, but the row stays with its text and counters and `lesson show`
+still reads it; nothing is deleted. `memory.mjs lesson unarchive <id>` restores one (clears `archived` and `archived_reason`; refuses an unknown or non-archived id).
 
 **Citation re-check.** Each returned lesson's citation (a `path:line` or `path:line "quoted text"` form) is
 re-checked against `[dir]`, but only when `[dir]` is a real project root — it exists and contains a `.doug`
@@ -144,16 +170,17 @@ Runs after `record` in `run-report` (card `memory-reflect`): report/dir/adversar
 (card `memory-every-session`) reflects on a hand landing, which has no workflow report. It assembles one at
 `.doug/.state/reports/<card-id>/hand-report.json` (canonical, no timestamp, so a second run hashes the same and
 is a no-op) from the briefs and reviewer reports `doug-hand` saved there and `lessons.json`: one task with
-`memoryUsed` = the lessons.json ids, `verified: true` (a green gate), `passes` = `--rounds` (default 1), and one
+`memoryUsed` = the lessons.json ids the lead fetched (`lesson show --card`, recorded in fetched.jsonl), `verified: true` (a green gate), `passes` = `--rounds` (default 1), and one
 fixed blocker ledger entry per `--review` id, so a pitfall needs a `--review` classed `real` and a pattern needs
 one round. The prompt gains a hand section: each file cut at 4000 chars (`…[truncated]`), 16000 in total, the
 note last. Everything else is the flow pass; `--commit` is required (exit 2); there is no schema change and
 nothing is stored on the outcome row.
 
 **Counters (deterministic, no LLM, always runs first).** For each task in the report with a non-empty
-`memoryUsed`: a block classed `real` on that task bumps `harmful + 1` on every used lesson that exists (real wins
-even when the task also verified); otherwise a task that `verified === true` bumps `helpful + 1` on every used
-lesson that exists; a task that is neither real nor verified touches nothing. An id in `memoryUsed` that names no
+`memoryUsed`: only an id in `harmfulIds` (the lead's judgement that the lesson misled the work) gets `harmful + 1`; a
+`real` block alone bumps nothing, and earns no `helpful` (real wins even when the task also verified, except on
+the hand track, whose reviewer blocks never withhold it); otherwise a first-verified task bumps `helpful + 1` on
+every used lesson not named harmful; a task that is neither real nor verified touches nothing. An id in `memoryUsed` that names no
 lesson is reported in the result's `counters.unknown`, never an error. (The report also carries `indexUsed`, the
 code-index chunk ids an implementer saw — see "In the flow" above; these counters read only `memoryUsed`.) These
 counters, and a `reflections` row
@@ -166,7 +193,7 @@ never double-bumps and a failed LLM pass never loses the counters.
 files (from the plan), verified/passes/stopReason/partial, review and verifier findings, its adversary blocks with
 class and reason, and `memoryUsed`; and the id and text of the most recently created/confirmed `REFLECT_PROMPT_LESSON_CAP`
 (200) existing lessons, so the model does not re-propose one, with the prompt saying so when the store holds more
-than that — and proposes at most 3 lessons as `{ kind, text, citation, task, scope?, notDerivableBecause }`. The
+than that — and proposes at most 3 lessons as `{ kind, text, citation, task, scope?, notDerivableBecause, repeats?, supersedes? }`. The
 cap only bounds what the model sees; the near-duplicate filter below still checks a proposal against the full,
 uncapped set of existing lessons, never just the capped prompt list.
 
@@ -190,17 +217,24 @@ must propose no lesson that blames the task's code or its tests for that.
    from the memory-outcomes card is history, not the current contract.
 3. `notDerivableBecause` must be non-empty, and the lesson text (whitespace-normalised, case-folded) must not
    already sit verbatim in the cited file or in `CLAUDE.md` — a fact already in the checkout is not a lesson.
-4. **Near-duplicate.** Jaccard similarity over lower-cased word tokens (length >= 3) at or above
-   `REFLECT_DUPLICATE_JACCARD` (0.6) against every non-superseded existing lesson and every lesson already
-   appended earlier in the same pass bumps the matched lesson's `helpful + 1` (recorded in `bumped`) instead of
-   appending. An `addLesson` id collision (same kind+citation+text hash) is checked against the store directly,
-   superseded rows included: a collision with a *live* lesson bumps it the same way; a collision with a
-   *superseded* lesson is rejected with a reason — there is nothing live to bump, and appending would throw (the
-   id is already taken) — so a stale duplicate never gets stuck holding the reflections row at `proposed: null`
-   forever, unretryable.
+4. **Near-duplicate, and the repeats/supersedes judgement.** A proposal may carry an optional `repeats` or
+   `supersedes` field (never both: that is a rejection naming both) holding the id of one existing lesson the
+   prompt listed. Code accepts the id only when that lesson is live, was listed in the prompt, and was not
+   superseded earlier in the pass; any other id is ignored with a note (`notes` in the result, a `  note:` line
+   in the CLI) and the proposal goes on as if the field were absent. A valid `repeats` appends nothing and bumps
+   the named lesson's `seen` (schema v11), never `helpful`; it is listed in `bumped`. A valid `supersedes`
+   skips the word-overlap check, appends the new lesson through the other filters and the 3-append cap, then
+   retires the old one with `supersedeLesson` (listed in `superseded` as `{ old, new }`; the old row stays,
+   lessons are add-only). With neither field, Jaccard similarity over lower-cased word tokens (length >= 3) at
+   or above `REFLECT_DUPLICATE_JACCARD` (0.6) against every non-superseded existing lesson and every lesson
+   appended earlier in the pass is rejected as a near-duplicate naming the match: the similarity score never
+   merges and bumps nothing. An `addLesson` id collision (same kind+citation+text hash) is an identical hash,
+   not a similarity score, and is checked against the store directly, superseded rows included: a collision with
+   a *live* lesson is a repeat that bumps its `seen`; a collision with a *superseded* lesson is rejected with a
+   reason, since there is nothing live to bump and appending would throw (the id is already taken).
 
 At most 3 lessons are appended per reflection. The cap limits appends, not evaluation: a proposal past the cap
-that turns out to be a near-duplicate still bumps the lesson it matches; only a proposal that would otherwise be
+that turns out to be a repeat still bumps the seen count of the lesson it names; only a proposal that would otherwise be
 a genuine new append past the cap is rejected, naming the limit. A surviving lesson is appended with `addLesson`
 (`source: { agent: "reflect", model }`, `task`, `card`/`commit` from the flag or else the task's own, `scope`
 from the proposal), then best-effort embedded the same way `lesson add` embeds a row it just wrote.
@@ -210,7 +244,7 @@ from the proposal), then best-effort embedded the same way `lesson add` embeds a
 `bumped`, `rejected` (JSON `{ text, reason }[]`), `usd`, `usd_source`, `session_id`. A second `reflect` on a
 report with the same sha256 does nothing and prints that it was already reflected on `<recorded>`, exit 0;
 `--json` returns the stored row. Lessons stay add-only throughout: nothing here ever `UPDATE`s or `DELETE`s a
-lesson's text/kind/citation — only `helpful`/`harmful` and the `reflections` table change.
+lesson's text/kind/citation — only `helpful`/`harmful`/`seen`, a superseded lesson's `superseded_by`, and the `reflections` table change.
 
 **Cost**, measured the same way as `record`'s: the real per-message transcript at
 `<claudeDir>/projects/<projectSlug(dir)>/<session_id>.jsonl` when it exists and prices (`usd_source: "transcript"`),
@@ -225,8 +259,24 @@ decimals would round to a misleading `$0.00` — and prints `cost not measured` 
 tolerates a stray notice or warning line printed on stdout before or after the JSON envelope — the CLI parses the
 last balanced top-level `{...}` object on stdout, not the whole buffer with a single `JSON.parse`.
 
-**`--dry-run`** applies nothing at all — no counters, no `reflections` row, no lessons appended — but still runs
-the LLM pass and prints what would happen, cost included.
+**`--dry-run`** applies nothing at all — no counters, no `reflections` row, no lessons appended — and makes no
+model call (cost $0.0000); it prints the counters it would credit and the prompt it would send.
+
+**`reflect --failures <card-id> [dir] [--session <id>] [--claude-bin <path>] [--model <name>] [--max-usd <n>] [--dry-run] [--json]`**
+(card `memory-failure-lessons`) reflects on the failure slice of a card's run history
+(`.doug/.state/history/<card>/*.jsonl`) instead of a report: stopped card or flow reports, `block` entries classed
+`real`, and `denial` entries. Other block classes (race, load-timeout, expected-red, stood-down, test-count) are
+counted by class in `hidden`, and report/block entries that do not parse in `unreadable`; the command prints both.
+The pass proposes `pitfall` lessons only, each citing the `history:<card>/<run>:<line>` ref of a slice item; any other
+citation is rejected. A proposal may name a live pitfall in `repeats`: no lesson is added and `helpful` is not
+changed; an occurrence is recorded for that lesson instead. No Jaccard check runs in this pass. At most 3 lessons are
+appended per pass. The pass is idempotent per slice (a `reflections` row keyed `failures:<sha256 of the item refs>`);
+an empty slice never calls the model. `--dry-run` writes nothing, makes no model call and prints the prompt it would send. It is exclusive with `--hand` and a report path
+(exit 2), and is not wired into autopilot, run-report or doug-hand: the pass's spend cap is an open decision.
+
+**Occurrence ledger.** `.doug/.state/memory/pitfalls.jsonl` is append-only, one line `{ lesson, citation, card, run,
+session, at }` per occurrence, de-duplicated on lesson plus citation. `learn.mjs` counts a pitfall's distinct cards
+and sessions from it (see docs/learn.md).
 
 ## Session recall
 
@@ -245,11 +295,55 @@ A doug-flow plugin hook (`plugins/doug-flow/hooks/hooks.json`, `scripts/session-
 memory.mjs brief-lessons <card-id> [dir] [--k <n>] [--json]
 ```
 
-Recall for a hand-track card's briefs (card memory-every-session; doug-hand step 3 pastes its output into every tester, coder, and reviewer brief). The query is the card's title and goal, `k` is 8 unless `--k` says otherwise, and the recall is the one `plan.mjs json` runs per task. Stdout is the workflow's lessons header verbatim, an optional `(recall was keyword-only: <reason>)` note when the recall degraded, the `- [<id>] ...` lines (capped at 2000 characters by the same `renderLessons`), then `memoryUsed: <id>, <id>`. `.doug/.state/reports/<card-id>/lessons.json` records `{ card, query, mode, reason, ids, text, recalledAt }`, with `ids` exactly the rendered lines' ids.
+Recall for a hand-track card's briefs (card memory-every-session; doug-hand step 3 pastes its output into every tester, coder, and reviewer brief). The query is the card's title and goal, `k` is 8 unless `--k` says otherwise, and the recall is the one `plan.mjs json` runs per task. Stdout is the workflow's lessons header verbatim, an optional `(recall was keyword-only: <reason>)` note when the recall degraded, the index lines, an `index: omitted <n> lessons over the 2000-character index budget: <id>, <id>` line only when the budget dropped any, the window line, then `memoryUsed: <id>, <id>`. Each index line is `- [<id>] <title> (<kind>, ~<n> tokens)`: the first non-blank line of the lesson, cut at 100 characters, and the cost of the lesson's full text (characters / 4, rounded up). The lead fetches the full text of the lessons a card needs with `lesson show` and pastes it below the block; the 400-character cut no longer applies to the hand track's briefs. `.doug/.state/reports/<card-id>/lessons.json` records `{ card, query, mode, reason, ids, omitted, text, recalledAt }`, with `ids` exactly the index lines' ids and `omitted` the ids the budget dropped (`[]` when none).
 
 - No memory database: `No lessons recalled for <id>.`, `ids: []`, exit 0, and the database is not created.
 - A database or provider error: one stderr line `[doug] memory recall skipped: <message>`, `ids: []` plus an `error` field, exit 0.
 - An unknown card exits 1 with `no card <id>`.
+
+## `memory.mjs lesson show` / `history show`
+
+```
+memory.mjs lesson show <id> [dir] [--card <card-id>] [--json]
+memory.mjs history show <card>[/<run>[:<line>]] [dir] [--json]
+```
+
+`lesson show` prints `lesson <id> (<kind>, ~<n> tokens)`, `citation: <citation>` (or `citation: none`), `superseded by <id>` and `stale since <stamp>` when set, a blank line, then the full text, never cut. `--json` prints the row without the embedding blob (`hasVector` instead) plus `tokens`. Read-only unless `--card <card-id>` is given (a plain id, `[A-Za-z0-9][A-Za-z0-9._-]*`; anything else exits 2 and writes nothing): then, after the lesson is found and printed, it appends `{"id","at"}` as one line to `.doug/.state/reports/<card-id>/fetched.jsonl`, which `reflect --hand` reads to credit only fetched lessons. No memory database or an unknown id: one stderr line `no lesson <id>...`, exit 1, nothing created. A missing id exits 2.
+
+`history show` reads the run history (`.doug/.state/history/<card>/<run>.jsonl`) by id; an optional `history:` prefix and a trailing `.jsonl` on the run are accepted. A card lists its runs with entry counts and cost; `<card>/<run>` lists the entries with line, kind, seat, round, source and cost, marks truncated and redacted entries, and ends with the cap line when entries were dropped; `<card>/<run>:<line>` prints that entry's text whole after a header with its cost. `--json` prints the same object. Needs no memory database. A malformed id (including `..`) exits 2; a missing card, run or line exits 1 with one stderr line.
+
+## memory.mjs ideas
+
+```
+memory.mjs ideas [dir] [--claude-bin <path>] [--model <name>] [--max-usd <n>] [--cap <n>] [--dry-run] [--json]
+```
+
+The on-demand idea pass (card memory-idea-proposals, ADR 0019 L3), run by the user or the lead, never by a code trigger. One `claude -p --json-schema` call on the `cheap` tier (override with `--model`; `--max-usd` default 0.5) reads the live lessons, the run-history refs, the pitfall occurrences and the Backlog and Ready cards, and proposes idea cards and priority reviews. The prompt carries the follow-up threshold: realistic drift or a class-closing card only.
+
+Ideas go to Backlog only: each filed card has column `backlog`, track `hand`, no deps, `source` `memory-proposed: <citations>`, and a goal that opens `Memory-proposed (memory.mjs ideas, <date>)` and ends with its evidence. New cards are appended after every existing card; no existing card is changed or reordered, and nothing is promoted to Ready. At most `--cap` cards are filed per pass (an integer of at least 1, default 3, else exit 2); the rest are skipped as `over cap`. A duplicate id, an id that is not kebab-case, or an invalid card is skipped with the error and does not count against the cap.
+
+Citations are checked in code like `model regen`: a lesson id must be live, a history ref must name an existing run (and line); an idea or review with no citation or any unresolved one is dropped.
+
+Priority reviews are proposals for the user to accept or ignore. A review is kept only when every card it names is in Backlog (at most `--cap` kept), and is appended as `{at, text, cards, citations}` to `.doug/.state/memory/priority-reviews.jsonl`. A review with the same cards (in any order) and the same text as one already in the file, or earlier in the same pass, is dropped as `already recorded`. A review never changes the board.
+
+No memory store or no board exits 1 with no model call. A failed call exits 1 and writes nothing. `--dry-run` makes no model call, writes neither the board nor the reviews file, and prints the prompt it would send and the files it would write; `--json --dry-run` prints `{ dryRun, prompt, wouldWrite, usd: 0, usdSource }`. Otherwise `--json` prints `{ filed, skipped, reviews, droppedReviews, unresolved, usd, usdSource, dryRun }`.
+
+## memory.mjs model regen / model show
+
+```
+memory.mjs model regen [dir] [--claude-bin <path>] [--model <name>] [--max-usd <n>] [--dry-run] [--json]
+memory.mjs model show [dir]
+```
+
+The on-demand cited project model (card memory-project-model, ADR 0019 L2). `model regen` makes one `claude -p --json-schema` call, the way `reflect` does, on the CLAUDE.md Models table's `cheap` tier (override with `--model`), with `--max-usd` (default 0.5, a positive number, else exit 2) as the budget cap. The prompt lists every live (not superseded) lesson, each text cut at 500 characters, and every run-history ref under `.doug/.state/history`, and asks for statements in three sections (failure patterns, conventions learned from runs, open risks), each citing lesson ids or run refs, none restating CLAUDE.md, the ADRs or board cards. The result is `.doug/project-model.md`, at most 2000 characters with its header, overwritten on each regen and meant to be committed.
+
+Citations are checked in code, never guessed. One resolves when it is the id of a live lesson, or a run-history ref with a run (`<card>/<run>` or `<card>/<run>:<line>`, optional `history:` prefix) whose file and line exist; a bare `<card>` does not count. A statement with any unresolved citation is dropped whole and counted as unresolved. Over the 2000-character cap the most cited statements stay (ties keep the model's order), the render keeps the model's order, and every statement left out is counted as over cap.
+
+Regen prints `Wrote .doug/project-model.md: <n> statements, <chars> characters (cap 2000); dropped <u> unresolved, <c> over cap; <cost>`. `--dry-run` makes no model call, writes nothing, prints the prompt it would send, then a `Would write` line; `--json --dry-run` prints `{ path, dryRun, prompt, usd: 0, usdSource }`. `--json` prints `{ path, statements, chars, cap, unresolved, overCap, dropped, usd, usdSource, dryRun }`. No memory store exits 1 with one stderr line and no model call. A failed call exits 1, and zero surviving statements exits 1 saying nothing was written with the drop counts; neither touches an existing file.
+
+`model show` prints `.doug/project-model.md` verbatim and creates nothing; a missing file is one stderr line and exit 1. `model` with no or an unknown subcommand prints usage and exits 2.
+
+The bench arm `node evals/bench-memory.mjs project-model --model-file .doug/project-model.md` measures what the file adds over index+fetch (docs/memory-benchmark.md section 13).
 
 ## `memory.mjs doctor`
 
@@ -470,6 +564,7 @@ memory.mjs lesson add --text <text> --kind <feedback|project|pitfall|pattern> [d
                  [--scope <glob,glob>] [--citation <text>] [--card <id>]
                  [--commit <sha>] [--source-agent <name>] [--source-model <name>] [--json]
 memory.mjs lesson unstale <id> [dir] [--json]
+memory.mjs lesson unarchive <id> [dir] [--json]
 ```
 
 `lesson add` (and `import`, the auto-memory roundtrip) embeds only the row(s) it just wrote, best-effort, when a
@@ -481,6 +576,8 @@ line says so, pointing at `memory.mjs reembed` (see [Embedding sanity check](#em
 best-effort add/import must never be the thing that quietly puts a new, unchecked model/dims pair into use.
 `lesson unstale <id>` clears a lesson's `stale` mark — `stale` is not one of the columns the lessons table's
 no-rewrite trigger protects, so this is an ordinary update, not a special case.
+`lesson unarchive <id>` restores an archived lesson (clears `archived` and `archived_reason`, also ordinary
+updates); an unknown or non-archived id exits 1 with a message.
 
 ## The `memory.embeddings` config key
 

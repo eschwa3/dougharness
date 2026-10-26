@@ -134,6 +134,35 @@ describe("summarizeEval", () => {
     expect(text).toContain("Against pipeline, swarm-crew: +0 points success, +0 scope violations, +$3.000 mean cost, +4.0 min wall.");
     expect(text).not.toContain("Against baseline");
   });
+  it("orders testers after swarm-crew and before memory, and compares it against pipeline", () => {
+    // card ablate-testers-arm: the testers arm (swarm on, crew reviewers 2, testers 2) is a known orchestration arm.
+    // The rows list testers first and memory before swarm-crew so only CONDITION_ORDER can produce the expected order.
+    const row = (condition: string, costUsd: number, durationMs: number) => [
+      { task: "schedule-feature", condition, run: 1, costUsd, turns: 4, durationMs, verified: true, inScope: true, success: true },
+      { task: "schedule-feature", condition, run: 2, costUsd, turns: 4, durationMs, verified: true, inScope: true, success: true },
+    ];
+    const data: EvalFile = {
+      suite: "ts-basic",
+      results: [...row("testers", 8, 1020000), ...row("memory", 4, 720000), ...row("swarm-crew", 7, 960000), ...row("pipeline", 4, 720000)],
+    };
+    const a = summarizeEval([{ source: "testers.json", data }]);
+    expect(a.conditions.map((c) => c.condition)).toEqual(["pipeline", "swarm-crew", "testers", "memory"]);
+    const text = renderAblation(a);
+    expect(text).toContain("Against pipeline, testers: +0 points success, +0 scope violations, +$4.000 mean cost, +5.0 min wall.");
+  });
+  it("reports a single testers run against a repeated pipeline as a single run, not a difference", () => {
+    const one = { task: "schedule-feature", costUsd: 4, turns: 4, durationMs: 720000, verified: true, inScope: true, success: true };
+    const data: EvalFile = {
+      suite: "ts-basic",
+      results: [
+        { ...one, condition: "pipeline", run: 1 },
+        { ...one, condition: "pipeline", run: 2 },
+        { ...one, condition: "testers", run: 1, costUsd: 8 },
+      ],
+    };
+    const text = renderAblation(summarizeEval([{ source: "t1.json", data }]));
+    expect(text).toContain("Against pipeline, testers: single run (n=1 vs n=2), not reported as a difference.");
+  });
   it("renders an empty result without a suite", () => {
     const text = renderAblation(summarizeEval([{ source: "e.json", data: { results: [] } }]));
     expect(text).toContain("Ablation of results: 0 sessions from e.json; 0 tasks.");

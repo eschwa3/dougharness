@@ -9,7 +9,7 @@
 import { spawnSync, execFileSync } from "node:child_process";
 import { cpSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync, existsSync, rmSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, relative } from "node:path";
+import { dirname, join, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { newBoard, addCard, boardPath, BOARD_RELPATH } from "../plugins/doug-flow/lib/board.mjs";
 import { commandEnv } from "../plugins/doug-flow/lib/land.mjs";
@@ -25,6 +25,16 @@ export const LEARN_MJS = join(PLUGIN_DIR, "scripts/learn.mjs");
 export const CLI = join(ROOT, "packages/doug-cli/dist/bin.js");
 export const FIXTURE_DIR = join(ROOT, "evals/fixtures/ts-basic");
 export const TASKS_FILE = join(ROOT, "evals/tasks/ts-basic.json");
+// Card fixture-repo-scenarios: the larger fictitious order-management fixture, its tasks file (which also carries
+// the rehearsal descriptor: per-scenario cards, background cards, seeded lessons, the memory query and the decide
+// proposal) and the held-out directory both fixtures share.
+export const ORDERS_FIXTURE_DIR = join(ROOT, "evals/fixtures/ts-orders");
+export const ORDERS_TASKS_FILE = join(ROOT, "evals/tasks/ts-orders.json");
+export const HELDOUT_DIR = join(ROOT, "evals/heldout");
+// Card rehearsal-harder-tier: the equipment-rental fixture the hard tier (`--tier hard`) runs on and its tasks file.
+export const RENTALS_FIXTURE_DIR = join(ROOT, "evals/fixtures/ts-rentals");
+export const RENTALS_TASKS_FILE = join(ROOT, "evals/tasks/ts-rentals.json");
+export const FIXTURE_NAMES = ["ts-basic", "ts-orders"];
 export const HELDOUT_FILE = join(ROOT, "evals/heldout/fix-hours.test.ts");
 // The swarm scenario's own task and held-out test (card rehearsal-swarm-splittable): one size M plan task owning two
 // source files, so the shape gate lets the lead split it.
@@ -55,7 +65,7 @@ export function cleanEnv(extra = {}) {
 // stage figure, not the scenario total (item workflow-rehearsal-review #6: research gives no single number, so
 // the flow and hand totals are split across their sessions in proportion to what each is expected to do, and the
 // swarm total is all in its one implement session).
-export const SCENARIOS = ["flow", "swarm", "hand", "auto", "parallel", "start", "start-feature"];
+export const SCENARIOS = ["flow", "swarm", "hand", "auto", "parallel", "start", "start-feature", "init", "board", "memory", "decide", "swarm-skill"];
 export const ESTIMATES = {
   flow: {
     // /doug-next's own first step moves the card (uncommitted working state, never a "Board: <id> moved to In
@@ -76,12 +86,12 @@ export const ESTIMATES = {
     source: "hand rehearsal on the ts-basic fixture measured $2.16/3.8 min (docs/live-runs.md, 2026-09-09), measured before the tester seat and research step existed, and $1.72/3.2 min (gate $0.32/0.3 min, build $1.39/2.9 min, the first run with the tester seat and research step, 2026-10-09)",
   },
   auto: {
-    stages: { gate: 0.5, build: 8.0 },
-    source: "two hand builds at the hand figure ($2.16/3.8 min each, docs/live-runs.md, 2026-09-09, rounded up with a gate that reads two cards); unmeasured, no autopilot rehearsal has run live",
+    stages: { gate: 0.5, build: 3.0 },
+    source: "autopilot rehearsal on the ts-basic fixture measured $2.69/6.4 min (gate $0.27/0.4 min, build $2.42/6 min, docs/live-runs.md, 2026-10-08, card autopilot-unlimited) and $2.67 (gate 0.5 min, build 6.6 min, card autopilot-edge-case-not-decision); stage figures rounded up to cover the measured stage cost",
   },
   parallel: {
-    stages: { gate: 0.5, build: 9.0 },
-    source: "one flow card (measured up to $4.15/9 min, docs/live-runs.md, 2026-09-09) and one hand card (up to $2.16/3.8 min, 2026-09-09) at once, plus about $1.50 for main's coordination and the two queens' relays; unmeasured, no parallel rehearsal has run live",
+    stages: { gate: 0.5, build: 5.0 },
+    source: "parallel rehearsal on the ts-basic fixture (one flow card and one hand card at once) measured $4.32/6.3 min (gate $0.28/0.3 min, build $4.04/6 min, docs/live-runs.md, 2026-10-13, card parallel-card-queens); a failed run the same day cost $4.65; stage figures rounded up to cover the measured stage cost",
   },
   start: {
     stages: { idea: 0.5, architecture: 1.5, skeleton: 2.0, scope: 0.7 },
@@ -91,52 +101,170 @@ export const ESTIMATES = {
     stages: { spec: 0.5, architecture: 0.7, plan: 0.7 },
     source: "feature mode on the ts-basic fixture's fix-hours card, one session per phase (spec, architecture, plan): the first passing live run measured $1.57/3.6 min (docs/live-runs.md, 2026-10-11, card doug-start-skill); the per-stage figures are the card's pre-run estimates, not measured per stage, and the plan figure is below the flow gate's measured $0.58 (docs/live-runs.md, 2026-10-09) plus the lead's turns",
   },
+  // Card fixture-repo-scenarios: the five command paths that had no scenario. All run on ts-orders and none has
+  // run live yet, so every figure is a pre-run estimate (unmeasured on ts-orders).
+  init: {
+    stages: {},
+    source: "measured on ts-orders: doug init, doug doctor and a re-init run offline with no model call, so $0 (measured $0.00/0 min, docs/live-runs.md, 2026-10-22)",
+  },
+  board: {
+    stages: {},
+    source: "measured on ts-orders: the doug board commands and the served page run offline with no model call, so $0 (measured $0.00/0 min, docs/live-runs.md, 2026-10-22)",
+  },
+  memory: {
+    stages: { reflect: 0.05, "model-regen": 0.05, ideas: 0.05 },
+    source: "measured on ts-orders: three cheap-row `claude -p --json-schema` calls measured $0.02/0.4 min in total (docs/live-runs.md, 2026-10-22; per-stage cost not archived, so each stage is rounded up to $0.05); recall makes no model call",
+  },
+  decide: {
+    stages: { propose: 0.25 },
+    source: "measured on ts-orders: one /doug-decide session that runs memory.mjs decision propose and reads the diff measured $0.19/0.2 min (docs/live-runs.md, 2026-10-22), rounded up; the apply act makes no model call",
+  },
+  "swarm-skill": {
+    stages: { gate: 1.0, run: 3.5 },
+    source: "unmeasured on ts-orders: the gate session spawns the planner (the flow gate measured $0.58, docs/live-runs.md, 2026-10-09, rounded up for a three-file plan) and the run session is the swarm implement stage (a two-brief split measured $2.32, 2026-10-09, plus a third brief and the landing) (estimated 2026-10-22)",
+  },
 };
 
-export function scenarioTotal(scenario) {
-  return Object.values(ESTIMATES[scenario].stages).reduce((a, b) => a + b, 0);
+// ---- Card rehearsal-harder-tier: the hard tier's registry (`--tier hard`), beside the cheap one -------------------------
+// Six scenarios on the ts-rentals fixture. SCENARIOS, ESTIMATES, FIXTURE_NAMES and SCENARIO_STAGES stay as they are;
+// HARD_STAGES (below SCENARIO_STAGES) reuses each base scenario's stages with the hard turn caps, timeouts and asserts.
+export const TIERS = ["hard"];
+export const HARD_FIXTURE_NAMES = ["ts-rentals"];
+export const HARD_BASES = ["hand", "flow", "swarm-skill", "start-feature", "auto", "parallel"];
+export const HARD_SCENARIOS = HARD_BASES.map((b) => `hard-${b}`);
+export const HARD_SESSION_TIMEOUT_MS = 180 * 60 * 1000;
+// Every figure is the cost measured on ts-rentals in the 2026-10-25 hard sweep (docs/live-runs.md, card rehearsals-hard-sweep), to the cent.
+export const HARD_ESTIMATES = {
+  "hard-hand": {
+    stages: { gate: 0.38, build: 1.8 },
+    source: "measured on ts-rentals: $2.18/5.9 min (gate $0.38, build $1.80, docs/live-runs.md, 2026-10-25)",
+  },
+  "hard-flow": {
+    stages: { gate: 0.94, implement: 2.14 },
+    source: "measured on ts-rentals: $3.08/7.6 min (gate $0.94, implement $2.14, docs/live-runs.md, 2026-10-25)",
+  },
+  "hard-swarm-skill": {
+    stages: { gate: 0.67, run: 2.79 },
+    source: "measured on ts-rentals: $3.46/7.1 min (gate $0.67, run $2.79, docs/live-runs.md, 2026-10-25)",
+  },
+  "hard-start-feature": {
+    stages: { spec: 0.95, architecture: 0.92, plan: 0.99 },
+    source: "measured on ts-rentals: $2.87/8.5 min (spec $0.95, architecture $0.92, plan $0.99, docs/live-runs.md, 2026-10-25); the stages sum to $2.86 at the cent",
+  },
+  "hard-auto": {
+    stages: { gate: 0.31, build: 15.23 },
+    source: "measured on ts-rentals: the passing rerun $15.54/26.3 min (gate $0.31, build $15.23, docs/live-runs.md, 2026-10-25); the first, failed run cost $14.64",
+  },
+  "hard-parallel": {
+    stages: { gate: 0.32, build: 15.0 },
+    source: "measured on ts-rentals: the passing rerun $15.33/17.3 min (gate $0.32, build $15.00, docs/live-runs.md, 2026-10-25); the stages sum to $15.32 at the cent; the first, failed run cost $15.42",
+  },
+};
+export function isHardScenario(name) {
+  return HARD_SCENARIOS.includes(name);
+}
+// "auto" -> "hard-auto"; a base with no hard version ("swarm", "start", ...) -> null.
+export function hardScenarioFor(base) {
+  return HARD_BASES.includes(base) ? `hard-${base}` : null;
 }
 
-export function totalEstimate() {
-  return SCENARIOS.reduce((sum, s) => sum + scenarioTotal(s), 0);
+// A scenario's default fixture is the first of its fixtures (ts-basic for the original six, none for `start`, which
+// runs on an empty repo, ts-orders for the five new ones). `--fixture ts-orders` runs the original six on the larger
+// repo instead.
+export function scenarioFixtures(scenario) {
+  if (isHardScenario(scenario)) return ["ts-rentals"];
+  if (scenario === "start") return [];
+  if (["flow", "swarm", "hand", "auto", "parallel", "start-feature"].includes(scenario)) return ["ts-basic", "ts-orders"];
+  return ["ts-orders"];
+}
+
+const ORDERS_SCALE = 1.5;
+// Measured ts-orders figures (docs/live-runs.md, the 2026-10-22 full ts-orders rehearsal, 4170165) for the original
+// scenarios that passed there. Stage keys equal ESTIMATES[scenario].stages keys. The rest stay scaled and unmeasured.
+const ORDERS_MEASURED = {
+  flow: {
+    stages: { gate: 0.75, implement: 1.75 },
+    source: "measured on ts-orders: $2.34/6 min (gate $0.72, implement $1.62, docs/live-runs.md, 2026-10-22), rounded up",
+  },
+  hand: {
+    stages: { gate: 0.5, build: 2.0 },
+    source: "measured on ts-orders: $1.96/3.6 min (gate $0.38, build $1.58, docs/live-runs.md, 2026-10-22), rounded up",
+  },
+  "start-feature": {
+    stages: { spec: 0.7, architecture: 0.7, plan: 0.7 },
+    source: "measured on ts-orders: $1.93/4.9 min (spec $0.63, architecture $0.64, plan $0.66, docs/live-runs.md, 2026-10-22), rounded up",
+  },
+};
+// The estimate for a scenario on a fixture. The default fixture's entry is ESTIMATES[scenario] itself. A scenario run
+// on ts-orders when its default is ts-basic has no measurement: its figures are the ts-basic ones scaled for a repo
+// with five times the source files, and its source says so ("unmeasured on ts-orders"), never presented as measured.
+export function estimateFor(scenario, fixture = null) {
+  if (isHardScenario(scenario)) return HARD_ESTIMATES[scenario];
+  const base = ESTIMATES[scenario];
+  if (!base) throw new Error(`estimateFor: unknown scenario "${scenario}"`);
+  const fixtures = scenarioFixtures(scenario);
+  if (!fixture || fixture === fixtures[0] || !fixtures.includes(fixture)) return base;
+  if (ORDERS_MEASURED[scenario]) return ORDERS_MEASURED[scenario];
+  const stages = Object.fromEntries(Object.entries(base.stages).map(([k, v]) => [k, Math.round(v * ORDERS_SCALE * 100) / 100]));
+  const total = Object.values(base.stages).reduce((a, b) => a + b, 0);
+  return {
+    stages,
+    source: `unmeasured on ts-orders: the ts-basic figure ($${total.toFixed(2)}) scaled by ${ORDERS_SCALE} for a repo with 17 source files instead of 3 (estimated 2026-10-22); ts-basic source: ${base.source}`,
+  };
+}
+
+export function scenarioTotal(scenario, fixture = null) {
+  return Object.values(estimateFor(scenario, fixture).stages).reduce((a, b) => a + b, 0);
+}
+
+export function totalEstimate({ tier = null } = {}) {
+  return (tier === "hard" ? HARD_SCENARIOS : SCENARIOS).reduce((sum, s) => sum + scenarioTotal(s), 0);
 }
 
 // Three times a session stage's own estimate (never the scenario total): the cap `runStage` passes as
 // --max-budget-usd.
-export function capFor(scenario, stageName) {
-  const usd = ESTIMATES[scenario].stages[stageName];
+export function capFor(scenario, stageName, fixture = null) {
+  const usd = estimateFor(scenario, fixture).stages[stageName];
   if (usd === undefined) throw new Error(`capFor: scenario "${scenario}" has no estimate for stage "${stageName}"`);
   return Math.round(usd * 3 * 100) / 100;
 }
 
 // With no scenario: one line per scenario (its total and source) plus the `all` total. With a scenario: its
 // per-stage breakdown (card workflow-rehearsal-review #6).
-export function estimateLines(scenario = null) {
+export function estimateLines(scenario = null, fixture = null, { tier = null } = {}) {
+  if (!scenario && tier === "hard") {
+    const lines = HARD_SCENARIOS.map((s) => `  ${s.padEnd(18)} $${scenarioTotal(s).toFixed(2)}  (${HARD_ESTIMATES[s].source})`);
+    lines.push(`  ${"all --tier hard".padEnd(18)} $${totalEstimate({ tier: "hard" }).toFixed(2)}  (sum of every hard scenario)`);
+    return lines;
+  }
   if (!scenario) {
     const lines = SCENARIOS.map((s) => `  ${s.padEnd(6)} $${scenarioTotal(s).toFixed(2)}  (${ESTIMATES[s].source})`);
     lines.push(`  ${"all".padEnd(6)} $${totalEstimate().toFixed(2)}  (sum of every scenario)`);
     return lines;
   }
-  const est = ESTIMATES[scenario];
-  const lines = [`  ${scenario} $${scenarioTotal(scenario).toFixed(2)} total  (${est.source})`];
+  const est = estimateFor(scenario, fixture);
+  const lines = [`  ${scenario} $${scenarioTotal(scenario, fixture).toFixed(2)} total  (${est.source})`];
   for (const [stage, usd] of Object.entries(est.stages)) lines.push(`    ${stage.padEnd(10)} $${usd.toFixed(2)}  (cap $${(usd * 3).toFixed(2)})`);
   return lines;
 }
 
 // ---- CLI argument parsing ------------------------------------------------------------------------------
-// `rehearse.mjs [flow|swarm|hand|auto|parallel|start|start-feature|all] --card <id> --spend [dir]`. Pure: does not validate the scenario name
-// or check the card exists (the caller does, before anything is spawned).
+// `rehearse.mjs <scenario|all> [--tier <name>] [--fixture <name>] [--dry-run] --card <id> --spend [dir]`. Pure: does not validate the
+// scenario or fixture name or check the card exists (the caller does, before anything is spawned).
 export function parseArgs(argv) {
   const positional = [];
-  const opts = { spend: false, card: null };
+  const opts = { spend: false, card: null, fixture: null, dryRun: false, tier: null };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--spend") opts.spend = true;
+    else if (a === "--dry-run") opts.dryRun = true;
     else if (a === "--card") opts.card = argv[++i] ?? null;
+    else if (a === "--fixture") opts.fixture = argv[++i] ?? null;
+    else if (a === "--tier") opts.tier = argv[++i] ?? "";
     else positional.push(a);
   }
   const [scenario, dir] = positional;
-  return { scenario: scenario ?? null, dir: dir ?? null, spend: opts.spend, card: opts.card };
+  return { scenario: scenario ?? null, dir: dir ?? null, spend: opts.spend, card: opts.card, fixture: opts.fixture, dryRun: opts.dryRun, tier: opts.tier };
 }
 
 // ---- Stream assertions (research §2: the exact stream-json shapes on 2.1.266) -----------------------------
@@ -224,8 +352,8 @@ export function syntheticReport(scenario, stage, message) {
 
 // ---- Assertions shared by a scenario's gate and implement stages -------------------------------------------
 
-function fail(message) {
-  return { ok: false, message };
+function fail(message, cost) {
+  return cost === undefined ? { ok: false, message } : { ok: false, message, cost };
 }
 function pass(message, extra = {}) {
   return { ok: true, message, ...extra };
@@ -426,10 +554,129 @@ function prepareStartFixture({ dir, tempPrefix } = {}) {
   return { dir: target, card: { id: "start", title: "Start a project", goal: "Start a new project from an idea." }, task: null, baseline: git("rev-parse", "HEAD") };
 }
 
-export function prepareFixture({ scenario, dir, tempPrefix } = {}) {
+// ---- The ts-orders fixture (card fixture-repo-scenarios) -----------------------------------------------------------
+// evals/tasks/ts-orders.json carries, beside its tasks, a `rehearsal` descriptor: the cards each scenario takes, the
+// background cards every board holds, the lessons seeded into the memory store, the memory scenario's recall query and
+// the decide scenario's proposal. The fixture checks in no .doug directory; prepareFixture builds the board and the
+// store from this descriptor.
+export const DECISION_BODY_RELPATH = ".doug/.state/scratch/decision-body.md";
+
+function ordersSuite() {
+  return JSON.parse(readFileSync(ORDERS_TASKS_FILE, "utf8"));
+}
+
+// A descriptor card joined with its task: the board fields, the files its build must change (the task's allowedFiles)
+// and the held-out test that checks it (an absolute path under evals/heldout).
+// Card rehearsal-harder-tier: shared by the ts-orders and ts-rentals suites. `heldOut` is still the first held-out entry
+// (heldOutOf's callers); `heldOuts` lists every entry with its in-fixture path; `deps` come from the descriptor;
+// `requiredFiles` defaults to the owned files; `requireTestFile` asks for a tests/ path in the card's commit.
+function suiteCards(suite, specs, tasksFile) {
+  return specs.map((c) => {
+    const task = suite.tasks.find((t) => t.id === c.task);
+    if (!task || !task.plan) throw new Error(`task "${c.task}" with a plan was not found in ${tasksFile}`);
+    const held = (task.heldOut || [])[0];
+    return {
+      id: c.id,
+      task: c.task,
+      title: task.plan.title,
+      goal: task.plan.goal,
+      track: c.track,
+      column: c.column,
+      component: c.component,
+      size: c.size,
+      class: c.class,
+      deps: c.deps || [],
+      files: [...task.allowedFiles],
+      requiredFiles: [...(task.requiredFiles || task.allowedFiles)],
+      requireTestFile: !!task.requireTestFile,
+      heldOut: held ? { id: c.id, file: join(HELDOUT_DIR, held.from) } : null,
+      heldOuts: (task.heldOut || []).map((h) => ({ file: join(HELDOUT_DIR, h.from), to: h.to })),
+    };
+  });
+}
+
+// Prepares a temp copy of a suite fixture (ts-orders or ts-rentals) from its tasks file's `rehearsal` descriptor.
+export function prepareSuiteFixture({ scenario, fixtureName, fixtureDir, tasksFile, dir, tempPrefix }) {
+  const suite = JSON.parse(readFileSync(tasksFile, "utf8"));
+  const rehearsal = suite.rehearsal;
+  const spec = rehearsal.scenarios[scenario] || { cards: [] };
+  const cards = suiteCards(suite, spec.cards, tasksFile);
+  const target = dir || mkdtempSync(join(tmpdir(), tempPrefix || `doug-rehearse-${scenario}-`));
+  mkdirSync(target, { recursive: true });
+  cpSync(fixtureDir, target, { recursive: true, filter: (src) => !src.split(sep).includes("node_modules") });
+  const git = (...args) => execFileSync("git", args, { cwd: target, encoding: "utf8", env: cleanEnv() }).trim();
+  const raw = scenario === "init";
+
+  if (!raw) {
+    for (const cmd of suite.setup || []) {
+      const r = spawnSync(cmd, { cwd: target, shell: true, encoding: "utf8", timeout: 600000, env: commandEnv(cleanEnv()) });
+      if (r.status !== 0) throw new Error(`fixture setup failed in ${target}: ${cmd}\n${(r.stdout || "") + (r.stderr || "")}`);
+    }
+    const init = spawnSync(process.execPath, [CLI, "init", target, "--yes", "--quiet"], { encoding: "utf8", env: cleanEnv() });
+    if (init.status !== 0) throw new Error(`doug init failed in ${target}: ${init.stdout}${init.stderr}`);
+    const gitignorePath = join(target, ".gitignore");
+    const gitignore = existsSync(gitignorePath) ? readFileSync(gitignorePath, "utf8") : "";
+    if (!gitignore.split("\n").some((l) => l.trim() === ".claude/worktrees/")) {
+      writeFileSync(gitignorePath, `${gitignore}${gitignore && !gitignore.endsWith("\n") ? "\n" : ""}.claude/worktrees/\n`);
+    }
+
+    const everyCard = [...cards, ...rehearsal.background];
+    let board = { ...newBoard(), components: [...new Set(everyCard.map((c) => c.component))] };
+    for (const c of everyCard) {
+      board = addCard(board, { id: c.id, title: c.title, goal: c.goal, component: c.component, size: c.size, track: c.track, deps: c.deps, column: c.column, class: c.class });
+    }
+    mkdirSync(join(target, ".doug"), { recursive: true });
+    writeFileSync(join(target, BOARD_RELPATH), JSON.stringify(board, null, 2) + "\n");
+
+    if (spec.workersMax) {
+      const configPath = join(target, ".doug/config.json");
+      const config = JSON.parse(readFileSync(configPath, "utf8"));
+      writeFileSync(configPath, JSON.stringify({ ...config, workers: { ...(config.workers || {}), max: spec.workersMax } }, null, 2) + "\n");
+    }
+    if (scenario === "swarm") {
+      const task = suite.tasks.find((t) => t.id === cards[0].task);
+      writeFileSync(join(target, ".doug/plan.json"), JSON.stringify({ ...task.plan, status: "approved", card: cards[0].id, swarm: true }, null, 2) + "\n");
+    }
+    if (scenario === "decide") {
+      mkdirSync(join(target, ".doug/.state/scratch"), { recursive: true });
+      writeFileSync(join(target, DECISION_BODY_RELPATH), `${rehearsal.decide.body}\n`);
+    }
+  }
+
+  git("init", "-q", "-b", "main");
+  git("config", "user.email", "rehearse@example.com");
+  git("config", "user.name", "rehearse");
+  git("add", "-A");
+  git("commit", "-q", "-m", "fixture");
+  const baseline = git("rev-parse", "HEAD");
+
+  // The seeded lessons go in after the commit: the store lives under .doug/.state, which the fixture's .gitignore
+  // (doug init adds it) keeps out of the tree.
+  if (!raw) {
+    for (const l of rehearsal.lessons || []) {
+      const r = spawnSync(process.execPath, [MEMORY_MJS, "lesson", "add", "--text", l.text, "--kind", l.kind, "--citation", l.citation, target], { encoding: "utf8", env: cleanEnv() });
+      if (r.status !== 0) throw new Error(`memory.mjs lesson add failed in ${target}: ${r.stderr || r.stdout}`);
+    }
+  }
+  const first = cards[0];
+  const card = first ? { id: first.id, title: first.title, goal: first.goal } : { id: scenario, title: `${scenario} rehearsal`, goal: `Exercise the ${scenario} command path.` };
+  const task = first ? suite.tasks.find((t) => t.id === first.task) : null;
+  return { dir: target, card, cards, task, baseline, fixture: fixtureName };
+}
+
+export function prepareFixture({ scenario, fixture, dir, tempPrefix } = {}) {
+  if (isHardScenario(scenario)) {
+    if (!existsSync(CLI)) throw new Error(`the doug CLI is not built (${relative(ROOT, CLI)} is missing); run "pnpm build" first`);
+    if (fixture && fixture !== "ts-rentals") throw new Error(`prepareFixture: scenario "${scenario}" does not run on fixture "${fixture}"; the hard tier runs on ts-rentals only`);
+    return prepareSuiteFixture({ scenario, fixtureName: "ts-rentals", fixtureDir: RENTALS_FIXTURE_DIR, tasksFile: RENTALS_TASKS_FILE, dir, tempPrefix });
+  }
   if (!SCENARIOS.includes(scenario)) throw new Error(`prepareFixture: unknown scenario "${scenario}"; scenarios are ${SCENARIOS.join(", ")}`);
   if (!existsSync(CLI)) throw new Error(`the doug CLI is not built (${relative(ROOT, CLI)} is missing); run "pnpm build" first`);
   if (scenario === "start") return prepareStartFixture({ dir, tempPrefix });
+  const fixtures = scenarioFixtures(scenario);
+  const chosen = fixture || fixtures[0];
+  if (!fixtures.includes(chosen)) throw new Error(`prepareFixture: scenario "${scenario}" does not run on fixture "${chosen}"; its fixtures are ${fixtures.join(", ")}`);
+  if (chosen === "ts-orders") return prepareSuiteFixture({ scenario, fixtureName: "ts-orders", fixtureDir: ORDERS_FIXTURE_DIR, tasksFile: ORDERS_TASKS_FILE, dir, tempPrefix });
   const suite = fixtureSuite();
   const task = fixtureTask(suite, scenario === "swarm" ? SWARM_TASK_ID : "fix-hours-planned");
   const cardId = scenario === "swarm" ? SWARM_TASK_ID : "fix-hours";
@@ -496,7 +743,7 @@ export function prepareFixture({ scenario, dir, tempPrefix } = {}) {
   execFileSync("git", ["add", "-A"], { cwd: target, env: cleanEnv() });
   execFileSync("git", ["commit", "-q", "-m", "fixture"], { cwd: target, env: cleanEnv() });
   const baseline = execFileSync("git", ["rev-parse", "HEAD"], { cwd: target, encoding: "utf8", env: cleanEnv() }).trim();
-  return { dir: target, card: { id: cardId, title: task.plan.title, goal: task.plan.goal }, task, baseline };
+  return { dir: target, card: { id: cardId, title: task.plan.title, goal: task.plan.goal }, task, baseline, fixture: "ts-basic" };
 }
 
 // ---- One `claude -p` session (evals/run.mjs runWorkflowSession's spawn shape exactly) --------------------------
@@ -507,7 +754,7 @@ const SESSION_TIMEOUT_MS = 90 * 60 * 1000;
 // sets that env var, the test file points it at a fake. `capUsd` becomes --max-budget-usd. `spawnSync` never
 // throws on a missing binary; it sets `.error` instead (ENOENT), surfaced here as `error`/`signal` rather than
 // left for the caller to notice only from empty output (card workflow-rehearsal-review #5).
-export function runStage({ dir, prompt, maxTurns, stage, capUsd = null, claudeBin = process.env.DOUG_REHEARSE_CLAUDE || "claude" }) {
+export function runStage({ dir, prompt, maxTurns, stage, capUsd = null, claudeBin = process.env.DOUG_REHEARSE_CLAUDE || "claude", timeoutMs = SESSION_TIMEOUT_MS }) {
   const streamDir = join(dir, STREAM_DIR);
   mkdirSync(streamDir, { recursive: true });
   const streamPath = join(streamDir, `${stage}.jsonl`);
@@ -518,38 +765,70 @@ export function runStage({ dir, prompt, maxTurns, stage, capUsd = null, claudeBi
   // #5). This lockout is the runner's own, not evals/run.mjs's: an eval session never invokes a board skill.
   const args = ["-p", prompt, "--output-format", "stream-json", "--verbose", "--max-turns", String(maxTurns), "--plugin-dir", PLUGIN_DIR, "--dangerously-skip-permissions", "--disallowedTools", "Artifact"];
   if (capUsd !== null) args.push("--max-budget-usd", String(capUsd));
-  const r = spawnSync(claudeBin, args, { cwd: dir, encoding: "utf8", timeout: SESSION_TIMEOUT_MS, env, maxBuffer: 64 * 1024 * 1024 });
+  const r = spawnSync(claudeBin, args, { cwd: dir, encoding: "utf8", timeout: timeoutMs, env, maxBuffer: 64 * 1024 * 1024 });
   writeFileSync(streamPath, r.stdout || "");
   return { stdout: r.stdout || "", stderr: r.stderr || "", status: r.status, signal: r.signal || null, error: r.error || null, streamPath, cost: sessionCost(r.stdout || "") };
+}
+
+// The last ~20 lines of a child's stderr, capped to ~2000 chars, as a message suffix; empty stderr gives "" (card
+// rehearse-stop-block-message: a non-zero exit or a Stop-hook block used to fail with no reason).
+function stderrTail(stderr) {
+  const lines = String(stderr || "").trim().split("\n");
+  const tail = lines.slice(-20).join("\n").slice(-2000).trim();
+  return tail ? `: ${tail}` : "";
 }
 
 // Runs one session stage end to end: spawn, then assert, with every failure mode (the binary could not run, it
 // was killed, or the assertion itself threw) turned into a normal `{ ok:false, message }` instead of a crash or
 // a misleading assertion failure (card workflow-rehearsal-review #5). Always carries `streamPath` and `cost`.
-export function runSessionStage(stage, { dir, card, baseline, capUsd = null, claudeBin } = {}) {
+export function runSessionStage(stage, { dir, card, cards, fixture, baseline, capUsd = null, claudeBin } = {}) {
   let head = null;
   try {
     head = execFileSync("git", ["rev-parse", "HEAD"], { cwd: dir, encoding: "utf8", env: cleanEnv() }).trim();
   } catch {
     // no git HEAD: the held-at-gate commit check is skipped for this stage
   }
-  const r = runStage({ dir, prompt: stage.prompt({ card }), maxTurns: stage.maxTurns, stage: stage.name, capUsd, ...(claudeBin ? { claudeBin } : {}) });
+  const r = runStage({ dir, prompt: stage.prompt({ card, cards, fixture }), maxTurns: stage.maxTurns, stage: stage.name, capUsd, ...(claudeBin ? { claudeBin } : {}), ...(stage.timeoutMs ? { timeoutMs: stage.timeoutMs } : {}) });
   if (r.error) return { ok: false, message: `claude could not run: ${r.error.message}`, streamPath: r.streamPath, cost: null };
-  if (r.signal) return { ok: false, message: `claude was killed by signal ${r.signal} before finishing`, streamPath: r.streamPath, cost: r.cost };
+  if (r.signal) return { ok: false, message: `claude was killed by signal ${r.signal} before finishing${stderrTail(r.stderr)}`, streamPath: r.streamPath, cost: r.cost };
+  // Card rehearse-max-turns-exit: the docs do not say what exit code claude -p gives when a session ends on
+  // --max-turns or --max-budget-usd, so the final result line's subtype decides, not the status.
+  let endedBy = null;
+  if (r.status !== 0) {
+    let last = null;
+    for (const j of jsonLines(r.stdout || "")) if (j.type === "result") last = j;
+    if (last && (last.subtype === "error_max_turns" || last.subtype === "error_max_budget_usd")) endedBy = last.subtype;
+    else return { ok: false, message: `claude exited with status ${r.status}${stderrTail(r.stderr)}`, streamPath: r.streamPath, cost: r.cost };
+  }
   let result;
   try {
-    result = stage.assert({ dir, card, baseline, head, stream: r.stdout });
+    result = stage.assert({ dir, card, cards, fixture, baseline, head, stream: r.stdout });
   } catch (err) {
     result = fail(`assertion threw: ${err && err.message ? err.message : String(err)}`);
   }
+  if (endedBy && !result.ok) result = { ...result, message: `${result.message} (session ended ${endedBy}, exit ${r.status})` };
   return { ...result, streamPath: r.streamPath, cost: r.cost };
 }
 
 // Runs one act stage (the runner performing a human gate's act, or a deterministic step): a throw becomes a
 // normal failed result instead of crashing the scenario (card workflow-rehearsal-review #5).
-export function runActStage(stage, { dir, card, baseline } = {}) {
+export function runActStage(stage, ctx = {}) {
   try {
-    return { ...stage.run({ dir, card, baseline }), streamPath: null, cost: null };
+    return { ...stage.run(ctx), streamPath: null, cost: null };
+  } catch (err) {
+    return { ok: false, message: `threw: ${err && err.message ? err.message : String(err)}`, streamPath: null, cost: null };
+  }
+}
+
+// Runs one command stage (card fixture-repo-scenarios): a step that spends model money through a Doug CLI that
+// spawns claude itself (memory.mjs reflect, model regen, ideas). The runner hands it the claude binary
+// ($DOUG_REHEARSE_CLAUDE or "claude") and the stage's cap; the stage passes them on as --claude-bin and --max-usd.
+// The cost it returns is kept, unlike an act's.
+export function runCommandStage(stage, ctx = {}) {
+  const claudeBin = ctx.claudeBin || process.env.DOUG_REHEARSE_CLAUDE || "claude";
+  try {
+    const r = stage.run({ ...ctx, claudeBin });
+    return { ...r, streamPath: null, cost: typeof r.cost === "number" ? r.cost : null };
   } catch (err) {
     return { ok: false, message: `threw: ${err && err.message ? err.message : String(err)}`, streamPath: null, cost: null };
   }
@@ -578,6 +857,33 @@ function runHeldOutAndClean(dir, { id = "fix-hours", file = HELDOUT_FILE } = {})
   }
   if (test.status !== 0) return fail(`pnpm test failed in the fixture after the held-out test was added:\n${((test.stdout || "") + (test.stderr || "")).slice(0, 2000)}`);
   return pass("held-out test passed");
+}
+
+// The hard tier's held-out run (card rehearsal-harder-tier): a card can own several held-out files. Same order as
+// runHeldOutAndClean: the clean-tree check first, every `heldOuts[].to` copied in, one `pnpm test`, and every copy removed
+// whether it passed or not. A failure names the card and each held-out file.
+export function runHeldOutsAndClean(dir, card) {
+  const id = (card && card.id) || "card";
+  const held = card && Array.isArray(card.heldOuts) ? card.heldOuts : [];
+  const before = dirtyOutsideDoug(dir);
+  if (before.length) return fail(`working tree is not clean before the held-out tests for ${id} are added: ${before.join(", ")}`);
+  const copied = [];
+  let test;
+  try {
+    for (const h of held) {
+      const dest = join(dir, h.to);
+      mkdirSync(dirname(dest), { recursive: true });
+      cpSync(h.file, dest);
+      copied.push(dest);
+    }
+    test = spawnSync("pnpm", ["test"], { cwd: dir, encoding: "utf8", shell: true, env: cleanEnv() });
+  } finally {
+    for (const dest of copied) rmSync(dest, { force: true });
+  }
+  if (test.status !== 0) {
+    return fail(`pnpm test failed in the fixture after the held-out tests for ${id} were added (${held.map((h) => h.to).join(", ") || "none"}):\n${((test.stdout || "") + (test.stderr || "")).slice(0, 2000)}`);
+  }
+  return pass(`held-out tests passed for ${id}`);
 }
 
 // A passed run used to be removed, streams and report and all, so a passed scenario's evidence could only be read
@@ -612,15 +918,16 @@ function runBoardCli(args) {
 // list so it reaches the record instead of being discarded (card workflow-rehearsal-review #10).
 // Scenarios whose outcome records in the hand form (no workflow report): hand, auto, and the two start scenarios.
 export function recordsAsHand(scenario) {
-  return scenario === "hand" || scenario === "auto" || scenario === "parallel" || scenario === "start" || scenario === "start-feature";
+  return ["hand", "auto", "parallel", "start", "start-feature", "init", "board", "memory", "decide", "hard-hand", "hard-auto", "hard-parallel", "hard-start-feature"].includes(scenario);
 }
 
-export function rehearsalNote({ scenario, outcome, stages, cost = null, agentNames = null }) {
+export function rehearsalNote({ scenario, outcome, stages, cost = null, agentNames = null, fixture = null }) {
   const stageList = stages.map((s) => `${s.name} (${s.wallClock})${s.message ? ` — ${s.message}` : ""}`).join(", ");
+  const onFixture = `the ${fixture || scenarioFixtures(scenario)[0] || "ts-basic"} fixture`;
   const base =
     recordsAsHand(scenario)
-      ? `Rehearsal ${scenario} on ${scenario === "start" ? "an empty git repo" : "the ts-basic fixture"}: ${outcome}; cost ${cost === null ? "not measured" : `$${Number(cost).toFixed(2)}`}; stages ${stageList}`
-      : `Rehearsal ${scenario} on the ts-basic fixture: ${outcome}; stages ${stageList}`;
+      ? `Rehearsal ${scenario} on ${scenario === "start" ? "an empty git repo" : onFixture}: ${outcome}; cost ${cost === null ? "not measured" : `$${Number(cost).toFixed(2)}`}; stages ${stageList}`
+      : `Rehearsal ${scenario} on ${onFixture}: ${outcome}; stages ${stageList}`;
   if (scenario !== "swarm") return base;
   return `${base}; plugin loading and agent-name resolution asserted in the runtime (plugins: doug-flow; agents resolved: ${(agentNames || []).join(", ") || "none"})`;
 }
@@ -646,13 +953,16 @@ export function rehearsalGate(result, fixtureDir) {
 // Records a flow or swarm outcome under `cardId` on the board at `dir` (the real repository by default; a temp
 // copy in tests) by spawning `board.mjs record <id> <report> [dir] ...` exactly as a normal run does. Throws on a
 // non-zero exit (the caller decides how to report that; it is never swallowed).
-export function recordRunOutcome(dir, cardId, { reportFile, wallClock = null, cost = null, mergeCommit = null, note = null, rehearsal = null, outcome = null }) {
+export function recordRunOutcome(dir, cardId, { reportFile, wallClock = null, cost = null, mergeCommit = null, note = null, rehearsal = null, outcome = null, fixture = null }) {
   const args = ["record", cardId, reportFile, "--summary", "A rehearsal run was recorded."];
   if (cost !== null) args.push("--cost", String(cost));
   if (wallClock !== null) args.push("--wall", wallClock);
   if (mergeCommit) args.push("--commit", mergeCommit);
   if (note) args.push("--note", note);
-  if (rehearsal) args.push("--rehearsal", rehearsal, "--rehearsal-outcome", outcome);
+  if (rehearsal) {
+    args.push("--rehearsal", rehearsal, "--rehearsal-outcome", outcome);
+    if (fixture) args.push("--rehearsal-fixture", fixture);
+  }
   args.push(dir);
   const r = runBoardCli(args);
   if (!r.ok) throw new Error(`board.mjs record failed: ${r.stderr || r.stdout}`);
@@ -661,13 +971,16 @@ export function recordRunOutcome(dir, cardId, { reportFile, wallClock = null, co
 
 // Records a hand outcome under `cardId` on the board at `dir` by spawning `board.mjs record <id> --hand [dir]
 // ...` exactly as a normal hand-track landing does.
-export function recordHandOutcome(dir, cardId, { commit = null, wallClock = null, gate = null, note = null, rehearsal = null, outcome = null }) {
+export function recordHandOutcome(dir, cardId, { commit = null, wallClock = null, gate = null, note = null, rehearsal = null, outcome = null, fixture = null }) {
   const args = ["record", cardId, "--hand", "--summary", "A rehearsal hand landing was recorded."];
   if (commit) args.push("--commit", commit);
   if (wallClock !== null) args.push("--wall", wallClock);
   if (gate !== null) args.push("--gate", gate);
   if (note) args.push("--note", note);
-  if (rehearsal) args.push("--rehearsal", rehearsal, "--rehearsal-outcome", outcome);
+  if (rehearsal) {
+    args.push("--rehearsal", rehearsal, "--rehearsal-outcome", outcome);
+    if (fixture) args.push("--rehearsal-fixture", fixture);
+  }
   args.push(dir);
   const r = runBoardCli(args);
   if (!r.ok) throw new Error(`board.mjs record --hand failed: ${r.stderr || r.stdout}`);
@@ -738,7 +1051,7 @@ function afterSkillRan(agents, filesCheck, later = []) {
   return (ctx) => {
     const ran = assertSkillRan(ctx.stream, { agents });
     if (!ran.ok) return ran;
-    const held = heldAtGate(ctx, later);
+    const held = heldAtGate(ctx, typeof later === "function" ? later(ctx) : later);
     return held.ok ? filesCheck(ctx) : held;
   };
 }
@@ -792,8 +1105,8 @@ function assertStartEnded(dir) {
 
 // The start-feature scenario's end: the spec, the architecture, and a plan that is still a draft (approval is the
 // user's, through /doug-approve, never the skill's).
-function assertFeatureEnded(dir) {
-  for (const rel of ["docs/specs/fix-hours/spec.md", "docs/specs/fix-hours/architecture.md", ".doug/plan.json"]) {
+function assertFeatureEnded(dir, id = "fix-hours") {
+  for (const rel of [`docs/specs/${id}/spec.md`, `docs/specs/${id}/architecture.md`, ".doug/plan.json"]) {
     if (!existsSync(join(dir, rel))) return fail(`${rel} was not written`);
   }
   let plan;
@@ -805,10 +1118,123 @@ function assertFeatureEnded(dir) {
   if (plan.status === "approved") return fail("the plan is already approved; the skill must leave approval to /doug-approve");
   const validate = act(PLAN_MJS, ["validate"], dir);
   if (!validate.ok) return fail(`plan.mjs validate failed: ${validate.stderr || validate.stdout}`);
-  if (plan.card !== "fix-hours") return fail(`the plan's card is ${JSON.stringify(plan.card)}, not "fix-hours"`);
+  if (plan.card !== id) return fail(`the plan's card is ${JSON.stringify(plan.card)}, not ${JSON.stringify(id)}`);
   // Not checked: that every file architecture.md names is owned by a task. architecture.md is free prose with no
   // machine-readable files list, and a file it only mentions (read, not changed) would fail a correct paid run.
   return pass(`spec, architecture, and a ${plan.status || "draft"} plan exist`);
+}
+
+// ---- Card fixture-repo-scenarios: asserts and helpers for the init, board, memory, decide and swarm-skill scenarios ----
+
+// node <script> <args...>, synchronously, with the runner's clean environment. Unlike act(), the directory is not
+// appended: the caller places it. status is the exit code (null when the process was killed).
+function spawnNode(script, args = []) {
+  const r = spawnSync(process.execPath, [script, ...args], { encoding: "utf8", env: cleanEnv(), timeout: 600000, maxBuffer: 64 * 1024 * 1024 });
+  return { status: r.status, stdout: r.stdout || "", stderr: r.stderr || "" };
+}
+
+// doug init's result: CLAUDE.md written and a .doug/config.json whose stopGate.commands names at least one gate command.
+export function assertInitialized(dir) {
+  if (!existsSync(join(dir, "CLAUDE.md"))) return fail("CLAUDE.md was not written");
+  if (!stopGateCommands(dir).length) return fail(".doug/config.json has no stopGate.commands (missing or empty)");
+  return pass(`initialized: CLAUDE.md written and ${stopGateCommands(dir).length} stopGate command(s) detected`);
+}
+
+// memory.mjs recall <query> --json must return a lesson whose text contains expectText.
+export function assertRecalled(dir, { query, expectText }) {
+  const r = spawnNode(MEMORY_MJS, ["recall", query, dir, "--json"]);
+  if (r.status !== 0) return fail(`memory.mjs recall exited ${r.status}: ${(r.stdout + r.stderr).trim().slice(0, 300)}`);
+  let result;
+  try {
+    result = JSON.parse(r.stdout);
+  } catch (err) {
+    return fail(`memory.mjs recall --json printed no JSON: ${err.message}`);
+  }
+  const lessons = Array.isArray(result && result.lessons) ? result.lessons : [];
+  const hit = lessons.find((l) => typeof l.text === "string" && l.text.includes(expectText));
+  return hit ? pass(`recall found lesson ${hit.id} (${result.mode})`) : fail(`recall for ${JSON.stringify(query)} returned ${lessons.length} lesson(s), none containing ${JSON.stringify(expectText)}`);
+}
+
+// The live lessons in the store at `dir`, as memory.mjs lessons --json lists them.
+function memoryLessons(dir) {
+  const r = spawnNode(MEMORY_MJS, ["lessons", dir, "--json"]);
+  if (r.status !== 0) throw new Error(`memory.mjs lessons exited ${r.status}: ${r.stderr.trim()}`);
+  return JSON.parse(r.stdout);
+}
+
+// One memory.mjs command that spawns claude itself: the runner's binary and cap go on as --claude-bin and --max-usd.
+// cost is the call's measured usd from the --json result, or null.
+function memoryCommand(args, { dir, claudeBin, capUsd }) {
+  const flags = ["--json"];
+  if (claudeBin) flags.push("--claude-bin", claudeBin);
+  if (typeof capUsd === "number") flags.push("--max-usd", String(capUsd));
+  const r = spawnNode(MEMORY_MJS, [...args, dir, ...flags]);
+  let cost = null;
+  try {
+    const j = JSON.parse(r.stdout);
+    if (j && typeof j.usd === "number") cost = j.usd;
+  } catch {
+    // no JSON result: the call failed before it printed one
+  }
+  return { ...r, cost };
+}
+
+// The path a proposal diff creates or changes: the `+++ <path>` line.
+function diffTarget(diffFile) {
+  const m = /^\+\+\+ (?:b\/)?(\S+)/m.exec(readFileSync(diffFile, "utf8"));
+  return m ? m[1] : null;
+}
+
+// /doug-decide stopped at its apply/skip gate: a proposal diff is pending under .doug/.state/learn/ and the file it
+// would write does not exist yet.
+export function assertDecisionHeld(dir) {
+  const pending = pendingDecisionProposals(dir);
+  if (!pending.length) return fail("no pending decision proposal under .doug/.state/learn/: /doug-decide wrote no diff");
+  for (const diff of pending) {
+    const target = diffTarget(diff);
+    if (!target) return fail(`cannot read the target path from ${diff}`);
+    if (existsSync(join(dir, target))) return fail(`${target} already exists: the proposal was applied before the apply act`);
+  }
+  return pass(`held at the apply gate: ${pending.length} pending proposal(s), no ADR written`);
+}
+
+// /doug-swarm stopped at its plan approval: the flow gate's state (the card in flow and uncommitted, a valid draft plan,
+// no worktree or branch, only the fixture commit), and the plan names the card and has swarm on.
+export function assertSwarmGateHeld(dir, stream, opts) {
+  const held = assertFlowGateHeld(dir, stream, opts);
+  if (!held.ok) return held;
+  let plan;
+  try {
+    plan = JSON.parse(readFileSync(join(dir, ".doug/plan.json"), "utf8"));
+  } catch (err) {
+    return fail(`.doug/plan.json is not valid JSON: ${err.message}`);
+  }
+  if (plan.swarm !== true) return fail("the plan does not have swarm on: /doug-swarm must plan with swarm true");
+  if (plan.card !== opts.cardId) return fail(`the plan's card is ${JSON.stringify(plan.card)}, not ${JSON.stringify(opts.cardId)}`);
+  // The shape gate keeps a task off the lead unless it owns two or more source files and is not size S. The test-file
+  // predicate mirrors isTestFile in workflows/doug-implement.js (a test checks the two agree); a plan without a
+  // splittable task costs the whole run stage.
+  const isTestFile = (f) => /(^|\/)(test|tests|__tests__|spec)\//.test(f) || /\.test\.|\.spec\.|_test\.|Test\./.test(f.slice(f.lastIndexOf("/") + 1));
+  const splittable = (plan.tasks || []).some((t) => t.size !== "S" && (t.files || []).filter((f) => !isTestFile(String(f))).length >= 2);
+  if (!splittable) return fail("the plan has no task the shape gate will split: a swarm task needs two or more source files (not counting tests) and a size other than S, so the run would keep every task off the lead");
+  return pass("gate held: the card is in flow, the swarm plan is a draft, and the session stopped at the approval gate");
+}
+
+// The card a stage works on: the stage context's card (ts-orders names its own; the ts-basic constants stand in when a
+// caller passes none, as the tests that call a stage directly do), its owned files, and its held-out test.
+function cardIdOf(ctx, fallback = "fix-hours") {
+  return (ctx && ctx.card && ctx.card.id) || fallback;
+}
+function cardOf(ctx, id) {
+  return (ctx && Array.isArray(ctx.cards) ? ctx.cards : []).find((c) => c.id === id) || null;
+}
+function ownedFilesOf(ctx, id, fallback) {
+  const c = cardOf(ctx, id);
+  return c ? c.files : fallback;
+}
+function heldOutOf(ctx, id, fallback) {
+  const c = cardOf(ctx, id);
+  return c && c.heldOut ? c.heldOut : fallback;
 }
 
 // ---- The three scenarios, stage by stage ------------------------------------------------------------------
@@ -927,24 +1353,24 @@ export const SCENARIO_STAGES = {
       kind: "session",
       name: "spec",
       maxTurns: 20,
-      prompt: () => ["/doug-start fix-hours", "Do only the Specification phase, then stop at its gate as the skill says. Do not invoke the doug-board skill."].join("\n\n"),
-      assert: afterSkillRan(["doug-flow:spec-writer"], ({ dir }) => (existsSync(join(dir, "docs/specs/fix-hours/spec.md")) ? pass("spec.md written") : fail("docs/specs/fix-hours/spec.md was not written")), ["docs/specs/fix-hours/pseudocode.md", "docs/specs/fix-hours/architecture.md", ".doug/plan.json"]),
+      prompt: (ctx) => [`/doug-start ${cardIdOf(ctx)}`, "Do only the Specification phase, then stop at its gate as the skill says. Do not invoke the doug-board skill."].join("\n\n"),
+      assert: afterSkillRan(["doug-flow:spec-writer"], (ctx) => (existsSync(join(ctx.dir, `docs/specs/${cardIdOf(ctx)}/spec.md`)) ? pass("spec.md written") : fail(`docs/specs/${cardIdOf(ctx)}/spec.md was not written`)), (ctx) => [`docs/specs/${cardIdOf(ctx)}/pseudocode.md`, `docs/specs/${cardIdOf(ctx)}/architecture.md`, ".doug/plan.json"]),
     },
-    { kind: "act", name: "approve-spec", run: ({ dir }) => commitPhase(dir, "docs: fix-hours spec") },
+    { kind: "act", name: "approve-spec", run: (ctx) => commitPhase(ctx.dir, `docs: ${cardIdOf(ctx)} spec`) },
     {
       kind: "session",
       name: "architecture",
       maxTurns: 30,
-      prompt: () => ["/doug-start fix-hours", "I approved the spec (committed) and skipped Pseudocode. Do only the Architecture phase, then stop at its gate as the skill says."].join("\n\n"),
-      assert: afterSkillRan(["architect"], ({ dir }) => (existsSync(join(dir, "docs/specs/fix-hours/architecture.md")) ? pass("architecture.md written") : fail("docs/specs/fix-hours/architecture.md was not written")), [".doug/plan.json"]),
+      prompt: (ctx) => [`/doug-start ${cardIdOf(ctx)}`, "I approved the spec (committed) and skipped Pseudocode. Do only the Architecture phase, then stop at its gate as the skill says."].join("\n\n"),
+      assert: afterSkillRan(["architect"], (ctx) => (existsSync(join(ctx.dir, `docs/specs/${cardIdOf(ctx)}/architecture.md`)) ? pass("architecture.md written") : fail(`docs/specs/${cardIdOf(ctx)}/architecture.md was not written`)), [".doug/plan.json"]),
     },
-    { kind: "act", name: "approve-architecture", run: ({ dir }) => commitPhase(dir, "docs: fix-hours architecture") },
+    { kind: "act", name: "approve-architecture", run: (ctx) => commitPhase(ctx.dir, `docs: ${cardIdOf(ctx)} architecture`) },
     {
       kind: "session",
       name: "plan",
       maxTurns: 30,
-      prompt: () => ["/doug-start fix-hours", "I approved the architecture (committed) and skipped Pseudocode. Do only the Refinement phase: write the draft plan, show it, then stop at its gate as the skill says. Do not approve the plan."].join("\n\n"),
-      assert: afterSkillRan(["doug-flow:planner"], ({ dir }) => assertFeatureEnded(dir)),
+      prompt: (ctx) => [`/doug-start ${cardIdOf(ctx)}`, "I approved the architecture (committed) and skipped Pseudocode. Do only the Refinement phase: write the draft plan, show it, then stop at its gate as the skill says. Do not approve the plan."].join("\n\n"),
+      assert: afterSkillRan(["doug-flow:planner"], (ctx) => assertFeatureEnded(ctx.dir, cardIdOf(ctx))),
     },
   ],
   hand: [
@@ -952,16 +1378,18 @@ export const SCENARIO_STAGES = {
       kind: "session",
       name: "gate",
       maxTurns: 12,
-      prompt: () => "/doug-next fix-hours",
-      assert: ({ dir, stream }) => assertGateHeld(dir, stream, { plugins: ["doug-flow"], command: "doug-flow:doug-next", cardId: "fix-hours", unchangedFiles: ["src/duration.ts"] }),
+      prompt: (ctx) => `/doug-next ${cardIdOf(ctx)}`,
+      assert: (ctx) => assertGateHeld(ctx.dir, ctx.stream, { plugins: ["doug-flow"], command: "doug-flow:doug-next", cardId: cardIdOf(ctx), unchangedFiles: [ownedFilesOf(ctx, cardIdOf(ctx), ["src/duration.ts"])[0]] }),
     },
     {
       kind: "act",
       name: "start-gate",
-      run: ({ dir }) => {
+      run: (ctx) => {
+        const { dir } = ctx;
+        const id = cardIdOf(ctx);
         // task rehearse-uncommitted-move: the board move stays uncommitted working state (it lands only in the
         // card's landing commit), so this act no longer commits it.
-        const move = act(BOARD_MJS, ["move", "fix-hours", "flow"], dir);
+        const move = act(BOARD_MJS, ["move", id, "flow"], dir);
         if (!move.ok) return fail(`board.mjs move failed: ${move.stderr || move.stdout}`);
         // doug-hand step 2 stamps the landing's condition before the brief (plugins/doug-flow/skills/doug-hand/SKILL.md):
         // `memory.mjs condition open <id>` writes .doug/.state/reports/<id>/condition.json, and refuses a classless
@@ -969,18 +1397,18 @@ export const SCENARIO_STAGES = {
         // the uncommitted move above. `act()` passes `dir` positionally and spawns with cleanEnv(), so this writes
         // into the fixture, never this repository (dirFrom prefers CLAUDE_PROJECT_DIR, which cleanEnv scrubs, over
         // that positional argument).
-        const condition = act(MEMORY_MJS, ["condition", "open", "fix-hours"], dir);
+        const condition = act(MEMORY_MJS, ["condition", "open", id], dir);
         if (!condition.ok) return fail(`memory.mjs condition open failed: ${condition.stderr || condition.stdout}`);
-        return pass("moved fix-hours to In flow (uncommitted) and opened its condition, standing in for the start gate");
+        return pass(`moved ${id} to In flow (uncommitted) and opened its condition, standing in for the start gate`);
       },
     },
     {
       kind: "session",
       name: "build",
       maxTurns: 60,
-      prompt: () =>
+      prompt: (ctx) =>
         [
-          "/doug-next fix-hours",
+          `/doug-next ${cardIdOf(ctx)}`,
           "I answered Start at the start gate and moved the card to In flow myself (it is uncommitted), and I chose by hand. Do not invoke the doug-board skill at any step: this checkout publishes nothing. Do the doug-hand skill's steps 3 and 4, then stop before step 5: do not suggest follow-up cards and do not ask the continue gate.",
         ].join("\n\n"),
       assert: (ctx) => assertHandBuilt(ctx),
@@ -992,7 +1420,7 @@ export const SCENARIO_STAGES = {
       name: "gate",
       maxTurns: 20,
       prompt: () => "/doug-next --auto",
-      assert: ({ dir, stream }) => assertAutoGateHeld(dir, stream),
+      assert: ({ dir, stream, cards }) => assertAutoGateHeld(dir, stream, { cards }),
     },
     {
       kind: "session",
@@ -1012,7 +1440,7 @@ export const SCENARIO_STAGES = {
       name: "gate",
       maxTurns: 20,
       prompt: () => "/doug-next --auto",
-      assert: ({ dir, stream }) => assertParallelGateHeld(dir, stream),
+      assert: ({ dir, stream, cards }) => assertParallelGateHeld(dir, stream, { cards }),
     },
     {
       kind: "session",
@@ -1031,14 +1459,16 @@ export const SCENARIO_STAGES = {
       kind: "session",
       name: "gate",
       maxTurns: 30,
-      prompt: () => "/doug-next fix-hours",
-      assert: ({ dir, stream }) => assertFlowGateHeld(dir, stream, { plugins: ["doug-flow"], command: "doug-flow:doug-next", cardId: "fix-hours" }),
+      prompt: (ctx) => `/doug-next ${cardIdOf(ctx)}`,
+      assert: (ctx) => assertFlowGateHeld(ctx.dir, ctx.stream, { plugins: ["doug-flow"], command: "doug-flow:doug-next", cardId: cardIdOf(ctx) }),
     },
     {
       kind: "act",
       name: "approve",
-      run: ({ dir }) => {
-        const setCard = act(PLAN_MJS, ["set", "card", "fix-hours"], dir);
+      run: (ctx) => {
+        const { dir } = ctx;
+        const id = cardIdOf(ctx);
+        const setCard = act(PLAN_MJS, ["set", "card", id], dir);
         if (!setCard.ok) return fail(`plan.mjs set card failed: ${setCard.stderr || setCard.stdout}`);
         let plan = null;
         try {
@@ -1047,7 +1477,8 @@ export const SCENARIO_STAGES = {
           // approve below reports the same problem
         }
         const owned = new Set((plan && plan.tasks ? plan.tasks : []).flatMap((t) => t.files || []));
-        const outOfScope = [...owned].filter((f) => f !== "src/duration.ts" && f !== "tests/duration.test.ts");
+        const expected = ownedFilesOf(ctx, id, ["src/duration.ts", "tests/duration.test.ts"]);
+        const outOfScope = [...owned].filter((f) => !expected.includes(f));
         const approve = act(PLAN_MJS, ["approve"], dir);
         if (!approve.ok) return fail(`plan.mjs approve failed: ${approve.stderr || approve.stdout}`);
         return pass(outOfScope.length ? `approved; the plan also owns ${outOfScope.join(", ")} (noted, not blocking)` : "approved");
@@ -1063,7 +1494,7 @@ export const SCENARIO_STAGES = {
     {
       kind: "act",
       name: "land",
-      run: ({ dir }) => landAndVerify(dir),
+      run: (ctx) => landAndVerify(ctx.dir, heldOutOf(ctx, cardIdOf(ctx), undefined)),
     },
   ],
   swarm: [
@@ -1077,7 +1508,281 @@ export const SCENARIO_STAGES = {
     {
       kind: "act",
       name: "land",
-      run: ({ dir }) => landAndVerify(dir, { id: SWARM_TASK_ID, file: SWARM_HELDOUT_FILE }),
+      run: (ctx) => landAndVerify(ctx.dir, heldOutOf(ctx, cardIdOf(ctx, SWARM_TASK_ID), { id: SWARM_TASK_ID, file: SWARM_HELDOUT_FILE })),
+    },
+  ],
+  // ---- Card fixture-repo-scenarios: the command paths that had no scenario. They run on ts-orders. ---------------
+  // init: doug init is a CLI that needs no model. Without --yes and without a TTY it writes nothing and exits 2.
+  init: [
+    {
+      kind: "act",
+      name: "refuse",
+      run: ({ dir }) => {
+        const r = spawnNode(CLI, ["init", dir]);
+        const text = `${r.stdout}${r.stderr}`;
+        if (r.status !== 2) return fail(`doug init without --yes and without a TTY exited ${r.status}, not 2: ${text.trim().slice(0, 300)}`);
+        if (!text.includes("Not a TTY and --yes not given. Nothing written.")) return fail(`doug init did not print "Not a TTY and --yes not given. Nothing written.": ${text.trim().slice(0, 300)}`);
+        for (const rel of [".doug", "CLAUDE.md"]) if (existsSync(join(dir, rel))) return fail(`doug init refused but ${rel} exists: it wrote something`);
+        return pass("refused with exit 2 and wrote nothing");
+      },
+    },
+    {
+      kind: "act",
+      name: "init",
+      run: ({ dir }) => {
+        const r = spawnNode(CLI, ["init", dir, "--yes", "--quiet"]);
+        if (r.status !== 0) return fail(`doug init --yes --quiet exited ${r.status}: ${(r.stdout + r.stderr).trim().slice(0, 400)}`);
+        return assertInitialized(dir);
+      },
+    },
+    {
+      kind: "act",
+      name: "doctor",
+      run: ({ dir }) => {
+        const r = spawnNode(CLI, ["doctor", dir]);
+        return r.status === 0 ? pass(`doug doctor exited 0: ${r.stdout.trim().split("\n").pop()}`) : fail(`doug doctor exited ${r.status}: ${(r.stdout + r.stderr).trim().slice(-500)}`);
+      },
+    },
+    {
+      kind: "act",
+      name: "reinit",
+      run: ({ dir }) => {
+        const before = readFileSync(join(dir, "CLAUDE.md"), "utf8");
+        const r = spawnNode(CLI, ["init", dir, "--yes", "--quiet"]);
+        if (r.status !== 0) return fail(`a second doug init --yes exited ${r.status}: ${(r.stdout + r.stderr).trim().slice(0, 400)}`);
+        if (readFileSync(join(dir, "CLAUDE.md"), "utf8") !== before) return fail("a second doug init changed CLAUDE.md");
+        return assertInitialized(dir);
+      },
+    },
+  ],
+  // board: the doug board CLI and the served page, offline.
+  board: [
+    {
+      kind: "act",
+      name: "list",
+      run: ({ dir }) => {
+        const r = spawnNode(CLI, ["board", "list", dir, "--json"]);
+        if (r.status !== 0) return fail(`doug board list exited ${r.status}: ${r.stderr.trim()}`);
+        const missing = ordersSuite().rehearsal.background.map((c) => c.id).filter((id) => !r.stdout.includes(`"${id}"`));
+        return missing.length ? fail(`doug board list does not name ${missing.join(", ")}`) : pass("doug board list names every background card");
+      },
+    },
+    {
+      kind: "act",
+      name: "next",
+      run: ({ dir }) => {
+        // The background board holds no Ready card, so `next` finds none and exits 1 saying so; the round-trip act below
+        // promotes a scratch card and `next` names it.
+        const r = spawnNode(CLI, ["board", "next", dir]);
+        const text = `${r.stdout}${r.stderr}`;
+        return r.status === 1 && text.includes("No Ready card") ? pass("doug board next found no Ready card") : fail(`doug board next on a board with no Ready card exited ${r.status}: ${text.trim().slice(0, 300)}`);
+      },
+    },
+    {
+      kind: "act",
+      name: "round-trip",
+      run: ({ dir }) => {
+        const board = (...args) => spawnNode(CLI, ["board", ...args, dir]);
+        const snapshot = () => {
+          const b = JSON.parse(readFileSync(join(dir, BOARD_RELPATH), "utf8"));
+          delete b.updated;
+          return JSON.stringify(b);
+        };
+        const before = snapshot();
+        const steps = [
+          ["add", "scratch-card", "--title", "Scratch", "--goal", "A scratch card for the round trip.", "--component", "store", "--size", "S", "--class", "code", "--column", "backlog"],
+          ["edit", "scratch-card", "--title", "Scratch edited"],
+          ["reorder", "scratch-card", "--top"],
+          ["move", "scratch-card", "ready"],
+        ];
+        for (const args of steps) {
+          const r = board(...args);
+          if (r.status !== 0) return fail(`doug board ${args[0]} exited ${r.status}: ${(r.stdout + r.stderr).trim().slice(0, 300)}`);
+        }
+        const next = board("next");
+        if (next.status !== 0 || !next.stdout.includes("scratch-card")) return fail(`doug board next did not name the promoted scratch card (exit ${next.status}): ${(next.stdout + next.stderr).trim().slice(0, 300)}`);
+        const removed = board("remove", "scratch-card");
+        if (removed.status !== 0) return fail(`doug board remove exited ${removed.status}: ${(removed.stdout + removed.stderr).trim().slice(0, 300)}`);
+        return snapshot() === before ? pass("add, edit, reorder, move and remove left the board as it started") : fail("the board differs from how it started after the round trip");
+      },
+    },
+    {
+      kind: "act",
+      name: "build",
+      run: ({ dir }) => {
+        const out = join(dir, ".doug/.state/scratch/board.html");
+        mkdirSync(dirname(out), { recursive: true });
+        const r = spawnNode(CLI, ["board", "build", dir, "--out", out]);
+        if (r.status !== 0) return fail(`doug board build exited ${r.status}: ${(r.stdout + r.stderr).trim().slice(0, 300)}`);
+        const html = readFileSync(out, "utf8");
+        const missing = ordersSuite().rehearsal.background.map((c) => c.id).filter((id) => !html.includes(id));
+        return missing.length ? fail(`the built page does not name ${missing.join(", ")}`) : pass("the built page names every background card");
+      },
+    },
+    {
+      kind: "act",
+      name: "serve",
+      run: ({ dir }) => {
+        const started = spawnNode(CLI, ["board", "serve", dir, "--detach", "--port", "0"]);
+        if (started.status !== 0) return fail(`doug board serve --detach exited ${started.status}: ${(started.stdout + started.stderr).trim().slice(0, 300)}`);
+        let message = null;
+        try {
+          const url = /https?:\/\/[^\s]+/.exec(started.stdout);
+          if (!url) message = `doug board serve --detach printed no URL: ${started.stdout.trim()}`;
+          else {
+            const probe = spawnNode("-e", [`fetch(process.argv[1]).then((r) => { console.log(r.status); }, (e) => { console.log("error " + e.message); })`, url[0]]);
+            if (probe.stdout.trim() !== "200") message = `GET ${url[0]} answered ${probe.stdout.trim() || probe.stderr.trim()}, not 200`;
+          }
+        } finally {
+          // Always stop the server, whatever the probe found: a rehearsal never leaves one running.
+          const stopped = spawnNode(CLI, ["board", "serve", dir, "--stop"]);
+          if (stopped.status !== 0) message = `${message ? `${message}; ` : ""}doug board serve --stop exited ${stopped.status}: ${(stopped.stdout + stopped.stderr).trim().slice(0, 300)}`;
+        }
+        return message ? fail(message) : pass("the served page answered 200 and --stop ended it");
+      },
+    },
+  ],
+  // memory: recall makes no model call; reflect, model regen and ideas each make one cheap-row call through
+  // memory.mjs, so they are command stages (the runner's claude binary and the stage's cap go through
+  // --claude-bin and --max-usd, never the ambient defaults).
+  memory: [
+    {
+      kind: "act",
+      name: "recall",
+      run: ({ dir }) => {
+        const { recallQuery, expectText } = ordersSuite().rehearsal.memory;
+        return assertRecalled(dir, { query: recallQuery, expectText });
+      },
+    },
+    {
+      kind: "command",
+      name: "reflect",
+      run: (ctx) => {
+        const { dir } = ctx;
+        const { expectText } = ordersSuite().rehearsal.memory;
+        const listed = memoryLessons(dir);
+        const target = listed.find((l) => l.text.includes(expectText)) || listed[0];
+        if (!target) return fail("the memory store holds no lesson to credit");
+        const reportFile = join(dir, ".doug/.state/scratch/memory-report.json");
+        mkdirSync(dirname(reportFile), { recursive: true });
+        // A minimal workflow report: one verified task that was given the seeded lesson, so reflect credits it.
+        writeFileSync(reportFile, JSON.stringify({ ok: true, plan: "memory rehearsal", levels: [{ index: 0, tasks: [{ id: "memory-rehearsal", verified: true, reviewed: true, passes: 1, memoryUsed: [target.id], ledger: [] }] }] }, null, 2) + "\n");
+        const r = memoryCommand(["reflect", reportFile], ctx);
+        if (r.status !== 0) return fail(`memory.mjs reflect exited ${r.status}: ${(r.stdout + r.stderr).trim().slice(-400)}`, r.cost);
+        const after = memoryLessons(dir).find((l) => l.id === target.id);
+        if (!after || after.helpful <= target.helpful) return fail(`lesson ${target.id}'s helpful count did not rise (${target.helpful} -> ${after ? after.helpful : "gone"})`, r.cost);
+        return pass(`reflect credited lesson ${target.id} (helpful ${target.helpful} -> ${after.helpful})`, { cost: r.cost });
+      },
+    },
+    {
+      kind: "command",
+      name: "model-regen",
+      run: (ctx) => {
+        const r = memoryCommand(["model", "regen"], ctx);
+        if (r.status !== 0) return fail(`memory.mjs model regen exited ${r.status}: ${(r.stdout + r.stderr).trim().slice(-400)}`, r.cost);
+        const file = join(ctx.dir, ".doug/project-model.md");
+        if (!existsSync(file) || readFileSync(file, "utf8").trim().length === 0) return fail(".doug/project-model.md is missing or empty after model regen", r.cost);
+        return pass("model regen wrote a non-empty .doug/project-model.md", { cost: r.cost });
+      },
+    },
+    {
+      kind: "command",
+      name: "ideas",
+      run: (ctx) => {
+        const cardsOf = () => boardCards(ctx.dir);
+        const before = cardsOf();
+        const r = memoryCommand(["ideas"], ctx);
+        if (r.status !== 0) return fail(`memory.mjs ideas exited ${r.status}: ${(r.stdout + r.stderr).trim().slice(-400)}`, r.cost);
+        const after = cardsOf();
+        const readyBefore = JSON.stringify(before.filter((c) => c.column === "ready"));
+        if (JSON.stringify(after.filter((c) => c.column === "ready")) !== readyBefore) return fail("memory.mjs ideas changed the Ready column", r.cost);
+        const known = new Set(before.map((c) => c.id));
+        const stray = after.filter((c) => !known.has(c.id) && c.column !== "backlog").map((c) => c.id);
+        if (stray.length) return fail(`memory.mjs ideas filed ${stray.join(", ")} outside Backlog`, r.cost);
+        return pass(`ideas filed ${after.length - before.length} card(s) to Backlog only`, { cost: r.cost });
+      },
+    },
+  ],
+  // decide: /doug-decide writes the proposal diff and stops at its apply/skip gate (AskUserQuestion is absent in
+  // `claude -p`); the apply act answers it the way step 5 does.
+  decide: [
+    {
+      kind: "session",
+      name: "propose",
+      maxTurns: 15,
+      prompt: () => {
+        const { title } = ordersSuite().rehearsal.decide;
+        return [`/doug-decide decision "${title}" --file ${DECISION_BODY_RELPATH}`, "Stop at the apply/skip question as the skill says: do not apply the diff and do not commit."].join("\n\n");
+      },
+      assert: (ctx) => {
+        if (!pluginsLoaded(ctx.stream, ["doug-flow"])) return fail("the init event's plugins did not name doug-flow");
+        if (!slashCommandPresent(ctx.stream, "doug-flow:doug-decide")) return fail("the init event's slash_commands did not carry doug-flow:doug-decide");
+        const held = heldAtGate(ctx, []);
+        return held.ok ? assertDecisionHeld(ctx.dir) : held;
+      },
+    },
+    {
+      kind: "act",
+      name: "apply",
+      run: ({ dir }) => {
+        const pending = pendingDecisionProposals(dir);
+        if (pending.length !== 1) return fail(`expected exactly one pending decision proposal under .doug/.state/learn/, found ${pending.length}`);
+        const applied = act(LEARN_MJS, ["apply", pending[0]], dir);
+        if (!applied.ok) return fail(`learn.mjs apply failed: ${applied.stderr || applied.stdout}`);
+        const target = diffTarget(pending[0]);
+        if (!target || !existsSync(join(dir, target))) return fail(`learn.mjs apply exited 0 but ${target || "the proposal's target"} does not exist`);
+        return pass(`applied: ${target}`);
+      },
+    },
+  ],
+  // swarm-skill: /doug-swarm <card> plans with swarm on and stops at the plan approval (AskUserQuestion is absent in
+  // `claude -p`); the approve act answers it as /doug-next's step 3 does, and a second session runs, lands and moves
+  // the card to Done.
+  "swarm-skill": [
+    {
+      kind: "session",
+      name: "gate",
+      maxTurns: 40,
+      prompt: (ctx) => [`/doug-swarm ${cardIdOf(ctx)}`, "Do sections 1 to 3 only: pick the card, plan it with swarm on, show the plan, then stop at the approval gate as the skill says. Do not invoke the doug-board skill."].join("\n\n"),
+      assert: (ctx) => assertSwarmGateHeld(ctx.dir, ctx.stream, { plugins: ["doug-flow"], command: "doug-flow:doug-swarm", cardId: cardIdOf(ctx) }),
+    },
+    {
+      kind: "act",
+      name: "approve",
+      run: ({ dir }) => {
+        const approve = act(PLAN_MJS, ["approve"], dir);
+        if (!approve.ok) return fail(`plan.mjs approve failed: ${approve.stderr || approve.stdout}`);
+        const anchor = act(PLAN_MJS, ["anchor"], dir);
+        if (!anchor.ok) return fail(`plan.mjs anchor failed: ${anchor.stderr || anchor.stdout}`);
+        return pass("approved and anchored the plan");
+      },
+    },
+    {
+      kind: "session",
+      name: "run",
+      maxTurns: 80,
+      prompt: (ctx) =>
+        [
+          `/doug-swarm ${cardIdOf(ctx)}`,
+          "I approved the plan as shown and anchored it (it is .doug/plan.json, approved, swarm on). Resume at section 4: run swarm-launch, save the result object to .doug/.state/last-report.json, then land as section 5 says (plan.mjs done, plan.mjs land, the card to Done with the merge commit). Do not invoke the doug-board or run-report skill, and stop before section 6: file no follow-up cards and do not ask the continue gate.",
+        ].join("\n\n"),
+      assert: (ctx) => {
+        const id = cardIdOf(ctx);
+        const done = assertImplemented(ctx.dir, ctx.stream, { plugins: ["doug-flow"], requireWorkers: true });
+        if (!done.ok) return done;
+        let card;
+        try {
+          card = boardCards(ctx.dir).find((c) => c.id === id);
+        } catch (err) {
+          return fail(`cannot read the board: ${err.message}`);
+        }
+        if (!card || card.column !== "done") return fail(`the fixture board does not have ${id} in done`);
+        const merged = assertTwoParents(ctx.dir);
+        if (!merged.ok) return merged;
+        if (!card.source || !String(card.source).includes(merged.commit.slice(0, 7))) return fail(`${id}'s source does not name the merge commit ${merged.commit} (source: ${card.source || "none"})`);
+        const held = runHeldOutAndClean(ctx.dir, heldOutOf(ctx, id, undefined));
+        return held.ok ? pass(`swarmed and landed as ${merged.commit}`, { commit: merged.commit }) : held;
+      },
     },
   ],
 };
@@ -1086,7 +1791,10 @@ export const SCENARIO_STAGES = {
 // board and docs/live-runs.md AFTER the code commit ("Board: <id> done as <sha>"), so HEAD is that board commit,
 // not the code commit — take every commit since the fixture's recorded baseline instead of assuming HEAD is it,
 // require that one of them changes both owned files, and require the board's `source` to name THAT commit.
-export function assertHandBuilt({ dir, baseline }) {
+export function assertHandBuilt(ctx) {
+  const { dir, baseline } = ctx;
+  const id = cardIdOf(ctx);
+  const owned = ownedFilesOf(ctx, id, ["src/duration.ts", "tests/duration.test.ts"]);
   if (!baseline) return fail("no baseline commit was recorded for this fixture");
   let shas;
   try {
@@ -1098,24 +1806,24 @@ export function assertHandBuilt({ dir, baseline }) {
   let codeCommit = null;
   for (const sha of shas) {
     const files = execFileSync("git", ["show", "--name-only", "--pretty=format:", sha], { cwd: dir, encoding: "utf8", env: cleanEnv() }).split("\n").filter(Boolean);
-    if (files.includes("src/duration.ts") && files.includes("tests/duration.test.ts")) {
+    if (owned.every((f) => files.includes(f))) {
       codeCommit = sha;
       break;
     }
   }
-  if (!codeCommit) return fail(`no commit since the fixture baseline changes both src/duration.ts and tests/duration.test.ts (commits since baseline: ${shas.join(", ")})`);
+  if (!codeCommit) return fail(`no commit since the fixture baseline changes both ${owned.join(" and ")} (commits since baseline: ${shas.join(", ")})`);
   let board;
   try {
     board = JSON.parse(readFileSync(boardPath(dir), "utf8"));
   } catch (err) {
     return fail(`could not read the fixture board: ${err.message}`);
   }
-  const card = (board.cards || []).find((c) => c.id === "fix-hours");
-  if (!card || card.column !== "done") return fail("the fixture board does not have fix-hours in done");
-  if (!card.source || !String(card.source).includes(codeCommit.slice(0, 7))) return fail(`fix-hours's source does not name the code commit ${codeCommit} (source: ${card.source || "none"})`);
+  const card = (board.cards || []).find((c) => c.id === id);
+  if (!card || card.column !== "done") return fail(`the fixture board does not have ${id} in done`);
+  if (!card.source || !String(card.source).includes(codeCommit.slice(0, 7))) return fail(`${id}'s source does not name the code commit ${codeCommit} (source: ${card.source || "none"})`);
   const runs = existsSync(join(dir, "docs/live-runs.md")) ? readFileSync(join(dir, "docs/live-runs.md"), "utf8") : "";
-  if (!runs.includes("`fix-hours`") || !runs.includes("hand track: a gated by-hand change")) return fail("docs/live-runs.md carries no hand-track entry for fix-hours (board.mjs record --hand did not run)");
-  const held = runHeldOutAndClean(dir);
+  if (!runs.includes(`\`${id}\``) || !runs.includes("hand track: a gated by-hand change")) return fail(`docs/live-runs.md carries no hand-track entry for ${id} (board.mjs record --hand did not run)`);
+  const held = runHeldOutAndClean(dir, heldOutOf(ctx, id, undefined));
   if (!held.ok) return held;
   return pass(`built as ${codeCommit}`, { commit: codeCommit });
 }
@@ -1128,9 +1836,20 @@ const AUTO_CARDS = [
 
 // The auto scenario's gate stage: a bare `/doug-next --auto` shows the queue and asks its one approval, which is denied
 // in print mode, so both cards are still Ready, only the fixture commit exists, and no source file was touched.
-export function assertAutoGateHeld(dir, stream) {
-  for (const c of AUTO_CARDS) {
-    const held = assertGateHeld(dir, stream, { plugins: ["doug-flow"], command: "doug-flow:doug-next", cardId: c.id, unchangedFiles: AUTO_CARDS.flatMap((x) => x.files.slice(0, 1)) });
+// The auto scenario's Ready hand cards and its Backlog card: the ts-orders descriptor's when the fixture names them,
+// else the ts-basic constants.
+function autoReadyCards(cards) {
+  return Array.isArray(cards) && cards.length ? cards.filter((c) => c.column === "ready").map((c) => ({ id: c.id, files: c.files, heldOut: c.heldOut })) : AUTO_CARDS;
+}
+function autoBacklogCard(cards) {
+  const b = Array.isArray(cards) ? cards.find((c) => c.column === "backlog") : null;
+  return b ? { id: b.id, goal: b.goal } : AUTO_BACKLOG_CARD;
+}
+
+export function assertAutoGateHeld(dir, stream, { cards } = {}) {
+  const ready = autoReadyCards(cards);
+  for (const c of ready) {
+    const held = assertGateHeld(dir, stream, { plugins: ["doug-flow"], command: "doug-flow:doug-next", cardId: c.id, unchangedFiles: ready.flatMap((x) => x.files.slice(0, 1)) });
     if (!held.ok) return held;
   }
   return pass("gate held: the queue approval was not given, and both cards are untouched");
@@ -1146,11 +1865,24 @@ function toolUseNames(stream) {
   return names;
 }
 
+// What the card's queen reported when it stopped (reason, seat, detail), or "" when no card-report.json says so.
+function queenStopNote(dir, id) {
+  try {
+    const r = JSON.parse(readFileSync(join(dir, ".doug/.state/reports", id, "card-report.json"), "utf8"));
+    if (!r || r.ok === true || !r.reason) return "";
+    return `card ${id} queen stopped: ${r.reason}${r.stoppedAt ? ` at ${r.stoppedAt}` : ""}${r.detail ? ` (${r.detail})` : ""}; `;
+  } catch {
+    return "";
+  }
+}
+
 // The auto scenario's build assertion: doug-hand's landing for EACH card (a code commit changing that card's source
 // and test files, the card Done with a `source` naming it, a hand-track entry in docs/live-runs.md, its held-out
 // test passing), and no AskUserQuestion in the stream: a gate prompt between the cards is exactly what autopilot
 // must not do. Never throws on a missing piece; every miss names the card.
-export function assertAutoBuilt({ dir, baseline, stream }) {
+export function assertAutoBuilt({ dir, baseline, stream, cards }) {
+  const ready = autoReadyCards(cards);
+  const backlogCard = autoBacklogCard(cards);
   if (!baseline) return fail("no baseline commit was recorded for this fixture");
   if (toolUseNames(stream).includes("AskUserQuestion")) return fail("the build stream carries an AskUserQuestion tool_use: autopilot asked a question between or within the cards");
   let shas;
@@ -1167,10 +1899,10 @@ export function assertAutoBuilt({ dir, baseline, stream }) {
     return fail(`could not read the fixture board: ${err.message}`);
   }
   const runs = existsSync(join(dir, "docs/live-runs.md")) ? readFileSync(join(dir, "docs/live-runs.md"), "utf8") : "";
-  const backlog = (board.cards || []).find((x) => x.id === AUTO_BACKLOG_CARD.id);
-  if (!backlog || backlog.column !== "backlog" || backlog.goal !== AUTO_BACKLOG_CARD.goal) return fail(`the Backlog card ${AUTO_BACKLOG_CARD.id} was moved or changed: unlimited autopilot must take Ready cards only`);
+  const backlog = (board.cards || []).find((x) => x.id === backlogCard.id);
+  if (!backlog || backlog.column !== "backlog" || backlog.goal !== backlogCard.goal) return fail(`the Backlog card ${backlogCard.id} was moved or changed: unlimited autopilot must take Ready cards only`);
   const commits = [];
-  for (const c of AUTO_CARDS) {
+  for (const c of ready) {
     let codeCommit = null;
     for (const sha of shas) {
       const files = execFileSync("git", ["show", "--name-only", "--pretty=format:", sha], { cwd: dir, encoding: "utf8", env: cleanEnv() }).split("\n").filter(Boolean);
@@ -1179,14 +1911,14 @@ export function assertAutoBuilt({ dir, baseline, stream }) {
         break;
       }
     }
-    if (!codeCommit) return fail(`no commit since the fixture baseline changes both ${c.files.join(" and ")} (card ${c.id}; commits since baseline: ${shas.join(", ")})`);
+    if (!codeCommit) return fail(`${queenStopNote(dir, c.id)}no commit since the fixture baseline changes both ${c.files.join(" and ")} (card ${c.id}; commits since baseline: ${shas.join(", ")})`);
     const card = (board.cards || []).find((x) => x.id === c.id);
     if (!card || card.column !== "done") return fail(`the fixture board does not have ${c.id} in done`);
     if (!card.source || !String(card.source).includes(codeCommit.slice(0, 7))) return fail(`${c.id}'s source does not name the code commit ${codeCommit} (source: ${card.source || "none"})`);
     if (!runs.includes(`\`${c.id}\``) || !runs.includes("hand track: a gated by-hand change")) return fail(`docs/live-runs.md carries no hand-track entry for ${c.id} (board.mjs record --hand did not run)`);
     commits.push(codeCommit);
   }
-  for (const c of AUTO_CARDS) {
+  for (const c of ready) {
     const held = runHeldOutAndClean(dir, c.heldOut);
     if (!held.ok) return fail(`${c.id}: ${held.message}`);
   }
@@ -1195,9 +1927,9 @@ export function assertAutoBuilt({ dir, baseline, stream }) {
 
 // The parallel scenario's gate stage: assertAutoGateHeld (both cards Ready, only the fixture commit, no source touched)
 // plus no Workflow launch: the denied queue approval must stop main before any queen starts.
-export function assertParallelGateHeld(dir, stream) {
+export function assertParallelGateHeld(dir, stream, { cards } = {}) {
   if (toolUseNames(stream).includes("Workflow")) return fail("the gate stream carries a Workflow tool_use: a queen was launched before the queue approval");
-  return assertAutoGateHeld(dir, stream);
+  return assertAutoGateHeld(dir, stream, { cards });
 }
 
 // The parallel scenario's build assertion (card parallel-card-queens, B13): a doug-implement Workflow launch and a
@@ -1205,8 +1937,8 @@ export function assertParallelGateHeld(dir, stream) {
 // once, not one after the other); main edited no source file and asked no question; each card has a per-card report
 // under .doug/.state/reports/<id>/; no .doug/plan.json; the flow card landed as a merge commit with two parents; the
 // hand card has its code commit, Done record and hand-track entry; both held-out tests pass. Every miss names the card.
-const PARALLEL_FLOW = { id: "fix-hours", files: ["src/duration.ts", "tests/duration.test.ts"], heldOut: { id: "fix-hours", file: HELDOUT_FILE } };
-const PARALLEL_HAND = { id: "add-truncate", files: ["src/strings.ts", "tests/strings.test.ts"], heldOut: { id: "add-truncate", file: join(ROOT, "evals/heldout/add-truncate.test.ts") } };
+const PARALLEL_FLOW_BASIC = { id: "fix-hours", files: ["src/duration.ts", "tests/duration.test.ts"], heldOut: { id: "fix-hours", file: HELDOUT_FILE } };
+const PARALLEL_HAND_BASIC = { id: "add-truncate", files: ["src/strings.ts", "tests/strings.test.ts"], heldOut: { id: "add-truncate", file: join(ROOT, "evals/heldout/add-truncate.test.ts") } };
 
 function toolUses(stream, { mainOnly = false } = {}) {
   const uses = [];
@@ -1218,7 +1950,12 @@ function toolUses(stream, { mainOnly = false } = {}) {
   return uses;
 }
 
-export function assertParallelBuilt({ dir, baseline, stream }) {
+export function assertParallelBuilt({ dir, baseline, stream, cards }) {
+  // The pair: the ts-orders descriptor's flow card and hand card when the fixture names them, else the ts-basic constants.
+  const named = Array.isArray(cards) && cards.length ? cards : null;
+  const asPair = (c) => ({ id: c.id, files: c.files, heldOut: c.heldOut });
+  const PARALLEL_FLOW = named ? asPair(named.find((c) => c.track !== "hand")) : PARALLEL_FLOW_BASIC;
+  const PARALLEL_HAND = named ? asPair(named.find((c) => c.track === "hand")) : PARALLEL_HAND_BASIC;
   if (!baseline) return fail("no baseline commit was recorded for this fixture");
   const uses = toolUses(stream);
   const mainUses = toolUses(stream, { mainOnly: true });
@@ -1231,9 +1968,13 @@ export function assertParallelBuilt({ dir, baseline, stream }) {
   const launch = (needle) => uses.findIndex((u) => u.name === "Workflow" && [u.input && u.input.name, u.input && u.input.scriptPath].some((v) => typeof v === "string" && v.includes(needle)));
   const firstLand = uses.findIndex((u) => u.name === "Bash" && /plan\.mjs"?\s+land(-card)?\b/.test(String(u.input && u.input.command)));
   if (firstLand < 0) return fail("no plan.mjs land or land-card Bash call in the build stream");
-  const implement = launch("doug-implement");
+  // doug-next launches each queen by its per-card script, .doug/.state/reports/<id>/queen.js, whose path names neither
+  // doug-implement nor card-queen; that launch counts for the card it is under.
+  const first = (...ix) => ix.filter((i) => i >= 0).sort((a, b) => a - b)[0] ?? -1;
+  const perCard = (id) => launch(`/.doug/.state/reports/${id}/queen.js`);
+  const implement = first(launch("doug-implement"), perCard(PARALLEL_FLOW.id));
   if (implement < 0 || implement > firstLand) return fail("no doug-implement Workflow launch before the first plan.mjs land/land-card call: the flow card's queen did not start before landing");
-  const queen = launch("card-queen");
+  const queen = first(launch("card-queen"), perCard(PARALLEL_HAND.id));
   if (queen < 0 || queen > firstLand) return fail("no card-queen.js Workflow launch before the first plan.mjs land/land-card call: the hand card's queen did not start before landing");
   for (const [c, name] of [[PARALLEL_FLOW, "last-report.json"], [PARALLEL_HAND, "card-report.json"]]) {
     if (!existsSync(join(dir, ".doug/.state/reports", c.id, name))) return fail(`no per-card report for ${c.id}: .doug/.state/reports/${c.id}/${name} is missing`);
@@ -1301,6 +2042,286 @@ function landAndVerify(dir, heldOut) {
   return pass(`landed as ${merged.commit}`, { commit: merged.commit });
 }
 
+// ---- Card rehearsal-harder-tier: the hard tier's build assertions and stages ------------------------------------------
+
+function gitLines(dir, ...args) {
+  return execFileSync("git", args, { cwd: dir, encoding: "utf8", env: cleanEnv() }).split("\n").filter(Boolean);
+}
+
+// The one commit a card's board `source` names, among the commits since the baseline (`inRange`, full shas). The source
+// is read for 7-40 character hex runs, each resolved with rev-parse and kept when it is in range. Never a search of
+// history by file: with overlapping cards that credits a later card's commit to an earlier one. Returns { sha } or { error }.
+function commitFromSource(dir, card, source, inRange) {
+  const found = new Set();
+  for (const tok of String(source || "").match(/\b[0-9a-f]{7,40}\b/gi) || []) {
+    let full = null;
+    try {
+      full = gitLines(dir, "rev-parse", "--verify", "--quiet", `${tok}^{commit}`)[0] || null;
+    } catch {
+      // not a commit in this repository
+    }
+    if (full && inRange.includes(full)) found.add(full);
+  }
+  if (found.size === 0) return { error: `${card.id}'s source names no commit since the baseline (source: ${source || "none"})` };
+  if (found.size > 1) return { error: `${card.id}'s source names more than one commit since the baseline, so its commit is ambiguous (${[...found].join(", ")}; source: ${source})` };
+  return { sha: [...found][0] };
+}
+
+// The per-card checks 4.1.4.1 to 4.1.4.6 shared by the queue check and the hard hand check: Done, the commit from its
+// source and not credited to another card, a two-parent merge for a non-hand card, the required files (and a tests/ path
+// under requireTestFile) in `git diff --name-only <sha>^1 <sha>`, and a hand-track entry for a hand card. Returns { sha }
+// or { error }.
+function checkLandedCard({ dir, c, board, runs, inRange, credited }) {
+  const bc = (board.cards || []).find((x) => x.id === c.id);
+  if (!bc || bc.column !== "done") return { error: `${queenStopNote(dir, c.id)}the fixture board does not have ${c.id} in done` };
+  const credit = commitFromSource(dir, c, bc.source, inRange);
+  if (credit.error) return credit;
+  const sha = credit.sha;
+  const other = [...credited.entries()].find(([id, s]) => s === sha && id !== c.id);
+  if (other) return { error: `${c.id}'s source names ${sha}, already credited to ${other[0]}` };
+  if (c.track !== "hand") {
+    const parents = gitLines(dir, "rev-list", "--parents", "-n", "1", sha)[0].trim().split(" ");
+    if (parents.length < 3) return { error: `${c.id} did not land as a merge commit with two parents (${sha} has ${parents.length - 1})` };
+  }
+  const changed = gitLines(dir, "diff", "--name-only", `${sha}^1`, sha);
+  const required = Array.isArray(c.requiredFiles) ? c.requiredFiles : Array.isArray(c.files) ? c.files : [];
+  const missing = required.filter((f) => !changed.includes(f));
+  if (missing.length) return { error: `${c.id}'s commit ${sha} does not change ${missing.join(", ")} (changed: ${changed.join(", ") || "none"})` };
+  if (c.requireTestFile && !changed.some((f) => f.startsWith("tests/"))) return { error: `${c.id}'s commit ${sha} changes no file under tests/ (changed: ${changed.join(", ") || "none"})` };
+  if (c.track === "hand" && (!runs.includes(`\`${c.id}\``) || !runs.includes("hand track: a gated by-hand change"))) return { error: `docs/live-runs.md carries no hand-track entry for ${c.id} (board.mjs record --hand did not run)` };
+  return { sha };
+}
+
+function readBoardAndRuns(dir) {
+  const board = JSON.parse(readFileSync(boardPath(dir), "utf8"));
+  const runs = existsSync(join(dir, "docs/live-runs.md")) ? readFileSync(join(dir, "docs/live-runs.md"), "utf8") : "";
+  return { board, runs };
+}
+
+// The hard tier's N-card queue check (used by hard-auto, and by hard-parallel after its stream checks): for every Ready
+// card in descriptor order, the card is Done, its commit is the one its `source` names (never a search of history),
+// each commit is credited to one card, a non-hand card landed as a two-parent merge, the commit changed the required
+// files, a hand card is recorded, and every dep landed first. Then each card's held-out files run on the end state. A
+// Backlog card must be untouched and no AskUserQuestion may appear. Every miss names the card; it never throws.
+export function assertQueueBuilt({ dir, baseline, stream, cards }) {
+  if (!baseline) return fail("no baseline commit was recorded for this fixture");
+  if (toolUseNames(stream).includes("AskUserQuestion")) return fail("the build stream carries an AskUserQuestion tool_use: autopilot asked a question between or within the cards");
+  const all = Array.isArray(cards) ? cards : [];
+  const ready = all.filter((c) => c.column === "ready");
+  try {
+    const inRange = gitLines(dir, "rev-list", `${baseline}..HEAD`);
+    if (!inRange.length) return fail("no commits since the fixture baseline; the build never committed");
+    const { board, runs } = readBoardAndRuns(dir);
+    const backlogCard = all.find((c) => c.column === "backlog");
+    if (backlogCard) {
+      const b = (board.cards || []).find((x) => x.id === backlogCard.id);
+      if (!b || b.column !== "backlog" || b.goal !== backlogCard.goal) return fail(`the Backlog card ${backlogCard.id} was moved or changed: unlimited autopilot must take Ready cards only`);
+    }
+    const credited = new Map();
+    for (const c of ready) {
+      const r = checkLandedCard({ dir, c, board, runs, inRange, credited });
+      if (r.error) return fail(r.error);
+      for (const d of c.deps || []) {
+        const dep = credited.get(d);
+        if (!dep) continue;
+        let ancestor = false;
+        try {
+          execFileSync("git", ["merge-base", "--is-ancestor", dep, r.sha], { cwd: dir, env: cleanEnv(), stdio: "ignore" });
+          ancestor = true;
+        } catch {
+          ancestor = false;
+        }
+        if (!ancestor) return fail(`${c.id} landed before its dep ${d}`);
+      }
+      credited.set(c.id, r.sha);
+    }
+    for (const c of ready) {
+      const held = runHeldOutsAndClean(dir, c);
+      if (!held.ok) return fail(`${c.id}: ${held.message}`);
+    }
+    const commits = [...credited.values()];
+    const newest = inRange.find((s) => commits.includes(s));
+    return pass(`built as ${commits.join(", ")}`, { commit: newest, commits });
+  } catch (err) {
+    return fail(`the queue check could not read the fixture: ${err && err.message ? err.message : String(err)}`);
+  }
+}
+
+const reEscape = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+// hard-parallel's build: the stream checks of assertParallelBuilt generalised to N cards, then assertQueueBuilt. Main
+// edited no file under src/ and made no plan.json; every queued card has a queen.js Workflow launch; at least two
+// launches come before the first plan.mjs land/land-card call (cards ran at once); every card has its per-card report;
+// and for each pair of queued cards whose owned files overlap, the later card's first queen launch comes after the
+// earlier card's land call (`plan.mjs land-card <id>` or `plan.mjs land --card <id>`).
+export function assertHardParallelBuilt({ dir, baseline, stream, cards }) {
+  if (!baseline) return fail("no baseline commit was recorded for this fixture");
+  const queued = (Array.isArray(cards) ? cards : []).filter((c) => c.column === "ready");
+  const uses = toolUses(stream);
+  const mainUses = toolUses(stream, { mainOnly: true });
+  if (uses.some((u) => u.name === "AskUserQuestion")) return fail("the build stream carries an AskUserQuestion tool_use: autopilot asked a question");
+  for (const u of mainUses) {
+    if (!["Edit", "Write", "MultiEdit", "NotebookEdit"].includes(u.name)) continue;
+    const p = String((u.input && (u.input.file_path || u.input.notebook_path)) || "").replaceAll("\\", "/");
+    if (/(^|\/)src\//.test(p.startsWith(dir) ? p.slice(dir.length) : p) && !p.includes("/.doug/")) return fail(`main edited a source file under src/ itself (${u.name} ${p}): the queens' seats do the building`);
+  }
+  if (existsSync(join(dir, ".doug/plan.json"))) return fail(".doug/plan.json exists: a parallel flow card's plan is per card (.doug/plans/<id>.json)");
+  const launchOf = (id) =>
+    uses.findIndex((u) => u.name === "Workflow" && [u.input && u.input.name, u.input && u.input.scriptPath].some((v) => typeof v === "string" && v.includes(`/.doug/.state/reports/${id}/queen.js`)));
+  const launches = new Map();
+  for (const c of queued) {
+    const i = launchOf(c.id);
+    if (i < 0) return fail(`no Workflow launch of .doug/.state/reports/${c.id}/queen.js in the build stream: card ${c.id}'s queen never started`);
+    launches.set(c.id, i);
+  }
+  const firstLand = uses.findIndex((u) => u.name === "Bash" && /plan\.mjs"?\s+land(-card)?\b/.test(String(u.input && u.input.command)));
+  if (firstLand < 0) return fail("no plan.mjs land or land-card Bash call in the build stream");
+  const before = [...launches.values()].filter((i) => i < firstLand).length;
+  if (before < 2) return fail(`only ${before} queen launch(es) come before the first plan.mjs land/land-card call; at least two cards must run at once`);
+  for (const c of queued) {
+    const name = c.track === "hand" ? "card-report.json" : "last-report.json";
+    if (!existsSync(join(dir, ".doug/.state/reports", c.id, name))) return fail(`no per-card report for ${c.id}: .doug/.state/reports/${c.id}/${name} is missing`);
+  }
+  // A land call's id is the literal card id or a $name / ${name} / "$name" bound by the last `name=value` assignment
+  // before the call in the same command (bare, single- or double-quoted value); an unset or other-valued variable is no land.
+  const landsCard = (command, id) => {
+    const lit = new RegExp(`plan\\.mjs"?\\s+(?:land-card\\s+${reEscape(id)}(?![\\w-])|land\\s+--card\\s+${reEscape(id)}(?![\\w-]))`);
+    if (lit.test(command)) return true;
+    const call = /plan\.mjs"?\s+(?:land-card|land\s+--card)\s+"?\$(?:\{(\w+)\}|(\w+))"?(?![\w-])/g;
+    for (let m; (m = call.exec(command)); ) {
+      const name = m[1] || m[2];
+      const assign = new RegExp(`(?:^|[\\s;&|(])${name}=("[^"]*"|'[^']*'|[^\\s;&|"']*)`, "g");
+      let value = null;
+      for (let a; (a = assign.exec(command.slice(0, m.index))); ) value = a[1].replace(/^(["'])(.*)\1$/, "$2");
+      if (value === id) return true;
+    }
+    return false;
+  };
+  const landOf = (id) => uses.findIndex((u) => u.name === "Bash" && landsCard(String(u.input && u.input.command), id));
+  for (let i = 0; i < queued.length; i++) {
+    for (let j = i + 1; j < queued.length; j++) {
+      const a = queued[i];
+      const b = queued[j];
+      const shared = (a.files || []).filter((f) => (b.files || []).includes(f));
+      if (!shared.length) continue;
+      const aLand = landOf(a.id);
+      if (aLand < 0) return fail(`${a.id} and ${b.id} share ${shared.join(", ")}, but no plan.mjs land-card ${a.id} (or land --card ${a.id}) call is in the build stream to order them by`);
+      if (launches.get(b.id) < aLand) return fail(`${b.id} started its queen before ${a.id} landed, though they share ${shared.join(", ")}`);
+    }
+  }
+  return assertQueueBuilt({ dir, baseline, stream, cards });
+}
+
+// hard-hand's build: assertHandBuilt's checks (a baseline, the card Done with a source naming the code commit, a
+// hand-track entry), with the commit read from `source` rather than found by a file search, the required files (and a
+// tests/ path under requireTestFile) in it, and every held-out file run.
+export function assertHardHandBuilt(ctx) {
+  const { dir, baseline } = ctx;
+  const id = cardIdOf(ctx);
+  const named = cardOf(ctx, id);
+  if (!named) return fail(`the stage context carries no card ${id}`);
+  const c = { ...named, track: "hand" };
+  if (!baseline) return fail("no baseline commit was recorded for this fixture");
+  try {
+    const inRange = gitLines(dir, "rev-list", `${baseline}..HEAD`);
+    if (!inRange.length) return fail("no commits since the fixture baseline; the build never committed");
+    const { board, runs } = readBoardAndRuns(dir);
+    const r = checkLandedCard({ dir, c, board, runs, inRange, credited: new Map() });
+    if (r.error) return fail(r.error);
+    const held = runHeldOutsAndClean(dir, c);
+    if (!held.ok) return held;
+    return pass(`built as ${r.sha}`, { commit: r.sha });
+  } catch (err) {
+    return fail(`the hand check could not read the fixture: ${err && err.message ? err.message : String(err)}`);
+  }
+}
+
+// The hard tier's swarm-skill scenario exists to prove the lead splits a six-file, three-module task: some swarmed task
+// must carry swarm.briefs >= 2 (the first split's round-one count, so a re-brief does not inflate it) and at least
+// two workers. The failure names the task, the brief count and the lead's splitReason.
+function assertSplit(dir) {
+  const { ok, reason, report } = readReport(dir);
+  if (!ok) return fail(reason);
+  const swarmed = reportTasks(report).filter((t) => Array.isArray(t.workers) && t.workers.length);
+  const briefsOf = (t) => (t.swarm && Number.isFinite(t.swarm.briefs) ? t.swarm.briefs : 0);
+  if (swarmed.some((t) => briefsOf(t) >= 2 && t.workers.length >= 2)) return pass("split into two or more briefs");
+  const t = swarmed[0];
+  const n = briefsOf(t);
+  const why = t.swarm && t.swarm.splitReason ? t.swarm.splitReason : "none recorded";
+  return fail(`task ${t.id}: the lead did not split it (${n} brief${n === 1 ? "" : "s"}, ${t.workers.length} worker${t.workers.length === 1 ? "" : "s"}); splitReason: ${why}`);
+}
+
+// hard-swarm-skill's run assert: the cheap swarm-skill run assert, with every held-out file of the card run.
+function assertSwarmSkillRun(ctx) {
+  const id = cardIdOf(ctx);
+  const done = assertImplemented(ctx.dir, ctx.stream, { plugins: ["doug-flow"], requireWorkers: true });
+  if (!done.ok) return done;
+  const split = assertSplit(ctx.dir);
+  if (!split.ok) return split;
+  let card;
+  try {
+    card = boardCards(ctx.dir).find((c) => c.id === id);
+  } catch (err) {
+    return fail(`cannot read the board: ${err.message}`);
+  }
+  if (!card || card.column !== "done") return fail(`the fixture board does not have ${id} in done`);
+  const merged = assertTwoParents(ctx.dir);
+  if (!merged.ok) return merged;
+  if (!card.source || !String(card.source).includes(merged.commit.slice(0, 7))) return fail(`${id}'s source does not name the merge commit ${merged.commit} (source: ${card.source || "none"})`);
+  const held = runHeldOutsAndClean(ctx.dir, cardOf(ctx, id) || { id });
+  return held.ok ? pass(`swarmed and landed as ${merged.commit}`, { commit: merged.commit }) : held;
+}
+
+// hard-flow's land act: plan.mjs done, plan.mjs land, a two-parent check, then every held-out file of the card.
+function landAndVerifyAll(dir, card) {
+  const done = act(PLAN_MJS, ["done"], dir);
+  if (!done.ok) return fail(`plan.mjs done failed: ${done.stderr || done.stdout}`);
+  const land = act(PLAN_MJS, ["land"], dir);
+  if (!land.ok) return fail(`plan.mjs land failed: ${land.stderr || land.stdout}`);
+  const merged = assertTwoParents(dir);
+  if (!merged.ok) return merged;
+  const held = runHeldOutsAndClean(dir, card);
+  if (!held.ok) return held;
+  return pass(`landed as ${merged.commit}`, { commit: merged.commit });
+}
+
+// Session-stage turn caps of the hard tier (architecture 3.2); an act stage has none.
+const HARD_TURNS = {
+  "hard-hand": { gate: 18, build: 90 },
+  "hard-flow": { gate: 45, implement: 60 },
+  "hard-swarm-skill": { gate: 60, run: 120 },
+  "hard-start-feature": { spec: 30, architecture: 45, plan: 45 },
+  "hard-auto": { gate: 30, build: 420 },
+  "hard-parallel": { gate: 30, build: 480 },
+};
+const HARD_OVERRIDES = {
+  "hard-hand": { build: { assert: assertHardHandBuilt } },
+  "hard-flow": { land: { run: (ctx) => landAndVerifyAll(ctx.dir, cardOf(ctx, cardIdOf(ctx)) || { id: cardIdOf(ctx) }) } },
+  "hard-swarm-skill": { run: { assert: assertSwarmSkillRun } },
+  "hard-auto": { build: { assert: assertQueueBuilt } },
+  "hard-parallel": { build: { assert: assertHardParallelBuilt } },
+};
+// Each SCENARIO_STAGES[base] stage copied by name, kind, prompt and act, with the hard caps, timeouts and asserts.
+export const HARD_STAGES = Object.fromEntries(
+  HARD_BASES.map((base) => {
+    const hard = `hard-${base}`;
+    return [
+      hard,
+      SCENARIO_STAGES[base].map((stage) => {
+        const copy = { ...stage, ...((HARD_OVERRIDES[hard] || {})[stage.name] || {}) };
+        if (stage.kind === "session") {
+          copy.maxTurns = HARD_TURNS[hard][stage.name];
+          copy.timeoutMs = (hard === "hard-auto" || hard === "hard-parallel") && stage.name === "build" ? HARD_SESSION_TIMEOUT_MS : SESSION_TIMEOUT_MS;
+        }
+        return copy;
+      }),
+    ];
+  }),
+);
+export function stagesFor(scenario) {
+  return HARD_STAGES[scenario] || SCENARIO_STAGES[scenario];
+}
+
 // ---- Running a whole scenario end to end (never called by the tests: it spawns the real claude) ---------------
 
 // Runs every stage of `scenario` in order, stopping at the first failed assertion. Every stage runs through
@@ -1309,18 +2330,25 @@ function landAndVerify(dir, heldOut) {
 // `{ scenario, outcome, stages, totalCost, wallClock, fixtureDir, commit, gate, reportFile, reportSynthesized,
 // failedStage, failedMessage, agentNames }`. For flow/swarm, `reportFile` always exists on return: the real one
 // when the workflow wrote it, otherwise a small synthetic one this function writes (never inventing task rows).
-export function runScenario(scenario, { tempPrefix } = {}) {
+export function runScenario(scenario, { tempPrefix, fixture } = {}) {
   const started = Date.now();
-  const { dir, card, baseline } = prepareFixture({ scenario, tempPrefix });
+  const prepared = prepareFixture({ scenario, fixture, tempPrefix });
+  const { dir, card, cards, baseline } = prepared;
+  // The fixture that prices the stages: the one prepareFixture ran on (none for `start`, an empty repo).
+  const ran = prepared.fixture || null;
   const stages = [];
   let outcome = "passed";
   let commit = null;
   let gate = null;
   let failedStage = null;
   let failedMessage = null;
-  for (const stage of SCENARIO_STAGES[scenario]) {
+  for (const stage of stagesFor(scenario)) {
     const stageStarted = Date.now();
-    const result = stage.kind === "session" ? runSessionStage(stage, { dir, card, baseline, capUsd: capFor(scenario, stage.name) }) : runActStage(stage, { dir, card, baseline });
+    const ctx = { dir, card, cards, fixture: ran, baseline };
+    let result;
+    if (stage.kind === "session") result = runSessionStage(stage, { ...ctx, capUsd: capFor(scenario, stage.name, ran) });
+    else if (stage.kind === "command") result = runCommandStage(stage, { ...ctx, capUsd: capFor(scenario, stage.name, ran) });
+    else result = runActStage(stage, ctx);
     const wallClock = `${Math.round((Date.now() - stageStarted) / 6000) / 10} min`;
     stages.push({ name: stage.name, wallClock, cost: result.cost, streamPath: result.streamPath, message: result.message });
     if (result.commit) commit = result.commit;
@@ -1357,6 +2385,7 @@ export function runScenario(scenario, { tempPrefix } = {}) {
     totalCost,
     wallClock: `${Math.round((Date.now() - started) / 6000) / 10} min`,
     fixtureDir: dir,
+    fixture: ran,
     commit,
     gate,
     reportFile,

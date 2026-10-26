@@ -2024,5 +2024,57 @@ describe("card stop-gate-worktree-agent-fingerprint", () => {
     const r = stopIn(dir, "ag1", wt);
     expect(r.json, JSON.stringify(r.json)).toBeNull();
     expect(cwdsRun(marker)).toEqual([]);
+    // card worktree-skip-origin-at-start: the origin sha the skip relies on comes from the start record.
+    const rec = JSON.parse(readFileSync(join(dir, ".doug/.state/agent-start/test-session/ag1.json"), "utf8"));
+    expect(rec.originHead, "the start record must carry origin/HEAD's sha at start").toBe(git(dir, "rev-parse", "refs/remotes/origin/HEAD^{commit}"));
+  });
+
+  // card worktree-skip-origin-at-start: compare against origin/HEAD as recorded at the agent's start, never the live ref.
+  function addBareOrigin(dir, c0) {
+    const bare = mkdtempSync(join(tmpdir(), "doug-wtfp-bare-"));
+    git(bare, "init", "-q", "--bare");
+    git(dir, "remote", "add", "origin", bare);
+    git(dir, "push", "-q", "origin", `${c0}:refs/heads/main`);
+    git(dir, "fetch", "-q", "origin");
+    git(dir, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main");
+  }
+
+  it("WF10 a worktree agent that commits, pushes to origin's default branch and fetches is verified", () => {
+    const { dir, wt, marker } = makeRemoteFixture({ originAhead: false, wtAt: "origin" });
+    addBareOrigin(dir, git(dir, "rev-parse", "refs/remotes/origin/HEAD^{commit}"));
+    fireStart(dir, "ag1");
+    fireBash(dir, "ag1");
+    writeFileSync(join(wt, "src/a.ts"), "pushed by the agent");
+    git(wt, "add", "src/a.ts");
+    git(wt, "commit", "-q", "-m", "agent work");
+    git(wt, "push", "-q", "origin", "HEAD:refs/heads/main");
+    git(wt, "fetch", "-q", "origin");
+    expect(git(dir, "rev-parse", "refs/remotes/origin/HEAD^{commit}"), "fixture: the fetch moved origin/HEAD to the agent commit").toBe(git(wt, "rev-parse", "HEAD"));
+    stopIn(dir, "ag1", wt);
+    expect(cwdsRun(marker).map(real)).toEqual([real(wt)]);
+  });
+
+  it("WF10b a worktree agent that forges refs/remotes/origin/main to its own commit is verified", () => {
+    const { dir, wt, marker } = makeRemoteFixture({ originAhead: false, wtAt: "origin" });
+    fireStart(dir, "ag1");
+    fireBash(dir, "ag1");
+    writeFileSync(join(wt, "src/a.ts"), "forged by the agent");
+    git(wt, "add", "src/a.ts");
+    git(wt, "commit", "-q", "-m", "agent work");
+    git(dir, "update-ref", "refs/remotes/origin/main", git(wt, "rev-parse", "HEAD"));
+    stopIn(dir, "ag1", wt);
+    expect(cwdsRun(marker).map(real)).toEqual([real(wt)]);
+  });
+
+  it("WF11 a start record without originHead falls back to the start-HEAD check only", () => {
+    const { dir, wt, marker } = makeRemoteFixture({ originAhead: true, wtAt: "origin" });
+    fireStart(dir, "ag1");
+    fireBash(dir, "ag1");
+    const f = join(dir, ".doug/.state/agent-start/test-session/ag1.json");
+    const rec = JSON.parse(readFileSync(f, "utf8"));
+    delete rec.originHead;
+    writeFileSync(f, JSON.stringify(rec));
+    stopIn(dir, "ag1", wt);
+    expect(cwdsRun(marker).map(real)).toEqual([real(wt)]);
   });
 });

@@ -1306,6 +1306,12 @@ describe("stop-gate count check on a credited pre-commit record (card ratchet-pr
     expect(ranMarker(dir), "a baselined command without recorded totals must run, not be credited").toBe(true);
   });
 
+  it("CR2: a record entry with no totals is not credited when only the last-green record holds the command's baseline: the command runs", () => {
+    const dir = makeCredit({ baseline: null, entry: {}, lastGreen: { [CMD]: T } });
+    stopGate(dir);
+    expect(ranMarker(dir), "a command baselined by the last-green record must run, not be credited").toBe(true);
+  });
+
   it("C4b: a recorded {status:\"none\"} for a baselined command is not credited either", () => {
     const dir = makeCredit({ entry: { totals: { status: "none" } } });
     stopGate(dir);
@@ -2008,10 +2014,11 @@ describe("card block-ledger-failing-output", () => {
     expect(typeof ledger.outputTail).toBe("function");
     const hundred = Array.from({ length: 100 }, (_, i) => "l" + (i + 1)).join("\n") + "\n";
     expect(ledger.outputTail(hundred, { enabled: false }).split("\n")).toEqual(Array.from({ length: 40 }, (_, i) => "l" + (61 + i)));
-    const multi = ledger.outputTail("é".repeat(3000), { enabled: false });
+    // trailing "a": 6001 bytes, the 4096-byte cut lands on a continuation byte, so the skip loop must run
+    const multi = ledger.outputTail("é".repeat(3000) + "a", { enabled: false });
     expect(Buffer.byteLength(multi, "utf8")).toBeLessThanOrEqual(4096);
     expect(multi).not.toContain("\uFFFD");
-    expect(multi).toBe("é".repeat(2048));
+    expect(multi).toBe("é".repeat(2047) + "a");
     expect(() => ledger.outputTail(undefined, {})).not.toThrow();
     expect(() => ledger.outputTail(null, undefined)).not.toThrow();
   });
@@ -2103,5 +2110,143 @@ describe("card block-ledger-failing-output", () => {
     for (const text of files) {
       for (let i = 0; i + 6 <= key.length; i++) expect(text, `leaks "${key.slice(i, i + 6)}"`).not.toContain(key.slice(i, i + 6));
     }
+  });
+
+  it("a secret in the failing command string is redacted in failures[0].command, blocks.jsonl and the trace", () => {
+    const key = ["AKIA", "IOSF", "ODNN", "7EXA", "MPLE"].join("");
+    const dir = editedProject({ test: `TOKEN=${key} ${node} -e "process.exit(1)"` });
+    stop(dir);
+    expect(readJsonl(dir, LEDGER)[0].failures[0].command).toBe("[redacted: awsKeyId]");
+    for (const rel of [LEDGER, TRACE]) {
+      const text = existsSync(join(dir, rel)) ? readFileSync(join(dir, rel), "utf8") : "";
+      for (let i = 0; i + 6 <= key.length; i++) expect(text, `leaks "${key.slice(i, i + 6)}"`).not.toContain(key.slice(i, i + 6));
+    }
+  });
+
+  it("a SubagentStop block writes exactly one decision:block trace line and no event:Stop line", () => {
+    const dir = editedProject({ test: "exit 1" }, { agent: AG });
+    subStop(dir);
+    const tl = readJsonl(dir, TRACE);
+    expect(tl.filter((l) => l.event === "Stop")).toHaveLength(0);
+    expect(tl.filter((l) => l.decision === "block")).toHaveLength(1);
+  });
+
+  it("a reused main-Stop red writes its own event:Stop decision:block trace line carrying the reused failures, cwd and tree", () => {
+    const dir = editedProject({ test: `${node} -e "console.log('REUSE-TRACE');process.exit(1)"` });
+    stop(dir);
+    const r2 = stop(dir);
+    expect(r2.json.reason).toMatch(/nothing changed/i);
+    const lines = readJsonl(dir, LEDGER);
+    const tl = readJsonl(dir, TRACE).filter((l) => l.event === "Stop" && l.decision === "block");
+    expect(tl).toHaveLength(2);
+    expect(tl[1].failures).toEqual(lines[1].failures);
+    expect(tl[1].cwd).toBe(lines[1].cwd);
+    expect(tl[1].tree).toBe(lines[1].tree);
+  });
+});
+
+// card block-reason-redacts-command: the block reason the session sees redacts the failing command and its output
+// with the same redactText call as blocks.jsonl, honouring the project's secrets config.
+describe("card block-reason-redacts-command", () => {
+  const LEDGER = ".doug/.state/blocks.jsonl";
+  const node = process.execPath;
+  const KEY = ["AKIA", "IOSF", "ODNN", "7EXA", "MPLE"].join("");
+  const readJsonl = (dir, rel) => {
+    const file = join(dir, rel);
+    if (!existsSync(file)) return [];
+    return readFileSync(file, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l));
+  };
+  const noLeak = (text, key = KEY) => {
+    for (let i = 0; i + 6 <= key.length; i++) expect(text, `leaks "${key.slice(i, i + 6)}"`).not.toContain(key.slice(i, i + 6));
+  };
+  function editedProject(commands, { secrets, files = {} } = {}) {
+    const config = {
+      ...baseConfig,
+      commands,
+      stopGate: { commands: Object.keys(commands), onlyIfEdited: true, maxBlocks: 3, timeoutMs: 10000, requireEvidence: false },
+      ...(secrets ? { secrets } : {}),
+    };
+    const dir = makeProject({ config, git: true });
+    for (const [name, body] of Object.entries(files)) writeFileSync(join(dir, name), body);
+    writeFileSync(join(dir, "a.ts"), "x");
+    runHookScript("edit-loop", { tool_name: "Edit", tool_input: { file_path: "a.ts" } }, { dir });
+    return dir;
+  }
+  const stop = (dir) => runHookScript("stop-gate", { hook_event_name: "Stop" }, { dir });
+  const GEN = `console.log(${JSON.stringify(["AKIA", "IOSF", "ODNN", "7EXA", "MPLE"])}.join(''));process.exit(1);\n`;
+
+  it("the failed-command line in the block reason redacts a secret in the command", () => {
+    const dir = editedProject({ test: `TOKEN=${KEY} ${node} -e "process.exit(1)"` });
+    const r = stop(dir);
+    expect(r.json.decision).toBe("block");
+    noLeak(r.json.reason);
+    expect(r.json.reason).toContain("[redacted: awsKeyId]");
+  });
+
+  it("the block reason redacts a secret in the failing command's output summary", () => {
+    const dir = editedProject({ test: `${node} gen.js` }, { files: { "gen.js": GEN } });
+    const r = stop(dir);
+    expect(r.json.decision).toBe("block");
+    noLeak(r.json.reason);
+    expect(r.json.reason).toContain("[redacted: awsKeyId]");
+    expect(r.json.reason).toContain("gen.js");
+  });
+
+  it("secrets.enabled false leaves the command and output raw in the reason and the ledger record", () => {
+    const dir = editedProject({ test: `TOKEN=${KEY} ${node} -e "console.log('${KEY}');process.exit(1)"` }, { secrets: { enabled: false } });
+    const r = stop(dir);
+    expect(r.json.decision).toBe("block");
+    expect(r.json.reason.split(KEY).length - 1).toBeGreaterThanOrEqual(2);
+    const f = readJsonl(dir, LEDGER)[0].failures[0];
+    expect(f.command).toContain(KEY);
+    expect(f.tail).toContain(KEY);
+  });
+
+  it("a project's secrets.rules.awsKeyId false leaves an AWS key id raw in the reason and the ledger record", () => {
+    const dir = editedProject({ test: `TOKEN=${KEY} ${node} -e "console.log('${KEY}');process.exit(1)"` }, { secrets: { rules: { awsKeyId: false } } });
+    const r = stop(dir);
+    expect(r.json.decision).toBe("block");
+    expect(r.json.reason.split(KEY).length - 1).toBeGreaterThanOrEqual(2);
+    const f = readJsonl(dir, LEDGER)[0].failures[0];
+    expect(f.command).toContain(KEY);
+    expect(f.tail).toContain(KEY);
+  });
+
+  function testerClaim(command) {
+    const dir = makeProject({
+      config: {
+        ...baseConfig,
+        commands: { test: command },
+        stopGate: { commands: ["test"], onlyIfEdited: true, maxBlocks: 3, timeoutMs: 10000, requireEvidence: false },
+      },
+      git: true,
+    });
+    mkdirSync(join(dir, "tests"));
+    writeFileSync(join(dir, "tests/a.test.mjs"), "it fails on purpose");
+    runHookScript("edit-loop", { tool_name: "Write", tool_input: { file_path: "tests/a.test.mjs" }, agent_id: "ag1", agent_type: "tester" }, { dir });
+    return runHookScript(
+      "stop-gate",
+      {
+        hook_event_name: "SubagentStop",
+        agent_id: "ag1",
+        agent_type: "tester",
+        last_assistant_message: `Ran it.\n${JSON.stringify({ tests_red_by_design: ["tests/a.test.mjs"] })}`,
+      },
+      { dir },
+    );
+  }
+
+  it("the claim-refusal line naming a command with no test file redacts the command", () => {
+    const r = testerClaim(`TOKEN=${KEY} sh -c "echo plain; exit 1"`);
+    expect(r.json.decision).toBe("block");
+    expect(r.json.reason).toMatch(/named no test file/);
+    noLeak(r.json.reason);
+  });
+
+  it("the claim-refusal line naming a type error redacts the command", () => {
+    const r = testerClaim(`TOKEN=${KEY} sh -c "echo 'src/x.ts(1,1): error TS2322: Type mismatch'; exit 1"`);
+    expect(r.json.decision).toBe("block");
+    expect(r.json.reason).toMatch(/type error/);
+    noLeak(r.json.reason);
   });
 });

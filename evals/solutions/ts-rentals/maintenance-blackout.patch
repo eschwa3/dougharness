@@ -1,0 +1,85 @@
+diff --git a/src/calendar/availability.ts b/src/calendar/availability.ts
+index 3e54e5a..ab5baa9 100644
+--- a/src/calendar/availability.ts
++++ b/src/calendar/availability.ts
+@@ -17,13 +17,13 @@ export function overlaps(a: Span, b: Span): boolean {
+   return a.start < b.end && b.start < a.end;
+ }
+ 
+-/** The bookings of one item that collide with a span. */
+-export function conflictsFor(bookings: Booking[], itemId: string, span: Span): Booking[] {
+-  return bookings.filter((booking) => booking.itemId === itemId && overlaps(booking, span));
++/** The bookings of one item that collide with a span. Inspection windows count as bookings: an item in the workshop is not free. */
++export function conflictsFor(bookings: Booking[], itemId: string, span: Span, windows: Booking[] = []): Booking[] {
++  return [...bookings, ...windows].filter((booking) => booking.itemId === itemId && overlaps(booking, span));
+ }
+ 
+-export function isAvailable(bookings: Booking[], itemId: string, span: Span): boolean {
+-  return conflictsFor(bookings, itemId, span).length === 0;
++export function isAvailable(bookings: Booking[], itemId: string, span: Span, windows: Booking[] = []): boolean {
++  return conflictsFor(bookings, itemId, span, windows).length === 0;
+ }
+ 
+ /** Bookings of one item in start order. */
+diff --git a/src/maintenance/schedule.ts b/src/maintenance/schedule.ts
+index c1239bc..42b01e5 100644
+--- a/src/maintenance/schedule.ts
++++ b/src/maintenance/schedule.ts
+@@ -27,6 +27,11 @@ export interface InspectionWindow {
+   end: Day;
+ }
+ 
++/** True when the item is in the workshop on `day`: from the first workshop day up to, not including, the day it is back. */
++export function isInWorkshop(windows: InspectionWindow[], itemId: string, day: Day): boolean {
++  return windows.some((w) => w.itemId === itemId && w.start <= day && day < w.end);
++}
++
+ /** The workshop days for an inspection that begins on `start`. */
+ export function inspectionWindow(item: Item, start: Day, lengthDays = 1): InspectionWindow {
+   if (lengthDays < 1) throw new Error("an inspection takes at least one day");
+diff --git a/tests/maintenance.test.ts b/tests/maintenance.test.ts
+index c002b59..ee6767a 100644
+--- a/tests/maintenance.test.ts
++++ b/tests/maintenance.test.ts
+@@ -2,7 +2,8 @@ import { describe, it, expect } from "vitest";
+ import { seedCatalog } from "../src/catalog/catalog.js";
+ import { failedInspections, inspectionsFor, lastInspectionDay, passRate, recordInspection } from "../src/maintenance/inspections.js";
+ import type { Inspection } from "../src/maintenance/inspections.js";
+-import { inspectionIntervalDays, inspectionWindow, nextInspectionDay } from "../src/maintenance/schedule.js";
++import { inspectionIntervalDays, inspectionWindow, isInWorkshop, nextInspectionDay } from "../src/maintenance/schedule.js";
++import { conflictsFor, isAvailable } from "../src/calendar/availability.js";
+ 
+ const [drill, , camera, , tent] = seedCatalog();
+ 
+@@ -49,6 +50,31 @@ describe("inspections", () => {
+   });
+ });
+ 
++describe("workshop blackout", () => {
++  const windows = [inspectionWindow(drill, "2025-04-07", 2)];
++  it("knows the days an item is in the workshop", () => {
++    expect(isInWorkshop(windows, "itm-0001", "2025-04-06")).toBe(false);
++    expect(isInWorkshop(windows, "itm-0001", "2025-04-07")).toBe(true);
++    expect(isInWorkshop(windows, "itm-0001", "2025-04-08")).toBe(true);
++    expect(isInWorkshop(windows, "itm-0001", "2025-04-09")).toBe(false);
++    expect(isInWorkshop(windows, "itm-0002", "2025-04-07")).toBe(false);
++  });
++  it("cannot be reserved while in the workshop", () => {
++    expect(isAvailable([], "itm-0001", { start: "2025-04-05", end: "2025-04-08" }, windows)).toBe(false);
++    expect(isAvailable([], "itm-0001", { start: "2025-04-08", end: "2025-04-10" }, windows)).toBe(false);
++  });
++  it("can be reserved around the workshop days", () => {
++    expect(isAvailable([], "itm-0001", { start: "2025-04-01", end: "2025-04-05" }, windows)).toBe(true);
++    expect(isAvailable([], "itm-0001", { start: "2025-04-09", end: "2025-04-12" }, windows)).toBe(true);
++  });
++  it("is not blocked by the window of another item", () => {
++    expect(isAvailable([], "itm-0002", { start: "2025-04-07", end: "2025-04-09" }, windows)).toBe(true);
++  });
++  it("lists a window as a conflict", () => {
++    expect(conflictsFor([], "itm-0001", { start: "2025-04-07", end: "2025-04-09" }, windows)).toEqual(windows);
++  });
++});
++
+ describe("more maintenance", () => {
+   it("starts the next interval from the last inspection", () => {
+     expect(nextInspectionDay(tent, "2025-01-01")).toBe("2025-06-30");

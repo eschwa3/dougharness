@@ -3,10 +3,11 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, sep } from "node:path";
-import { openMemory, addLesson, recordOutcomes } from "../lib/memory.mjs";
+import { openMemory, addLesson, recordOutcomes, supersedeLesson, writeRunHistory, recordPitfallOccurrence } from "../lib/memory.mjs";
+import { proposeRule } from "../lib/decisions.mjs";
 import { createHash } from "node:crypto";
 import { traceLine } from "../../doug-gates/lib/trace.mjs";
-import { collectSignals, proposeChanges, writeProposals, applyProposal, unifiedDiff, readAppliedLedger, PROPOSAL_LEDGER_RELPATH, LEARN_STATE_RELPATH, readGate } from "../lib/learn.mjs";
+import { collectSignals, proposeChanges, writeProposals, applyProposal, unifiedDiff, readAppliedLedger, PROPOSAL_LEDGER_RELPATH, LEARN_STATE_RELPATH, readGate, RULE_MIN_CARDS, RULE_MIN_SESSIONS, renderRule, cardFilesTouched } from "../lib/learn.mjs";
 
 // Deterministic proposals from the outcomes/lessons store and the run trace (card learn-signals): log-then-
 // propose, never auto-apply. collectSignals/proposeChanges/writeProposals are pure given their inputs; only
@@ -100,6 +101,15 @@ describe("readGate", () => {
   });
 });
 
+// --- card memory-failure-lessons helpers -----------------------------------------------------------------------
+
+const pit = (o = {}) => ({ id: "pit1", text: "Never edit dist/ by hand.", cards: ["a", "b", "c"], sessions: ["s1", "s2"], citations: ["history:a/r1:2", "history:b/r1:2", "history:c/r1:2"], files: ["src/a.mjs"], ...o });
+const pitfallSignals = (pitfalls) => ({ outcomes: { rows: [] }, lessons: { pitfalls }, trace: { denials: [], files: [], skills: [] } });
+
+function writeHistoryReport(dir, card, report, run = "wf_1") {
+  writeRunHistory(dir, { card, run, entries: [{ kind: "report", source: "card-report.json", value: JSON.stringify(report) }], scan: () => null });
+}
+
 // --- collectSignals -----------------------------------------------------------------------------------------
 
 describe("collectSignals", () => {
@@ -142,11 +152,11 @@ describe("collectSignals", () => {
     expect(signals.outcomes.byCard["card-doug"]).toMatchObject({ rows: 1, gateFailures: 0 });
   });
 
-  it("counts lessons: total/live/helpful/harmful/stale, and groups repeated lessons by near-duplicate text or by helpful>=3", () => {
+  it("counts lessons: total/live/helpful/harmful/stale, and no longer reports a repeated signal (card memory-failure-lessons)", () => {
     const dir = tempProject();
     const m = openMemory(dir);
-    const a = addLesson(m, { text: "Always run pnpm typecheck before committing.", kind: "feedback", source: { agent: "lead" } });
-    const b = addLesson(m, { text: "You must always run pnpm typecheck before committing changes.", kind: "feedback", source: { agent: "lead" } });
+    addLesson(m, { text: "Always run pnpm typecheck before committing.", kind: "feedback", source: { agent: "lead" } });
+    addLesson(m, { text: "You must always run pnpm typecheck before committing changes.", kind: "feedback", source: { agent: "lead" } });
     const solo = addLesson(m, { text: "A stray unrelated lesson about something else entirely.", kind: "pattern", source: { agent: "lead" } });
     const superseded = addLesson(m, { text: "An old superseded lesson.", kind: "project", source: { agent: "lead" } });
     const replacement = addLesson(m, { text: "The replacement lesson.", kind: "project", source: { agent: "lead" }, id: undefined });
@@ -162,10 +172,8 @@ describe("collectSignals", () => {
     expect(signals.lessons.helpful).toBe(1);
     expect(signals.lessons.harmful).toBe(1);
     expect(signals.lessons.stale).toBe(1);
-    const byIds = signals.lessons.repeated.map((r) => r.ids.sort());
-    expect(byIds).toContainEqual([a.id, b.id].sort());
-    expect(signals.lessons.repeated.find((r) => r.ids.includes(solo.id))).toMatchObject({ ids: [solo.id], count: 3, kind: "pattern" });
-    expect(signals.lessons.repeated.find((r) => r.ids.includes("nope"))).toBeUndefined();
+    expect(signals.lessons.repeated).toBeUndefined();
+    expect(signals.lessons.pitfalls).toEqual([]);
   });
 
   it("T10 (card trace-redact-secrets) denials of two different GitHub tokens group into one redacted row with count 2", () => {
@@ -252,7 +260,7 @@ describe("collectSignals", () => {
     expect(signals.outcomes.rows).toEqual([]);
     expect(signals.outcomes.gateFailures).toBe(0);
     expect(signals.lessons.total).toBe(0);
-    expect(signals.lessons.repeated).toEqual([]);
+    expect(signals.lessons.pitfalls).toEqual([]);
     expect(signals.trace.files).toEqual([]);
     expect(signals.trace.denials).toEqual([]);
     expect(signals.trace.unmatched).toEqual([]);
@@ -262,48 +270,116 @@ describe("collectSignals", () => {
 // --- proposeChanges ------------------------------------------------------------------------------------------
 
 describe("proposeChanges", () => {
-  it("promote: a repeated feedback lesson not already in CLAUDE.md becomes a diff under Working agreement; a pitfall lesson goes under Gotchas; a lesson already present proposes nothing", () => {
-    const signals = {
-      outcomes: { rows: [] },
-      lessons: {
-        repeated: [
-          { text: "Never mix package managers in one install.", ids: ["l1", "l2"], kind: "feedback", count: 2 },
-          { text: "Never edit dist/ by hand.", ids: ["l3", "l4"], kind: "pitfall", count: 2 },
-          { text: "Task worktrees live under .claude/worktrees/ (gitignored).", ids: ["l5", "l6"], kind: "feedback", count: 2 }, // already in Gotchas verbatim
-        ],
-      },
-      trace: { denials: [], files: [], skills: [] },
-    };
-    const proposals = proposeChanges(signals, { dir: "/nope", claudeMd: CLAUDE_MD, config: {}, skills: [] });
-    const promotes = proposals.filter((p) => p.kind === "promote");
-    expect(promotes.length).toBe(2);
-    const feedback = promotes.find((p) => p.evidence.ids.includes("l1"));
-    expect(feedback.diff).toContain("+- Never mix package managers in one install.");
-    expect(feedback.diff).toContain("+++ b/CLAUDE.md");
-    const idx = feedback.diff.indexOf("## Gotchas");
-    // inserted under Working agreement, so it lands before the Gotchas heading appears in the diff context
-    expect(feedback.diff.indexOf("Never mix package managers")).toBeLessThan(idx === -1 ? Infinity : idx);
-    const pitfall = promotes.find((p) => p.evidence.ids.includes("l3"));
-    expect(pitfall.diff).toContain("+- Never edit dist/ by hand.");
+  it("promote: at threshold with no files proposes a CLAUDE.md Gotchas promote (diff null at 60 lines), never an unscoped rule", () => {
+    const header = ["# Project", "", "## Gotchas", ""];
+    const at59 = `${[...header, ...Array.from({ length: 59 - header.length }, (_, i) => `- filler ${i}`)].join("\n")}\n`;
+    const signals = pitfallSignals([pit({ files: [] })]);
+    const [p, ...rest] = proposeChanges(signals, { dir: "/nope", claudeMd: at59, config: {}, skills: [] });
+    expect(rest).toEqual([]);
+    expect(p).toMatchObject({ kind: "promote", target: "CLAUDE.md", diff: null });
+    expect(p.reason).toContain("60-line limit");
+
+    const roomy = proposeChanges(signals, { dir: "/nope", claudeMd: CLAUDE_MD, config: {}, skills: [] });
+    expect(roomy).toHaveLength(1);
+    expect(roomy[0]).toMatchObject({ kind: "promote", target: "CLAUDE.md" });
+    expect(roomy[0].diff).toContain("+- Never edit dist/ by hand.");
+    expect(roomy.filter((x) => x.kind === "rule")).toEqual([]);
+
+    const already = proposeChanges(pitfallSignals([pit({ files: [], text: "Task worktrees live under .claude/worktrees/ (gitignored)." })]), { dir: "/nope", claudeMd: CLAUDE_MD, config: {}, skills: [] });
+    expect(already).toEqual([]);
   });
 
-  it("promote: emits diff:null with a reason when the result would be at CLAUDE.md's 60-line limit", () => {
-    // Exactly 59 lines (wc -l semantics) so that inserting one bullet brings it to 60.
-    const header = ["# Project", "", "## Gotchas", ""];
-    const bullets = Array.from({ length: 59 - header.length }, (_, i) => `- filler ${i}`);
-    const at59 = `${[...header, ...bullets].join("\n")}\n`;
-    expect(at59.split("\n").length - 1).toBe(59);
-    const signals = { outcomes: { rows: [] }, lessons: { repeated: [{ text: "A brand new repeated pitfall.", ids: ["l1", "l2"], kind: "pitfall", count: 2 }] }, trace: { denials: [], files: [], skills: [] } };
-    const [p] = proposeChanges(signals, { dir: "/nope", claudeMd: at59, config: {}, skills: [] });
-    expect(p.kind).toBe("promote");
-    expect(p.diff).toBeNull();
-    expect(p.reason).toContain("60-line limit");
+  it("exports the thresholds: 3 cards over 2 sessions", () => {
+    expect(RULE_MIN_CARDS).toBe(3);
+    expect(RULE_MIN_SESSIONS).toBe(2);
+  });
+
+  it("two cards over two sessions propose nothing; three cards over two sessions propose a rule", () => {
+    const opts = { dir: "/nope", claudeMd: CLAUDE_MD, config: {}, skills: [] };
+    expect(proposeChanges(pitfallSignals([pit({ cards: ["a", "b"], sessions: ["s1", "s2"] })]), opts)).toEqual([]);
+    const three = proposeChanges(pitfallSignals([pit({ cards: ["a", "b", "c"], sessions: ["s1", "s2"] })]), opts);
+    expect(three).toHaveLength(1);
+    expect(three[0]).toMatchObject({ kind: "rule", target: ".claude/rules/pitfall-pit1.md" });
+  });
+
+  it("three cards in one session propose nothing, and a null session never counts as a second one", () => {
+    const opts = { dir: "/nope", claudeMd: CLAUDE_MD, config: {}, skills: [] };
+    expect(proposeChanges(pitfallSignals([pit({ cards: ["a", "b", "c"], sessions: ["s1"] })]), opts)).toEqual([]);
+    const dir = tempProject();
+    const m = openMemory(dir);
+    const L = addLesson(m, { text: "Never edit dist/ by hand.", kind: "pitfall", source: { agent: "reflect" }, citation: "history:a/r1:2" });
+    for (const [card, session] of [["a", "s1"], ["b", null], ["c", null]]) {
+      recordPitfallOccurrence(dir, { lesson: L.id, citation: `history:${card}/r1:2`, card, run: "r1", session, at: "2026-10-20T00:00:00.000Z" });
+      writeHistoryReport(dir, card, { outcome: "stopped", worktree: `/wt/${card}`, filesChanged: [`/wt/${card}/src/x.mjs`] });
+    }
+    const signals = collectSignals(m, { dir });
+    m.close();
+    expect(signals.lessons.pitfalls.find((x) => x.id === L.id).sessions).toEqual(["s1"]);
+    expect(proposeChanges(signals, { dir, claudeMd: CLAUDE_MD, config: {}, skills: [] })).toEqual([]);
+  });
+
+  it("three occurrences on one card over two sessions propose nothing", () => {
+    const dir = tempProject();
+    const m = openMemory(dir);
+    const L = addLesson(m, { text: "Never edit dist/ by hand.", kind: "pitfall", source: { agent: "reflect" }, citation: "history:a/r1:2" });
+    for (const [n, session] of [[1, "s1"], [2, "s2"], [3, "s1"]]) {
+      recordPitfallOccurrence(dir, { lesson: L.id, citation: `history:a/r${n}:2`, card: "a", run: `r${n}`, session, at: "2026-10-20T00:00:00.000Z" });
+    }
+    writeHistoryReport(dir, "a", { outcome: "stopped", worktree: "/wt/a", filesChanged: ["/wt/a/src/x.mjs"] });
+    const signals = collectSignals(m, { dir });
+    m.close();
+    expect(signals.lessons.pitfalls.find((x) => x.id === L.id)).toMatchObject({ cards: ["a"], sessions: ["s1", "s2"] });
+    expect(proposeChanges(signals, { dir, claudeMd: CLAUDE_MD, config: {}, skills: [] })).toEqual([]);
+  });
+
+  it("the rule targets .claude/rules/pitfall-<id>.md with paths: the cards' repo-relative files, an outside absolute path dropped", () => {
+    const dir = tempProject();
+    const m = openMemory(dir);
+    const L = addLesson(m, { text: "Never edit dist/ by hand.", kind: "pitfall", source: { agent: "reflect" }, citation: "history:a/r1:2" });
+    const cits = [];
+    for (const [card, session] of [["a", "s1"], ["b", "s1"], ["c", "s2"]]) {
+      const citation = `history:${card}/r1:2`;
+      cits.push(citation);
+      recordPitfallOccurrence(dir, { lesson: L.id, citation, card, run: "r1", session, at: "2026-10-20T00:00:00.000Z" });
+    }
+    writeHistoryReport(dir, "a", { outcome: "stopped", worktree: "/wt/a", filesChanged: ["/wt/a/plugins/doug-flow/lib/x.mjs", "/outside/z.mjs", "/wt/a/../etc/passwd"] });
+    writeHistoryReport(dir, "b", { outcome: "stopped", worktree: "/wt/b", filesChanged: ["/wt/b/plugins/doug-flow/lib/x.mjs", "docs/r.md"] });
+    writeHistoryReport(dir, "c", { outcome: "done", worktree: "/wt/c", filesChanged: ["/wt/c/packages/doug-cli/y.mjs"] });
+    const signals = collectSignals(m, { dir });
+    m.close();
+    const sig = signals.lessons.pitfalls.find((x) => x.id === L.id);
+    expect(sig.cards).toEqual(["a", "b", "c"]);
+    expect(sig.sessions).toEqual(["s1", "s2"]);
+    expect(sig.files).toEqual(["docs/r.md", "packages/doug-cli/y.mjs", "plugins/doug-flow/lib/x.mjs"]);
+    const proposals = proposeChanges(signals, { dir, claudeMd: CLAUDE_MD, config: {}, skills: [] });
+    expect(proposals).toHaveLength(1);
+    const [p] = proposals;
+    expect(p).toMatchObject({ kind: "rule", target: `.claude/rules/pitfall-${L.id}.md` });
+    expect(p.evidence).toMatchObject({ id: L.id, cards: ["a", "b", "c"], sessions: ["s1", "s2"], files: sig.files });
+    expect(p.diff).toContain("paths:");
+    expect(p.diff).toContain('+  - "plugins/doug-flow/lib/x.mjs"');
+    expect(p.diff).toContain('+  - "packages/doug-cli/y.mjs"');
+    expect(p.diff).not.toContain("/wt/");
+    expect(p.diff).not.toContain("/outside");
+    expect(p.diff).not.toContain("passwd");
+    expect(p.diff).toContain("+Never edit dist/ by hand.");
+    expect(p.diff).toContain("Evidence:");
+    for (const c of cits) expect(p.diff).toContain(`+- ${c}`);
+  });
+
+  it("a rule already on disk is diffed from its current content", () => {
+    const dir = tempProject();
+    mkdirSync(join(dir, ".claude/rules"), { recursive: true });
+    writeFileSync(join(dir, ".claude/rules/pitfall-pit1.md"), "old rule body\n");
+    const [p] = proposeChanges(pitfallSignals([pit({ files: ["src/a.mjs"] })]), { dir, claudeMd: CLAUDE_MD, config: {}, skills: [] });
+    expect(p.kind).toBe("rule");
+    expect(p.diff).toContain("-old rule body");
   });
 
   it("demote: a Bash denial repeated >=2x matching a known CLAUDE.md rule proposes enabling its config key, refuses when already enabled, and skips a denial matching no rule", () => {
     const signals = {
       outcomes: { rows: [] },
-      lessons: { repeated: [] },
+      lessons: { pitfalls: [] },
       trace: { files: [], skills: [], denials: [{ tool: "Bash", detail: "git branch -D some-branch", reason: null, count: 3 }] },
     };
     const [p] = proposeChanges(signals, { dir: "/nope", claudeMd: CLAUDE_MD, config: {}, skills: [] });
@@ -330,7 +406,7 @@ describe("proposeChanges", () => {
   it("delete: a CLAUDE.md rule line referenced by no denial, lesson, or block, with enough signal density, proposes removing it; stays silent below the density floor or when referenced", () => {
     const manyRows = Array.from({ length: 10 }, (_, i) => ({ card: `c${i}`, blocks: [] }));
     const manyFiles = Array.from({ length: 5 }, (_, i) => `s${i}.jsonl`);
-    const unreferenced = { outcomes: { rows: manyRows }, lessons: { repeated: [] }, trace: { files: manyFiles, skills: [], denials: [] } };
+    const unreferenced = { outcomes: { rows: manyRows }, lessons: { pitfalls: [] }, trace: { files: manyFiles, skills: [], denials: [] } };
     const proposals = proposeChanges(unreferenced, { dir: "/nope", claudeMd: CLAUDE_MD, config: {}, skills: [] });
     const deletes = proposals.filter((p) => p.kind === "delete");
     expect(deletes.length).toBe(3); // all three CLAUDE_MD bullets are unreferenced by this fixture's signals
@@ -341,7 +417,7 @@ describe("proposeChanges", () => {
 
     const referenced = {
       outcomes: { rows: manyRows },
-      lessons: { repeated: [] },
+      lessons: { pitfalls: [] },
       trace: { files: manyFiles, skills: [], denials: [{ tool: "Bash", detail: "git branch -D x", reason: null, count: 1 }] },
     };
     const withReference = proposeChanges(referenced, { dir: "/nope", claudeMd: CLAUDE_MD, config: {}, skills: [] });
@@ -349,7 +425,7 @@ describe("proposeChanges", () => {
   });
 
   it("tighten: a never-invoked skill with a long description proposes surfacing it (diff:null) only while another skill was busy; a short description or any invocation proposes nothing", () => {
-    const busySignals = { outcomes: { rows: [] }, lessons: { repeated: [] }, trace: { files: [], denials: [], skills: [{ skill: "doug-next", count: 9 }] } };
+    const busySignals = { outcomes: { rows: [] }, lessons: { pitfalls: [] }, trace: { files: [], denials: [], skills: [{ skill: "doug-next", count: 9 }] } };
     const longDescription = "x".repeat(401);
     const proposals = proposeChanges(busySignals, { dir: "/nope", claudeMd: CLAUDE_MD, config: {}, skills: [{ name: "quiet-skill", description: longDescription }] });
     expect(proposals).toEqual([{ id: "01", kind: "tighten", target: "skills/quiet-skill/SKILL.md", reason: expect.stringContaining("invoked 0 times"), evidence: expect.objectContaining({ descriptionLength: 401 }), diff: null }]);
@@ -361,7 +437,7 @@ describe("proposeChanges", () => {
     const invoked = proposeChanges(invokedSignals, { dir: "/nope", claudeMd: CLAUDE_MD, config: {}, skills: [{ name: "quiet-skill", description: longDescription }] });
     expect(invoked).toEqual([]);
 
-    const noBusySkill = { outcomes: { rows: [] }, lessons: { repeated: [] }, trace: { files: [], denials: [], skills: [] } };
+    const noBusySkill = { outcomes: { rows: [] }, lessons: { pitfalls: [] }, trace: { files: [], denials: [], skills: [] } };
     const nobusy = proposeChanges(noBusySkill, { dir: "/nope", claudeMd: CLAUDE_MD, config: {}, skills: [{ name: "quiet-skill", description: longDescription }] });
     expect(nobusy).toEqual([]);
   });
@@ -369,7 +445,7 @@ describe("proposeChanges", () => {
   // review round 2, MINOR 7: target used to be hardcoded plugins/doug-flow/skills/<name>/SKILL.md regardless of
   // where readOwnSkills actually read the skill from.
   it("MINOR 7: tighten's target is the real path the skill was read from (skill.file), relative to dir when inside it, absolute otherwise, and the historical hardcoded guess only when no file is given at all", () => {
-    const busySignals = { outcomes: { rows: [] }, lessons: { repeated: [] }, trace: { files: [], denials: [], unmatched: [], skills: [{ skill: "doug-next", count: 9 }] } };
+    const busySignals = { outcomes: { rows: [] }, lessons: { pitfalls: [] }, trace: { files: [], denials: [], unmatched: [], skills: [{ skill: "doug-next", count: 9 }] } };
     const longDescription = "x".repeat(401);
     const dir = "/project/root";
 
@@ -384,7 +460,7 @@ describe("proposeChanges", () => {
   });
 
   it("returns [] with no signals at all", () => {
-    const empty = { outcomes: { rows: [] }, lessons: { repeated: [] }, trace: { files: [], denials: [], skills: [] } };
+    const empty = { outcomes: { rows: [] }, lessons: { pitfalls: [] }, trace: { files: [], denials: [], skills: [] } };
     expect(proposeChanges(empty, { dir: "/nope", claudeMd: CLAUDE_MD, config: {}, skills: [] })).toEqual([]);
   });
 });
@@ -586,6 +662,15 @@ describe("applyProposal", () => {
 
 // --- CLI ---------------------------------------------------------------------------------------------------
 
+// A pitfall cited by three cards over two sessions, with no history files: the occurrence-ledger form of "repeated"
+// (card memory-failure-lessons dropped the helpful and Jaccard triggers).
+function seedRepeatedPitfall(dir, m) {
+  const L = addLesson(m, { text: "Never edit dist/ by hand.", kind: "pitfall", source: { agent: "lead" } });
+  for (const [card, session] of [["a", "s1"], ["b", "s1"], ["c", "s2"]]) {
+    recordPitfallOccurrence(dir, { lesson: L.id, citation: `history:${card}/r1:2`, card, run: "r1", session, at: "2026-10-20T00:00:00.000Z" });
+  }
+}
+
 describe("learn.mjs CLI", () => {
   const run = (args, cwd) => spawnSync(process.execPath, [script, ...args], { cwd, encoding: "utf8", env: { ...process.env, CLAUDE_PROJECT_DIR: "" } });
 
@@ -622,8 +707,7 @@ describe("learn.mjs CLI", () => {
   it("propose never touches a tracked file - git status --porcelain is unchanged after a real run that produces proposals (the never-auto-apply guarantee)", () => {
     const dir = tempProject();
     const m = openMemory(dir);
-    addLesson(m, { text: "Never edit dist/ by hand.", kind: "pitfall", source: { agent: "lead" } });
-    addLesson(m, { text: "Never edit dist/ by hand, at all.", kind: "pitfall", source: { agent: "lead" } });
+    seedRepeatedPitfall(dir, m);
     m.close();
     const before = execFileSync("git", ["status", "--porcelain"], { cwd: dir, encoding: "utf8" });
     const r = run(["propose", dir], dir);
@@ -636,8 +720,7 @@ describe("learn.mjs CLI", () => {
   it("propose writes proposals and prints one line per proposal; apply then applies one by path and exits 1 with the reason when refused", () => {
     const dir = tempProject();
     const m = openMemory(dir);
-    addLesson(m, { text: "Never edit dist/ by hand.", kind: "pitfall", source: { agent: "lead" } });
-    addLesson(m, { text: "Never edit dist/ by hand, at all.", kind: "pitfall", source: { agent: "lead" } });
+    seedRepeatedPitfall(dir, m);
     m.close();
 
     const propose = run(["propose", dir], dir);
@@ -659,5 +742,124 @@ describe("learn.mjs CLI", () => {
     const again = run(["apply", join(writtenDir, diffFile), dir], dir);
     expect(again.status).toBe(1);
     expect(again.stderr.length).toBeGreaterThan(0);
+  });
+});
+
+// --- card memory-failure-lessons: pitfall signals count distinct cards and sessions -------------------------------
+
+describe("collectSignals: pitfalls (card memory-failure-lessons)", () => {
+  const AT = "2026-10-20T00:00:00.000Z";
+  const occ = (dir, lesson, card, session, n = 1) => recordPitfallOccurrence(dir, { lesson, citation: `history:${card}/r${n}:2`, card, run: `r${n}`, session, at: AT });
+  const pitfallLesson = (m, text, extra = {}) => addLesson(m, { text, kind: "pitfall", source: { agent: "reflect" }, citation: `history:z/r0:${text.length}`, ...extra });
+
+  it("counts a pitfall's distinct cards (sorted), distinct non-null sessions (sorted) and citations; a repeated occurrence on one card is one card", () => {
+    const dir = tempProject();
+    const m = openMemory(dir);
+    const L = pitfallLesson(m, "Never edit dist/ by hand.");
+    occ(dir, L.id, "b", "s2");
+    occ(dir, L.id, "a", "s1");
+    occ(dir, L.id, "a", "s1", 2);
+    occ(dir, L.id, "c", null);
+    const signals = collectSignals(m, { dir });
+    m.close();
+    const sig = signals.lessons.pitfalls.find((x) => x.id === L.id);
+    expect(sig).toMatchObject({ id: L.id, text: "Never edit dist/ by hand.", cards: ["a", "b", "c"], sessions: ["s1", "s2"] });
+    expect(sig.citations).toHaveLength(4);
+    expect(sig.files).toEqual([]);
+  });
+
+  it("a lesson with helpful 5 and no occurrences is not a pitfall signal and yields no proposal", () => {
+    const dir = tempProject();
+    const m = openMemory(dir);
+    const L = pitfallLesson(m, "Never edit dist/ by hand.");
+    m.prepare("UPDATE lessons SET helpful = 5 WHERE id = ?").run(L.id);
+    const signals = collectSignals(m, { dir });
+    m.close();
+    expect(signals.lessons.pitfalls).toEqual([]);
+    expect(proposeChanges(signals, { dir, claudeMd: CLAUDE_MD, config: {}, skills: [] })).toEqual([]);
+  });
+
+  it("two near-identical pitfall lessons with no occurrences give no pitfall signal and no proposal", () => {
+    const dir = tempProject();
+    const m = openMemory(dir);
+    pitfallLesson(m, "Always run pnpm typecheck before committing the change to the main branch.");
+    pitfallLesson(m, "You must always run pnpm typecheck before committing the change to the main branch.");
+    const signals = collectSignals(m, { dir });
+    m.close();
+    expect(signals.lessons.pitfalls).toEqual([]);
+    expect(proposeChanges(signals, { dir, claudeMd: CLAUDE_MD, config: {}, skills: [] })).toEqual([]);
+  });
+
+  it("a superseded pitfall with three cards over two sessions gives no signal, and a feedback lesson or an unknown id with occurrences gives none either", () => {
+    const dir = tempProject();
+    const m = openMemory(dir);
+    const old = pitfallLesson(m, "An old pitfall that was superseded long ago.");
+    const fresh = pitfallLesson(m, "The replacement pitfall for the old one.");
+    supersedeLesson(m, old.id, fresh.id);
+    const fb = addLesson(m, { text: "A feedback lesson from the user.", kind: "feedback", source: { agent: "lead" } });
+    for (const id of [old.id, fb.id, "lxunknown"]) {
+      occ(dir, id, "a", "s1");
+      occ(dir, id, "b", "s1");
+      occ(dir, id, "c", "s2");
+    }
+    const signals = collectSignals(m, { dir });
+    m.close();
+    expect(signals.lessons.pitfalls).toEqual([]);
+  });
+});
+
+describe("cardFilesTouched (card memory-failure-lessons)", () => {
+  it("is the union over the card's history report entries, relative to each report's worktree, dropping outside absolute paths and .. paths, sorted and de-duplicated", () => {
+    const dir = tempProject();
+    expect(cardFilesTouched(dir, "nope")).toEqual([]);
+    writeHistoryReport(dir, "c1", { outcome: "stopped", worktree: "/wt/c1", filesChanged: ["/wt/c1/src/b.mjs", "/wt/c1/src/a.mjs", "/other/x.mjs", "/wt/c1/../y.mjs", "docs/r.md"] }, "wf_1");
+    writeHistoryReport(dir, "c1", { outcome: "done", worktree: "/wt/c1b", filesChanged: ["/wt/c1b/src/a.mjs", "../escape.mjs"] }, "wf_2");
+    expect(cardFilesTouched(dir, "c1")).toEqual(["docs/r.md", "src/a.mjs", "src/b.mjs"]);
+  });
+
+  it("a report with no filesChanged contributes nothing and an unreadable report is skipped", () => {
+    const dir = tempProject();
+    writeHistoryReport(dir, "c1", { ok: false, plan: "p" }, "wf_1");
+    writeRunHistory(dir, { card: "c1", run: "wf_2", entries: [{ kind: "report", source: "x", value: "{ not json" }], scan: () => null });
+    expect(cardFilesTouched(dir, "c1")).toEqual([]);
+  });
+});
+
+describe("renderRule (card memory-failure-lessons)", () => {
+  it("renders paths as a quoted frontmatter list and the body, or the body alone with no paths", () => {
+    expect(renderRule(["src/**", "*.test.mjs"], "Write tests first.")).toBe('---\npaths:\n  - "src/**"\n  - "*.test.mjs"\n---\n\nWrite tests first.\n');
+    expect(renderRule([], "Always do X.")).toBe("Always do X.\n");
+  });
+
+  it("proposeRule's created file equals renderRule(paths, body) for the same paths and body", () => {
+    const dir = tempProject();
+    const withPaths = proposeRule({ dir, name: "tests", paths: ["src/**", "*.test.mjs"], body: "Write tests first.", now: new Date("2026-09-12T00:00:00.000Z") });
+    const bare = proposeRule({ dir, name: "general", body: "Always do X.", now: new Date("2026-09-12T00:00:01.000Z") });
+    expect(applyProposal(withPaths.diffPath, { dir }).ok).toBe(true);
+    expect(applyProposal(bare.diffPath, { dir }).ok).toBe(true);
+    expect(readFileSync(join(dir, ".claude/rules/tests.md"), "utf8")).toBe(renderRule(["src/**", "*.test.mjs"], "Write tests first."));
+    expect(readFileSync(join(dir, ".claude/rules/general.md"), "utf8")).toBe(renderRule([], "Always do X."));
+  });
+});
+
+describe("proposeChanges: delete reads pitfalls, not repeated (card memory-failure-lessons)", () => {
+  it("a CLAUDE.md line whose key phrase a pitfall's text mentions is not proposed for deletion", () => {
+    const manyRows = Array.from({ length: 10 }, (_, i) => ({ card: `c${i}`, blocks: [] }));
+    const manyFiles = Array.from({ length: 5 }, (_, i) => `s${i}.jsonl`);
+    const base = { outcomes: { rows: manyRows }, lessons: { pitfalls: [] }, trace: { files: manyFiles, skills: [], denials: [] } };
+    const opts = { dir: "/nope", claudeMd: CLAUDE_MD, config: {}, skills: [] };
+    expect(proposeChanges(base, opts).filter((p) => p.kind === "delete" && /branch -D/.test(p.reason))).not.toEqual([]);
+    const withPitfall = { ...base, lessons: { pitfalls: [pit({ cards: ["a"], sessions: ["s1"], text: "never run git branch -D x on a card branch" })] } };
+    expect(proposeChanges(withPitfall, opts).filter((p) => p.kind === "delete" && /branch -D/.test(p.reason))).toEqual([]);
+  });
+});
+
+describe("learn.mjs signals CLI (card memory-failure-lessons)", () => {
+  it("prints the lessons line without the dropped repeated signal and exits 0", () => {
+    const dir = tempProject();
+    const res = spawnSync(process.execPath, [script, "signals", dir], { cwd: dir, encoding: "utf8", env: { ...process.env, CLAUDE_PROJECT_DIR: "" } });
+    expect(res.status, res.stderr).toBe(0);
+    expect(res.stdout).toContain("lessons:");
+    expect(res.stdout).not.toContain("undefined");
   });
 });

@@ -1,0 +1,213 @@
+diff --git a/src/customers/customer.ts b/src/customers/customer.ts
+index 4e5b12c..a61e1ce 100644
+--- a/src/customers/customer.ts
++++ b/src/customers/customer.ts
+@@ -1,11 +1,15 @@
+ export type Tier = "standard" | "member";
+ 
++/** How a customer wants to be reached. A customer who states nothing is reached by email. */
++export type Contact = "email" | "phone";
++
+ export interface Customer {
+   id: string;
+   name: string;
+   email: string;
+   phone?: string;
+   tier: Tier;
++  contact?: Contact;
+ }
+ 
+ export interface CustomerInput {
+@@ -14,6 +18,7 @@ export interface CustomerInput {
+   email: string;
+   phone?: string;
+   tier?: Tier;
++  contact?: Contact;
+ }
+ 
+ /** Checks a customer record and returns it. A new customer is a standard customer unless said otherwise. */
+@@ -23,9 +28,16 @@ export function makeCustomer(input: CustomerInput): Customer {
+   if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(input.email)) throw new Error(`customer ${input.id} has a bad email`);
+   const customer: Customer = { id: input.id, name: input.name.trim(), email: input.email, tier: input.tier ?? "standard" };
+   if (input.phone) customer.phone = input.phone;
++  if (input.contact === "phone" && !input.phone) throw new Error(`customer ${input.id} prefers phone but has no phone number`);
++  if (input.contact) customer.contact = input.contact;
+   return customer;
+ }
+ 
++/** Where to reach a customer: the phone number when they prefer phone, otherwise the email address. */
++export function contactAddress(customer: Customer): string {
++  return customer.contact === "phone" && customer.phone ? customer.phone : customer.email;
++}
++
+ export function displayName(customer: Customer): string {
+   return customer.tier === "member" ? `${customer.name} (member)` : customer.name;
+ }
+diff --git a/src/notifications/reminders.ts b/src/notifications/reminders.ts
+index c846edf..9e45589 100644
+--- a/src/notifications/reminders.ts
++++ b/src/notifications/reminders.ts
+@@ -1,9 +1,12 @@
+ import type { Item } from "../catalog/item.js";
+ import type { Customer } from "../customers/customer.js";
+-import { findCustomer } from "../customers/customer.js";
++import { contactAddress, findCustomer } from "../customers/customer.js";
++import { memberGraceDays } from "../customers/membership.js";
+ import type { Reservation } from "../reservations/reservation.js";
++import { isOverdue } from "../reservations/status.js";
+ import { addDays } from "../util/dates.js";
+ import type { Day } from "../util/dates.js";
++import { fill } from "../util/text.js";
+ import { render, subjectFor } from "./templates.js";
+ 
+ export interface Reminder {
+@@ -35,3 +38,23 @@ export function pickupReminders(reservations: Reservation[], customers: Customer
+   }
+   return reminders;
+ }
++
++const OVERDUE_BODY = "Hello {name}, your {item} was due back on {end}. Please bring it back.";
++
++/** An overdue reminder for each rental still out past its due day and the customer's grace days, sent where the customer prefers. */
++export function overdueReminders(reservations: Reservation[], customers: Customer[], items: Item[], today: Day): Reminder[] {
++  const reminders: Reminder[] = [];
++  for (const reservation of reservations) {
++    const customer = findCustomer(customers, reservation.customerId);
++    const item = items.find((i) => i.id === reservation.itemId);
++    if (!customer || !item) continue;
++    if (!isOverdue(reservation.status, reservation.end, today, memberGraceDays(customer))) continue;
++    reminders.push({
++      reservationId: reservation.id,
++      to: contactAddress(customer),
++      subject: "Rental overdue",
++      body: fill(OVERDUE_BODY, { name: customer.name, item: item.name, end: reservation.end }),
++    });
++  }
++  return reminders;
++}
+diff --git a/src/reservations/status.ts b/src/reservations/status.ts
+index 4a177c1..37811a8 100644
+--- a/src/reservations/status.ts
++++ b/src/reservations/status.ts
+@@ -1,3 +1,6 @@
++import { daysBetween } from "../util/dates.js";
++import type { Day } from "../util/dates.js";
++
+ export type Status = "requested" | "confirmed" | "picked-up" | "returned" | "cancelled";
+ 
+ const TRANSITIONS: Record<Status, Status[]> = {
+@@ -27,3 +30,8 @@ export function isFinal(status: Status): boolean {
+ export function holdsItem(status: Status): boolean {
+   return status === "requested" || status === "confirmed" || status === "picked-up";
+ }
++
++/** True for an item still out once `graceDays` have passed after its due day. */
++export function isOverdue(status: Status, end: Day, today: Day, graceDays = 0): boolean {
++  return status === "picked-up" && daysBetween(end, today) > graceDays;
++}
+diff --git a/tests/customers.test.ts b/tests/customers.test.ts
+index e18caba..29f9653 100644
+--- a/tests/customers.test.ts
++++ b/tests/customers.test.ts
+@@ -1,5 +1,5 @@
+ import { describe, it, expect } from "vitest";
+-import { displayName, findCustomer, makeCustomer } from "../src/customers/customer.js";
++import { contactAddress, displayName, findCustomer, makeCustomer } from "../src/customers/customer.js";
+ import { MEMBER_DISCOUNT_PERCENT, downgradeToStandard, isMember, memberDiscountPercent, upgradeToMember } from "../src/customers/membership.js";
+ 
+ const ana = makeCustomer({ id: "cus-0001", name: " Ana Ruiz ", email: "ana@example.com", phone: "555-0101" });
+@@ -56,3 +56,18 @@ describe("more customers", () => {
+     expect(ana.tier).toBe("standard");
+   });
+ });
++
++describe("contact preference", () => {
++  const cy = makeCustomer({ id: "cus-0010", name: "Cy", email: "cy@example.com", phone: "555-0110", contact: "phone" });
++  it("keeps a stated preference and leaves it out when none is given", () => {
++    expect(cy.contact).toBe("phone");
++    expect("contact" in ana).toBe(false);
++  });
++  it("reaches a customer at the address they prefer, email by default", () => {
++    expect(contactAddress(cy)).toBe("555-0110");
++    expect(contactAddress(ana)).toBe("ana@example.com");
++  });
++  it("refuses a phone preference without a phone number", () => {
++    expect(() => makeCustomer({ id: "cus-0011", name: "Di", email: "di@example.com", contact: "phone" })).toThrow("prefers phone");
++  });
++});
+diff --git a/tests/notifications.test.ts b/tests/notifications.test.ts
+index 3b1e632..0c69e75 100644
+--- a/tests/notifications.test.ts
++++ b/tests/notifications.test.ts
+@@ -1,9 +1,9 @@
+ import { describe, it, expect } from "vitest";
+ import { seedCatalog } from "../src/catalog/catalog.js";
+ import { makeCustomer } from "../src/customers/customer.js";
+-import { pickupReminders, startingTomorrow } from "../src/notifications/reminders.js";
++import { overdueReminders, pickupReminders, startingTomorrow } from "../src/notifications/reminders.js";
+ import { TEMPLATES, render, subjectFor } from "../src/notifications/templates.js";
+-import { confirm, createReservation } from "../src/reservations/reservation.js";
++import { confirm, createReservation, pickUp } from "../src/reservations/reservation.js";
+ 
+ const items = seedCatalog();
+ const ana = makeCustomer({ id: "cus-0001", name: "Ana", email: "ana@example.com" });
+@@ -62,3 +62,28 @@ describe("more notifications", () => {
+     expect(startingTomorrow([tomorrow], "2025-03-11")).toEqual([]);
+   });
+ });
++
++describe("overdue reminders", () => {
++  const out = pickUp(confirm(createReservation({ id: "res-0010", item: items[0], customerId: "cus-0001", start: "2025-03-10", end: "2025-03-13" }, [])));
++  const cy = makeCustomer({ id: "cus-0003", name: "Cy", email: "cy@example.com", phone: "555-0103", contact: "phone", tier: "member" });
++  const cyOut = pickUp(confirm(createReservation({ id: "res-0011", item: items[1], customerId: "cus-0003", start: "2025-03-10", end: "2025-03-13" }, [])));
++
++  it("lists a picked up rental once it is past the due day", () => {
++    expect(overdueReminders([out], [ana], items, "2025-03-13")).toEqual([]);
++    expect(overdueReminders([out], [ana], items, "2025-03-14").map((r) => r.reservationId)).toEqual(["res-0010"]);
++  });
++  it("lists a member's rental only after the grace day", () => {
++    expect(overdueReminders([cyOut], [cy], items, "2025-03-14")).toEqual([]);
++    expect(overdueReminders([cyOut], [cy], items, "2025-03-15")).toHaveLength(1);
++  });
++  it("leaves out rentals that are not out", () => {
++    expect(overdueReminders([tomorrow, later, unconfirmed], [ana, bo], items, "2025-04-01")).toEqual([]);
++  });
++  it("sends the reminder where the customer prefers", () => {
++    expect(overdueReminders([out], [ana], items, "2025-03-14")[0].to).toBe("ana@example.com");
++    expect(overdueReminders([cyOut], [cy], items, "2025-03-15")[0].to).toBe("555-0103");
++  });
++  it("names the customer, the item and the due day", () => {
++    expect(overdueReminders([out], [ana], items, "2025-03-14")[0].body).toBe("Hello Ana, your Cordless drill was due back on 2025-03-13. Please bring it back.");
++  });
++});
+diff --git a/tests/reservations.test.ts b/tests/reservations.test.ts
+index 5380a2c..1101631 100644
+--- a/tests/reservations.test.ts
++++ b/tests/reservations.test.ts
+@@ -4,7 +4,7 @@ import { makeCustomer, } from "../src/customers/customer.js";
+ import { upgradeToMember } from "../src/customers/membership.js";
+ import { bookingsFrom, cancel, confirm, createReservation, markReturned, pickUp, plannedDays } from "../src/reservations/reservation.js";
+ import { quoteFor } from "../src/reservations/quote.js";
+-import { advance, canTransition, holdsItem, isFinal } from "../src/reservations/status.js";
++import { advance, canTransition, holdsItem, isFinal, isOverdue } from "../src/reservations/status.js";
+ 
+ const [drill, saw] = seedCatalog();
+ const ana = makeCustomer({ id: "cus-0001", name: "Ana", email: "ana@example.com" });
+@@ -112,3 +112,17 @@ describe("more reservation rules", () => {
+     expect(quoteFor(saw, "2025-03-10", "2025-03-11").lines[0].label).toBe("Tile saw, 1 day");
+   });
+ });
++
++describe("overdue", () => {
++  it("is overdue once a picked up rental is past its due day", () => {
++    expect(isOverdue("picked-up", "2025-03-13", "2025-03-13")).toBe(false);
++    expect(isOverdue("picked-up", "2025-03-13", "2025-03-14")).toBe(true);
++  });
++  it("waits out the grace days", () => {
++    expect(isOverdue("picked-up", "2025-03-13", "2025-03-14", 1)).toBe(false);
++    expect(isOverdue("picked-up", "2025-03-13", "2025-03-15", 1)).toBe(true);
++  });
++  it("is never overdue once returned, cancelled or not yet picked up", () => {
++    for (const status of ["requested", "confirmed", "returned", "cancelled"] as const) expect(isOverdue(status, "2025-03-13", "2025-04-01")).toBe(false);
++  });
++});

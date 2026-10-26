@@ -95,7 +95,7 @@ function readOwnSkills() {
 function signalsText(s) {
   return [
     `outcomes: ${s.outcomes.rows.length} rows, ${s.outcomes.gateFailures} gate failures, blocks real=${s.outcomes.blocksByClass.real} marginal=${s.outcomes.blocksByClass.marginal} false=${s.outcomes.blocksByClass.false}, fixPasses sum=${s.outcomes.fixPasses.sum} max=${s.outcomes.fixPasses.max}, usd sum=${s.outcomes.usd.sum.toFixed(2)} n=${s.outcomes.usd.n}, cards=${Object.keys(s.outcomes.byCard).length}`,
-    `lessons: ${s.lessons.total} total, ${s.lessons.live} live, ${s.lessons.helpful} helpful, ${s.lessons.harmful} harmful, ${s.lessons.stale} stale, ${s.lessons.repeated.length} repeated`,
+    `lessons: ${s.lessons.total} total, ${s.lessons.live} live, ${s.lessons.helpful} helpful, ${s.lessons.harmful} harmful, ${s.lessons.stale} stale, ${s.lessons.pitfalls.length} pitfalls with occurrences`,
     `trace: ${s.trace.files.length} files, ${s.trace.denials.length} denials, ${s.trace.unmatched.length} unmatched (reported only, never a proposal signal), ${s.trace.skills.length} skills invoked, ${s.trace.instructionsLoaded.length} instruction files loaded`,
   ].join("\n");
 }

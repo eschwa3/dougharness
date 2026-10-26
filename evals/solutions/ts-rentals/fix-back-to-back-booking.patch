@@ -1,0 +1,43 @@
+diff --git a/src/calendar/availability.ts b/src/calendar/availability.ts
+index c8d9683..3e54e5a 100644
+--- a/src/calendar/availability.ts
++++ b/src/calendar/availability.ts
+@@ -12,9 +12,9 @@ export interface Span {
+   end: Day;
+ }
+ 
+-/** True when two spans share a rental night. ISO days compare correctly as strings. */
++/** True when two spans share a rental night. A span holds the item up to its end day, so the end day itself is free. ISO days compare correctly as strings. */
+ export function overlaps(a: Span, b: Span): boolean {
+-  return a.start <= b.end && b.start <= a.end;
++  return a.start < b.end && b.start < a.end;
+ }
+ 
+ /** The bookings of one item that collide with a span. */
+diff --git a/tests/calendar.test.ts b/tests/calendar.test.ts
+index e917fc0..13a1eb0 100644
+--- a/tests/calendar.test.ts
++++ b/tests/calendar.test.ts
+@@ -40,6 +40,22 @@ describe("availability", () => {
+   });
+ });
+ 
++describe("back to back bookings", () => {
++  const first: Booking[] = [{ itemId: "itm-0001", start: "2025-04-07", end: "2025-04-10" }];
++  it("is not a conflict when a rental starts the day another ends", () => {
++    expect(overlaps({ start: "2025-04-07", end: "2025-04-10" }, { start: "2025-04-10", end: "2025-04-12" })).toBe(false);
++    expect(isAvailable(first, "itm-0001", { start: "2025-04-10", end: "2025-04-12" })).toBe(true);
++  });
++  it("is not a conflict when a rental ends the day another starts", () => {
++    expect(overlaps({ start: "2025-04-07", end: "2025-04-10" }, { start: "2025-04-05", end: "2025-04-07" })).toBe(false);
++    expect(isAvailable(first, "itm-0001", { start: "2025-04-05", end: "2025-04-07" })).toBe(true);
++  });
++  it("is still a conflict when the rentals share a night", () => {
++    expect(isAvailable(first, "itm-0001", { start: "2025-04-09", end: "2025-04-12" })).toBe(false);
++    expect(isAvailable(first, "itm-0001", { start: "2025-04-05", end: "2025-04-08" })).toBe(false);
++  });
++});
++
+ describe("holidays", () => {
+   it("knows the listed holidays", () => {
+     for (const day of HOLIDAYS) expect(isHoliday(day)).toBe(true);

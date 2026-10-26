@@ -1057,12 +1057,12 @@ function wallRow(wall, flags) {
 
 // The first prose line of a rehearsal entry. The start scenario runs in an empty git repo; every other scenario
 // (start-feature included) on the ts-basic fixture, the rule rehearse-lib's rehearsalNote uses.
-function rehearsalLine(rehearsal, cardId) {
-  const where = rehearsal === "start" ? "an empty git repo" : "the ts-basic fixture";
+function rehearsalLine(rehearsal, cardId, fixture = null) {
+  const where = rehearsal === "start" ? "an empty git repo" : `the ${fixture || "ts-basic"} fixture`;
   return `Rehearsal ${rehearsal} for card \`${cardId}\` on ${where} (scripts/rehearse.mjs); the commit and gate below are the fixture's, not this repository's.`;
 }
 
-export function runEntry({ card, report, cost = null, codexCost = null, wallClock = null, wall = null, mergeCommit = null, record = null, adversary = [], date = new Date().toISOString().slice(0, 10), batch = null, sharedCost = null, taskIds = [], note = null, rehearsal = null, rehearsalOutcome = null }) {
+export function runEntry({ card, report, cost = null, codexCost = null, wallClock = null, wall = null, mergeCommit = null, record = null, adversary = [], date = new Date().toISOString().slice(0, 10), batch = null, sharedCost = null, taskIds = [], note = null, rehearsal = null, rehearsalOutcome = null, fixture = null, forcedLanding = false }) {
   const inBatch = Array.isArray(batch) && batch.length > 1;
   if (inBatch) report = filterReportForCard(report, card.id, taskIds);
   const lines = [];
@@ -1071,13 +1071,13 @@ export function runEntry({ card, report, cost = null, codexCost = null, wallCloc
   const batchNote = inBatch ? `, in one plan with ${listOthers(batch, card.id)} (one approval, one run, one landing)` : "";
   lines.push(
     rehearsal
-      ? rehearsalLine(rehearsal, card.id)
+      ? rehearsalLine(rehearsal, card.id, fixture)
       : `Ran through /doug-next on this repo from card \`${card.id}\`${record ? ` in \`${record}\`` : ""}${batchNote}. Plan "${report.plan}", integration branch \`${report.integrationBranch}\`${report.modelsSource ? `, models from ${report.modelsSource}` : ""}.`,
   );
   lines.push("");
   lines.push("| Measure | Value |");
   lines.push("|---|---|");
-  lines.push(`| Outcome | ${rehearsal ? `rehearsal ${rehearsal} ${rehearsalOutcome}` : outcomeOf(report)}${!rehearsal && pausedAt(report) ? `; next: ${listNext(report)}` : ""} |`);
+  lines.push(`| Outcome | ${rehearsal ? `rehearsal ${rehearsal} ${rehearsalOutcome}` : forcedLanding ? `landed after plan.mjs done --force; last run ${outcomeOf(report)}` : outcomeOf(report)}${!rehearsal && !forcedLanding && pausedAt(report) ? `; next: ${listNext(report)}` : ""} |`);
   lines.push(`| Cost | ${cost === null ? "not measured" : `$${Number(cost).toFixed(2)}${inBatch ? " for this card's tasks" : ""}`} |`);
   if (!inBatch || batch[0] === card.id) {
     lines.push(
@@ -1149,13 +1149,13 @@ export function handWallVerdict(card, wallClock, table = WALL_BUDGET_MIN) {
 
 // The live-runs entry for a hand-track card (decision 0005): no workflow report and no levels, so it records what
 // doug-hand can measure: the landing commit, the wall clock, and the gate result, plus an optional note.
-export function handEntry({ card, commit = null, wallClock = null, gate = null, note = null, record = null, date = new Date().toISOString().slice(0, 10), rehearsal = null, rehearsalOutcome = null, table = WALL_BUDGET_MIN, cost = null }) {
+export function handEntry({ card, commit = null, wallClock = null, gate = null, note = null, record = null, date = new Date().toISOString().slice(0, 10), rehearsal = null, rehearsalOutcome = null, fixture = null, table = WALL_BUDGET_MIN, cost = null }) {
   const lines = [];
   lines.push(`## ${date}, ${card.id}: ${card.title}`);
   lines.push("");
   lines.push(
     rehearsal
-      ? rehearsalLine(rehearsal, card.id)
+      ? rehearsalLine(rehearsal, card.id, fixture)
       : `Built by hand through doug-hand from card \`${card.id}\`${record ? ` in \`${record}\`` : ""} (hand track: a gated by-hand change); no workflow run.`,
   );
   lines.push("");
@@ -1280,10 +1280,10 @@ function wallNote(wall, flags) {
 
 // Three lines for the chat after a run: the outcome, the tasks, and what stopped or was not met. Everything in it
 // is read from the report; nothing is estimated.
-export function runSummary({ report, cost = null, codexCost = null, wallClock = null, wall = null, mergeCommit = null, batch = null, card = null }) {
+export function runSummary({ report, forcedLanding = false, cost = null, codexCost = null, wallClock = null, wall = null, mergeCommit = null, batch = null, card = null }) {
   const tasks = (report.levels || []).flatMap((l) => (l.tasks || []).map((t) => ({ level: l, task: t })));
   const integrated = tasks.filter(({ level }) => level.integration && level.integration.ok).length;
-  const outcome = outcomeOf(report);
+  const outcome = forcedLanding ? `landed after plan.mjs done --force; last run ${outcomeOf(report)}` : outcomeOf(report);
   const first = `${report.plan}: ${outcome}; ${tasks.length} task${tasks.length === 1 ? "" : "s"}, ${integrated} integrated; wall ${wallClock === null ? "not measured" : wallClock}; cost ${cost === null ? "not measured" : `$${Number(cost).toFixed(2)}`}${codexCost === null ? "" : `; Codex $${Number(codexCost).toFixed(2)}`}${mergeCommit ? `; landed as ${mergeCommit}` : ""}${wallNote(wall, wall ? wallFlagsFor(wall, report, batch, card) : [])}.`;
   const second = tasks.length
     ? tasks.map(({ task: t }) => {

@@ -10,7 +10,18 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync, append
 import { join, relative, resolve, sep, dirname } from "node:path";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { listOutcomes, listLessons, jaccard, reflectTokens, REFLECT_DUPLICATE_JACCARD } from "./memory.mjs";
+import { listOutcomes, listLessons, readPitfallOccurrences, HISTORY_DIR_RELPATH } from "./memory.mjs";
+
+export const RULE_MIN_CARDS = 3;
+export const RULE_MIN_SESSIONS = 2;
+
+// The one format of a .claude/rules file (learn's rule proposals and decisions.mjs proposeRule share it): a quoted
+// `paths:` frontmatter list and the body, or the body alone with no paths.
+export function renderRule(paths, body) {
+  const list = Array.isArray(paths) ? paths.filter((p) => String(p || "").trim()) : [];
+  const trimmed = String(body).replace(/\s+$/, "");
+  return list.length ? `---\npaths:\n${list.map((p) => `  - "${p}"`).join("\n")}\n---\n\n${trimmed}\n` : `${trimmed}\n`;
+}
 
 // --- collectSignals ----------------------------------------------------------------------------------------
 
@@ -80,50 +91,70 @@ function isGateFailure(row) {
   return false;
 }
 
-// Union-find clustering of live lessons by near-duplicate text (memory.mjs's own REFLECT_DUPLICATE_JACCARD
-// threshold and jaccard function - the same "near-duplicate" memory-reflect already uses to bump a lesson
-// instead of appending one). A cluster of >=2 is "repeated" by text; a lesson on its own with helpful >= 3 is
-// "repeated" by use. Both paths only ever report a count of >= 2, so a caller can treat `count >= 2` as one
-// uniform test.
-function groupRepeatedLessons(live) {
-  const n = live.length;
-  const parent = Array.from({ length: n }, (_, i) => i);
-  function find(x) {
-    while (parent[x] !== x) {
-      parent[x] = parent[parent[x]];
-      x = parent[x];
+// The file a rule proposal's `paths:` frontmatter is scoped by (card memory-failure-lessons, ADR 0019 line 60): the
+// union over a card's history `report` entries of `filesChanged`. An absolute path counts only when it lies under
+// that report's `worktree` and is then made relative to it; a relative path is kept; any path with a `..` segment,
+// and any other absolute path, is dropped. Sorted, de-duplicated; never throws.
+export function cardFilesTouched(dir, card) {
+  const out = new Set();
+  try {
+    if (typeof card !== "string" || !/^[A-Za-z0-9_.-]+$/.test(card) || card.includes("..")) return [];
+    const cardDir = join(dir, HISTORY_DIR_RELPATH, card);
+    if (!existsSync(cardDir)) return [];
+    for (const file of readdirSync(cardDir).filter((f) => f.endsWith(".jsonl")).sort()) {
+      let text;
+      try {
+        text = readFileSync(join(cardDir, file), "utf8");
+      } catch {
+        continue;
+      }
+      for (const raw of text.split("\n")) {
+        if (raw === "") continue;
+        let entry;
+        let report;
+        try {
+          entry = JSON.parse(raw);
+          if (!entry || entry.kind !== "report") continue;
+          report = JSON.parse(entry.text);
+        } catch {
+          continue;
+        }
+        if (!report || !Array.isArray(report.filesChanged)) continue;
+        const worktree = typeof report.worktree === "string" && report.worktree ? report.worktree.replace(/\/+$/, "") : null;
+        for (const f of report.filesChanged) {
+          if (typeof f !== "string" || f === "" || f.split("/").includes("..")) continue;
+          if (f.startsWith("/")) {
+            if (worktree && f.startsWith(`${worktree}/`)) out.add(f.slice(worktree.length + 1));
+          } else out.add(f.replace(/^\.\//, ""));
+        }
+      }
     }
-    return x;
+  } catch {
+    // fail open: whatever was read so far
   }
-  function union(a, b) {
-    const ra = find(a);
-    const rb = find(b);
-    if (ra !== rb) parent[ra] = rb;
+  return [...out].sort();
+}
+
+// A pitfall lesson's distinct cards, sessions and files from the occurrence ledger (card memory-failure-lessons).
+// Only occurrences count: helpful counters and text similarity play no part (ADR 0019 lines 39 and 60). A null
+// session never counts toward the sessions.
+function collectPitfallSignals(dir, live) {
+  const pitfalls = new Map(live.filter((l) => l.kind === "pitfall").map((l) => [l.id, l]));
+  const byLesson = new Map();
+  for (const o of readPitfallOccurrences(dir)) {
+    if (!pitfalls.has(o.lesson)) continue;
+    const cur = byLesson.get(o.lesson) || { cards: new Set(), sessions: new Set(), citations: [] };
+    if (typeof o.card === "string" && o.card) cur.cards.add(o.card);
+    if (typeof o.session === "string" && o.session) cur.sessions.add(o.session);
+    cur.citations.push(o.citation);
+    byLesson.set(o.lesson, cur);
   }
-  const tokens = live.map((l) => reflectTokens(l.text));
-  for (let i = 0; i < n; i++) {
-    for (let j = i + 1; j < n; j++) {
-      if (jaccard(tokens[i], tokens[j]) >= REFLECT_DUPLICATE_JACCARD) union(i, j);
-    }
-  }
-  const clusters = new Map();
-  for (let i = 0; i < n; i++) {
-    const r = find(i);
-    if (!clusters.has(r)) clusters.set(r, []);
-    clusters.get(r).push(i);
-  }
-  const repeated = [];
-  for (const idxs of clusters.values()) {
-    if (idxs.length >= 2) {
-      const members = idxs.map((i) => live[i]).sort((a, b) => String(a.created || "").localeCompare(String(b.created || "")) || a.id.localeCompare(b.id));
-      repeated.push({ text: members[0].text, ids: members.map((l) => l.id).sort(), kind: members[0].kind, count: members.length });
-    } else {
-      const l = live[idxs[0]];
-      if (l.helpful >= 3) repeated.push({ text: l.text, ids: [l.id], kind: l.kind, count: l.helpful });
-    }
-  }
-  repeated.sort((a, b) => b.count - a.count || a.text.localeCompare(b.text));
-  return repeated;
+  return [...byLesson.entries()]
+    .map(([id, v]) => {
+      const cards = [...v.cards].sort();
+      return { id, text: pitfalls.get(id).text, cards, sessions: [...v.sessions].sort(), citations: v.citations, files: [...new Set(cards.flatMap((c) => cardFilesTouched(dir, c)))].sort() };
+    })
+    .sort((a, b) => a.id.localeCompare(b.id));
 }
 
 function listTraceFiles(traceDir) {
@@ -278,7 +309,7 @@ export function collectSignals(m, { dir, traceDir, now = new Date() } = {}) {
       helpful: live.filter((l) => l.helpful > 0).length,
       harmful: live.filter((l) => l.harmful > 0).length,
       stale: live.filter((l) => l.stale).length,
-      repeated: groupRepeatedLessons(live),
+      pitfalls: collectPitfallSignals(dir, live),
     },
     trace,
   };
@@ -499,15 +530,25 @@ export function proposeChanges(signals, { dir, claudeMd, config, skills = [] } =
   let n = 0;
   const nextId = () => String(++n).padStart(2, "0");
 
-  // promote: a repeated feedback/pitfall lesson not already in CLAUDE.md.
-  for (const r of signals.lessons.repeated) {
-    if (r.kind !== "feedback" && r.kind !== "pitfall") continue;
+  // promote: a pitfall cited by RULE_MIN_CARDS distinct cards over RULE_MIN_SESSIONS distinct sessions (card
+  // memory-failure-lessons, ADR 0019 line 60). With known files it becomes a path-scoped .claude/rules file; with none, a
+  // CLAUDE.md Gotchas bullet (refused at the 60-line cap). Feedback lessons have no trigger.
+  for (const r of signals.lessons.pitfalls ?? []) {
+    if (r.cards.length < RULE_MIN_CARDS || r.sessions.length < RULE_MIN_SESSIONS) continue;
+    const evidence = { id: r.id, cards: r.cards, sessions: r.sessions, citations: r.citations, files: r.files };
+    const counted = `pitfall ${r.id} cited by ${r.cards.length} cards over ${r.sessions.length} sessions`;
+    if (r.files.length) {
+      const relPath = `.claude/rules/pitfall-${r.id}.md`;
+      const body = `${r.text}\n\nEvidence:\n${r.citations.map((c) => `- ${c}`).join("\n")}`;
+      const abs = join(dir, relPath);
+      const oldText = existsSync(abs) ? readFileSync(abs, "utf8") : "";
+      proposals.push({ id: nextId(), kind: "rule", target: relPath, reason: `${counted}; proposing a rule scoped to the files those cards touched`, evidence, diff: unifiedDiff(relPath, oldText, renderRule(r.files, body)) });
+      continue;
+    }
     if (normalize(claudeMd).includes(normalize(r.text))) continue;
-    const heading = r.kind === "feedback" ? "## Working agreement" : "## Gotchas";
-    const bulletLine = `- ${r.text}`;
-    const evidence = { count: r.count, ids: r.ids, kind: r.kind };
-    const reason = `lesson repeated ${r.count}× (ids: ${r.ids.join(", ")}); promoting to CLAUDE.md's ${heading.replace("## ", "")}`;
-    const updated = insertBulletUnderHeading(claudeMd, heading, bulletLine);
+    const heading = "## Gotchas";
+    const reason = `${counted}; no file known, promoting to CLAUDE.md's Gotchas`;
+    const updated = insertBulletUnderHeading(claudeMd, heading, `- ${r.text}`);
     if (updated === null) {
       proposals.push({ id: nextId(), kind: "promote", target: "CLAUDE.md", reason: `${reason}, but CLAUDE.md has no "${heading}" section`, evidence, diff: null });
       continue;
@@ -541,7 +582,7 @@ export function proposeChanges(signals, { dir, claudeMd, config, skills = [] } =
     }
   }
 
-  // delete: a CLAUDE.md rule line referenced by no denial, no repeated lesson, and no block description, with
+  // delete: a CLAUDE.md rule line referenced by no denial, no pitfall lesson, and no block description, with
   // enough signal density to trust the absence (>=10 outcome rows, >=5 trace files).
   if (signals.outcomes.rows.length >= 10 && signals.trace.files.length >= 5) {
     const blockDescriptions = signals.outcomes.rows.flatMap((r) => (r.blocks || []).map((b) => b.description || ""));
@@ -556,7 +597,7 @@ export function proposeChanges(signals, { dir, claudeMd, config, skills = [] } =
         if (!tokens.length) continue;
         const referenced =
           signals.trace.denials.some((d) => textReferencesTokens(d.detail, tokens)) ||
-          signals.lessons.repeated.some((r) => textReferencesTokens(r.text, tokens)) ||
+          (signals.lessons.pitfalls ?? []).some((r) => textReferencesTokens(r.text, tokens)) ||
           blockDescriptions.some((d) => textReferencesTokens(d, tokens));
         if (referenced) continue;
         const updated = removeExactLine(claudeMd, line);
@@ -564,7 +605,7 @@ export function proposeChanges(signals, { dir, claudeMd, config, skills = [] } =
           id: nextId(),
           kind: "delete",
           target: "CLAUDE.md",
-          reason: `no denial, repeated lesson, or block description across ${signals.outcomes.rows.length} outcome rows and ${signals.trace.files.length} trace files mentions "${tokens.join(", ")}"`,
+          reason: `no denial, pitfall lesson, or block description across ${signals.outcomes.rows.length} outcome rows and ${signals.trace.files.length} trace files mentions "${tokens.join(", ")}" (rule: ${line.slice(2)})`,
           evidence: { outcomeRows: signals.outcomes.rows.length, traceFiles: signals.trace.files.length, keyPhrase: tokens },
           diff: updated === null ? null : unifiedDiff("CLAUDE.md", claudeMd, updated),
         });

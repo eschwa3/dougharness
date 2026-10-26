@@ -17,6 +17,7 @@ import { copyFileSync, existsSync, mkdirSync, readFileSync, realpathSync, rename
 import { join, resolve } from "node:path";
 import { randomBytes } from "node:crypto";
 import { pathToFileURL } from "node:url";
+import { readSummaries } from "./test-totals.mjs";
 
 export const RECORD_RELPATH = ".doug/.state/verified-tree.json";
 export const EXCLUDED = [".doug/.state", ".claude/worktrees", ".doug/anchor.md"];
@@ -103,6 +104,37 @@ export function validRecord(r) {
       typeof r.node === "string" &&
       typeof r.at === "string"
     );
+  } catch {
+    return false;
+  }
+}
+
+// Test totals depend on the environment (a worktree without a built dist skips tests), not only the tree. A record
+// stamps `ranIn` (realpath of the directory its commands ran in); its totals count as evidence only for that directory.
+// Never throws: any failure, or a record with no ranIn (legacy), is false (the commands run).
+export function totalsUsable(record, dir) {
+  try {
+    return !!record && typeof record.ranIn === "string" && realpathSync(record.ranIn) === realpathSync(dir);
+  } catch {
+    return false;
+  }
+}
+
+// A record from another checkout (or a legacy one with no ranIn) credits exit codes only when none of its recorded
+// totals reports skipped tests: a dist-less worktree skips tests that could fail here. Absent or unreadable entries
+// do not count. Never throws: any failure is false.
+export function exitCreditUsable(record, dir) {
+  try {
+    if (!record || typeof record !== "object") return false;
+    if (totalsUsable(record, dir)) return true;
+    const totals = record.totals;
+    if (!totals || typeof totals !== "object") return true;
+    for (const entry of Object.values(totals)) {
+      const sums = readSummaries(entry);
+      if (!sums) continue;
+      if (sums.reduce((n, s) => n + (s.skipped || 0), 0) > 0) return false;
+    }
+    return true;
   } catch {
     return false;
   }
@@ -214,6 +246,7 @@ if (isMain()) {
           node: process.version,
           at: new Date().toISOString(),
           by: "pre-commit",
+          ranIn: realpathSync(dir),
           commands: commands.map((cm) => ({ name: cm.name, command: cm.command, exit: cm.exit, durationMs: cm.durationMs })),
           totals,
         });

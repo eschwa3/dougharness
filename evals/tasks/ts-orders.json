@@ -1,0 +1,512 @@
+{
+  "fixture": "ts-orders",
+  "setup": [
+    "pnpm install --prefer-offline --silent"
+  ],
+  "tasks": [
+    {
+      "id": "fix-tax-rounding",
+      "prompt": "taxFor in src/billing/tax.ts drops the fractional cent instead of rounding it: taxFor(1005, 0.15) is 150 but must be 151, because tax rounds half up to whole cents. Fix it and add a test for it in tests/billing.test.ts. Run the tests to confirm.",
+      "allowedFiles": [
+        "src/billing/tax.ts",
+        "tests/billing.test.ts"
+      ],
+      "heldOut": [
+        {
+          "from": "ts-orders-fix-tax-rounding.test.ts",
+          "to": "tests/heldout-fix-tax-rounding.test.ts"
+        }
+      ],
+      "mustPass": [
+        "pnpm test",
+        "pnpm typecheck"
+      ],
+      "mustNotChange": [
+        ".env",
+        "pnpm-lock.yaml",
+        "src/inventory/stock.ts",
+        "tests/inventory.test.ts"
+      ],
+      "plan": {
+        "version": 1,
+        "title": "Round tax half up",
+        "goal": "taxFor rounds a fractional cent half up so an order's tax matches its invoice",
+        "acceptance": [
+          "taxFor(1005, 0.15) === 151",
+          "a test covers a fractional cent"
+        ],
+        "verify": [
+          "pnpm test",
+          "pnpm typecheck"
+        ],
+        "tasks": [
+          {
+            "id": "fix-tax-rounding",
+            "title": "Round tax half up",
+            "spec": "Make taxFor in src/billing/tax.ts round half up to whole cents (use roundCents from src/util/money.ts) and add a test for a fractional cent in tests/billing.test.ts.",
+            "files": [
+              "src/billing/tax.ts",
+              "tests/billing.test.ts"
+            ],
+            "verify": "pnpm test",
+            "size": "S"
+          }
+        ]
+      },
+      "note": "A planted bug in one module: the hand rehearsal's card. Existing tests only use amounts whose tax is exact."
+    },
+    {
+      "id": "fix-stock-reserve",
+      "prompt": "reserve in src/inventory/stock.ts checks the quantity against the units on hand, not the units still available, so a sku can be reserved past its stock (3 on hand, 2 reserved, reserving 2 more must throw). Fix it and add a test for it in tests/inventory.test.ts. Run the tests to confirm.",
+      "allowedFiles": [
+        "src/inventory/stock.ts",
+        "tests/inventory.test.ts"
+      ],
+      "heldOut": [
+        {
+          "from": "ts-orders-fix-stock-reserve.test.ts",
+          "to": "tests/heldout-fix-stock-reserve.test.ts"
+        }
+      ],
+      "mustPass": [
+        "pnpm test",
+        "pnpm typecheck"
+      ],
+      "mustNotChange": [
+        ".env",
+        "pnpm-lock.yaml",
+        "src/billing/tax.ts",
+        "tests/billing.test.ts"
+      ],
+      "plan": {
+        "version": 1,
+        "title": "Reserve only available stock",
+        "goal": "reserve refuses a quantity above the units still available, so two reservations can never exceed what is on hand",
+        "acceptance": [
+          "reserve throws when qty exceeds available units",
+          "a test covers a second reservation past the stock"
+        ],
+        "verify": [
+          "pnpm test",
+          "pnpm typecheck"
+        ],
+        "tasks": [
+          {
+            "id": "fix-stock-reserve",
+            "title": "Reserve only available stock",
+            "spec": "Compare qty with available(stock, sku) in reserve (src/inventory/stock.ts) instead of onHand and add a test for an over-reservation in tests/inventory.test.ts.",
+            "files": [
+              "src/inventory/stock.ts",
+              "tests/inventory.test.ts"
+            ],
+            "verify": "pnpm test",
+            "size": "S"
+          }
+        ]
+      },
+      "note": "A planted bug: the flow rehearsal's card, and the flow half of the parallel pair."
+    },
+    {
+      "id": "fix-catalog-search",
+      "prompt": "searchProducts in src/catalog/catalog.ts is case-sensitive: searching 'widget' misses 'Blue Widget'. Make it ignore case in both the name and the query and add a test for it in tests/catalog.test.ts. Run the tests to confirm.",
+      "allowedFiles": [
+        "src/catalog/catalog.ts",
+        "tests/catalog.test.ts"
+      ],
+      "heldOut": [
+        {
+          "from": "ts-orders-fix-catalog-search.test.ts",
+          "to": "tests/heldout-fix-catalog-search.test.ts"
+        }
+      ],
+      "mustPass": [
+        "pnpm test",
+        "pnpm typecheck"
+      ],
+      "mustNotChange": [
+        ".env",
+        "pnpm-lock.yaml",
+        "src/billing/tax.ts",
+        "tests/billing.test.ts"
+      ],
+      "plan": {
+        "version": 1,
+        "title": "Make product search ignore case",
+        "goal": "searchProducts matches a name whatever the case of the name or the query",
+        "acceptance": [
+          "searchProducts(catalog, 'widget') finds 'Blue Widget'",
+          "a test covers a mixed-case match"
+        ],
+        "verify": [
+          "pnpm test",
+          "pnpm typecheck"
+        ],
+        "tasks": [
+          {
+            "id": "fix-catalog-search",
+            "title": "Make product search ignore case",
+            "spec": "Lower-case both sides of the includes test in searchProducts (src/catalog/catalog.ts) and add a mixed-case test in tests/catalog.test.ts.",
+            "files": [
+              "src/catalog/catalog.ts",
+              "tests/catalog.test.ts"
+            ],
+            "verify": "pnpm test",
+            "size": "S"
+          }
+        ]
+      },
+      "note": "A planted bug: the second Ready hand card of the auto scenario and the hand half of the parallel pair."
+    },
+    {
+      "id": "add-top-products",
+      "prompt": "Add topProducts(orders: Order[], n: number): { sku: string; qty: number }[] to src/reports/sales.ts. It totals the units sold per sku over the orders that are not cancelled and returns the n best sellers, most units first, ties broken by sku; no orders gives []. Add tests in tests/reports.test.ts. Run the tests.",
+      "allowedFiles": [
+        "src/reports/sales.ts",
+        "tests/reports.test.ts"
+      ],
+      "heldOut": [
+        {
+          "from": "ts-orders-add-top-products.test.ts",
+          "to": "tests/heldout-add-top-products.test.ts"
+        }
+      ],
+      "mustPass": [
+        "pnpm test",
+        "pnpm typecheck"
+      ],
+      "mustNotChange": [
+        ".env",
+        "pnpm-lock.yaml",
+        "src/billing/tax.ts",
+        "tests/billing.test.ts"
+      ],
+      "plan": {
+        "version": 1,
+        "title": "Add a top-products report",
+        "goal": "topProducts ranks skus by units sold over the live orders, so the sales report can name the best sellers",
+        "acceptance": [
+          "topProducts(orders, 2) returns the two best sellers by units",
+          "cancelled orders are left out"
+        ],
+        "verify": [
+          "pnpm test",
+          "pnpm typecheck"
+        ],
+        "tasks": [
+          {
+            "id": "add-top-products",
+            "title": "Add a top-products report",
+            "spec": "Add topProducts to src/reports/sales.ts next to salesByDay, skipping cancelled orders, sorting by qty descending then sku, and add tests in tests/reports.test.ts.",
+            "files": [
+              "src/reports/sales.ts",
+              "tests/reports.test.ts"
+            ],
+            "verify": "pnpm test",
+            "size": "M"
+          }
+        ]
+      },
+      "note": "A missing feature: the Backlog card auto must leave alone, and the start-feature scenario's card."
+    },
+    {
+      "id": "split-commerce-helpers",
+      "prompt": "An approved plan for this change is in .doug/plan.json (task split-commerce-helpers). Implement it, one independent change in each of three source files. (1) In src/util/text.ts add padLeft(text: string, width: number): string and padRight(text: string, width: number): string that pad with spaces to the width and never cut a longer string. (2) In src/billing/discount.ts add bulkDiscount(qty: number, unitCents: number): number, the price in cents of a line: qty times unitCents, with 10% off from 10 units and 20% off from 50 units (use applyPercent); it throws when qty is not a positive whole number. (3) In src/inventory/restock.ts add reorderQuantity(onHand: number, target: number, packSize: number): number, the units to order to reach the target, rounded up to whole packs, 0 when onHand is at or above the target; it throws when packSize is not a positive whole number. Add tests for each part in tests/money.test.ts, tests/billing.test.ts and tests/inventory.test.ts. Run the tests and the typecheck to confirm.",
+      "allowedFiles": [
+        "src/util/text.ts",
+        "src/billing/discount.ts",
+        "src/inventory/restock.ts",
+        "tests/money.test.ts",
+        "tests/billing.test.ts",
+        "tests/inventory.test.ts"
+      ],
+      "heldOut": [
+        {
+          "from": "ts-orders-split-commerce-helpers.test.ts",
+          "to": "tests/heldout-split-commerce-helpers.test.ts"
+        }
+      ],
+      "mustPass": [
+        "pnpm test",
+        "pnpm typecheck"
+      ],
+      "mustNotChange": [
+        ".env",
+        "pnpm-lock.yaml",
+        "README.md",
+        "src/cli.ts",
+        "tests/cli.test.ts"
+      ],
+      "plan": {
+        "version": 1,
+        "title": "Commerce helpers: padding, bulk discount, reorder quantity",
+        "goal": "padLeft/padRight, bulkDiscount and reorderQuantity exist, three independent helpers in three source files across three modules",
+        "acceptance": [
+          "padLeft('7', 3) === '  7'",
+          "bulkDiscount(10, 100) === 900",
+          "reorderQuantity(3, 20, 6) === 18"
+        ],
+        "verify": [
+          "pnpm test",
+          "pnpm typecheck"
+        ],
+        "tasks": [
+          {
+            "id": "split-commerce-helpers",
+            "title": "Commerce helpers: padding, bulk discount, reorder quantity",
+            "spec": "Three independent changes that share no new symbol: padLeft/padRight in src/util/text.ts, bulkDiscount in src/billing/discount.ts, reorderQuantity in src/inventory/restock.ts. (1) In src/util/text.ts add padLeft(text: string, width: number): string and padRight(text: string, width: number): string that pad with spaces to the width and never cut a longer string. (2) In src/billing/discount.ts add bulkDiscount(qty: number, unitCents: number): number, the price in cents of a line: qty times unitCents, with 10% off from 10 units and 20% off from 50 units (use applyPercent); it throws when qty is not a positive whole number. (3) In src/inventory/restock.ts add reorderQuantity(onHand: number, target: number, packSize: number): number, the units to order to reach the target, rounded up to whole packs, 0 when onHand is at or above the target; it throws when packSize is not a positive whole number. Tests for each in the matching test file.",
+            "files": [
+              "src/util/text.ts",
+              "src/billing/discount.ts",
+              "src/inventory/restock.ts",
+              "tests/money.test.ts",
+              "tests/billing.test.ts",
+              "tests/inventory.test.ts"
+            ],
+            "verify": "pnpm test",
+            "size": "M"
+          }
+        ]
+      },
+      "note": "The swarm rehearsal's task on ts-orders: one size M plan task owning three source files in three modules, so the shape gate lets the lead split it into more than two briefs."
+    },
+    {
+      "id": "split-money-catalog",
+      "prompt": "Implement this change. It is one change across three source files. (1) In src/util/money.ts add splitCents(total: number, parts: number): number[] that shares a total in cents across parts, the first parts taking the extra cents (splitCents(100, 3) is [34, 33, 33]); it throws when parts is not a positive whole number. (2) In src/catalog/catalog.ts add byCategory(products: Product[]): Record<string, string[]> that maps each category to its skus in catalog order. (3) In src/orders/status.ts add isTerminal(status: Status): boolean, true for shipped and cancelled only. Add tests for each part in tests/money.test.ts, tests/catalog.test.ts and tests/orders.test.ts. Run the tests and the typecheck to confirm.",
+      "allowedFiles": [
+        "src/util/money.ts",
+        "src/catalog/catalog.ts",
+        "src/orders/status.ts",
+        "tests/money.test.ts",
+        "tests/catalog.test.ts",
+        "tests/orders.test.ts"
+      ],
+      "heldOut": [
+        {
+          "from": "ts-orders-split-money-catalog.test.ts",
+          "to": "tests/heldout-split-money-catalog.test.ts"
+        }
+      ],
+      "mustPass": [
+        "pnpm test",
+        "pnpm typecheck"
+      ],
+      "mustNotChange": [
+        ".env",
+        "pnpm-lock.yaml",
+        "README.md",
+        "src/cli.ts",
+        "tests/cli.test.ts"
+      ],
+      "plan": {
+        "version": 1,
+        "title": "Money, catalog and status helpers",
+        "goal": "splitCents, byCategory and isTerminal exist, planned as one task, size M, that owns all six files (three source files and their tests)",
+        "acceptance": [
+          "splitCents(100, 3) is [34, 33, 33]",
+          "byCategory groups skus per category",
+          "isTerminal('shipped') is true"
+        ],
+        "verify": [
+          "pnpm test",
+          "pnpm typecheck"
+        ],
+        "tasks": [
+          {
+            "id": "split-money-catalog",
+            "title": "Money, catalog and status helpers",
+            "spec": "One task owning all three source files, so the shape gate can split it: splitCents in src/util/money.ts, byCategory in src/catalog/catalog.ts, isTerminal in src/orders/status.ts. Tests for each in the matching test file.",
+            "files": [
+              "src/util/money.ts",
+              "src/catalog/catalog.ts",
+              "src/orders/status.ts",
+              "tests/money.test.ts",
+              "tests/catalog.test.ts",
+              "tests/orders.test.ts"
+            ],
+            "verify": "pnpm test",
+            "size": "M"
+          }
+        ]
+      },
+      "note": "The /doug-swarm skill scenario's task: the same shape as split-commerce-helpers, but the planner plans it and the plan is not pre-approved. The goal directs one task owning all three source files; three single-file tasks would stay off the lead (shape gate)."
+    }
+  ],
+  "rehearsal": {
+    "scenarios": {
+      "hand": {
+        "cards": [
+          {
+            "task": "fix-tax-rounding",
+            "id": "fix-tax-rounding",
+            "column": "ready",
+            "component": "billing",
+            "size": "S",
+            "class": "code",
+            "track": "hand"
+          }
+        ]
+      },
+      "flow": {
+        "cards": [
+          {
+            "task": "fix-stock-reserve",
+            "id": "fix-stock-reserve",
+            "column": "ready",
+            "component": "inventory",
+            "size": "S",
+            "class": "code"
+          }
+        ]
+      },
+      "auto": {
+        "cards": [
+          {
+            "task": "fix-tax-rounding",
+            "id": "fix-tax-rounding",
+            "column": "ready",
+            "component": "billing",
+            "size": "S",
+            "class": "code",
+            "track": "hand"
+          },
+          {
+            "task": "fix-catalog-search",
+            "id": "fix-catalog-search",
+            "column": "ready",
+            "component": "catalog",
+            "size": "S",
+            "class": "code",
+            "track": "hand"
+          },
+          {
+            "task": "add-top-products",
+            "id": "add-top-products",
+            "column": "backlog",
+            "component": "reports",
+            "size": "S",
+            "class": "code",
+            "track": "hand"
+          }
+        ]
+      },
+      "parallel": {
+        "cards": [
+          {
+            "task": "fix-stock-reserve",
+            "id": "fix-stock-reserve",
+            "column": "ready",
+            "component": "inventory",
+            "size": "S",
+            "class": "code"
+          },
+          {
+            "task": "fix-catalog-search",
+            "id": "fix-catalog-search",
+            "column": "ready",
+            "component": "catalog",
+            "size": "S",
+            "class": "code",
+            "track": "hand"
+          }
+        ],
+        "workersMax": 2
+      },
+      "swarm": {
+        "cards": [
+          {
+            "task": "split-commerce-helpers",
+            "id": "split-commerce-helpers",
+            "column": "ready",
+            "component": "commerce",
+            "size": "M",
+            "class": "code"
+          }
+        ]
+      },
+      "swarm-skill": {
+        "cards": [
+          {
+            "task": "split-money-catalog",
+            "id": "split-money-catalog",
+            "column": "ready",
+            "component": "core",
+            "size": "M",
+            "class": "code"
+          }
+        ]
+      },
+      "start-feature": {
+        "cards": [
+          {
+            "task": "add-top-products",
+            "id": "add-top-products",
+            "column": "ready",
+            "component": "reports",
+            "size": "M",
+            "class": "code"
+          }
+        ]
+      }
+    },
+    "background": [
+      {
+        "id": "orders-json-store",
+        "title": "Persist orders as JSON",
+        "goal": "Orders are saved to and loaded from a JSON file so the CLI can report on them.",
+        "column": "done",
+        "component": "store",
+        "size": "S",
+        "track": "hand",
+        "class": "code"
+      },
+      {
+        "id": "refund-flow",
+        "title": "Add refunds",
+        "goal": "A paid order can be refunded: a refunded status, its transition, and an invoice line for the refund.",
+        "column": "backlog",
+        "component": "orders",
+        "size": "L",
+        "class": "code"
+      },
+      {
+        "id": "coupon-codes",
+        "title": "Add coupon codes",
+        "goal": "A coupon code takes a percent off an order, validated against an expiry date.",
+        "column": "backlog",
+        "component": "billing",
+        "size": "M",
+        "class": "code"
+      }
+    ],
+    "lessons": [
+      {
+        "text": "Order totals must round half up to whole cents: taxFor and applyPercent both go through roundCents, so a fractional cent never truncates.",
+        "kind": "pitfall",
+        "citation": "src/util/money.ts"
+      },
+      {
+        "text": "Reservations are checked against available units (on hand minus reserved), never against on-hand stock alone.",
+        "kind": "pitfall",
+        "citation": "src/inventory/stock.ts"
+      },
+      {
+        "text": "Money is integer cents everywhere in ts-orders; format with formatMoney only at the edge, in invoices and CLI output.",
+        "kind": "pattern",
+        "citation": "src/util/money.ts"
+      },
+      {
+        "text": "Each module keeps its tests in tests/<module>.test.ts; add a helper's test to the file of the module that owns it.",
+        "kind": "pattern",
+        "citation": "tests/"
+      }
+    ],
+    "memory": {
+      "recallQuery": "order totals rounding cents",
+      "expectText": "round half up"
+    },
+    "decide": {
+      "title": "Orders are stored as one JSON file",
+      "body": "The order store stays a single JSON file read and written whole by src/store/store.ts. A database waits until orders outgrow what a person can read in an editor, because every report and the CLI load the whole list anyway."
+    }
+  }
+}

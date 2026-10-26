@@ -328,6 +328,40 @@ describe("card-queen workflow (parallel-card-queens B10)", () => {
     expect(want).toContain("const SEAT_ROWS = {");
   });
 
+  it("Q09b the workflow's inlined contract carries the lessons-fetch rule, and only the lead's prompt prints it", async () => {
+    const text = "For each indexed lesson the card needs, run memory.mjs lesson show <id> <repo-root> --card <card-id>, passing the REPO ROOT named in this brief as [dir], and append its output verbatim to lessons below the brief-lessons block; never cut or paraphrase a fetched lesson.";
+    expect(loadSource()).toContain(text);
+    const { agent, calls } = fakeAgent();
+    await runQueen(ARGS, agent);
+    for (const c of calls) {
+      if (c.seat === "lead") expect(c.prompt, "lead prompt").toContain(text);
+      else expect(c.prompt, `${c.seat} prompt`).not.toContain(text);
+    }
+  });
+
+  it("Q09d the queen's tester, coder, reviewer and commit prompts print the no-trailers rule; setup, research, lead and gate do not", async () => {
+    const text = "Commit without Co-Authored-By or Claude-Session trailers.";
+    expect(loadSource()).toContain(text);
+    const { agent, calls } = fakeAgent();
+    await runQueen(ARGS, agent);
+    expect(calls.map((c) => c.seat)).toEqual(SEATS_IN_ORDER);
+    for (const c of calls) {
+      if (["tester", "coder", "reviewer", "commit"].includes(c.seat)) expect(c.prompt, `${c.seat} prompt`).toContain(text);
+      else expect(c.prompt, `${c.seat} prompt`).not.toContain(text);
+    }
+  });
+
+  it("Q09c the queen's lead prompt names the repo root it was given; no other seat does", async () => {
+    const { agent, calls } = fakeAgent();
+    await runQueen(ARGS, agent);
+    expect(calls.some((c) => c.seat === "lead")).toBe(true);
+    for (const c of calls) {
+      if (c.seat === "lead") expect(c.prompt, "lead prompt").toContain("REPO ROOT: " + REPO);
+      else expect(c.prompt, `${c.seat} prompt`).not.toContain("REPO ROOT:");
+    }
+    expect(loadSource()).toContain("REPO ROOT: ");
+  });
+
   it("Q10 drift sensitivity: a one-character edit to the lib changes the inlined block", async () => {
     const { inlineCardLoop } = await loadSync();
     const lib = readFileSync(LIB, "utf8");
@@ -505,5 +539,77 @@ describe("card-queen commit tree", () => {
     expect(report.outcome).toBe("stopped");
     expect(report.reason).toBe("commit-tree-mismatch");
     expect(report.stoppedAt).toBe("commit");
+  });
+});
+
+// Card card-loop-reviewer-answer-reaches-coder: a reviewer-seat answer on resume reaches a fresh coder round.
+describe("card queen: reviewer answer reaches the coder on resume", () => {
+  const QUESTION = "major with evidence still open after one fix pass: F2";
+  const MAJOR = { id: "F2", severity: "major", file: "b.mjs", description: "meh", evidence: "ran X, saw Y" };
+  const failing = (seat, brief) => okHB(seat, { verdict: "fail", findings: [MAJOR] });
+
+  function cachingAgent(cache, options, respond) {
+    let mirror = initialState(CARD, options);
+    const calls = [];
+    const agent = async (prompt, opts) => {
+      const action = currentAction(mirror);
+      const seat = action.kind === "seat" ? action.seat : null;
+      const key = prompt + "\u0000" + JSON.stringify(opts);
+      const hit = cache.has(key);
+      let hb;
+      if (hit) hb = cache.get(key);
+      else {
+        hb = respond(seat, action.brief);
+        cache.set(key, hb);
+      }
+      calls.push({ seat, prompt, opts, hit, round: action.brief ? action.brief.round : null });
+      if (action.kind === "seat") mirror = next(mirror, hb).state;
+      return hb;
+    };
+    return { agent, calls };
+  }
+  const answersArgs = (answers) => ({ ...ARGS, options: { research: true, answers } });
+  const answer = (text) => ({ seat: "reviewer", question: QUESTION, answer: text, round: 2, run: "wf_one" });
+
+  async function firstRun(cache) {
+    const first = cachingAgent(cache, { research: true }, (seat) => (seat === "reviewer" ? failing(seat) : okHB(seat)));
+    const report = await runQueen(ARGS, first.agent);
+    expect(report.outcome).toBe("stopped");
+    expect(report.reason).toBe("reviewer-major-open");
+    expect(report.stoppedAt).toBe("reviewer");
+    return first.calls.filter((c) => c.seat === "coder");
+  }
+
+  it("Q18 a fix answer reaches a new coder round while the earlier coder round replays from the cache", async () => {
+    const cache = new Map();
+    const firstCoders = await firstRun(cache);
+    expect(firstCoders.length).toBe(2);
+    const ans = answer("Fix F2.");
+    const resumed = cachingAgent(cache, { research: true, answers: [ans] }, (seat, brief) =>
+      seat === "reviewer" && brief.round < 3 ? failing(seat) : okHB(seat),
+    );
+    const report = await runQueen(answersArgs([ans]), resumed.agent);
+    expect(report.outcome).toBe("done");
+    const coders = resumed.calls.filter((c) => c.seat === "coder");
+    expect(coders.map((c) => [c.round, c.hit])).toEqual([[1, true], [2, true], [3, false]]);
+    expect(coders[1].prompt).toBe(firstCoders[1].prompt);
+    expect(coders[2].prompt).toContain("A: Fix F2.");
+    expect(coders[1].prompt).not.toContain("ANSWERS FROM THE USER");
+  });
+
+  it("Q19 an accept-only answer adds no coder round and no coder prompt changes", async () => {
+    const cache = new Map();
+    const firstCoders = await firstRun(cache);
+    const ans = answer("Accept F2 as minor.");
+    const resumed = cachingAgent(cache, { research: true, answers: [ans] }, (seat, brief) =>
+      seat === "reviewer" && brief.round < 2 ? failing(seat) : okHB(seat),
+    );
+    const report = await runQueen(answersArgs([ans]), resumed.agent);
+    expect(report.outcome).toBe("done");
+    const coders = resumed.calls.filter((c) => c.seat === "coder");
+    expect(coders.length).toBe(2);
+    expect(coders.every((c) => c.hit)).toBe(true);
+    expect(coders.map((c) => c.prompt)).toEqual(firstCoders.map((c) => c.prompt));
+    for (const c of coders) expect(c.prompt).not.toContain("ANSWERS FROM THE USER");
   });
 });

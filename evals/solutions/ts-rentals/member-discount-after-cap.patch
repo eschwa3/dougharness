@@ -1,0 +1,59 @@
+diff --git a/src/pricing/discounts.ts b/src/pricing/discounts.ts
+index 16aaf25..ef97484 100644
+--- a/src/pricing/discounts.ts
++++ b/src/pricing/discounts.ts
+@@ -1,7 +1,9 @@
++import type { Item } from "../catalog/item.js";
+ import type { Customer } from "../customers/customer.js";
+ import { memberDiscountPercent } from "../customers/membership.js";
+ import { percentOf } from "../util/money.js";
+ import type { Cents } from "../util/money.js";
++import { rentalCostCents } from "./rates.js";
+ 
+ /** The amount a percentage takes off. */
+ export function percentOffCents(cents: Cents, percent: number): Cents {
+@@ -22,3 +24,9 @@ export function bundleDiscountCents(itemCount: number, cents: Cents): Cents {
+ export function afterDiscount(cents: Cents, discountCents: Cents): Cents {
+   return Math.max(0, cents - discountCents);
+ }
++
++/** What a customer pays for `days` days of an item: the capped rental price, less the member discount worked out on that capped price. */
++export function memberPriceCents(customer: Customer | undefined, item: Item, days: number): Cents {
++  const rental = rentalCostCents(item, days);
++  return afterDiscount(rental, memberDiscountCents(customer, rental));
++}
+diff --git a/tests/pricing.test.ts b/tests/pricing.test.ts
+index fd399cc..0a45216 100644
+--- a/tests/pricing.test.ts
++++ b/tests/pricing.test.ts
+@@ -4,7 +4,7 @@ import { seedCatalog } from "../src/catalog/catalog.js";
+ import { createReservation } from "../src/reservations/reservation.js";
+ import { makeCustomer } from "../src/customers/customer.js";
+ import { upgradeToMember } from "../src/customers/membership.js";
+-import { afterDiscount, bundleDiscountCents, memberDiscountCents, percentOffCents } from "../src/pricing/discounts.js";
++import { afterDiscount, bundleDiscountCents, memberDiscountCents, memberPriceCents, percentOffCents } from "../src/pricing/discounts.js";
+ import { feeForDays, lateDays, lateFeeCents } from "../src/pricing/late-fees.js";
+ import { billableDays, costForSpan, dayRateLabel, rentalCostCents, weekRateLabel } from "../src/pricing/rates.js";
+ 
+@@ -91,6 +91,21 @@ describe("weekly rate cap", () => {
+   });
+ });
+ 
++describe("member price after the cap", () => {
++  const member = upgradeToMember(ana);
++  it("takes the member discount off the capped price", () => {
++    expect(memberPriceCents(member, drill, 6)).toBe(6750);
++    expect(memberPriceCents(member, drill, 9)).toBe(9450);
++  });
++  it("charges a standard customer the capped price", () => {
++    expect(memberPriceCents(ana, drill, 6)).toBe(7500);
++    expect(memberPriceCents(undefined, drill, 9)).toBe(10500);
++  });
++  it("leaves a short rental at the day rate less the discount", () => {
++    expect(memberPriceCents(member, drill, 2)).toBe(2700);
++  });
++});
++
+ describe("more pricing", () => {
+   it("prices every seeded item for one day at its day rate", () => {
+     for (const item of seedCatalog()) expect(rentalCostCents(item, 1)).toBe(item.dayRateCents);

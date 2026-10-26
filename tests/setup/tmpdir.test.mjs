@@ -31,4 +31,16 @@ describe("tests/setup/tmpdir.mjs", () => {
     expect(basename(out)).toMatch(/^doug-tests-/);
     expect(out).toBe(tmpdir());
   });
+  // Card detached-run-report-back: the runners post to CLAUDE_CODE_MESSAGING_SOCKET when it is set, so the suite must never
+  // inherit the live session's socket. This bites only when the outer environment sets them (inside a Claude session).
+  it("removes CLAUDE_CODE_MESSAGING_SOCKET and _TOKEN so no test posts into the session it runs under", () => {
+    expect(process.env.CLAUDE_CODE_MESSAGING_SOCKET).toBeUndefined();
+    expect(process.env.CLAUDE_CODE_MESSAGING_TOKEN).toBeUndefined();
+    const out = execFileSync(
+      process.execPath,
+      ["-e", "process.stdout.write(JSON.stringify([process.env.CLAUDE_CODE_MESSAGING_SOCKET ?? null, process.env.CLAUDE_CODE_MESSAGING_TOKEN ?? null]))"],
+      { encoding: "utf8" },
+    );
+    expect(JSON.parse(out)).toEqual([null, null]);
+  });
 });

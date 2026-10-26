@@ -38,13 +38,13 @@
 //                                                 flow, or named by .doug/plan.json (each with --force removes it
 //                                                 and prints a warning to stderr); prints the removed card as JSON
 //                                                 to stdout so a mistaken removal can be re-added by hand
-//   board.mjs record <id> <report.json> [dir] --summary "<one sentence>" [--cost <usd>] [--codex-cost <usd>] [--shared-cost <usd>] [--wall <text>] [--commit <sha>] [--adversary "<id>=<class>[: <reason>]"]... [--note <text>] [--rehearsal <scenario> --rehearsal-outcome <passed|failed>] [--run <run-id>] [--claude-dir <dir>]
+//   board.mjs record <id> <report.json> [dir] --summary "<one sentence>" [--cost <usd>] [--codex-cost <usd>] [--shared-cost <usd>] [--wall <text>] [--commit <sha>] [--adversary "<id>=<class>[: <reason>]"]... [--note <text>] [--rehearsal <scenario> --rehearsal-outcome <passed|failed> [--rehearsal-fixture <name>]] [--run <run-id>] [--claude-dir <dir>]
 //                                                 append a run entry for the card to docs/live-runs.md; every adversary block
 //                                                 in the report is classified real, marginal, or false (repeat the flag per block).
 //                                                 When .doug/plan.json lists the card among its `cards` (a batch), the entry
 //                                                 shows only that card's tasks, --cost is that card's tasks' cost, and
 //                                                 --shared-cost <usd> the shared integration agents', counted once
-//   board.mjs record <id> --hand [dir] --summary "<one sentence>" [--commit <sha>] [--wall <text>] [--gate <text>] [--note <text>] [--rehearsal <scenario> --rehearsal-outcome <passed|failed>] [--cost <usd>]
+//   board.mjs record <id> --hand [dir] --summary "<one sentence>" [--commit <sha>] [--wall <text>] [--gate <text>] [--note <text>] [--rehearsal <scenario> --rehearsal-outcome <passed|failed> [--rehearsal-fixture <name>]] [--cost <usd>]
 //                                                 append a hand-track entry (no report) for the card
 //   --rehearsal <scenario> (either form) marks the entry as a rehearse.mjs run on the ts-basic fixture (the start scenario: an empty git repo): the first
 //   prose line and the commit sha (abbreviated to 7 characters) read as the fixture's, not this repository's.
@@ -94,8 +94,8 @@ const planUsage = (kind) => [
   `       board.mjs ${kind} edit <id> [dir] [--title <t>] [--goal <g>] [--version <v>] [--date YYYY-MM-DD] [--status planned|active|done] [--force]`,
   `       board.mjs ${kind} list [dir]`,
 ].join("\n");
-const RECORD_HAND_FLAGS = ["summary", "hand", "commit", "wall", "gate", "note", "rehearsal", "rehearsal-outcome", "cost"];
-const RECORD_REPORT_FLAGS = ["summary", "cost", "codex-cost", "wall", "commit", "adversary", "shared-cost", "note", "rehearsal", "rehearsal-outcome", "run", "claude-dir"];
+const RECORD_HAND_FLAGS = ["summary", "hand", "commit", "wall", "gate", "note", "rehearsal", "rehearsal-outcome", "rehearsal-fixture", "cost"];
+const RECORD_REPORT_FLAGS = ["summary", "cost", "codex-cost", "wall", "commit", "adversary", "shared-cost", "note", "rehearsal", "rehearsal-outcome", "rehearsal-fixture", "run", "claude-dir"];
 const opts = {};
 const positional = [];
 for (let i = 0; i < argv.length; i++) {
@@ -131,8 +131,8 @@ const USAGE_FOR = {
   labels: "usage: board.mjs labels --check [dir] | labels init [dir]",
   summary: "usage: board.mjs summary <report.json> --summary \"<one sentence>\" [--cost <usd>] [--codex-cost <usd>] [--wall <text>] [--commit <sha>] [--card <id>] [--run <run-id>] [--claude-dir <dir>] [--note <text>]",
 };
-const RECORD_HAND_USAGE = "usage: board.mjs record <id> --hand [dir] --summary \"<one sentence>\" [--commit <sha>] [--wall <text>] [--gate <text>] [--note <text>] [--rehearsal <scenario> --rehearsal-outcome <passed|failed>] [--cost <usd>]";
-const RECORD_REPORT_USAGE = "usage: board.mjs record <id> <report.json> [dir] --summary \"<one sentence>\" [--cost <usd>] [--codex-cost <usd>] [--shared-cost <usd>] [--wall <text>] [--commit <sha>] [--adversary \"<id>=<class>[: <reason>]\"]... [--note <text>] [--rehearsal <scenario> --rehearsal-outcome <passed|failed>] [--run <run-id>] [--claude-dir <dir>]";
+const RECORD_HAND_USAGE = "usage: board.mjs record <id> --hand [dir] --summary \"<one sentence>\" [--commit <sha>] [--wall <text>] [--gate <text>] [--note <text>] [--rehearsal <scenario> --rehearsal-outcome <passed|failed> [--rehearsal-fixture <name>]] [--cost <usd>]";
+const RECORD_REPORT_USAGE = "usage: board.mjs record <id> <report.json> [dir] --summary \"<one sentence>\" [--cost <usd>] [--codex-cost <usd>] [--shared-cost <usd>] [--wall <text>] [--commit <sha>] [--adversary \"<id>=<class>[: <reason>]\"]... [--note <text>] [--rehearsal <scenario> --rehearsal-outcome <passed|failed> [--rehearsal-fixture <name>]] [--run <run-id>] [--claude-dir <dir>]";
 
 // An unknown --flag for the given subcommand: exit 2, name the flag and the subcommand's usage.
 // Runs on flag names only (parse order doesn't matter), before any work or write.
@@ -177,6 +177,7 @@ if (cmd === "record" || cmd === "summary") {
 if (cmd === "record") {
   const ro = opts["rehearsal-outcome"];
   if (opts.rehearsal !== undefined && ro !== "passed" && ro !== "failed") fail(`--rehearsal needs --rehearsal-outcome passed|failed, got ${ro === undefined ? "none" : JSON.stringify(ro)}\n${opts.hand ? RECORD_HAND_USAGE : RECORD_REPORT_USAGE}`, 2);
+  if (opts.rehearsal === undefined && opts["rehearsal-fixture"] !== undefined) fail(`--rehearsal-fixture is only valid with --rehearsal\n${opts.hand ? RECORD_HAND_USAGE : RECORD_REPORT_USAGE}`, 2);
   if (opts.rehearsal === undefined && ro !== undefined) fail(`--rehearsal-outcome is only valid with --rehearsal\n${opts.hand ? RECORD_HAND_USAGE : RECORD_REPORT_USAGE}`, 2);
 }
 
@@ -192,7 +193,8 @@ function landingBlock({ id, ok, commit, wall, gate, cost, codexCost, note, rehea
   const learned = typeof note === "string" && note.trim() ? note.trim().replace(/\s+/g, " ") : "nothing new";
   const lines = [`Changed: ${summarySentence}`, `Outcome: ${outcome}`, `Learned: ${learned}`];
   const words = lines.join("\n").split(/\s+/).filter(Boolean).length;
-  if (words > LANDING_BLOCK_WORDS) fail(`landing block is ${words} words; the limit is ${LANDING_BLOCK_WORDS}. Shorten --summary or --note.`);
+  // A rehearsal's block is print-only (no landing-block files, so the Stop gate checks nothing): no cap, so a failed stage's long note still records.
+  if (!rehearsal && words > LANDING_BLOCK_WORDS) fail(`landing block is ${words} words; the limit is ${LANDING_BLOCK_WORDS}. Shorten --summary or --note.`);
   return lines;
 }
 // The pending marker holds the session that landed, so only that session's Stop checks it (empty when unset).
@@ -212,6 +214,25 @@ function writeLandingBlock(dir, id, lines, keepFile = false, printOnly = false) 
   }
   process.stdout.write(lines.join("\n") + "\n");
 }
+// A plan landed after `plan.mjs done --force` (landed set, report not ok, --commit naming the land merge or absent,
+// not a rehearsal) is a landed card whatever the report says; its gate is land's own acceptance. In a batch plan
+// only the entries tagged `[<card>] ` count, or the whole list labelled as the plan's when none carries the tag.
+function forcedLanding({ plan, report, opts, card }) {
+  const lc = plan && plan.landed && typeof plan.landed === "object" ? plan.landed : null;
+  const lm = lc && typeof lc.mergeCommit === "string" ? lc.mergeCommit : "";
+  const forced = report.ok !== true && !opts.rehearsal && lc !== null && (opts.commit === undefined || (lm !== "" && (lm.startsWith(String(opts.commit)) || String(opts.commit).startsWith(lm))));
+  if (!forced) return { forced: false, gate: null };
+  if (!Array.isArray(lc.acceptance)) return { forced, gate: "acceptance checked at land" };
+  const count = (list) => `${list.filter((a) => a && a.ok).length}/${list.length}`;
+  if (plan && Array.isArray(plan.cards) && plan.cards.includes(card)) {
+    const tag = `[${card}] `;
+    const own = lc.acceptance.filter((a) => a && (typeof a === "string" ? a : String(a.text ?? "")).startsWith(tag));
+    if (own.length) return { forced, gate: `acceptance ${count(own)} at land` };
+    return { forced, gate: `acceptance ${count(lc.acceptance)} at land (the plan's)` };
+  }
+  return { forced, gate: `acceptance ${count(lc.acceptance)} at land` };
+}
+
 function acceptanceGate(report) {
   const levels = (report.levels || []).filter((l) => l && l.integration);
   const acc = levels.length && Array.isArray(levels[levels.length - 1].integration.acceptance) ? levels[levels.length - 1].integration.acceptance : [];
@@ -434,11 +455,11 @@ try {
     case "record": {
       if (opts.hand) {
         const [id] = rest;
-        if (!id) fail("usage: board.mjs record <id> --hand [dir] --summary \"<one sentence>\" [--commit <sha>] [--wall <text>] [--gate <text>] [--note <text>] [--rehearsal <scenario> --rehearsal-outcome <passed|failed>] [--cost <usd>]", 2);
+        if (!id) fail("usage: board.mjs record <id> --hand [dir] --summary \"<one sentence>\" [--commit <sha>] [--wall <text>] [--gate <text>] [--note <text>] [--rehearsal <scenario> --rehearsal-outcome <passed|failed> [--rehearsal-fixture <name>]] [--cost <usd>]", 2);
         if (opts.cost !== undefined && !/^\d+(\.\d+)?$/.test(opts.cost)) fail(`--cost takes a non-negative number of dollars, got ${JSON.stringify(opts.cost)}`, 2);
         const dir = dirFrom(rest, 1);
         const card = findCard(loadBoard(dir), id);
-        const entry = handEntry({ card, commit: opts.commit ?? null, wallClock: opts.wall ?? null, gate: opts.gate ?? null, note: opts.note ?? null, record: relative(dir, boardPath(dir)), rehearsal: opts.rehearsal ?? null, rehearsalOutcome: opts["rehearsal-outcome"] ?? null, cost: opts.cost !== undefined ? Number(opts.cost) : null });
+        const entry = handEntry({ card, commit: opts.commit ?? null, wallClock: opts.wall ?? null, gate: opts.gate ?? null, note: opts.note ?? null, record: relative(dir, boardPath(dir)), rehearsal: opts.rehearsal ?? null, rehearsalOutcome: opts["rehearsal-outcome"] ?? null, fixture: opts["rehearsal-fixture"] ?? null, cost: opts.cost !== undefined ? Number(opts.cost) : null });
         const block = landingBlock({ id, ok: true, commit: opts.commit, wall: opts.wall, gate: opts.gate, cost: opts.cost, note: opts.note, rehearsal: opts.rehearsal ?? null, rehearsalOutcome: opts["rehearsal-outcome"] ?? null });
         const { file, promoted } = recordLanding(dir, id, entry);
         process.stdout.write(`${summarySentence}\n`);
@@ -452,7 +473,7 @@ try {
         break;
       }
       const [id, reportFile] = rest;
-      if (!id || !reportFile) fail("usage: board.mjs record <id> <report.json> [dir] --summary \"<one sentence>\" [--cost <usd>] [--codex-cost <usd>] [--shared-cost <usd>] [--wall <text>] [--commit <sha>] [--adversary \"<id>=<class>[: <reason>]\"]... [--note <text>] [--rehearsal <scenario> --rehearsal-outcome <passed|failed>] [--run <run-id>] [--claude-dir <dir>]", 2);
+      if (!id || !reportFile) fail("usage: board.mjs record <id> <report.json> [dir] --summary \"<one sentence>\" [--cost <usd>] [--codex-cost <usd>] [--shared-cost <usd>] [--wall <text>] [--commit <sha>] [--adversary \"<id>=<class>[: <reason>]\"]... [--note <text>] [--rehearsal <scenario> --rehearsal-outcome <passed|failed> [--rehearsal-fixture <name>]] [--run <run-id>] [--claude-dir <dir>]", 2);
       const dir = dirFrom(rest, 2);
       const card = findCard(loadBoard(dir), id);
       const report = unwrapReport(JSON.parse(readFileSync(resolve(reportFile), "utf8")));
@@ -461,8 +482,10 @@ try {
       const batch = plan && Array.isArray(plan.cards) && plan.cards.includes(id) ? plan.cards : null;
       const taskIds = batch ? plan.tasks.filter((t) => t.card === id).map((t) => t.id) : [];
       const wall = opts.run ? wallForRun({ runId: opts.run, claudeDir: opts["claude-dir"], projectDir: dir, wallMinutes: report.budget?.wallMinutes ?? DEFAULT_BUDGET.wallMinutes }) : null;
-      const entry = runEntry({ card, report, wall, cost: opts.cost !== undefined ? Number(opts.cost) : null, codexCost: opts["codex-cost"] !== undefined ? Number(opts["codex-cost"]) : null, wallClock: opts.wall ?? null, mergeCommit: opts.commit ?? null, record: relative(dir, boardPath(dir)), adversary: parseAdversaryClasses(opts.adversary || []), batch, taskIds, sharedCost: opts["shared-cost"] !== undefined ? Number(opts["shared-cost"]) : null, note: opts.note ?? null, rehearsal: opts.rehearsal ?? null, rehearsalOutcome: opts["rehearsal-outcome"] ?? null });
-      const block = landingBlock({ id, ok: report.ok === true, commit: opts.commit, wall: opts.wall, gate: acceptanceGate(report), cost: opts.cost, codexCost: opts["codex-cost"], note: opts.note, rehearsal: opts.rehearsal ?? null, rehearsalOutcome: opts["rehearsal-outcome"] ?? null });
+      // A plan landed after `plan.mjs done --force` is recorded as landed, with land's own acceptance.
+      const { forced, gate: forcedGate } = forcedLanding({ plan, report, opts, card: id });
+      const entry = runEntry({ forcedLanding: forced, card, report, wall, cost: opts.cost !== undefined ? Number(opts.cost) : null, codexCost: opts["codex-cost"] !== undefined ? Number(opts["codex-cost"]) : null, wallClock: opts.wall ?? null, mergeCommit: opts.commit ?? null, record: relative(dir, boardPath(dir)), adversary: parseAdversaryClasses(opts.adversary || []), batch, taskIds, sharedCost: opts["shared-cost"] !== undefined ? Number(opts["shared-cost"]) : null, note: opts.note ?? null, rehearsal: opts.rehearsal ?? null, rehearsalOutcome: opts["rehearsal-outcome"] ?? null, fixture: opts["rehearsal-fixture"] ?? null });
+      const block = landingBlock({ id, ok: report.ok === true || forced, commit: opts.commit, wall: opts.wall, gate: forced ? forcedGate : acceptanceGate(report), cost: opts.cost, codexCost: opts["codex-cost"], note: opts.note, rehearsal: opts.rehearsal ?? null, rehearsalOutcome: opts["rehearsal-outcome"] ?? null });
       const { file, promoted } = recordLanding(dir, id, entry);
       process.stdout.write(`${summarySentence}\n`);
       if (promoted) process.stdout.write(`Promoted the research note for ${id} to ${promoted}.\n`);
@@ -491,9 +514,10 @@ try {
           if (saved.length === 3) sumSaved = saved;
         } catch {}
       }
-      const sumBlock = sumSaved ? sumSaved : opts.card !== undefined ? landingBlock({ id: opts.card, ok: report.ok === true, commit: opts.commit, wall: opts.wall, gate: acceptanceGate(wholeReport), cost: opts.cost, codexCost: opts["codex-cost"], note: opts.note }) : null;
+      const sumForced = opts.card !== undefined ? forcedLanding({ plan: sumPlan, report: wholeReport, opts, card: opts.card }) : { forced: false, gate: null };
+      const sumBlock = sumSaved ? sumSaved : opts.card !== undefined ? landingBlock({ id: opts.card, ok: report.ok === true || sumForced.forced, commit: opts.commit, wall: opts.wall, gate: sumForced.forced ? sumForced.gate : acceptanceGate(wholeReport), cost: opts.cost, codexCost: opts["codex-cost"], note: opts.note }) : null;
       process.stdout.write(`${summarySentence}\n`);
-      process.stdout.write(runSummary({ report, wall, batch: sumBatch, card: opts.card ?? null, cost: opts.cost !== undefined ? Number(opts.cost) : null, codexCost: opts["codex-cost"] !== undefined ? Number(opts["codex-cost"]) : null, wallClock: opts.wall ?? null, mergeCommit: opts.commit ?? null }));
+      process.stdout.write(runSummary({ report, forcedLanding: sumForced.forced, wall, batch: sumBatch, card: opts.card ?? null, cost: opts.cost !== undefined ? Number(opts.cost) : null, codexCost: opts["codex-cost"] !== undefined ? Number(opts["codex-cost"]) : null, wallClock: opts.wall ?? null, mergeCommit: opts.commit ?? null }));
       if (sumBlock) writeLandingBlock(dirFrom(rest, 1), opts.card, sumBlock, sumSaved !== null);
       break;
     }
