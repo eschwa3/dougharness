@@ -145,7 +145,11 @@ function unknownFlagFor(cmd, opts) {
 }
 
 function dirFrom(args, n) {
-  return resolve(process.env.CLAUDE_PROJECT_DIR || args[n] || process.cwd());
+  const d = resolve(process.env.CLAUDE_PROJECT_DIR || args[n] || process.cwd());
+  if (!existsSync(join(d, ".doug")) && !existsSync(join(d, "docs", "board.json"))) {
+    fail(`not a Doug project: ${d} has no .doug/`, 1);
+  }
+  return d;
 }
 
 if (cmd === "epic" || cmd === "milestone") {

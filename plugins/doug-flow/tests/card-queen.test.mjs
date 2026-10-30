@@ -612,4 +612,28 @@ describe("card queen: reviewer answer reaches the coder on resume", () => {
     expect(coders.map((c) => c.prompt)).toEqual(firstCoders.map((c) => c.prompt));
     for (const c of coders) expect(c.prompt).not.toContain("ANSWERS FROM THE USER");
   });
+  it("Q20 a second answer reaches a new coder round while coders 1-3 replay from the cache byte-identical", async () => {
+    const cache = new Map();
+    await firstRun(cache);
+    const a1 = answer("Fix F2.");
+    const mid = cachingAgent(cache, { research: true, answers: [a1] }, (seat, brief) =>
+      seat === "reviewer" ? failing(seat) : okHB(seat),
+    );
+    const midReport = await runQueen(answersArgs([a1]), mid.agent);
+    expect(midReport.outcome).toBe("stopped");
+    expect(midReport.reason).toBe("reviewer-major-open");
+    const midCoders = mid.calls.filter((c) => c.seat === "coder");
+    expect(midCoders.length).toBe(3);
+    const a2 = { ...answer("Fix F2 properly, the first attempt missed it."), round: 3, run: "wf_two" };
+    const resumed = cachingAgent(cache, { research: true, answers: [a1, a2] }, (seat, brief) =>
+      seat === "reviewer" && brief.round < 4 ? failing(seat) : okHB(seat),
+    );
+    const report = await runQueen(answersArgs([a1, a2]), resumed.agent);
+    expect(report.outcome).toBe("done");
+    const coders = resumed.calls.filter((c) => c.seat === "coder");
+    expect(coders.map((c) => [c.round, c.hit])).toEqual([[1, true], [2, true], [3, true], [4, false]]);
+    expect(coders[2].prompt).toBe(midCoders[2].prompt);
+    expect(coders[3].prompt).toContain("A: Fix F2 properly, the first attempt missed it.");
+    expect(coders[2].prompt).not.toContain("Fix F2 properly");
+  });
 });

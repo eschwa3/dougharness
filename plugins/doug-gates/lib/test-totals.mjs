@@ -5,7 +5,7 @@
 //   - Counts cannot see delete-one-add-one: a session that removes a test and adds an unrelated one keeps
 //     every number level and passes.
 //   - The verified-unchanged skip runs no test command, so there is no output to count there; no count check
-//     happens on it. (The pre-commit credit path is counted from the totals the hook records in last-run.json.)
+//     happens on it. (The credited path is counted from the totals the verified-tree record carries.)
 //   - The baseline is the number of `Tests` summaries a command prints plus their sum (ADR 0013): a session
 //     that adds or removes a package changes the number of summaries and blocks with no waiver until a new
 //     baseline is taken.

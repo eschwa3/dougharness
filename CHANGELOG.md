@@ -1,5 +1,20 @@
 # Changelog
 
+## 1.6.0
+
+- Stop gate: suites serialise on `gate.lock`, a seat's single-file test runs take the lock too (`gate-lock.mjs run`, including shell forms), a takeover of a stale lock is exclusive, and concurrent gates no longer time out under load.
+- Stop gate: the queen's seat stop gates run in the card worktree.
+- Stop gate: the verified-tree record is the only gate credit; the pre-commit credit (`preCommitCredit`, `last-run.json`) is removed.
+- Stop gate: count-check, budget not-run and missing-evidence reason lines redact secrets in the configured commands they name; the secret-scan timing budget no longer flakes.
+- Memory: `reflect --detach` runs the report as a detached `memory.mjs job`, and `reflect --failures` runs detached on a stop under a 0.5 cap; the failures match lists a pitfall as repeated only when its occurrence was written.
+- Memory: `memory.db` waits on a busy lock with a timeout, and writers open with `BEGIN IMMEDIATE`.
+- Scripts: `memory.mjs`, `board.mjs` and `learn.mjs` refuse a directory with no `.doug/`.
+- Tests: SSE tests wait on events instead of fixed delays, the W14 lock-wait flake is fixed, and a stale replay skill-hash pin fails `test:unit`.
+- Card loop: a reviewer-seat answer reaches a coder round.
+- Card loop: `pick` holds a card behind an unplanned flow card.
+- Docs: `learn` and decisions share one 200-line `CLAUDE.md` limit, and `scripts/mine-transcripts.mjs` reports seat wall time, re-runs and waste.
+- Rehearsals: `rehearse --auto` build names the queue, and the 1.6 sweep passes all 18 scenarios on main.
+
 ## 1.5.0
 
 - Memory: lessons are fetched on demand. `memory.mjs` prints a lesson index with token costs, `lesson show` and a history fetch return full text, and the lead fetches full lesson text into its briefs; flow tasks get the index plus fetch in place of the 400-char cut, and each outcome row records the delivery its track got.

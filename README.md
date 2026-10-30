@@ -46,7 +46,7 @@ Then run `/doug-plan <what you want built>`: it plans, you approve with `/doug-a
 - **Two tracks, one board.** A small or risky change is a hand card, a feature is a flow card; `/doug-next` routes each by its track and asks before it starts (`docs/board.md`).
 - **Autopilot with parallel cards.** `/doug-next --auto` runs the Ready queue on one approval, up to `workers.max` cards at once, each under its own queen in its own worktree, with a live pane (`/doug-autopilot`) and the same run on the served board.
 - **Start from an idea.** `/doug-start` walks a new project or a large card through specification, architecture and scope, one committed phase at a time behind a human gate.
-- **New in 1.4.** Board v2 adds epics, milestones and label groups, with `doug board rollup` and a roadmap on the served board; autopilot records an answer for any stop that asks and resumes with it; the stop gate keeps a test-count baseline and its block ledger records the failing command and output (`CHANGELOG.md`).
+- **New in 1.6.** A stability release: suites serialise on `gate.lock`, the verified-tree record is the only gate credit, reflect runs detached, `memory.db` waits out a busy lock, scripts refuse a directory with no `.doug/`, and flake fixes leave every rehearsal scenario passing (`CHANGELOG.md`).
 
 ## How-tos
 

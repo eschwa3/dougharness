@@ -10,7 +10,7 @@ import { spawnSync } from "node:child_process";
 import { unlinkSync, realpathSync } from "node:fs";
 import { resolve } from "node:path";
 import { loadConfig } from "../lib/config.mjs";
-import { gateLockPath, readGateLock, pidIsLive, writeGateLock, takeOverGateLock, resolveHookTimeoutSec, lockStaleByAge, normalizedTimeoutMs, lockWaitBoundMs } from "../lib/gate-lock.mjs";
+import { gateLockPath, readGateLock, pidIsLive, writeGateLock, takeOverGateLock, acquireGateLock, resolveHookTimeoutSec, lockStaleByAge, normalizedTimeoutMs, lockWaitBoundMs } from "../lib/gate-lock.mjs";
 import { runCommand, tail } from "../lib/run.mjs";
 import { parseTotals, readSummaries, sumTotals } from "../lib/test-totals.mjs";
 import { computeTree, readRecord, writeRecord, removeRecord, creditable, exitCreditUsable, resolveCommands } from "../lib/verified-tree.mjs";
@@ -155,17 +155,33 @@ function main() {
       const hookTimeoutMs = resolveHookTimeoutSec(cfg) * 1000;
       const stale = (l) => !l || !pidIsLive(l.pid) || lockStaleByAge(l, hookTimeoutMs);
       const held = readGateLock(dir);
-      if (stale(held)) {
-        takeOverGateLock(dir, o.by || "verify");
-        lockOwned = true;
-      } else {
+      // Card gate-lock-takeover-exclusive: a lock read as stale on arrival is acquired exclusively; "busy" (a rival
+      // just took it) is waited on like a live holder, never overwritten; "unwritable" runs unlocked.
+      let needWait = !stale(held);
+      if (!needWait) {
+        const got = acquireGateLock(dir, o.by || "verify", hookTimeoutMs);
+        if (got === "acquired") lockOwned = true;
+        else if (got === "busy") needWait = true;
+      }
+      if (needWait) {
         const waitStart = Date.now();
         const deadline = waitStart + waitBoundMs;
         let live = held;
+        let acquired = false;
         const nap = new Int32Array(new SharedArrayBuffer(4));
         while (true) {
           live = readGateLock(dir);
-          if (stale(live) || Date.now() >= deadline) break;
+          if (stale(live)) {
+            // Card gate-load-timeouts: take a released or stale lock exclusively (two waiters must not both run);
+            // a lost race goes back to waiting, bounded by the deadline.
+            const got = acquireGateLock(dir, o.by || "verify", hookTimeoutMs);
+            if (got !== "busy") {
+              acquired = got === "acquired";
+              lockOwned = acquired;
+              break;
+            }
+          }
+          if (Date.now() >= deadline) break;
           Atomics.wait(nap, 0, 0, 200);
         }
         lockWaitMs = Date.now() - waitStart;
@@ -173,9 +189,11 @@ function main() {
         treeBefore = computeTree(cwd);
         const again = tryCredit();
         if (again !== null) return again;
-        if (!stale(live)) process.stderr.write(`[doug] verify: gate.lock still held by pid ${live.pid} after ${waitBoundMs} ms; running the commands anyway.\n`);
-        takeOverGateLock(dir, o.by || "verify");
-        lockOwned = true;
+        if (!acquired) {
+          if (!stale(live)) process.stderr.write(`[doug] verify: gate.lock still held by pid ${live.pid} after ${waitBoundMs} ms; running the commands anyway.\n`);
+          takeOverGateLock(dir, o.by || "verify");
+          lockOwned = true;
+        }
       }
     }
   }

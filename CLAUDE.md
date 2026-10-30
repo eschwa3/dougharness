@@ -1,6 +1,6 @@
 # Project instructions
 
-Guardrails are enforced by hooks configured in `.doug/config.json`; this file carries only what hooks cannot. Keep it under 60 lines.
+Guardrails are enforced by hooks configured in `.doug/config.json`; this file carries only what hooks cannot. Keep it to 200 lines or fewer.
 
 ## Commands
 

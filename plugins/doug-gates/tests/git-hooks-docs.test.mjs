@@ -22,7 +22,6 @@ afterEach(() => new Promise((resolve) => setTimeout(resolve, 0)));
 // working tree, or any doubt runs the full gate.
 describe("docs named by tests (card gate-docs-skip-unless-named)", () => {
   const recPath = (cwd) => join(cwd, ".doug/.state/verified-tree.json");
-  const lastRun = (cwd) => join(cwd, ".doug/.state/pre-commit/last-run.json");
   const argvLog = (cwd) => join(cwd, ".doug/.state/unit-argv.log");
   const SKIP_LINE = "pre-commit: gate skipped";
   const ADR = "docs/decisions/0005-two-tracks.md";
@@ -87,9 +86,10 @@ describe("docs named by tests (card gate-docs-skip-unless-named)", () => {
     expect(readArgv(cwd), "the full run passes test:unit no file arguments").toEqual([[]]);
   };
 
-  it("D1 (a): an ADR no test names, alone staged -> skipped like a no-test path: exit 0, neither command runs, one skip line naming docs, last-run.json gone", async () => {
+  it("D1 (a): an ADR no test names, alone staged -> skipped like a no-test path: exit 0, neither command runs, one skip line naming docs, the verified-tree record untouched", async () => {
     const cwd = await docsRepo();
-    expect(existsSync(lastRun(cwd)), "fixture: the baseline left a record").toBe(true);
+    expect(existsSync(recPath(cwd)), "fixture: the baseline left a record").toBe(true);
+    const recBefore = readFileSync(recPath(cwd));
     await stage(cwd, UNNAMED);
     const { status, out } = await commitA(cwd);
     expect(status, out).toBe(0);
@@ -100,7 +100,7 @@ describe("docs named by tests (card gate-docs-skip-unless-named)", () => {
     const lines = out.split("\n").filter((l) => l.includes(SKIP_LINE));
     expect(lines, out).toHaveLength(1);
     expect(lines[0], "the skip line names docs").toMatch(/docs/);
-    expect(existsSync(lastRun(cwd)), "a skip must remove the stale pass record").toBe(false);
+    expect(readFileSync(recPath(cwd)).equals(recBefore), "a skip leaves the verified-tree record byte-identical").toBe(true);
   });
 
   it("D2 (a): an unnamed ADR plus a listed board.json staged -> skipped", async () => {
@@ -125,17 +125,13 @@ describe("docs named by tests (card gate-docs-skip-unless-named)", () => {
     expect(out).not.toContain(SKIP_LINE);
   });
 
-  it("D4 (b): a targeted green run is never credited as a full run: last-run.json is not a pass and the verified-tree record is untouched", async () => {
+  it("D4 (b): a targeted green run is never credited as a full run: the verified-tree record is untouched", async () => {
     const cwd = await docsRepo();
     const before = readFileSync(recPath(cwd));
     await stage(cwd, ADR);
     const { status, out } = await commitA(cwd);
     expect(status, out).toBe(0);
     expect(readArgv(cwd), "fixture: the targeted run must have happened").toEqual([[NAMER]]);
-    if (existsSync(lastRun(cwd))) {
-      const rec = JSON.parse(readFileSync(lastRun(cwd), "utf8"));
-      expect(rec.ok, `a targeted run must not leave a passing record: ${JSON.stringify(rec)}`).not.toBe(true);
-    }
     const after = existsSync(recPath(cwd)) ? readFileSync(recPath(cwd)) : null;
     expect(after === null || after.equals(before), "a targeted run writes no verified-tree record for the new tree").toBe(true);
   });
@@ -199,7 +195,7 @@ describe("docs named by tests (card gate-docs-skip-unless-named)", () => {
     expect(out).toContain("UNIT-MARKER");
     expect(typechecked(out)).toBe(false);
     expect(await headCount(cwd)).toBe("1");
-    if (existsSync(lastRun(cwd))) expect(JSON.parse(readFileSync(lastRun(cwd), "utf8")).ok).not.toBe(true);
+    expect(existsSync(recPath(cwd)), "a red targeted run removes the verified-tree record").toBe(false);
   });
 
   it("D11 (f): a non-test helper under a tests/ directory naming the doc cannot be mapped to test files -> the full gate", async () => {
@@ -244,6 +240,28 @@ describe("docs named by tests (card gate-docs-skip-unless-named)", () => {
     const cwd = await docsRepo();
     await stage(cwd, ADR);
     writeFileSync(join(cwd, "untracked.txt"), "x\n");
+    expectFull(cwd, await commitA(cwd));
+  });
+
+  const ANCHOR = ".doug/anchor.md";
+
+  it("D31 (dirty, excluded): a staged unnamed ADR with .doug/anchor.md dirty-unstaged and an untracked .doug/.state file -> still skipped (the harness's own files do not count as a dirty tree)", async () => {
+    const cwd = await docsRepo({ extra: { [ANCHOR]: "# anchor\n" } });
+    writeFileSync(join(cwd, ANCHOR), "# anchor, changed after the commit\n");
+    mkdirSync(join(cwd, ".doug/.state"), { recursive: true });
+    writeFileSync(join(cwd, ".doug/.state/scratch.txt"), "not part of any commit");
+    await stage(cwd, UNNAMED);
+    const { status, out } = await commitA(cwd);
+    expect(status, out).toBe(0);
+    expect(out).toContain(SKIP_LINE);
+    expect(typechecked(out)).toBe(false);
+    expect(readArgv(cwd), "test:unit must not run at all").toEqual([]);
+  });
+
+  it("D32 (dirty, glob name): a staged unnamed ADR with an untracked file literally named \".doug/anchor.m[d]\" next to the tracked .doug/anchor.md -> the full gate (names are compared literally, never glob-matched)", async () => {
+    const cwd = await docsRepo({ extra: { [ANCHOR]: "# anchor\n" } });
+    writeFileSync(join(cwd, ".doug/anchor.m[d]"), "not the excluded path");
+    await stage(cwd, UNNAMED);
     expectFull(cwd, await commitA(cwd));
   });
 

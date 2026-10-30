@@ -215,6 +215,7 @@ export function appendBlockLine(dir, { hook, agent, reason, class: cls, session,
         class: cls,
         session: session ?? null,
         ...plain,
+        files: Array.isArray(plain.files) ? plain.files : [],
       }) + "\n";
     mkdirSync(join(dir, ".doug/.state"), { recursive: true });
     appendFileSync(join(dir, BLOCKS_RELPATH), line);

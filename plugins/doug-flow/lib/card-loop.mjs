@@ -102,6 +102,14 @@ export const BRIEF_RULES = {
     seats: ["coder", "reviewer", "tester"],
     when: "mutations",
   },
+  "suites-through-verify": {
+    text: "Run a full test suite only through `node .doug/hooks/scripts/verify.mjs`, never the gate's commands (the commands in `stopGate.commands`) directly, with or without CI=1: verify.mjs takes gate.lock, so your suite queues behind a running gate instead of overlapping it.",
+    seats: ["tester", "coder", "reviewer", "gate"],
+  },
+  "tests-take-gate-lock": {
+    text: "Run every other test command, a single test file or a mutation's test run in a scratch copy included, as `node <card worktree>/.doug/hooks/lib/gate-lock.mjs run -- <command>` with the Bash timeout set to 600000, so it waits on gate.lock instead of overlapping a gate; never wrap verify.mjs in gate-lock.mjs, since verify.mjs takes the lock itself. Put env vars right after `--` (`-- CI=1 pnpm exec vitest run <file>`) and quote a compound command as one argument (`-- 'cd dir && vitest run x'`).",
+    seats: ["tester", "coder", "reviewer"],
+  },
   "reviewer-reruns-mutations": {
     text: "Rerun every listed mutation yourself and add your own (own: true); read the diff only after running them.",
     seats: ["reviewer"],
@@ -854,15 +862,17 @@ export function next(state, handBack) {
       // An evidenced major gets the same one fix pass; a major without evidence and a minor stay advisory.
       const majors = findings.filter((f) => f.severity === "major" && nonBlank(f.evidence));
       if (blockers.length === 0 && majors.length === 0) return advance(s, "gate", "ok", { acc });
-      // A reviewer round that carried a user answer and still has an open finding gets one extra coder round.
-      const answered = (s.answers || []).some(
-        (a) => a.seat === "reviewer" && (a.round ?? 1) <= (s.seatRuns.reviewer || 0),
-      );
-      if (s.counters.fixPasses >= 1 && answered && !s.answerCoderUsed) {
+      // Each user answer to a reviewer stop gets one coder round when the reviewer that carried it still has an open finding.
+      const given = s.answerCoderRounds || [];
+      const fresh = (s.answers || [])
+        .filter((a) => a.seat === "reviewer" && (a.round ?? 1) <= (s.seatRuns.reviewer || 0))
+        .map((a) => a.round ?? 1)
+        .filter((r) => !given.includes(r));
+      if (s.counters.fixPasses >= 1 && fresh.length > 0) {
         return advance(s, buildSeat(s), "blockers", {
           acc,
           fixFor: "review",
-          answerCoderUsed: true,
+          answerCoderRounds: [...given, ...fresh],
           lastFindings: findings.filter((f) => f.severity !== "minor"),
         });
       }

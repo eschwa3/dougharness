@@ -98,7 +98,7 @@ const PEM_TAB = "-----BEGIN" + "\t" + "PRIVATE KEY-----"; // a tab instead of th
 // the current implementation). githubToken and slackToken's patterns backtrack badly enough at
 // 1 MB (confirmed by hand: githubToken 88s, slackToken did not finish in 3 minutes) that this
 // file would hang, so those two are run at a smaller, deliberately chosen size instead (112 KB
-// and 50 KB below) -- still well over the 500ms budget on the pre-fix code, but fast enough
+// and 50 KB below) -- still far slower than linear on the pre-fix code, but fast enough
 // that this file stays runnable either way.
 const ADV_AWS = "AKIA".repeat(262144); // 1,048,576 chars (~1 MB)
 const ADV_PEM = "-----BEGIN ".repeat(95325); // 1,048,575 chars (~1 MB)
@@ -117,7 +117,7 @@ const PWD_BARE = "pwd=" + "abcdefghijkl12"; // sanity: a real bare key must stil
 
 // -- Round 3 (R3-2): 1 MB single-line (no newline) adversarial strings, built from the rule's
 // own key+quote start, measured by hand against the current implementation: pwd-line 1.9s,
-// password-line 1.0s (both over the 500ms budget; neither is catastrophic, so kept at the
+// password-line 1.0s (both well above linear scaling before the fix; neither is catastrophic, so kept at the
 // brief's full ~1 MB size).
 const ADV_INLINE_PWD_QUOTE = ("pwd" + "='").repeat(209715); // ~1 MB
 const ADV_INLINE_PASSWORD_QUOTE = ("password" + '="').repeat(104858); // ~1 MB
@@ -399,37 +399,51 @@ describe("inlineAssignment (Round 2 design, B1)", () => {
   });
 });
 
-describe("linear-time patterns (M1)", () => {
-  const BUDGET_MS = 500;
+// Same-run scaling check instead of a wall-clock budget: one scan of the full text (8n) is
+// compared with 8 scans of its first eighth (n) timed in one block, so both intervals are about
+// the same length. Linear gives a ratio near 1, a quadratic pattern near 7-8; the threshold is 3.
+// The best of RUNS rounds is kept for each side. This does not make load hit both sides alike;
+// the loose threshold and FLOOR_MS (sub-ms rules, timer jitter) absorb it.
+const RUNS = 3;
+const FLOOR_MS = 20;
+const MAX_RATIO = 3;
+function expectLinearScan(text) {
+  const small = text.slice(0, text.length >> 3);
+  scanText(small, DEFAULTS.secrets); // warm up
+  let tSmall = Infinity;
+  let tBig = Infinity;
+  for (let i = 0; i < RUNS; i++) {
+    let t0 = performance.now();
+    for (let k = 0; k < 8; k++) scanText(small, DEFAULTS.secrets);
+    tSmall = Math.min(tSmall, performance.now() - t0);
+    t0 = performance.now();
+    scanText(text, DEFAULTS.secrets);
+    tBig = Math.min(tBig, performance.now() - t0);
+  }
+  expect(tBig, `8 x n=${small.length} ${tSmall.toFixed(1)} ms, 8n=${text.length} ${tBig.toFixed(1)} ms`).toBeLessThan(
+    MAX_RATIO * Math.max(tSmall, FLOOR_MS),
+  );
+}
 
+describe("linear-time patterns (M1)", () => {
   it("scans a 1 MB AWS-shaped adversarial string within budget", () => {
-    const t0 = Date.now();
-    scanText(ADV_AWS, DEFAULTS.secrets);
-    expect(Date.now() - t0).toBeLessThan(BUDGET_MS);
+    expectLinearScan(ADV_AWS);
   });
 
   it("scans a 1 MB PEM-shaped adversarial string within budget", () => {
-    const t0 = Date.now();
-    scanText(ADV_PEM, DEFAULTS.secrets);
-    expect(Date.now() - t0).toBeLessThan(BUDGET_MS);
+    expectLinearScan(ADV_PEM);
   });
 
   it("scans a 112 KB GitHub-shaped adversarial string within budget", () => {
-    const t0 = Date.now();
-    scanText(ADV_GITHUB, DEFAULTS.secrets);
-    expect(Date.now() - t0).toBeLessThan(BUDGET_MS);
+    expectLinearScan(ADV_GITHUB);
   });
 
   it("scans a 50 KB Slack-shaped adversarial string within budget", () => {
-    const t0 = Date.now();
-    scanText(ADV_SLACK, DEFAULTS.secrets);
-    expect(Date.now() - t0).toBeLessThan(BUDGET_MS);
+    expectLinearScan(ADV_SLACK);
   });
 
   it("scans a 1 MB inline-assignment-shaped adversarial string within budget", () => {
-    const t0 = Date.now();
-    scanText(ADV_INLINE, DEFAULTS.secrets);
-    expect(Date.now() - t0).toBeLessThan(BUDGET_MS);
+    expectLinearScan(ADV_INLINE);
   });
 });
 
@@ -461,18 +475,12 @@ describe("inlineAssignment (Round 3, false positives, R3-1)", () => {
 });
 
 describe("linear-time patterns (R3-2, single line, no newline)", () => {
-  const BUDGET_MS = 500;
-
   it("scans a 1 MB single-line pwd='-shaped adversarial string within budget", () => {
-    const t0 = Date.now();
-    scanText(ADV_INLINE_PWD_QUOTE, DEFAULTS.secrets);
-    expect(Date.now() - t0).toBeLessThan(BUDGET_MS);
+    expectLinearScan(ADV_INLINE_PWD_QUOTE);
   });
 
   it("scans a 1 MB single-line password=\"-shaped adversarial string within budget", () => {
-    const t0 = Date.now();
-    scanText(ADV_INLINE_PASSWORD_QUOTE, DEFAULTS.secrets);
-    expect(Date.now() - t0).toBeLessThan(BUDGET_MS);
+    expectLinearScan(ADV_INLINE_PASSWORD_QUOTE);
   });
 });
 

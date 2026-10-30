@@ -37,6 +37,20 @@ import { SEATS } from "../lib/card-loop.mjs";
 import { planFor, reportPathFor } from "../lib/plan.mjs";
 import { readMemoryConfig, readMemoryStaleDays } from "../lib/embeddings.mjs";
 
+// Card memory-failures-wiring (user decision, 2026-10-28): a stopped card starts `memory.mjs reflect --failures
+// <card> --max-usd 0.5 --detach` (job failures-<card>, cheap row), after its run history is written. The queue
+// approval is the approval. A start that fails (a live job holds the name) warns and never fails the report.
+function startFailuresReflect(dir, id) {
+  try {
+    execFileSync(process.execPath, [join(dirname(fileURLToPath(import.meta.url)), "memory.mjs"), "reflect", "--failures", id, dir, "--max-usd", "0.5", "--detach"], {
+      stdio: ["ignore", "ignore", "pipe"],
+      env: process.env,
+    });
+  } catch (e) {
+    process.stderr.write(`autopilot: warning: cannot start reflect --failures for ${id}: ${String(e.stderr || e.message || e).trim().split("\n")[0]}\n`);
+  }
+}
+
 const argv = process.argv.slice(2);
 const opts = {};
 const pos = [];
@@ -566,6 +580,7 @@ switch (cmd) {
         process.stderr.write(`autopilot: warning: cannot write the run history for ${c.id}: ${e.message || e}\n`);
       }
     }
+    if (kind === "hand" && parsed !== null && (parsed.report ?? parsed)?.outcome === "stopped") startFailuresReflect(dir, c.id);
     if (kind === "flow" && parsed !== null && typeof parsed === "object" && !Array.isArray(parsed) && parsed.ok === false && !parsed.paused) {
       try {
         const mem = await import("../lib/memory.mjs");
@@ -645,6 +660,7 @@ switch (cmd) {
         process.stderr.write(`autopilot: warning: cannot write the run history for ${c.id}: ${e.message || e}\n`);
       }
     }
+    if (kind === "flow" && parsed !== null && typeof parsed === "object" && !Array.isArray(parsed) && parsed.ok === false && !parsed.paused) startFailuresReflect(dir, c.id);
     const v = classifyNotification(kind, { status: "completed", result: parsed === null ? text : parsed });
     if (v.action === "ask") {
       let answered = false;

@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, rmSync, existsSync, writeFileSync, readdirSync, statSync, chmodSync, copyFileSync, readFileSync } from "node:fs";
+import { spawn } from "node:child_process";
+import { mkdtempSync, mkdirSync, rmSync, existsSync, writeFileSync, readdirSync, statSync, chmodSync, copyFileSync, readFileSync, appendFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname, resolve, sep } from "node:path";
 import { createHash } from "node:crypto";
@@ -81,6 +82,7 @@ import {
   buildProjectModelPrompt,
   checkProjectModelCitations,
   renderProjectModel,
+  MEMORY_BUSY_TIMEOUT_MS,
 } from "../lib/memory.mjs";
 import { initialState, currentAction, next as loopNext, briefPrompt } from "../lib/card-loop.mjs";
 import { scanText } from "../../doug-gates/lib/secret-rules.mjs";
@@ -3040,7 +3042,7 @@ describe("openMemory: v10 to v11 migration (card memory-reflect-supersede)", () 
 });
 
 // A small CLAUDE.md: Commands block, a Gotchas section with one bullet, a Models table. `padTo` pads Gotchas
-// with distinct filler bullets until the file is exactly that many lines (the 60-line limit case).
+// with distinct filler bullets until the file is exactly that many lines (the 200-line limit case).
 function claudeMdFixture(padTo = 0) {
   const build = (filler) => [
     "# Project instructions",
@@ -3258,14 +3260,14 @@ describe("runReflect: CLAUDE.md candidates (card reflect-offers-claude-md)", () 
     expect(existsSync(CANDIDATES())).toBe(false);
   });
 
-  it("e: a suggestion that would push CLAUDE.md past 60 lines is dropped with the 60-line reason", async () => {
-    const full = claudeMdFixture(60);
-    expect(full.split("\n").length - 1).toBe(60);
+  it("e: a suggestion that would push CLAUDE.md past 200 lines is dropped with the 200-line reason", async () => {
+    const full = claudeMdFixture(200);
+    expect(full.split("\n").length - 1).toBe(200);
     claudeMdBefore = setupClaudeMdProject(dir, full);
     const result = await reflect([lessonProposal("A clean single pass task confirms the spec hash before verifying", NOVEL)], "hash-cm-e");
     expect(result.claudeMd ?? []).toEqual([]);
     expect(result.claudeMdDropped).toHaveLength(1);
-    expect(result.claudeMdDropped[0].reason).toContain("60");
+    expect(result.claudeMdDropped[0].reason).toContain("200");
     expect(existsSync(CANDIDATES())).toBe(false);
   });
 
@@ -5305,6 +5307,174 @@ describe("card memory-failure-lessons", () => {
       expect(m.prepare("SELECT * FROM reflections").all()).toHaveLength(0);
     });
   });
+
+  // card memory-failures-wiring: failure items carry the block's class and files; a pitfall's repeat is counted in
+  // code when a later real block has the same class and shares a file with a recorded occurrence (ADR 0019 line 60).
+  describe("card memory-failures-wiring", () => {
+    const AT = "2026-10-20T00:00:00.000Z";
+    const C1REF = "history:c1/wf_1:2";
+    const C2REF = "history:c2/wf_9:2";
+    const mkPitfall = () => addLesson(m, { text: "Never commit generated files because the stop hook rebuilds them", kind: "pitfall", citation: C1REF, card: "c1", source: { agent: "reflect" } });
+    const writeOcc = (o) => {
+      mkdirSync(dirname(ledger()), { recursive: true });
+      appendFileSync(ledger(), J({ citation: C1REF, card: "c1", run: "wf_1", session: "s1", at: AT, ...o }) + "\n");
+    };
+    const noModel = { propose: async () => ({ lessons: [], sessionId: null, totalCostUsd: null }) };
+    const runC2 = (over = {}) => runFailureReflect(m, { dir, card: "c2", propose: noModel.propose, claudeDir: join(dir, "no-claude"), ...over });
+    const c2Occ = (id) => readPitfallOccurrences(dir).filter((o) => o.lesson === id && o.card === "c2");
+
+    beforeEach(() => {
+      m = openMemory(dir);
+    });
+
+    it("a real block with files gives an item with class 'real' and those files; a stop item has class null and files []", () => {
+      hist("c1", "wf_1", [brief, blk(blockOf("real", { files: ["src/a.mjs"] })), rep(STOP)]);
+      const s = failureSlice(dir, "c1");
+      const block = s.items.find((i) => i.kind === "block");
+      const stop = s.items.find((i) => i.kind === "stop");
+      expect(block).toMatchObject({ class: "real", files: ["src/a.mjs"] });
+      expect(stop.class).toBeNull();
+      expect(stop.files).toEqual([]);
+    });
+
+    it("an old real block line with no files field gives files []", () => {
+      hist("c1", "wf_1", [brief, blk(blockOf("real"))]);
+      expect(failureSlice(dir, "c1").items[0]).toMatchObject({ class: "real", files: [] });
+    });
+
+    it("an appended pitfall writes an occurrence line carrying the cited block's class and files", async () => {
+      hist("c1", "wf_1", [brief, blk(blockOf("real", { files: ["src/a.mjs"] }))]);
+      const f = {
+        propose: async () => ({ lessons: [{ kind: "pitfall", text: "Never run the gate while the tester files are red because the stop hook blocks the whole turn", citation: C1REF, notDerivableBecause: "learned only from this run" }], sessionId: null, totalCostUsd: null }),
+      };
+      const r = await runFailureReflect(m, { dir, card: "c1", propose: f.propose, claudeDir: join(dir, "no-claude") });
+      expect(r.appended).toHaveLength(1);
+      expect(readPitfallOccurrences(dir)[0]).toMatchObject({ lesson: r.appended[0], citation: C1REF, class: "real", files: ["src/a.mjs"] });
+    });
+
+    it("a real block with the same class on a shared file is an occurrence of the pitfall with no model repeats, tagged via 'file'", async () => {
+      const P = mkPitfall();
+      writeOcc({ lesson: P.id, class: "real", files: ["src/a.mjs"] });
+      hist("c2", "wf_9", [brief, blk(blockOf("real", { files: ["src/a.mjs", "src/z.mjs"] }))]);
+      const r = await runC2();
+      expect(r.repeated).toContain(P.id);
+      expect(c2Occ(P.id)).toEqual([expect.objectContaining({ lesson: P.id, citation: C2REF, card: "c2", run: "wf_9", via: "file" })]);
+    });
+
+    it("the model's repeats and the code-side match on the same item write one occurrence line", async () => {
+      const P = mkPitfall();
+      writeOcc({ lesson: P.id, class: "real", files: ["src/a.mjs"] });
+      hist("c2", "wf_9", [brief, blk(blockOf("real", { files: ["src/a.mjs"] }))]);
+      const propose = async () => ({ lessons: [{ kind: "pitfall", text: "Repeat of the generated files pitfall", citation: C2REF, notDerivableBecause: "learned only from this run", repeats: P.id }], sessionId: null, totalCostUsd: null });
+      await runC2({ propose });
+      expect(c2Occ(P.id)).toHaveLength(1);
+    });
+
+    it("no file in common is no match", async () => {
+      const P = mkPitfall();
+      writeOcc({ lesson: P.id, class: "real", files: ["src/a.mjs"] });
+      hist("c2", "wf_9", [brief, blk(blockOf("real", { files: ["src/b.mjs"] }))]);
+      await runC2();
+      expect(c2Occ(P.id)).toEqual([]);
+    });
+
+    it("empty files never match, on the block side or the occurrence side", async () => {
+      const P = mkPitfall();
+      writeOcc({ lesson: P.id, class: "real", files: ["src/a.mjs"] });
+      hist("c2", "wf_9", [brief, blk(blockOf("real", { files: [] }))]);
+      await runC2();
+      expect(c2Occ(P.id)).toEqual([]);
+      const Q = addLesson(m, { text: "Another pitfall about lockfiles because pnpm rewrites them", kind: "pitfall", citation: "history:c3/wf_1:2", card: "c3", source: { agent: "reflect" } });
+      writeOcc({ lesson: Q.id, class: "real", files: [] });
+      hist("c2", "wf_10", [brief, blk(blockOf("real", { files: [] }))]);
+      await runC2();
+      expect(c2Occ(Q.id)).toEqual([]);
+    });
+
+    it("an occurrence of another block class does not match", async () => {
+      const P = mkPitfall();
+      writeOcc({ lesson: P.id, class: "race", files: ["src/a.mjs"] });
+      hist("c2", "wf_9", [brief, blk(blockOf("real", { files: ["src/a.mjs"] }))]);
+      await runC2();
+      expect(c2Occ(P.id)).toEqual([]);
+    });
+
+    it("a stop item never matches by file", async () => {
+      const P = mkPitfall();
+      writeOcc({ lesson: P.id, class: "real", files: ["src/a.mjs"] });
+      hist("c2", "wf_9", [brief, rep({ ...STOP, filesChanged: ["/wt/c1/src/a.mjs"] })]);
+      await runC2();
+      expect(c2Occ(P.id)).toEqual([]);
+    });
+
+    it("a dry run writes no occurrence", async () => {
+      const P = mkPitfall();
+      writeOcc({ lesson: P.id, class: "real", files: ["src/a.mjs"] });
+      hist("c2", "wf_9", [brief, blk(blockOf("real", { files: ["src/a.mjs"] }))]);
+      await runC2({ dryRun: true });
+      expect(c2Occ(P.id)).toEqual([]);
+    });
+
+    it("a dry run previews what a real run would write: it lists the pitfall on a first match and still writes nothing", async () => {
+      const P = mkPitfall();
+      writeOcc({ lesson: P.id, class: "real", files: ["src/a.mjs"] });
+      hist("c2", "wf_9", [brief, blk(blockOf("real", { files: ["src/a.mjs"] }))]);
+      const r = await runC2({ dryRun: true });
+      expect(r.repeated).toContain(P.id);
+      expect(c2Occ(P.id)).toEqual([]);
+    });
+
+    it("a second stop that re-matches an already recorded block does not list the pitfall as repeated", async () => {
+      const P = mkPitfall();
+      writeOcc({ lesson: P.id, class: "real", files: ["src/a.mjs"] });
+      hist("c2", "wf_9", [brief, blk(blockOf("real", { files: ["src/a.mjs"] })), rep(STOP)]);
+      const first = await runC2();
+      expect(first.repeated).toContain(P.id);
+      hist("c2", "wf_10", [brief, rep(STOP)]);
+      const second = await runC2();
+      expect(second.alreadyReflected).toBeFalsy();
+      expect(second.repeated).not.toContain(P.id);
+      const row = m.prepare("SELECT bumped FROM reflections WHERE card = ? ORDER BY recorded DESC, rowid DESC").get("c2");
+      expect(JSON.parse(row.bumped)).not.toContain(P.id);
+      expect(c2Occ(P.id)).toHaveLength(1);
+      // a dry run of a third stop (a new slice, so not alreadyReflected) previews nothing new either
+      hist("c2", "wf_11", [brief, rep(STOP)]);
+      const dry = await runC2({ dryRun: true });
+      expect(dry.repeated).not.toContain(P.id);
+    });
+
+    it("a superseded pitfall is never matched by file", async () => {
+      const oldP = mkPitfall();
+      const fresh = addLesson(m, { text: "Never commit generated files; the stop hook rebuilds them on every turn", kind: "pitfall", citation: "history:c3/wf_1:2", card: "c3", source: { agent: "reflect" } });
+      supersedeLesson(m, oldP.id, fresh.id);
+      writeOcc({ lesson: oldP.id, class: "real", files: ["src/a.mjs"] });
+      hist("c2", "wf_9", [brief, blk(blockOf("real", { files: ["src/a.mjs"] }))]);
+      const r = await runC2();
+      expect(c2Occ(oldP.id)).toEqual([]);
+      expect(r.repeated).not.toContain(oldP.id);
+    });
+
+    it("a lesson of another kind named in the ledger is never matched by file", async () => {
+      const F = addLesson(m, { text: "Prefer small commits because the reviewer reads the whole diff at once", kind: "feedback", citation: "history:c3/wf_1:2", card: "c3", source: { agent: "reflect" } });
+      writeOcc({ lesson: F.id, class: "real", files: ["src/a.mjs"] });
+      hist("c2", "wf_9", [brief, blk(blockOf("real", { files: ["src/a.mjs"] }))]);
+      const r = await runC2();
+      expect(c2Occ(F.id)).toEqual([]);
+      expect(r.repeated).not.toContain(F.id);
+    });
+
+    it("an occurrence written through the model's repeats path carries the block's class and files and no via", async () => {
+      const P = mkPitfall();
+      hist("c2", "wf_9", [brief, blk(blockOf("real", { files: ["src/a.mjs"] }))]);
+      const propose = async () => ({ lessons: [{ kind: "pitfall", text: "Repeat of the generated files pitfall", citation: C2REF, notDerivableBecause: "learned only from this run", repeats: P.id }], sessionId: null, totalCostUsd: null });
+      const r = await runC2({ propose });
+      expect(r.repeated).toContain(P.id);
+      const occ = c2Occ(P.id);
+      expect(occ).toHaveLength(1);
+      expect(occ[0]).toMatchObject({ lesson: P.id, citation: C2REF, class: "real", files: ["src/a.mjs"] });
+      expect(occ[0].via).toBeUndefined();
+    });
+  });
 });
 
 // Card memory-feedback-rank: harmful and evidence class enter recall scoring, helpful does not, and a lesson with
@@ -5890,5 +6060,159 @@ describe("card memory-project-model: renderProjectModel", () => {
     expect(lines[lines.length - 2]).toContain(input[17].text);
     expect(lines[lines.length - 1]).toContain(input[18].text);
     expect(r.text.length).toBeLessThanOrEqual(PROJECT_MODEL_CHAR_CAP);
+  });
+});
+
+// --- busy timeout (card memory-db-busy-timeout) -------------------------------------------------------------------
+// A second process holds BEGIN EXCLUSIVE on memory.db; the synchronous lib call runs in this process while the holder
+// releases from its own process, so the parent's blocked event loop does not stall the release.
+async function holdExclusive(file, ms) {
+  const code = `const { DatabaseSync } = require("node:sqlite");
+const db = new DatabaseSync(process.argv[1]);
+db.exec("BEGIN EXCLUSIVE");
+db.exec("INSERT INTO lessons_fts(lessons_fts) VALUES('optimize')");
+process.stdout.write("held\\n");
+setTimeout(() => { db.exec("COMMIT"); db.close(); }, Number(process.argv[2]));`;
+  const child = spawn(process.execPath, ["-e", code, file, String(ms)], { stdio: ["ignore", "pipe", "inherit"] });
+  const exited = new Promise((res) => child.on("exit", res));
+  await new Promise((res, rej) => {
+    child.on("error", rej);
+    child.stdout.on("data", (d) => String(d).includes("held") && res());
+  });
+  return { exited };
+}
+
+describe("openMemory busy timeout", () => {
+  it("waits out a second process's write lock, then the write lands", async () => {
+    m = openMemory(dir);
+    m.close();
+    m = null;
+    const { exited } = await holdExclusive(memoryPath(dir), 800);
+    try {
+      m = openMemory(dir);
+      addLesson(m, { text: "written after the lock cleared", kind: "pattern", source: { agent: "worker" } });
+      expect(listLessons(m).map((r) => r.text)).toContain("written after the lock cleared");
+    } finally {
+      await exited;
+    }
+  });
+
+  it("gives up with 'database is locked' within the bound, below the 5 s SessionStart hook timeout", async () => {
+    m = openMemory(dir);
+    m.close();
+    m = null;
+    const { exited } = await holdExclusive(memoryPath(dir), 6500);
+    const t0 = Date.now();
+    let err = null;
+    try {
+      m = openMemory(dir);
+      addLesson(m, { text: "never lands", kind: "pattern", source: { agent: "worker" } });
+    } catch (e) {
+      err = e;
+    }
+    const waited = Date.now() - t0;
+    await exited;
+    expect(err).not.toBeNull();
+    expect(String(err.message)).toMatch(/database is locked/);
+    expect(waited).toBeGreaterThanOrEqual(400);
+    expect(waited).toBeLessThan(4500);
+  });
+});
+
+describe("inspectMemory (read-only) busy timeout", () => {
+  it("waits out a second process's write lock", async () => {
+    m = openMemory(dir);
+    addLesson(m, { text: "seed", kind: "pattern", source: { agent: "worker" } });
+    m.close();
+    m = null;
+    const { exited } = await holdExclusive(memoryPath(dir), 800);
+    let r;
+    try {
+      r = inspectMemory(dir);
+    } finally {
+      await exited;
+    }
+    expect(r.error).toBeNull();
+    expect(r.userVersion).toBe(12);
+  });
+});
+
+// --- BEGIN IMMEDIATE (card memory-db-begin-immediate) -------------------------------------------------------------
+// A deferred BEGIN that reads and then writes upgrades SHARED to RESERVED; SQLite returns SQLITE_BUSY for that upgrade
+// at once, without calling the busy handler. So the holder here takes RESERVED (BEGIN IMMEDIATE), which lets readers
+// in; holdExclusive would block the first read and let deferred code pass.
+async function holdReserved(file, ms) {
+  const code = `const { DatabaseSync } = require("node:sqlite");
+const db = new DatabaseSync(process.argv[1]);
+db.exec("BEGIN IMMEDIATE");
+process.stdout.write("held\\n");
+setTimeout(() => { db.exec("COMMIT"); db.close(); }, Number(process.argv[2]));`;
+  const child = spawn(process.execPath, ["-e", code, file, String(ms)], { stdio: ["ignore", "pipe", "inherit"] });
+  const exited = new Promise((res) => child.on("exit", res));
+  await new Promise((res, rej) => {
+    child.on("error", rej);
+    child.stdout.on("data", (d) => String(d).includes("held") && res());
+  });
+  return { exited };
+}
+
+describe("write transactions wait out a second process's write lock (card memory-db-begin-immediate)", () => {
+  it("recordOutcomes waits out a second process holding the write lock (reader-then-writer)", async () => {
+    m = openMemory(dir);
+    const { exited } = await holdReserved(memoryPath(dir), 800);
+    let elapsed;
+    const t0 = Date.now();
+    try {
+      recordOutcomes(m, [handOutcomeRow({ card: "c-bi1", commit: "sha-bi1", now: "2026-10-01T00:00:00.000Z" })]);
+      elapsed = Date.now() - t0;
+    } finally {
+      await exited;
+    }
+    expect(elapsed).toBeGreaterThanOrEqual(300);
+    expect(elapsed).toBeLessThan(MEMORY_BUSY_TIMEOUT_MS + 1000);
+    expect(listOutcomes(m, { track: "hand" }).map((r) => r.card)).toContain("c-bi1");
+  });
+
+  it("openMemory migrates a v11 store while a second process holds the write lock", async () => {
+    m = openMemory(dir);
+    m.exec("ALTER TABLE lessons DROP COLUMN archived;");
+    m.exec("ALTER TABLE lessons DROP COLUMN archived_reason;");
+    m.exec("PRAGMA user_version = 11;");
+    m.close();
+    m = null;
+    const { exited } = await holdReserved(memoryPath(dir), 800);
+    let elapsed;
+    const t0 = Date.now();
+    try {
+      m = openMemory(dir);
+      elapsed = Date.now() - t0;
+    } finally {
+      await exited;
+    }
+    expect(elapsed).toBeGreaterThanOrEqual(300);
+    expect(elapsed).toBeLessThan(MEMORY_BUSY_TIMEOUT_MS + 1000);
+    expect(m.prepare("PRAGMA user_version").get().user_version).toBe(12);
+  });
+
+  it("runReflect applies counters while a second process holds the write lock", async () => {
+    m = openMemory(dir);
+    const lesson = addLesson(m, { text: "a pattern worth keeping around", kind: "pattern", source: { agent: "worker" } });
+    const report = buildReflectReport();
+    report.levels[0].tasks[0].memoryUsed = [lesson.id];
+    const { exited } = await holdReserved(memoryPath(dir), 800);
+    let result;
+    let elapsed;
+    const t0 = Date.now();
+    try {
+      result = await runReflect(m, report, { reportHash: "hash-bi-reflect", dir, classes: REFLECT_CLASSES, propose: noopPropose });
+      elapsed = Date.now() - t0;
+    } finally {
+      await exited;
+    }
+    expect(elapsed).toBeGreaterThanOrEqual(300);
+    expect(elapsed).toBeLessThan(MEMORY_BUSY_TIMEOUT_MS + 1000);
+    expect(result.ok).toBe(true);
+    expect(result.counters.helpful).toEqual([lesson.id]);
+    expect(getLesson(m, lesson.id).helpful).toBe(1);
   });
 });

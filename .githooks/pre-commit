@@ -10,17 +10,8 @@ cd "$(git rev-parse --show-toplevel)" || {
   exit 1
 }
 
-# card stop-gate-credits-pre-commit: the tree this commit is about to record, computed here, before the
-# unset below, while GIT_INDEX_FILE (a `git commit -a` / pathspec commit points it at a temporary index) is
-# still whatever git set it to. write-tree reads that index, so this is the tree of what git is about to
-# commit, not necessarily today's HEAD^{tree}. Failure (no index, detached weirdness, ...) leaves
-# commit_tree empty; the record writer below treats that as fail-closed (write no passing record, remove
-# any stale one) rather than guess.
-commit_tree=$(git write-tree 2>/dev/null)
-write_tree_status=$?
-
 # card pre-commit-skip-no-test-paths: the staged path list, captured here, before the unset below, for the
-# same reason as commit_tree: it must read the index git is about to commit (a temporary index for
+# same reason as the working-tree checks below: it must read the index git is about to commit (a temporary index for
 # `git commit -a` / a pathspec commit). Plain --name-only output, one path per line. A non-zero exit leaves
 # staged_status non-zero (git's own error stays visible), which the skip check below treats as "run the full gate" (fail closed).
 staged_paths=$(git diff --cached --name-only --no-renames)
@@ -31,20 +22,16 @@ staged_status=$?
 no_test_config=$(git show :.doug/config.json 2>/dev/null)
 no_test_config_status=$?
 
-# card stop-gate-credits-pre-commit (round 2, reviewer BLOCKER): the commands below run against the WORKING
-# TREE, but commit_tree above is the committed INDEX - a file staged one way and left different on disk
-# hides a broken committed version behind a passing run, and an untracked file the tests depend on is
-# invisible to write-tree the same way. Captured here, still before the unset below, so `git diff` reads the
-# same GIT_INDEX_FILE write-tree just did (the temporary index a `git commit -a` / pathspec commit points
-# at) - checking this after the unset would compare against the real, not-yet-updated .git/index instead.
-# Any non-excluded unstaged diff or untracked file makes `ok` false below regardless of how the commands
-# themselves do; either git call failing counts as dirty too (fail closed). Exclusions match
-# plugins/doug-gates/lib/baseline.mjs's changedFiles: .doug/.state/ (the hook's own record and logs, and
-# any other project state living there), .doug/anchor.md exactly (the harness's own handoff snapshot), and
-# .claude/worktrees/ (subagent worktrees). Plain --name-only output (no --porcelain) is used, not parsed for
-# quoting, so a path containing a space is never misread; git itself C-quotes a name containing a newline, so
-# such a name arrives as one already-quoted entry that never matches any of the literal exclusion patterns
-# below — an unexcluded entry, correctly read as dirty (fail closed), not silently dropped or split.
+# card gate-docs-skip-unless-named: whether the WORKING TREE has anything beyond the committed index, read by the
+# docs gate below. Captured here, still before the unset below, so `git diff` reads the same GIT_INDEX_FILE
+# (the temporary index a `git commit -a` / pathspec commit points at) - after the unset it would compare against
+# the real, not-yet-updated .git/index. Any non-excluded unstaged diff or untracked file, or either git call
+# failing, counts as dirty (fail closed). Exclusions match plugins/doug-gates/lib/baseline.mjs's changedFiles:
+# .doug/.state/ (the hook's own logs and any other project state living there), .doug/anchor.md exactly (the
+# harness's own handoff snapshot), and .claude/worktrees/ (subagent worktrees). Plain --name-only output (no
+# --porcelain) is used, not parsed for quoting, so a path containing a space is never misread; git itself
+# C-quotes a name containing a newline, so such a name arrives as one already-quoted entry that never matches
+# any of the literal exclusion patterns below - an unexcluded entry, correctly read as dirty (fail closed).
 working_tree_diff=$(git diff --name-only 2>/dev/null)
 working_tree_diff_status=$?
 working_tree_untracked=$(git ls-files --others --exclude-standard 2>/dev/null)
@@ -88,7 +75,7 @@ unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_PREFIX GIT_COMMON_DIR \
 # in .doug/config.json (an entry matches a path when equal to it, or, ending in `/`, when the path starts
 # with it). Fail closed: an unreadable staged list, an empty one (--allow-empty), a missing or unparseable
 # config, a missing, non-array or empty list, or any node failure runs the full gate as before. The skip
-# removes last-run.json instead of writing one, so the Stop gate never credits a run that did not happen.
+# writes no verified-tree record, so the Stop gate never credits a run that did not happen.
 if [ "$staged_status" -eq 0 ] && [ "$no_test_config_status" -eq 0 ] && [ -n "$staged_paths" ] && printf '%s\n' "$staged_paths" | DOUG_NO_TEST_CONFIG="$no_test_config" node --input-type=module -e '
 import { readFileSync } from "node:fs";
 const list = JSON.parse(process.env.DOUG_NO_TEST_CONFIG)?.preCommit?.noTestPaths;
@@ -98,7 +85,6 @@ if (staged.length === 0) process.exit(1);
 const hit = (p) => list.some((e) => (e.endsWith("/") ? p.startsWith(e) : p === e));
 process.exit(staged.every(hit) ? 0 : 1);
 ' >/dev/null 2>&1; then
-  rm -f .doug/.state/pre-commit/last-run.json
   echo "pre-commit: gate skipped; only no-test paths (preCommit.noTestPaths) are staged" >&2
   exit 0
 fi
@@ -117,7 +103,6 @@ fi
 docs_mode=${docs_decision%%
 *}
 if [ "$docs_mode" = "skip" ]; then
-  rm -f .doug/.state/pre-commit/last-run.json
   echo "pre-commit: gate skipped; only no-test paths (preCommit.noTestPaths) and docs no test names are staged" >&2
   exit 0
 fi
@@ -134,15 +119,12 @@ mkdir -p .doug/.state/pre-commit || {
   exit 1
 }
 
-# card stop-gate-credits-pre-commit: a machine-readable record of this run, so the Stop gate can credit a
-# passing pre-commit instead of re-running the same commands a second time. commands_json accumulates one
-# {"name","command","exit","durationMs"} object per step, in the order run_step runs them; write_record
-# assembles the full record and writes it via temp file + mv so a half-written file is never read.
-pre_commit_record=".doug/.state/pre-commit/last-run.json"
+# card verified-tree-record: commands_json accumulates one {"name","command","exit","durationMs","totals"?} object
+# per step, in the order run_step runs them; it is handed to the verified-tree record writer at the end.
 pre_commit_commands_json=""
 
 record_command() {
-  # $1=name $2=command $3=exit $4=durationMs $5=totals JSON (optional, card ratchet-pre-commit-credit).
+  # $1=name $2=command $3=exit $4=durationMs $5=totals JSON (optional).
   # Command strings here are always fixed `pnpm <script>` invocations (no user input), so no JSON escaping is
   # needed; $5 is JSON.stringify output from node, already valid JSON.
   totals_field=""
@@ -157,34 +139,21 @@ record_command() {
   fi
 }
 
-write_record() {
-  # $1 = steps_ok ("true"/"false"): whether every command run so far exited 0. The record's own `ok` is
-  # true only when steps_ok is true AND the working tree (checked above, before the unset) had nothing
-  # beyond the committed index - round 2's fix. If write-tree (captured before the unset above) failed or
-  # produced nothing, this is fail-closed: never write a passing record for a tree we could not identify,
-  # and never leave a stale one from an earlier run in place either.
-  steps_ok="$1"
-  if [ "$write_tree_status" -ne 0 ] || [ -z "$commit_tree" ]; then
-    rm -f "$pre_commit_record"
-    return
+gl_lib="$(cd "$(dirname "$0")/.." 2>/dev/null && pwd)/plugins/doug-gates/lib/gate-lock.mjs"
+
+# card gate-lock-takeover-exclusive: gate.lock is taken once for the whole step section, under this shell's pid
+# ($$, alive for the whole hook), so typecheck and test:unit share one wait. The skip paths above exit before
+# this point and never wait. A runner that cannot even start refuses the commit by name (fail closed); the
+# lock is released on every exit path.
+take_gate_lock() {
+  if ! node "$gl_lib" acquire --pid "$$"; then
+    echo "pre-commit: gate-lock runner ${gl_lib} failed; commit refused" >&2
+    exit 1
   fi
-  reason_field=""
-  if [ "$steps_ok" = "true" ] && [ "$working_tree_dirty" -eq 0 ]; then
-    ok="true"
-  else
-    ok="false"
-    if [ "$steps_ok" = "true" ]; then
-      reason_field=',"reason":"working tree differs from the committed index"'
-    fi
-  fi
-  at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-  tmp="${pre_commit_record}.tmp.$$"
-  printf '{"version":1,"tree":"%s","ok":%s,"at":"%s","commands":[%s]%s}\n' \
-    "$commit_tree" "$ok" "$at" "$pre_commit_commands_json" "$reason_field" > "$tmp" 2>/dev/null \
-    && mv "$tmp" "$pre_commit_record" 2>/dev/null
-  # A record write failure (unwritable dir, race, ...) must never change the hook's exit status - only
-  # clean up a leftover temp file here; the caller's own exit code is untouched either way.
-  rm -f "$tmp" 2>/dev/null
+  trap 'node "$gl_lib" release --pid "$$" >/dev/null 2>&1' EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  trap 'exit 129' HUP
 }
 
 run_step() {
@@ -207,8 +176,8 @@ run_step() {
     '' | *[!0-9]*) step_status=1; status_readable=0 ;;
   esac
   rm -f "$log.status"
-  # card ratchet-pre-commit-credit: the step's parsed test totals (lib/test-totals.mjs parseTotals), read from
-  # the log before it is removed below, so the Stop gate can count tests on a credited record. Any failure
+  # the step's parsed test totals (lib/test-totals.mjs parseTotals), read from the log before it is removed
+  # below, so the Stop gate can count tests on a credited verified-tree record. Any failure
   # (no node, missing module, unreadable log) leaves step_totals empty and the entry without `totals`: the
   # gate then runs the commands instead of crediting. Never changes the hook's exit status.
   step_totals=""
@@ -223,7 +192,6 @@ process.stdout.write(JSON.stringify(parseTotals(readFileSync(process.argv[1], "u
   fi
   record_command "$step_name" "$command_str" "$step_status" "$duration_ms" "$step_totals"
   if [ "$step_status" -ne 0 ]; then
-    write_record false
     rm -f .doug/.state/verified-tree.json
     if [ "$status_readable" -eq 0 ]; then
       echo "pre-commit: could not read the exit status of pnpm ${step_name} (${log}.status missing or unreadable); commit refused" >&2
@@ -246,10 +214,11 @@ process.stdout.write(JSON.stringify(parseTotals(readFileSync(process.argv[1], "u
 vt_lib="$(cd "$(dirname "$0")/.." 2>/dev/null && pwd)/plugins/doug-gates/lib/verified-tree.mjs"
 vt_before=$(node "$vt_lib" tree "$PWD" 2>/dev/null) || vt_before=""
 
+take_gate_lock
+
 if [ "$docs_mode" = "targeted" ]; then
   # card gate-docs-skip-unless-named: only the test files that name the staged docs; no typecheck. Never credited
-  # as a full run: no passing last-run.json (removed), no verified-tree record (a red run_step removes it).
-  rm -f .doug/.state/pre-commit/last-run.json
+  # as a full run: no verified-tree record (a red run_step removes it).
   docs_files=${docs_decision#*
 }
   old_ifs="$IFS"
@@ -266,7 +235,6 @@ fi
 run_step typecheck pnpm typecheck
 run_step test:unit pnpm test:unit
 
-write_record true
 if [ -n "$vt_before" ]; then
   node "$vt_lib" record "$vt_before" "[$pre_commit_commands_json]" "$PWD" >/dev/null 2>&1 || true
 fi

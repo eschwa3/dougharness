@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { writeFileSync, mkdirSync, readFileSync, existsSync, mkdtempSync, rmSync } from "node:fs";
+import { writeFileSync, mkdirSync, readFileSync, existsSync, mkdtempSync, rmSync, chmodSync } from "node:fs";
 import { execFileSync, spawn } from "node:child_process";
 import { join, dirname } from "node:path";
 import { tmpdir } from "node:os";
@@ -465,6 +465,28 @@ describe("stop-gate process storm (card stop-gate-process-storm)", () => {
       expect(existsSync(seenPath)).toBe(true);
       const seen = JSON.parse(readFileSync(seenPath, "utf8"));
       expect(seen.session, "the gate must take the lock over with its own pid/session, not just run past someone else's stale one").toBe("test-session");
+    });
+
+    // Card gate-lock-takeover-exclusive (F1): a lock that reads stale on arrival while acquireGateLock reports busy
+    // (a rival just took it) is waited on, never overwritten. chmod 000 on the lock file is the stand-in.
+    it("3e: a lock that reads stale but is reported busy on arrival is waited on for the bound, then the gate runs once", () => {
+      const dir = makeEditedProject(makeRunsConfig(3000));
+      putLock(dir, JSON.stringify({ pid: 999999, session: "rival", at: Date.now() }));
+      chmodSync(lockPath(dir), 0o000);
+      try {
+        const started = Date.now();
+        const r = runHookScript("stop-gate", { hook_event_name: "Stop" }, { dir });
+        const elapsed = Date.now() - started;
+        expect(elapsed, "busy must be waited out (timeoutMs x 1 command), not overwritten at once").toBeGreaterThanOrEqual(2500);
+        expect(runsCount(dir)).toBe(1);
+        expect(r.json).toBeNull();
+      } finally {
+        try {
+          chmodSync(lockPath(dir), 0o644);
+        } catch {
+          // already gone
+        }
+      }
     });
 
     it("3c: a live lock is waited for, then state is reloaded and the reloaded verified tree is applied", () => {

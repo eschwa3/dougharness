@@ -275,7 +275,7 @@ const V1_OUTCOME_COLUMNS = [
 ];
 
 function migrateV1ToV2(db) {
-  db.exec("BEGIN");
+  db.exec("BEGIN IMMEDIATE");
   try {
     db.exec(`CREATE TABLE outcomes_v2 (${OUTCOMES_COLUMNS_SQL});`);
     db.exec(
@@ -300,7 +300,7 @@ const V2_LESSON_COLUMNS = [
 ];
 
 function migrateV2ToV3(db) {
-  db.exec("BEGIN");
+  db.exec("BEGIN IMMEDIATE");
   try {
     db.exec(`CREATE TABLE lessons_v3 (${LESSONS_COLUMNS_SQL});`);
     db.exec(
@@ -320,7 +320,7 @@ function migrateV2ToV3(db) {
 // v3 had no reflections table. Unlike v1->v2 and v2->v3, nothing existing is rebuilt: adding a table needs no
 // rebuild-under-a-temp-name dance, just the CREATE plus the version bump, in the same transactional pattern.
 function migrateV3ToV4(db) {
-  db.exec("BEGIN");
+  db.exec("BEGIN IMMEDIATE");
   try {
     db.exec(`CREATE TABLE reflections (${REFLECTIONS_COLUMNS_SQL});`);
     db.exec("PRAGMA user_version = 4");
@@ -338,7 +338,7 @@ function migrateV3ToV4(db) {
 // this guard makes the step a no-op there instead of a duplicate-column error, while still doing the ALTER for a
 // genuine v4 store that only ever had the v4 columns.
 function migrateV4ToV5(db) {
-  db.exec("BEGIN");
+  db.exec("BEGIN IMMEDIATE");
   try {
     const cols = db.prepare("PRAGMA table_info(outcomes)").all().map((c) => c.name);
     if (!cols.includes("partial")) db.exec("ALTER TABLE outcomes ADD COLUMN partial INTEGER;");
@@ -354,7 +354,7 @@ function migrateV4ToV5(db) {
 // the four CREATEs and the version bump. No add-only trigger is added for these tables — the code index is a
 // cache, never add-only.
 function migrateV5ToV6(db) {
-  db.exec("BEGIN");
+  db.exec("BEGIN IMMEDIATE");
   try {
     db.exec(CODE_INDEX_SCHEMA_SQL);
     db.exec("PRAGMA user_version = 6");
@@ -381,7 +381,7 @@ const V7_CONDITION_COLUMNS = [
 ];
 
 function migrateV6ToV7(db) {
-  db.exec("BEGIN");
+  db.exec("BEGIN IMMEDIATE");
   try {
     const cols = db.prepare("PRAGMA table_info(outcomes)").all().map((c) => c.name);
     for (const [name, type] of V7_CONDITION_COLUMNS) {
@@ -403,7 +403,7 @@ function migrateV6ToV7(db) {
 const V8_CODEX_COLUMNS = [["codex_usd", "REAL"]];
 
 function migrateV7ToV8(db) {
-  db.exec("BEGIN");
+  db.exec("BEGIN IMMEDIATE");
   try {
     const cols = db.prepare("PRAGMA table_info(outcomes)").all().map((c) => c.name);
     for (const [name, type] of V8_CODEX_COLUMNS) {
@@ -424,7 +424,7 @@ function migrateV7ToV8(db) {
 const V9_STOP_COLUMNS = [["stop_class", "TEXT"]];
 
 function migrateV8ToV9(db) {
-  db.exec("BEGIN");
+  db.exec("BEGIN IMMEDIATE");
   try {
     const cols = db.prepare("PRAGMA table_info(outcomes)").all().map((c) => c.name);
     for (const [name, type] of V9_STOP_COLUMNS) {
@@ -445,7 +445,7 @@ function migrateV8ToV9(db) {
 const V10_MEMORY_COLUMNS = [["memory_config", "TEXT"]];
 
 function migrateV9ToV10(db) {
-  db.exec("BEGIN");
+  db.exec("BEGIN IMMEDIATE");
   try {
     const cols = db.prepare("PRAGMA table_info(outcomes)").all().map((c) => c.name);
     for (const [name, type] of V10_MEMORY_COLUMNS) {
@@ -463,7 +463,7 @@ function migrateV9ToV10(db) {
 // proposal a repeat of the lesson. One guarded ALTER (LESSONS_COLUMNS_SQL already carries seen for a rebuilt
 // store), then the version bump. seen is not in the no-rewrite trigger's column list.
 function migrateV10ToV11(db) {
-  db.exec("BEGIN");
+  db.exec("BEGIN IMMEDIATE");
   try {
     const cols = db.prepare("PRAGMA table_info(lessons)").all().map((c) => c.name);
     if (!cols.includes("seen")) db.exec("ALTER TABLE lessons ADD COLUMN seen INTEGER NOT NULL DEFAULT 0;");
@@ -480,7 +480,7 @@ function migrateV10ToV11(db) {
 // carries both for a rebuilt store), then the version bump. Neither is in the no-rewrite trigger's column list,
 // and the no-delete trigger is unchanged: an archived row is kept.
 function migrateV11ToV12(db) {
-  db.exec("BEGIN");
+  db.exec("BEGIN IMMEDIATE");
   try {
     const cols = db.prepare("PRAGMA table_info(lessons)").all().map((c) => c.name);
     if (!cols.includes("archived")) db.exec("ALTER TABLE lessons ADD COLUMN archived TEXT;");
@@ -493,10 +493,14 @@ function migrateV11ToV12(db) {
   }
 }
 
+// Bounded wait for another process's write lock; well under the 5 s SessionStart hook timeout.
+export const MEMORY_BUSY_TIMEOUT_MS = 2000;
+
 export function openMemory(dir) {
   const file = memoryPath(dir);
   mkdirSync(dirname(file), { recursive: true });
-  const db = new DatabaseSync(file);
+  const db = new DatabaseSync(file, { timeout: MEMORY_BUSY_TIMEOUT_MS });
+  db.exec(`PRAGMA busy_timeout = ${MEMORY_BUSY_TIMEOUT_MS}`);
   db.exec("PRAGMA foreign_keys = ON");
   const version = db.prepare("PRAGMA user_version").get().user_version;
   if (version === 0) {
@@ -620,7 +624,8 @@ export function inspectMemory(dir) {
   out.exists = true;
   let db;
   try {
-    db = new DatabaseSync(file, { readOnly: true });
+    db = new DatabaseSync(file, { readOnly: true, timeout: MEMORY_BUSY_TIMEOUT_MS });
+    db.exec(`PRAGMA busy_timeout = ${MEMORY_BUSY_TIMEOUT_MS}`);
     out.userVersion = db.prepare("PRAGMA user_version").get().user_version;
     out.quickCheck = String(db.prepare("PRAGMA quick_check").get().quick_check);
   } catch (err) {
@@ -688,7 +693,7 @@ export function addLesson(m, opts) {
     commit_sha: commit,
     created,
   };
-  m.exec("BEGIN");
+  m.exec("BEGIN IMMEDIATE");
   try {
     m.prepare(
       `INSERT INTO lessons (id, text, kind, scope, citation, source_agent, source_model, task, card, commit_sha, created)
@@ -2193,7 +2198,7 @@ const ROUND_COLUMNS = new Set(["passes", "fix_passes"]);
 export function recordOutcomes(m, rows) {
   let inserted = 0;
   let updated = 0;
-  m.exec("BEGIN");
+  m.exec("BEGIN IMMEDIATE");
   try {
     for (const row of rows) {
       const existing = m.prepare("SELECT id FROM outcomes WHERE run = ? AND task = ?").get(row.run, row.task);
@@ -2813,7 +2818,7 @@ export async function runReflect(m, report, opts = {}) {
   if (dryRun) {
     counters = computeReflectCounters(m, blocks, report, { apply: false, harmfulIds });
   } else {
-    m.exec("BEGIN");
+    m.exec("BEGIN IMMEDIATE");
     try {
       counters = computeReflectCounters(m, blocks, report, { apply: true, harmfulIds });
       for (const id of counters.harmful) {
@@ -3147,6 +3152,8 @@ export function failureSlice(dir, card, { session = null } = {}) {
           card: cardName,
           run,
           line: i + 1,
+          class: kind === "block" ? v.class : null,
+          files: kind === "block" && Array.isArray(v.files) ? v.files.filter((f) => typeof f === "string" && f !== "") : [],
           session: sessionOf(v) ?? runSession ?? (typeof session === "string" && session !== "" ? session : null),
           text: failureItemText(kind, body, e.text),
         });
@@ -3179,12 +3186,12 @@ export function readPitfallOccurrences(dir) {
 }
 
 export function recordPitfallOccurrence(dir, occ) {
-  const { lesson, citation, card = null, run = null, session = null, at = nowIso() } = occ ?? {};
+  const { lesson, citation, card = null, run = null, session = null, at = nowIso(), via, class: cls = null, files = [] } = occ ?? {};
   if (typeof lesson !== "string" || typeof citation !== "string") throw new Error("recordPitfallOccurrence needs a lesson and a citation");
   if (readPitfallOccurrences(dir).some((o) => o.lesson === lesson && o.citation === citation)) return { written: false };
   const path = join(dir, PITFALL_LEDGER_RELPATH);
   mkdirSync(dirname(path), { recursive: true });
-  appendFileSync(path, JSON.stringify({ lesson, citation, card, run, session, at }) + "\n", "utf8");
+  appendFileSync(path, JSON.stringify({ lesson, citation, card, run, session, at, ...(via ? { via } : {}), class: typeof cls === "string" ? cls : null, files: Array.isArray(files) ? files : [] }) + "\n", "utf8");
   return { written: true };
 }
 
@@ -3252,6 +3259,24 @@ export async function runFailureReflect(m, opts = {}) {
   const existing = m.prepare("SELECT * FROM reflections WHERE report_hash = ?").get(key);
   if (existing) return { alreadyReflected: true, ...base, row: reflectionRowToObject(existing) };
 
+  // Code-side repeats (ADR 0019 line 60): a real block with the same class on a file a live pitfall's recorded
+  // occurrence also names is another occurrence of that pitfall. Empty files never match.
+  const fileRepeated = [];
+  const sharesFile = (a, b) => Array.isArray(a) && Array.isArray(b) && a.some((f) => b.includes(f));
+  for (const item of slice.items) {
+    if (item.kind !== "block" || !item.files.length) continue;
+    for (const o of readPitfallOccurrences(dir)) {
+      if (o.class !== item.class || !sharesFile(o.files, item.files)) continue;
+      const target = getLesson(m, o.lesson);
+      if (!target || target.kind !== "pitfall" || target.superseded_by) continue;
+      // List the pitfall only when this match is new: a block already recorded (a card's second stop re-reads it) adds nothing.
+      const isNew = dryRun
+        ? !readPitfallOccurrences(dir).some((x) => x.lesson === target.id && x.citation === item.ref)
+        : recordPitfallOccurrence(dir, { lesson: target.id, citation: item.ref, card: item.card, run: item.run, session: item.session, at: now, via: "file", class: item.class, files: item.files }).written;
+      if (isNew && !fileRepeated.includes(target.id)) fileRepeated.push(target.id);
+    }
+  }
+
   const prompt = buildFailureReflectPrompt(slice, { existingLessons: listLessons(m) });
   // A dry run with no propose makes no model call: it returns the prompt it would send and spends nothing.
   if (dryRun && typeof propose !== "function") {
@@ -3268,10 +3293,10 @@ export async function runFailureReflect(m, opts = {}) {
   const byRef = new Map(slice.items.map((i) => [i.ref, i]));
   const appended = [];
   const appendedIds = new Set();
-  const repeated = [];
+  const repeated = [...fileRepeated];
   const rejected = [];
   const occur = (lesson, item) => {
-    if (!dryRun) recordPitfallOccurrence(dir, { lesson, citation: item.ref, card: item.card, run: item.run, session: item.session, at: now });
+    if (!dryRun) recordPitfallOccurrence(dir, { lesson, citation: item.ref, card: item.card, run: item.run, session: item.session, at: now, class: item.class, files: item.files });
     if (!repeated.includes(lesson)) repeated.push(lesson);
   };
   for (const p of result.lessons) {
@@ -3338,7 +3363,7 @@ export async function runFailureReflect(m, opts = {}) {
     });
     appended.push(row.id);
     appendedIds.add(row.id);
-    recordPitfallOccurrence(dir, { lesson: row.id, citation: item.ref, card: item.card, run: item.run, session: item.session, at: now });
+    recordPitfallOccurrence(dir, { lesson: row.id, citation: item.ref, card: item.card, run: item.run, session: item.session, at: now, class: item.class, files: item.files });
   }
 
   const sessionId = result.sessionId || null;

@@ -86,7 +86,7 @@ Before the commit the lead itself runs `node .doug/hooks/scripts/verify.mjs` (th
 
 Stay within the card's goal. A defect found on the way that the goal does not cover becomes a new hand-track card, not part of this commit.
 
-When a by-hand run stops a card after Start (a hook block it reports, a design question answered stop, a gate it cannot get green, an unresolved reviewer blocker, or the user saying stop), the lead runs the recording step once: `node "${CLAUDE_PLUGIN_ROOT}/scripts/memory.mjs" record <id> --hand --stop <reason> --detail "<one line>"`. `<reason>` is one of the card loop's stop reasons (`lib/card-loop.mjs` `STOP_REASONS`) or `user-stopped` when the user stopped it.
+When a by-hand run stops a card after Start (a hook block it reports, a design question answered stop, a gate it cannot get green, an unresolved reviewer blocker, or the user saying stop), the lead runs the recording step once: `node "${CLAUDE_PLUGIN_ROOT}/scripts/memory.mjs" record <id> --hand --stop <reason> --detail "<one line>"`. `<reason>` is one of the card loop's stop reasons (`lib/card-loop.mjs` `STOP_REASONS`) or `user-stopped` when the user stopped it. Then it starts the failure pass once, detached: `node "${CLAUDE_PLUGIN_ROOT}/scripts/memory.mjs" reflect --failures <id> --max-usd 0.5 --detach` (cheap row, capped at $0.5; the doug-hand start is the approval; user, 2026-10-28). A start that fails does not stop the card's hand-back.
 
 ## 4. Record and land
 
@@ -105,6 +105,8 @@ Before the continue gate, gather the follow-up candidates this landing produced:
 Follow-ups are filed without a question. A landing with no candidates files nothing. Each realistic candidate goes straight to Backlog with `doug board add` (never a script that edits the record): `doug board add <id> --title "<title>" --goal "<goal>" --component <c> --size <S|M|L> --class <tests-only|prose|gate-script|code|docs|eval|decision> --track <hand|flow> --deps <landed-id> --column backlog`. Then the lead places it in Backlog by priority with `doug board reorder`: `--top` for a defect that blocks a commit, a gate, or a user; `--after <id>` of the last such card for drift a user would hit; `--bottom` otherwise. Only the user promotes a card to Ready; the lead never files a follow-up to Ready or Decide.
 
 The lead says in the chat what it filed and where: each new card's id, title, and its Backlog position with the reason. Then one commit `"Board: <id> follow-ups added: <new-id>, <new-id>"`, whatever the count; the served page (`doug board serve`) shows the new cards without a republish. Batch: each card's deps name the card of the batch it came from; still one commit for the whole batch.
+
+Last read: after the landing commit and the follow-up step, and before the final message, the lead reads the reflect that `run-report` started detached: `node "${CLAUDE_PLUGIN_ROOT}/scripts/memory.mjs" job reflect-<id> --wait 120`. It polls until the job is done or failed, or 120 s have passed. Its line (reflect's one-line summary with the measured cost) goes in the chat. `pending` after the cap is said as pending in the chat and the landing goes on; the next landing's `run-report` reads it with `memory.mjs job --earlier`. A `failed` line (exit 1) is said in the chat with its reason and the landing goes on regardless: reflect is a log, not a gate. Batch: one read for the batch's job.
 
 ## Cards the user asks for
 

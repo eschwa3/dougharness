@@ -1,13 +1,13 @@
 import { describe, it, expect } from "vitest";
 import { execFileSync, spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync, existsSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync, existsSync, appendFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, sep } from "node:path";
-import { openMemory, addLesson, recordOutcomes, supersedeLesson, writeRunHistory, recordPitfallOccurrence } from "../lib/memory.mjs";
+import { openMemory, addLesson, recordOutcomes, supersedeLesson, writeRunHistory, recordPitfallOccurrence, PITFALL_LEDGER_RELPATH } from "../lib/memory.mjs";
 import { proposeRule } from "../lib/decisions.mjs";
 import { createHash } from "node:crypto";
 import { traceLine } from "../../doug-gates/lib/trace.mjs";
-import { collectSignals, proposeChanges, writeProposals, applyProposal, unifiedDiff, readAppliedLedger, PROPOSAL_LEDGER_RELPATH, LEARN_STATE_RELPATH, readGate, RULE_MIN_CARDS, RULE_MIN_SESSIONS, renderRule, cardFilesTouched } from "../lib/learn.mjs";
+import { collectSignals, proposeChanges, writeProposals, applyProposal, unifiedDiff, readAppliedLedger, PROPOSAL_LEDGER_RELPATH, LEARN_STATE_RELPATH, readGate, RULE_MIN_CARDS, RULE_MIN_SESSIONS, renderRule, cardFilesTouched, CLAUDE_MD_MAX_LINES, exceedsClaudeMdLimit, countLines } from "../lib/learn.mjs";
 
 // Deterministic proposals from the outcomes/lessons store and the run trace (card learn-signals): log-then-
 // propose, never auto-apply. collectSignals/proposeChanges/writeProposals are pure given their inputs; only
@@ -270,14 +270,30 @@ describe("collectSignals", () => {
 // --- proposeChanges ------------------------------------------------------------------------------------------
 
 describe("proposeChanges", () => {
-  it("promote: at threshold with no files proposes a CLAUDE.md Gotchas promote (diff null at 60 lines), never an unscoped rule", () => {
+  it("the shared CLAUDE.md limit is 200 lines: 200 allowed, 201 over", () => {
+    expect(CLAUDE_MD_MAX_LINES).toBe(200);
+    expect(exceedsClaudeMdLimit(`${Array.from({ length: 200 }, (_, i) => `l${i}`).join("\n")}\n`)).toBe(false);
+    expect(exceedsClaudeMdLimit(`${Array.from({ length: 201 }, (_, i) => `l${i}`).join("\n")}\n`)).toBe(true);
+  });
+
+  it("promote: a result of exactly 200 lines is accepted with a diff", () => {
     const header = ["# Project", "", "## Gotchas", ""];
-    const at59 = `${[...header, ...Array.from({ length: 59 - header.length }, (_, i) => `- filler ${i}`)].join("\n")}\n`;
+    const at199 = `${[...header, ...Array.from({ length: 199 - header.length }, (_, i) => `- filler ${i}`)].join("\n")}\n`;
+    expect(countLines(at199)).toBe(199);
+    const [p] = proposeChanges(pitfallSignals([pit({ files: [] })]), { dir: "/nope", claudeMd: at199, config: {}, skills: [] });
+    expect(p).toMatchObject({ kind: "promote", target: "CLAUDE.md" });
+    expect(p.diff).toContain("+- Never edit dist/ by hand.");
+  });
+
+  it("promote: at threshold with no files proposes a CLAUDE.md Gotchas promote (diff null at 201 lines), never an unscoped rule", () => {
+    const header = ["# Project", "", "## Gotchas", ""];
+    const at200 = `${[...header, ...Array.from({ length: 200 - header.length }, (_, i) => `- filler ${i}`)].join("\n")}\n`;
     const signals = pitfallSignals([pit({ files: [] })]);
-    const [p, ...rest] = proposeChanges(signals, { dir: "/nope", claudeMd: at59, config: {}, skills: [] });
+    const [p, ...rest] = proposeChanges(signals, { dir: "/nope", claudeMd: at200, config: {}, skills: [] });
     expect(rest).toEqual([]);
     expect(p).toMatchObject({ kind: "promote", target: "CLAUDE.md", diff: null });
-    expect(p.reason).toContain("60-line limit");
+    expect(p.reason).toContain("200-line limit");
+    expect(p.reason).toContain("201");
 
     const roomy = proposeChanges(signals, { dir: "/nope", claudeMd: CLAUDE_MD, config: {}, skills: [] });
     expect(roomy).toHaveLength(1);
@@ -861,5 +877,76 @@ describe("learn.mjs signals CLI (card memory-failure-lessons)", () => {
     expect(res.status, res.stderr).toBe(0);
     expect(res.stdout).toContain("lessons:");
     expect(res.stdout).not.toContain("undefined");
+  });
+});
+
+// --- card memory-failures-wiring: code-side (file-matched) occurrences count toward the rule threshold -------------
+
+describe("collectSignals: file-matched pitfall occurrences (card memory-failures-wiring)", () => {
+  it("a pitfall with one model occurrence and two occurrences tagged via 'file' over three cards and two sessions is a signal and is proposed", () => {
+    const dir = tempProject();
+    const m = openMemory(dir);
+    const L = addLesson(m, { text: "Never edit dist/ by hand.", kind: "pitfall", source: { agent: "reflect" }, citation: "history:a/r1:2" });
+    recordPitfallOccurrence(dir, { lesson: L.id, citation: "history:a/r1:2", card: "a", run: "r1", session: "s1", at: "2026-10-20T00:00:00.000Z" });
+    const ledgerPath = join(dir, PITFALL_LEDGER_RELPATH);
+    for (const [card, session] of [["b", "s2"], ["c", "s2"]]) {
+      appendFileSync(ledgerPath, JSON.stringify({ lesson: L.id, citation: `history:${card}/r1:2`, card, run: "r1", session, at: "2026-10-20T00:00:00.000Z", via: "file", class: "real", files: ["src/a.mjs"] }) + "\n");
+    }
+    const signals = collectSignals(m, { dir });
+    m.close();
+    const sig = signals.lessons.pitfalls.find((x) => x.id === L.id);
+    expect(sig).toMatchObject({ cards: ["a", "b", "c"], sessions: ["s1", "s2"] });
+    const proposals = proposeChanges(signals, { dir, claudeMd: CLAUDE_MD, config: {}, skills: [] });
+    expect(proposals.some((p) => p.evidence && p.evidence.id === L.id)).toBe(true);
+  });
+});
+
+// Card scripts-dir-requires-doug: learn.mjs dirFrom resolved any cwd as the project, so signals/propose created
+// .doug/.state/memory/memory.db in the scripts dir. Same refusal as memory.mjs.
+describe("learn.mjs refuses a directory that is not a Doug project (card scripts-dir-requires-doug)", () => {
+  const bare = () => mkdtempSync(join(tmpdir(), "doug-learn-bare-"));
+  const runIn = (args, cwd, env = { CLAUDE_PROJECT_DIR: "" }) => spawnSync(process.execPath, [script, ...args], { cwd, encoding: "utf8", env: { ...process.env, ...env } });
+  const cleanup = (...dirs) => dirs.forEach((d) => rmSync(d, { recursive: true, force: true }));
+
+  it("signals and propose from a cwd with no .doug/ exit 1 with the message and create nothing", () => {
+    const cwd = bare();
+    try {
+      for (const sub of ["signals", "propose"]) {
+        const res = runIn([sub], cwd);
+        expect(res.status, res.stderr).toBe(1);
+        expect(res.stderr).toContain("not a Doug project");
+        expect(res.stderr).toContain("has no .doug/");
+        expect(readdirSync(cwd)).toEqual([]);
+      }
+    } finally {
+      cleanup(cwd);
+    }
+  });
+
+  it("CLAUDE_PROJECT_DIR naming a dir with no .doug/ is refused even when [dir] is a real project", () => {
+    const proj = tempProject();
+    const target = bare();
+    try {
+      const res = runIn(["signals", proj], proj, { CLAUDE_PROJECT_DIR: target });
+      expect(res.status, res.stderr).toBe(1);
+      expect(res.stderr).toContain("not a Doug project");
+      expect(res.stderr).toContain(target);
+      expect(readdirSync(target)).toEqual([]);
+    } finally {
+      cleanup(proj, target);
+    }
+  });
+
+  it("a [dir] positional with no .doug/ is refused from a project cwd, creating nothing there", () => {
+    const proj = tempProject();
+    const target = bare();
+    try {
+      const res = runIn(["signals", target], proj);
+      expect(res.status, res.stderr).toBe(1);
+      expect(res.stderr).toContain("not a Doug project");
+      expect(readdirSync(target)).toEqual([]);
+    } finally {
+      cleanup(proj, target);
+    }
   });
 });

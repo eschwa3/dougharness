@@ -11,7 +11,7 @@ import { cpSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync, existsSync
 import { tmpdir } from "node:os";
 import { dirname, join, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
-import { newBoard, addCard, boardPath, BOARD_RELPATH } from "../plugins/doug-flow/lib/board.mjs";
+import { newBoard, addCard, boardPath, BOARD_RELPATH, wallCapMinutes, usdCapDollars } from "../plugins/doug-flow/lib/board.mjs";
 import { commandEnv } from "../plugins/doug-flow/lib/land.mjs";
 import { unwrapReport } from "../plugins/doug-flow/lib/plan.mjs";
 
@@ -1426,11 +1426,7 @@ export const SCENARIO_STAGES = {
       kind: "session",
       name: "build",
       maxTurns: 140,
-      prompt: () =>
-        [
-          "/doug-next --auto",
-          "I approved the queue as shown, with the caps you proposed. Do not invoke the doug-board skill at any step: this checkout publishes nothing.",
-        ].join("\n\n"),
+      prompt: ({ cards } = {}) => autoBuildPrompt(cards),
       assert: (ctx) => assertAutoBuilt(ctx),
     },
   ],
@@ -1446,11 +1442,7 @@ export const SCENARIO_STAGES = {
       kind: "session",
       name: "build",
       maxTurns: 160,
-      prompt: () =>
-        [
-          "/doug-next --auto",
-          "I approved the queue as shown, with the caps you proposed. Do not invoke the doug-board skill at any step: this checkout publishes nothing.",
-        ].join("\n\n"),
+      prompt: ({ cards } = {}) => autoBuildPrompt(cards),
       assert: (ctx) => assertParallelBuilt(ctx),
     },
   ],
@@ -1830,14 +1822,24 @@ export function assertHandBuilt(ctx) {
 
 // The auto scenario's two cards, in board order: what each one's build must change and which held-out test checks it.
 const AUTO_CARDS = [
-  { id: "fix-hours", files: ["src/duration.ts", "tests/duration.test.ts"], heldOut: { id: "fix-hours", file: HELDOUT_FILE } },
-  { id: "add-truncate", files: ["src/strings.ts", "tests/strings.test.ts"], heldOut: { id: "add-truncate", file: join(ROOT, "evals/heldout/add-truncate.test.ts") } },
+  { id: "fix-hours", size: "S", class: "code", files: ["src/duration.ts", "tests/duration.test.ts"], heldOut: { id: "fix-hours", file: HELDOUT_FILE } },
+  { id: "add-truncate", size: "S", class: "code", files: ["src/strings.ts", "tests/strings.test.ts"], heldOut: { id: "add-truncate", file: join(ROOT, "evals/heldout/add-truncate.test.ts") } },
 ];
 
 // The auto scenario's gate stage: a bare `/doug-next --auto` shows the queue and asks its one approval, which is denied
 // in print mode, so both cards are still Ready, only the fixture commit exists, and no source file was touched.
 // The auto scenario's Ready hand cards and its Backlog card: the ts-orders descriptor's when the fixture names them,
 // else the ts-basic constants.
+// The auto and parallel build prompt: the fresh build session never showed the queue, so name the approved Ready cards
+// (board order) and the caps autopilot proposes for them (wallCapMinutes and usdCapDollars, as board.mjs next --batch prints).
+function autoBuildPrompt(cards) {
+  const queue = Array.isArray(cards) && cards.length ? cards.filter((c) => c.column === "ready") : AUTO_CARDS;
+  const ids = queue.map((c) => c.id).join(", ");
+  return [
+    "/doug-next --auto",
+    `I approved the queue ${ids} (board order) with a wall cap of ${wallCapMinutes(queue)} min and a USD cap of $${usdCapDollars(queue).toFixed(2)}; unlimited autopilot has no card cap. I gave that approval before this session, so this session has not shown the queue: do not ask again, start the queue now. Do not invoke the doug-board skill at any step: this checkout publishes nothing.`,
+  ].join("\n\n");
+}
 function autoReadyCards(cards) {
   return Array.isArray(cards) && cards.length ? cards.filter((c) => c.column === "ready").map((c) => ({ id: c.id, files: c.files, heldOut: c.heldOut })) : AUTO_CARDS;
 }

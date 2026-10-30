@@ -6455,6 +6455,11 @@ describe("plugin layout", () => {
   it("tells the planner an acceptance command never repeats a verify command (card flow-suite-dedupe)", () => {
     expect(readFileSync(join(root, "agents/planner.md"), "utf8")).toContain("never repeats a verify command");
   });
+  it("tells the planner to run the memory.mjs commands from the project root (card memory-dir-requires-doug)", () => {
+    // 2026-10-28, rehearsal-sweep-1-6: a planner ran recall from plugins/doug-flow/scripts and created a stray memory.db there.
+    const planner = readFileSync(join(root, "agents/planner.md"), "utf8");
+    expect(planner).toContain("from the project root");
+  });
   it("tells the planner a stated signature reaches the plan verbatim, quoted in backticks in an acceptance line (card planner-keeps-stated-signatures)", () => {
     // 2026-10-23, ts-orders swarm-skill: the request stated byCategory(products: Product[]): Record<string, string[]>,
     // the plan said byCategory(catalog: Catalog): Map<string, Product[]>, and the held-out test failed.
@@ -6749,7 +6754,7 @@ describe("plugin layout", () => {
     const claude = readFileSync(join(root, "..", "..", "CLAUDE.md"), "utf8");
     expect(claude).toContain("both tracks");
     for (const s of ["`implement`", "`review`", "`worker` row", "Agent tool"]) expect(claude, s).toContain(s);
-    expect(claude.split("\n").length).toBeLessThanOrEqual(61);
+    expect(claude.split("\n").length).toBeLessThanOrEqual(201);
 
     // The public export leaves docs/decisions/ out; the ADR is checked only where it exists.
     if (!IS_SNAPSHOT) {
@@ -6757,13 +6762,24 @@ describe("plugin layout", () => {
       for (const s of ["Amendment", "2026-09-07", "swarm", "workflows/doug-implement.js", "both tracks", "verify, review, and adversary"]) expect(decision, s).toContain(s);
     }
   });
+  // card claude-md-cap-review: the stated limit is 200 lines everywhere a human or a generated file reads it.
+  it("claude-md-cap-review: CLAUDE.md line 3 and the generated claude-md.ts comment state the 200-line limit, not 60", () => {
+    const repo = join(root, "..", "..");
+    const claudeLine3 = readFileSync(join(repo, "CLAUDE.md"), "utf8").split("\n")[2];
+    const gen = readFileSync(join(repo, "packages/doug-cli/src/generate/claude-md.ts"), "utf8");
+    const genLine = gen.split("\n").find((l) => l.includes("pitfalls here"));
+    expect(claudeLine3).toContain("200 lines");
+    expect(claudeLine3).not.toContain("60 lines");
+    expect(genLine).toContain("200 lines");
+    expect(genLine).not.toContain("60 lines");
+  });
   // 2026-09-13 (card claude-md-from-lessons): CLAUDE.md's tracked line budget and its source-cited edits file
   // (.doug/claude-md-edits.json, consumed by `memory.mjs claude-md propose`) both need a standing guard.
-  it("claude-md-from-lessons: CLAUDE.md stays under 60 lines with its parsed headers, and .doug/claude-md-edits.json is source-cited (card claude-md-from-lessons)", () => {
+  it("claude-md-from-lessons: CLAUDE.md stays within 200 lines with its parsed headers, and .doug/claude-md-edits.json is source-cited (card claude-md-from-lessons)", () => {
     const claudeMdPath = join(root, "..", "..", "CLAUDE.md");
     const claude = readFileSync(claudeMdPath, "utf8");
     const countLines = (text) => (text === "" ? 0 : text.endsWith("\n") ? text.split("\n").length - 1 : text.split("\n").length);
-    expect(countLines(claude)).toBeLessThanOrEqual(60);
+    expect(countLines(claude)).toBeLessThanOrEqual(200);
     for (const s of ["## Models", "| Work      | Model   | Effort  |", "|-----------|---------|---------|"]) expect(claude, s).toContain(s);
 
     const commandsIdx = claude.indexOf("## Commands");
@@ -7295,7 +7311,7 @@ describe("plugin layout", () => {
 
     const claude = readFileSync(join(root, "..", "..", "CLAUDE.md"), "utf8");
     expect(claude).toContain("| plan ");
-    expect(claude.trimEnd().split("\n").length).toBeLessThanOrEqual(60);
+    expect(claude.trimEnd().split("\n").length).toBeLessThanOrEqual(200);
 
     // The public export leaves docs/decisions/ out; the ADR is checked only where it exists.
     if (!IS_SNAPSHOT) expect(readFileSync(join(root, "..", "..", "docs/decisions/0005-two-tracks.md"), "utf8")).toContain("`plan` row");
@@ -7980,13 +7996,13 @@ describe("card op-docs: the track rule is stated once, by size and risk, and the
     expect(text, "docs/rehearsals.md must not say 'product feature'").not.toMatch(/product feature/i);
   });
 
-  it("CLAUDE.md drops the harness-vs-product framing, keeps the pointer to harness-fix, and stays within 60 lines", () => {
+  it("CLAUDE.md drops the harness-vs-product framing, keeps the pointer to harness-fix, and stays within 200 lines", () => {
     const text = doc("CLAUDE.md");
     expect(text).not.toMatch(/harness work/i);
     expect(text).not.toContain("Product features");
     expect(text).toContain(".claude/skills/harness-fix/SKILL.md");
     const lines = text === "" ? 0 : text.endsWith("\n") ? text.split("\n").length - 1 : text.split("\n").length;
-    expect(lines).toBeLessThanOrEqual(60);
+    expect(lines).toBeLessThanOrEqual(200);
   });
 });
 
@@ -8432,10 +8448,10 @@ describe("card user-card-mini-adr", () => {
       expect(text()).toContain("Follow-ups are filed without a question.");
     });
   }
-  it("CLAUDE.md carries the sentence and stays within 60 lines", () => {
+  it("CLAUDE.md carries the sentence and stays within 200 lines", () => {
     const md = readFileSync(join(root, "..", "..", "CLAUDE.md"), "utf8");
     expect(md).toContain('A card the user asks for is filed as a mini ADR (doug-next and doug-hand, "Cards the user asks for").');
-    expect(md.replace(/\n$/, "").split("\n").length).toBeLessThanOrEqual(60);
+    expect(md.replace(/\n$/, "").split("\n").length).toBeLessThanOrEqual(200);
   });
 });
 
@@ -8625,9 +8641,71 @@ describe("card memory-every-session: hand landing reflects", () => {
     expect(rec, "record --hand step present").toBeGreaterThanOrEqual(0);
     expect(refl, "reflect --hand step present").toBeGreaterThan(rec);
     for (const flag of ["--commit <sha>", "--rounds <n>", "--review"]) expect(h.slice(refl)).toContain(flag);
-    expect(h).toContain(
-      "Its one-line summary (with the measured cost) goes in the chat. An exit 1 naming the LLM pass is said in the chat and the landing goes on regardless — reflect is a log, not a gate, the same as record."
-    );
+    expect(h).toContain("a log, not a gate, the same as record");
+  });
+
+  // Card detach-background-chores: every reflect step starts detached, first reads earlier landings' jobs
+  // (`job --earlier`), and leaves reading its own job to the caller, at the end of the landing, with a bounded wait.
+  const detachedThenRead = (section) => {
+    const refl = section.indexOf('memory.mjs" reflect');
+    expect(refl, "reflect step present").toBeGreaterThanOrEqual(0);
+    const reflLine = section.slice(refl, section.indexOf("\n", refl));
+    expect(reflLine).toContain("--detach");
+    expect(reflLine).toContain('memory.mjs" job --earlier');
+    expect(reflLine).toContain("Before it starts, `node");
+    const tail = section.slice(section.indexOf("\n", refl));
+    expect(tail).toMatch(/--wait 120/);
+    expect(tail).toMatch(/after the landing commit and the follow-up step/);
+    expect(tail).toMatch(/pending is said as pending/i);
+    expect(tail).toMatch(/failed/);
+    expect(tail).toMatch(/said in the chat/);
+    expect(tail).toMatch(/landing goes on/);
+    expect(tail).toMatch(/job --earlier/);
+  };
+
+  it("every reflect step says what the lead says when the --detach start is refused", () => {
+    const r = report();
+    const sections = [
+      r.slice(r.indexOf("## A workflow run"), r.indexOf("## A batch")),
+      r.slice(r.indexOf("## A batch"), r.indexOf("## A hand-track landing")),
+      handSection(),
+    ];
+    expect(sections).toHaveLength(3);
+    for (const section of sections) {
+      const refl = section.indexOf('memory.mjs" reflect');
+      expect(refl, "reflect step present").toBeGreaterThanOrEqual(0);
+      const line = section.slice(refl, section.indexOf("\n", refl));
+      expect(line).toContain("already running");
+      expect(line).toContain("verbatim");
+      expect(line).toMatch(/did not start/);
+      expect(line).toMatch(/landing goes on/);
+    }
+  });
+
+  it("hand section starts reflect --detach, reads earlier jobs first, and leaves its own read to the end of the landing", () => {
+    detachedThenRead(handSection());
+  });
+
+  it("workflow-run and batch sections start reflect --detach and leave the read to the end of the landing", () => {
+    const r = report();
+    detachedThenRead(r.slice(r.indexOf("## A workflow run"), r.indexOf("## A batch")));
+    detachedThenRead(r.slice(r.indexOf("## A batch"), r.indexOf("## A hand-track landing")));
+  });
+
+  it("doug-hand and doug-next read the job last: after the follow-up step's text, bounded at 120 s, pending and failed said", () => {
+    for (const [name, last] of [["doug-hand", "## Cards the user asks for"], ["doug-next", "## Cards the user asks for"]]) {
+      const text = readFileSync(join(root, "skills", name, "SKILL.md"), "utf8");
+      const read = text.indexOf('memory.mjs" job reflect-');
+      expect(read, `${name} reads the job`).toBeGreaterThan(0);
+      expect(read, `${name}: after the landing commit`).toBeGreaterThan(text.indexOf("git commit -m"));
+      expect(read, `${name}: after the follow-ups section`).toBeGreaterThan(text.indexOf("Follow-up cards"));
+      expect(read, `${name}: before ${last}`).toBeLessThan(text.indexOf(last));
+      const para = text.slice(text.lastIndexOf("\n", read), text.indexOf("\n", read));
+      expect(para).toContain("--wait 120");
+      expect(para).toMatch(/`pending` after the cap is said as pending/);
+      expect(para).toMatch(/`failed` line \(exit 1\) is said in the chat/);
+      expect(para).toContain("job --earlier");
+    }
   });
 
   it("run-report no longer says reflect does not run on a hand-track landing", () => {
@@ -9192,6 +9270,20 @@ describe("card memory-hand-stop-rows: doug-hand records a stopped run", () => {
     expect(hand).toContain('memory.mjs" record <id> --hand --stop <reason>');
     expect(hand).toContain("--detail");
     expect(hand).toContain("user-stopped");
+  });
+
+  // Card memory-failures-wiring: the same stop also starts reflect --failures detached, capped at $0.5.
+  it("doug-hand's stop paragraph then runs memory.mjs reflect --failures <id> --max-usd 0.5 --detach", () => {
+    const hand = readFileSync(join(root, "skills/doug-hand/SKILL.md"), "utf8");
+    const rec = hand.indexOf('memory.mjs" record <id> --hand --stop <reason>');
+    const refl = hand.indexOf('memory.mjs" reflect --failures <id>');
+    expect(rec).toBeGreaterThan(-1);
+    expect(refl).toBeGreaterThan(rec);
+    const para = hand.slice(rec, hand.indexOf("\n## ", rec));
+    expect(para).toContain('memory.mjs" reflect --failures <id>');
+    const cmd = hand.slice(refl, hand.indexOf("\n", refl));
+    expect(cmd).toContain("--max-usd 0.5");
+    expect(cmd).toContain("--detach");
   });
 });
 

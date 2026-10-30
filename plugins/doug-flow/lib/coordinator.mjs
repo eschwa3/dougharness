@@ -260,7 +260,7 @@ export function queenKind(card) {
 
 // Which ready cards to start now. A flow card without a plan comes back as needsPlan (its owned files are
 // unknown until a planner runs); with a plan it is checked like any card. A card is launched when it conflicts
-// with nothing in flight and nothing launched before it; otherwise it is held against what it met first.
+// with nothing in flight and nothing launched or waiting for a plan before it; otherwise it is held against what it met first.
 // needsPlan and launch together never exceed `slots`; a held card takes no slot.
 export function pickCards(arg) {
   const { ready = [], inFlight = [], slots = 0, plans = {}, roots } = arg && typeof arg === "object" ? arg : {};
@@ -270,6 +270,7 @@ export function pickCards(arg) {
   const withPlan = (c) => (c.track === "flow" && planOf(c) ? { ...c, plan: planOf(c) } : c);
   const running = (inFlight || []).filter((c) => c && typeof c === "object").map(withPlan);
   const launched = [];
+  const pending = [];
   let blocked = false;
   for (const raw of ready || []) {
     if (!raw || typeof raw !== "object") continue;
@@ -284,11 +285,12 @@ export function pickCards(arg) {
     if (out.launch.length + out.needsPlan.length >= slots) continue;
     if (raw.track === "flow" && !planOf(raw)) {
       out.needsPlan.push(raw.id);
+      pending.push(raw);
       continue;
     }
     const card = withPlan(raw);
     let met = null;
-    for (const other of [...running, ...launched]) {
+    for (const other of [...running, ...launched, ...pending]) {
       met = cardConflict(card, other, opts);
       if (met) break;
     }

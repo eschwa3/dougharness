@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { spawnSync, spawn } from "node:child_process";
 import { createServer } from "node:http";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, chmodSync, readFileSync, readdirSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, chmodSync, readFileSync, readdirSync, openSync, closeSync, copyFileSync, appendFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -31,7 +31,13 @@ function runAsync(args, cwd, extraEnv = {}) {
 }
 
 function tempDir() {
-  return mkdtempSync(join(tmpdir(), "doug-memory-cli-"));
+  const dir = mkdtempSync(join(tmpdir(), "doug-memory-cli-"));
+  mkdirSync(join(dir, ".doug")); // a Doug project: dirFrom refuses a directory with no .doug/ (card memory-dir-requires-doug)
+  return dir;
+}
+
+function bareDir() {
+  return mkdtempSync(join(tmpdir(), "doug-memory-bare-")); // not a Doug project: no .doug/
 }
 
 function writeMemoryConfig(dir, embeddings) {
@@ -5493,7 +5499,7 @@ describe("memory.mjs model regen / model show (card memory-project-model)", () =
       expect(res.stderr.trim().split("\n")).toHaveLength(1);
       expect(res.stderr.trim()).not.toBe("");
       expect(existsSync(join(dir, "called.txt"))).toBe(false);
-      expect(existsSync(join(dir, ".doug"))).toBe(false);
+      expect(existsSync(join(dir, ".doug", ".state"))).toBe(false);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -5587,7 +5593,7 @@ describe("memory.mjs model regen / model show (card memory-project-model)", () =
       expect(res.stdout).toBe("");
       expect(res.stderr.trim().split("\n")).toHaveLength(1);
       expect(res.stderr.trim()).not.toBe("");
-      expect(readdirSync(dir)).toEqual([]);
+      expect(existsSync(join(dir, ".doug", ".state"))).toBe(false);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -5603,7 +5609,7 @@ describe("memory.mjs model regen / model show (card memory-project-model)", () =
         expect(res.stderr).toContain("model regen");
         expect(res.stderr).toContain("model show");
       }
-      expect(readdirSync(dir)).toEqual([]);
+      expect(existsSync(join(dir, ".doug", ".state"))).toBe(false);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -5839,5 +5845,640 @@ describe("memory.mjs record --hand --stop", () => {
     const src = readFileSync(script, "utf8");
     expect(src).toContain("--hand --stop");
     expect(readFileSync(join(here, "..", "..", "..", "docs", "memory.md"), "utf8")).toContain("--hand --stop");
+  });
+});
+
+// Card detach-background-chores: `reflect --detach` starts the same reflect as a detached job and returns; `job <name>`
+// reads it later (done -> reflect's one-line summary, running -> pending, failed -> exit 1). Fake claude blocks on a
+// release marker the test writes, never on a sleep.
+describe("memory.mjs reflect --detach and job", () => {
+  const reportsDir = (dir) => join(dir, ".doug", ".state", "reports", "c1");
+  const jobsDir = (dir) => join(dir, ".doug", ".state", "jobs");
+  function seed(dir) {
+    const m = openMemory(dir);
+    addLesson(m, { kind: "pattern", source: { agent: "worker" }, text: "the first seeded lesson about uploads" });
+    m.close();
+    const base = reportsDir(dir);
+    mkdirSync(join(base, "briefs"), { recursive: true });
+    mkdirSync(join(base, "reviews"), { recursive: true });
+    writeFileSync(join(base, "briefs", "1-coder.md"), "brief", "utf8");
+    writeFileSync(join(base, "reviews", "1.md"), "review", "utf8");
+  }
+  // A fake claude that waits for `release` to exist, then prints the envelope, or exits 1 when `fail` is set.
+  function writeGatedClaude(dir, envelope, release, fail = false) {
+    const p = join(dir, "fake-claude-gated.mjs");
+    const body =
+      "#!/usr/bin/env node\n" +
+      'import { readFileSync, existsSync } from "node:fs";\n' +
+      'readFileSync(0, "utf8");\n' +
+      `const release = ${JSON.stringify(release)};\n` +
+      "const t0 = Date.now();\n" +
+      "while (!existsSync(release) && Date.now() - t0 < 8000) await new Promise((r) => setTimeout(r, 25));\n" +
+      (fail
+        ? 'process.stderr.write("fake-claude: boom\\n"); process.exit(1);\n'
+        : `process.stdout.write(${JSON.stringify(JSON.stringify(envelope))});\n`);
+    writeFileSync(p, body, "utf8");
+    chmodSync(p, 0o755);
+    return p;
+  }
+  const lesson = {
+    kind: "pattern",
+    text: "uploads retry with jittered backoff",
+    citation: "report:c1",
+    task: "c1",
+    notDerivableBecause: "learned only from this landing",
+  };
+  const okEnvelope = { structured_output: { lessons: [lesson] }, session_id: "sess-det", total_cost_usd: 0.01, is_error: false };
+  const start = (dir, bin, commit = "abc1234") => run(["reflect", "--hand", "c1", dir, "--commit", commit, "--claude-bin", bin, "--detach"], dir);
+  const job = (dir, name = "reflect-c1") => run(["job", name, dir], dir);
+  // Bounded wait on the job leaving "pending"; no elapsed-time assertion, only a safety deadline.
+  function settle(dir, name = "reflect-c1") {
+    const deadline = Date.now() + 30000;
+    let res = job(dir, name);
+    while (/pending/.test(res.stdout) && Date.now() < deadline) {
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
+      res = job(dir, name);
+    }
+    return res;
+  }
+  function reapAll(dir) {
+    try {
+      for (const f of readdirSync(jobsDir(dir))) {
+        if (!f.endsWith(".json")) continue;
+        const pid = JSON.parse(readFileSync(join(jobsDir(dir), f), "utf8")).pid;
+        if (pid) {
+          try {
+            process.kill(-pid, "SIGKILL");
+          } catch {
+            try {
+              process.kill(pid, "SIGKILL");
+            } catch {}
+          }
+        }
+      }
+    } catch {}
+  }
+
+  it("reflect --detach returns while the job is still running", () => {
+    const dir = tempDir();
+    try {
+      seed(dir);
+      const release = join(dir, "release");
+      const started = start(dir, writeGatedClaude(dir, okEnvelope, release));
+      expect(started.status, started.stderr).toBe(0);
+      expect(started.stdout).toContain("reflect-c1");
+      const pending = job(dir);
+      expect(pending.status, pending.stderr).toBe(0);
+      expect(pending.stdout).toContain("pending");
+      writeFileSync(release, "go", "utf8");
+      settle(dir);
+    } finally {
+      reapAll(dir);
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("job prints reflect's one-line summary when the detached reflect finished, and the proposed lesson is in the store", () => {
+    const dir = tempDir();
+    try {
+      seed(dir);
+      const release = join(dir, "release");
+      expect(start(dir, writeGatedClaude(dir, okEnvelope, release)).status).toBe(0);
+      writeFileSync(release, "go", "utf8");
+      const done = settle(dir);
+      expect(done.status, done.stderr).toBe(0);
+      expect(done.stdout).toContain("Reflected on");
+      expect(done.stdout).not.toContain("pending");
+      const lessons = JSON.parse(run(["lessons", dir, "--json"], dir).stdout);
+      expect(lessons.filter((l) => l.source_agent === "reflect")).toHaveLength(1);
+    } finally {
+      reapAll(dir);
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("job reports pending while the detached reflect is still running, exit 0", () => {
+    const dir = tempDir();
+    try {
+      seed(dir);
+      const release = join(dir, "release");
+      expect(start(dir, writeGatedClaude(dir, okEnvelope, release)).status).toBe(0);
+      const res = job(dir);
+      expect(res.status).toBe(0);
+      expect(res.stdout).toContain("pending");
+      expect(res.stdout).not.toContain("Reflected on");
+      writeFileSync(release, "go", "utf8");
+      settle(dir);
+    } finally {
+      reapAll(dir);
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("job reports a failed detached reflect with exit 1, the exit code and reflect's stderr reason", () => {
+    const dir = tempDir();
+    try {
+      seed(dir);
+      const release = join(dir, "release");
+      expect(start(dir, writeGatedClaude(dir, okEnvelope, release, true)).status).toBe(0);
+      writeFileSync(release, "go", "utf8");
+      const res = settle(dir);
+      expect(res.status).toBe(1);
+      expect(res.stdout + res.stderr).toContain("failed");
+      expect(res.stdout + res.stderr).toContain("cheap-row pass failed");
+    } finally {
+      reapAll(dir);
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("reflect --detach with a usage error still exits 2 and starts no job", () => {
+    const dir = tempDir();
+    try {
+      const res = run(["reflect", "--hand", dir, "--detach"], dir);
+      expect(res.status).toBe(2);
+      expect(existsSync(jobsDir(dir))).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  // Fixture job files: the reader decides from the job file and log, not from what the child was.
+  const fixtureJob = (dir, name, state, log) => {
+    mkdirSync(jobsDir(dir), { recursive: true });
+    writeFileSync(join(jobsDir(dir), `${name}.json`), JSON.stringify({ name, argv: ["x"], startedAt: "2026-10-27T10:00:00.000Z", ...state }), "utf8");
+    writeFileSync(join(jobsDir(dir), `${name}.log`), log, "utf8");
+  };
+
+  it("job reports failed when the job process is gone and no result was written", () => {
+    const dir = tempDir();
+    try {
+      const gone = spawnSync(process.execPath, ["-e", ""]).pid;
+      fixtureJob(dir, "reflect-gone", { pid: gone }, "");
+      const res = job(dir, "reflect-gone");
+      expect(res.status).toBe(1);
+      expect(res.stdout + res.stderr).toContain("failed");
+      expect(res.stdout + res.stderr).not.toContain("pending");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("job reports pending for a live pid with no result in the job file", () => {
+    const dir = tempDir();
+    try {
+      fixtureJob(dir, "reflect-live", { pid: process.pid }, "");
+      const res = job(dir, "reflect-live");
+      expect(res.status).toBe(0);
+      expect(res.stdout).toContain("pending");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("job --wait polls a still-running job until it is done and prints reflect's summary", () => {
+    const dir = tempDir();
+    try {
+      seed(dir);
+      const release = join(dir, "release");
+      const started = start(dir, writeGatedClaude(dir, okEnvelope, release));
+      expect(started.status, started.stderr).toBe(0);
+      // The job is still pending when the wait starts; the release marker lands only after.
+      const gate = spawn(process.execPath, ["-e", `setTimeout(() => require("node:fs").writeFileSync(${JSON.stringify(release)}, "go"), 300)`], { stdio: "ignore" });
+      const res = run(["job", "reflect-c1", dir, "--wait", "30"], dir);
+      gate.kill();
+      expect(res.status, res.stderr).toBe(0);
+      expect(res.stdout).toContain("Reflected on");
+      expect(res.stdout).not.toContain("pending");
+    } finally {
+      reapAll(dir);
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("job --wait stops at the cap and says pending, exit 0", () => {
+    const dir = tempDir();
+    try {
+      fixtureJob(dir, "reflect-live", { pid: process.pid }, "");
+      const res = run(["job", "reflect-live", dir, "--wait", "1"], dir);
+      expect(res.status).toBe(0);
+      expect(res.stdout).toContain("pending");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("job --wait with a non-number exits 2", () => {
+    const dir = tempDir();
+    try {
+      fixtureJob(dir, "reflect-live", { pid: process.pid }, "");
+      expect(run(["job", "reflect-live", dir, "--wait", "soon"], dir).status).toBe(2);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("job --earlier reports an earlier landing's pending, failed and unread jobs once, and not the ones already read", () => {
+    const dir = tempDir();
+    try {
+      const gone = spawnSync(process.execPath, ["-e", ""]).pid;
+      fixtureJob(dir, "reflect-pend", { pid: process.pid }, "");
+      fixtureJob(dir, "reflect-dead", { pid: gone, exitCode: 1, endedAt: "2026-10-27T10:01:00.000Z" }, "reflect: the cheap-row pass failed for dead: boom\n");
+      fixtureJob(dir, "reflect-unread", { pid: gone, exitCode: 0, endedAt: "2026-10-27T10:01:20.000Z" }, "Reflected on unread: 1 lesson\n");
+      fixtureJob(dir, "reflect-read", { pid: gone, exitCode: 0, endedAt: "2026-10-27T10:01:20.000Z", reportedAt: "2026-10-27T10:02:00.000Z" }, "Reflected on read: 0 lessons\n");
+      const first = run(["job", "--earlier", dir], dir);
+      expect(first.status).toBe(1);
+      expect(first.stdout).toContain("reflect-pend: pending");
+      expect(first.stdout).toContain("reflect-dead: failed");
+      expect(first.stdout).toContain("Reflected on unread");
+      expect(first.stdout).not.toContain("Reflected on read");
+      const second = run(["job", "--earlier", dir], dir);
+      expect(second.status).toBe(0);
+      expect(second.stdout).toContain("reflect-pend: pending");
+      expect(second.stdout).not.toContain("reflect-dead");
+      expect(second.stdout).not.toContain("Reflected on unread");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("a job name an ended job already used reports the new job: failed with its exit code, and unread for job --earlier", () => {
+    const dir = tempDir();
+    try {
+      seed(dir);
+      const release1 = join(dir, "release1");
+      writeFileSync(release1, "go", "utf8");
+      expect(start(dir, writeGatedClaude(dir, okEnvelope, release1)).status).toBe(0);
+      const first = run(["job", "reflect-c1", dir, "--wait", "30"], dir);
+      expect(first.status, first.stderr).toBe(0);
+      const release2 = join(dir, "release2");
+      const second = start(dir, writeGatedClaude(dir, okEnvelope, release2, true), "def5678");
+      expect(second.status, second.stderr).toBe(0);
+      expect(job(dir).stdout).toContain("pending");
+      writeFileSync(release2, "go", "utf8");
+      const res = run(["job", "reflect-c1", dir, "--wait", "30"], dir);
+      expect(res.status).toBe(1);
+      expect(res.stdout).toContain("failed");
+      expect(res.stdout).toContain("exit 1");
+      const st = JSON.parse(readFileSync(join(jobsDir(dir), "reflect-c1.json"), "utf8"));
+      expect(st.exitCode).toBe(1);
+    } finally {
+      reapAll(dir);
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("a failed job under a reused name is reported once by job --earlier", () => {
+    const dir = tempDir();
+    try {
+      seed(dir);
+      const release1 = join(dir, "release1");
+      writeFileSync(release1, "go", "utf8");
+      expect(start(dir, writeGatedClaude(dir, okEnvelope, release1)).status).toBe(0);
+      expect(run(["job", "reflect-c1", dir, "--wait", "30"], dir).status).toBe(0);
+      const release2 = join(dir, "release2");
+      writeFileSync(release2, "go", "utf8");
+      expect(start(dir, writeGatedClaude(dir, okEnvelope, release2, true), "def5678").status).toBe(0);
+      const deadline = Date.now() + 30000;
+      while (Date.now() < deadline) {
+        const st = JSON.parse(readFileSync(join(jobsDir(dir), "reflect-c1.json"), "utf8"));
+        if (st.exitCode !== undefined) break;
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
+      }
+      const earlier = run(["job", "--earlier", dir], dir);
+      expect(earlier.status).toBe(1);
+      expect(earlier.stdout).toContain("reflect-c1: failed");
+    } finally {
+      reapAll(dir);
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("a second start while a live job holds the name is refused and leaves the live job's log and file intact", () => {
+    const dir = tempDir();
+    try {
+      seed(dir);
+      const release = join(dir, "release");
+      expect(start(dir, writeGatedClaude(dir, okEnvelope, release)).status).toBe(0);
+      const before = readFileSync(join(jobsDir(dir), "reflect-c1.json"), "utf8");
+      const pid = JSON.parse(before).pid;
+      appendFileSync(join(jobsDir(dir), "reflect-c1.log"), "LIVE-LOG-MARKER\n");
+      const refused = start(dir, writeGatedClaude(dir, okEnvelope, join(dir, "other")));
+      expect(refused.status).not.toBe(0);
+      expect(refused.stderr).toContain("reflect-c1");
+      expect(refused.stderr).toContain(String(pid));
+      expect(readFileSync(join(jobsDir(dir), "reflect-c1.log"), "utf8")).toContain("LIVE-LOG-MARKER");
+      expect(JSON.parse(readFileSync(join(jobsDir(dir), "reflect-c1.json"), "utf8")).pid).toBe(pid);
+      writeFileSync(release, "go", "utf8");
+      settle(dir);
+    } finally {
+      reapAll(dir);
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("job files are replaced whole: no temp files are left after a detached reflect finished", () => {
+    const dir = tempDir();
+    try {
+      seed(dir);
+      const release = join(dir, "release");
+      writeFileSync(release, "go", "utf8");
+      const started = start(dir, writeGatedClaude(dir, okEnvelope, release));
+      expect(started.status, started.stderr).toBe(0);
+      const res = run(["job", "reflect-c1", dir, "--wait", "30"], dir);
+      expect(res.status, res.stderr).toBe(0);
+      expect(readdirSync(jobsDir(dir)).filter((f) => f.endsWith(".tmp"))).toEqual([]);
+    } finally {
+      reapAll(dir);
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("job on an unknown name exits 1", () => {
+    const dir = tempDir();
+    try {
+      expect(job(dir, "reflect-nope").status).toBe(1);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  // Runs the real runner (`__jobrun`) with its stdio on the job log, as startDetachedJob does, waiting for it to end.
+  function runRunner(dir, name, command) {
+    mkdirSync(jobsDir(dir), { recursive: true });
+    const fd = openSync(join(jobsDir(dir), `${name}.log`), "w");
+    try {
+      return spawnSync(process.execPath, [script, "__jobrun", dir, name, "--", ...command], { cwd: dir, stdio: ["ignore", fd, fd] });
+    } finally {
+      closeSync(fd);
+    }
+  }
+
+  it("the job runner runs a non-reflect command detached and reports its last line and exit code", () => {
+    const dir = tempDir();
+    try {
+      runRunner(dir, "rehearse-ok", [process.execPath, "-e", 'console.log("first"); console.log("the rehearsal line")']);
+      const ok = job(dir, "rehearse-ok");
+      expect(ok.status).toBe(0);
+      expect(ok.stdout).toContain("the rehearsal line");
+      expect(ok.stdout).not.toContain("Reflected");
+      expect(JSON.parse(readFileSync(join(jobsDir(dir), "rehearse-ok.json"), "utf8")).exitCode).toBe(0);
+      runRunner(dir, "rehearse-bad", [process.execPath, "-e", 'console.log("work"); console.log("it broke"); process.exit(3)']);
+      expect(JSON.parse(readFileSync(join(jobsDir(dir), "rehearse-bad.json"), "utf8")).exitCode).toBe(3);
+      const bad = job(dir, "rehearse-bad");
+      expect(bad.status).toBe(1);
+      expect(bad.stdout + bad.stderr).toContain("failed");
+      expect(bad.stdout + bad.stderr).toContain("3");
+      expect(bad.stdout + bad.stderr).toContain("it broke");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  describe("report form", () => {
+    // Report in another cwd, addressed by a relative path; the project dir is a positional argument.
+    const startReport = (dir, other, bin, extra) =>
+      spawnSync(process.execPath, [script, "reflect", "report.json", dir, "--claude-bin", bin, ...extra, "--detach"], { cwd: other, encoding: "utf8", env: { ...process.env, CLAUDE_PROJECT_DIR: "" } });
+
+    it("reflect <report> --detach returns while the job runs, names the job reflect-<card>, and resolves the report against the caller's cwd", () => {
+      const dir = tempDir();
+      const other = tempDir();
+      try {
+        copyFileSync(fixtureReport, join(other, "report.json"));
+        const release = join(dir, "release");
+        const started = startReport(dir, other, writeGatedClaude(dir, okEnvelope, release), ["--card", "k1"]);
+        expect(started.status, started.stderr).toBe(0);
+        expect(started.stdout).toContain("reflect-k1");
+        const pending = job(dir, "reflect-k1");
+        expect(pending.status).toBe(0);
+        expect(pending.stdout).toContain("pending");
+        writeFileSync(release, "go", "utf8");
+        const done = settle(dir, "reflect-k1");
+        expect(done.status, done.stdout + done.stderr).toBe(0);
+        expect(done.stdout).toContain("Reflected on");
+      } finally {
+        reapAll(dir);
+        rmSync(dir, { recursive: true, force: true });
+        rmSync(other, { recursive: true, force: true });
+      }
+    });
+
+    it("the report-form job is named reflect-<run> with --run, else reflect-<12 hex of the report hash>", () => {
+      const dir = tempDir();
+      const other = tempDir();
+      try {
+        copyFileSync(fixtureReport, join(other, "report.json"));
+        const release = join(dir, "release");
+        writeFileSync(release, "go", "utf8");
+        const bin = writeGatedClaude(dir, okEnvelope, release);
+        const byRun = startReport(dir, other, bin, ["--run", "r9"]);
+        expect(byRun.status, byRun.stderr).toBe(0);
+        expect(byRun.stdout).toContain("reflect-r9");
+        const bare = startReport(dir, other, bin, []);
+        expect(bare.status, bare.stderr).toBe(0);
+        const hashName = (bare.stdout.match(/reflect-[0-9a-f]{12}\b/) || [])[0];
+        expect(hashName).toBeTruthy();
+        settle(dir, "reflect-r9");
+        settle(dir, hashName);
+      } finally {
+        reapAll(dir);
+        rmSync(dir, { recursive: true, force: true });
+        rmSync(other, { recursive: true, force: true });
+      }
+    });
+  });
+});
+
+// card memory-failures-wiring: reflect --failures can run detached (job failures-<card>), the way autopilot and
+// doug-hand start it when a card stops. The job name never collides with a landing's reflect-<card> job.
+describe("memory.mjs reflect --failures --detach (card memory-failures-wiring)", () => {
+  const jobsDir = (dir) => join(dir, ".doug", ".state", "jobs");
+  const seed = (dir) =>
+    writeRunHistory(dir, {
+      card: "c1",
+      run: "wf_1",
+      scan: () => null,
+      entries: [
+        { kind: "report", source: "card-report.json", value: JSON.stringify({ outcome: "stopped", reason: "gate", stoppedAt: "coder", detail: "gate stayed red", worktree: "/wt/c1", filesChanged: [] }) },
+      ],
+    });
+  // A fake claude that records its argv, waits for `release`, then answers with an envelope holding no lessons.
+  const gated = (dir, release, argsFile) => {
+    const p = join(dir, "fake-claude-failures-gated.mjs");
+    writeFileSync(
+      p,
+      "#!/usr/bin/env node\n" +
+        'import { readFileSync, existsSync, writeFileSync } from "node:fs";\n' +
+        `writeFileSync(${JSON.stringify(argsFile)}, JSON.stringify(process.argv.slice(2)));\n` +
+        'readFileSync(0, "utf8");\n' +
+        `const release = ${JSON.stringify(release)};\n` +
+        "const t0 = Date.now();\n" +
+        "while (!existsSync(release) && Date.now() - t0 < 5000) await new Promise((r) => setTimeout(r, 25));\n" +
+        `process.stdout.write(${JSON.stringify(JSON.stringify({ structured_output: { lessons: [] }, session_id: "sess-fd", total_cost_usd: 0.01, is_error: false }))});\n`,
+      "utf8"
+    );
+    chmodSync(p, 0o755);
+    return p;
+  };
+  const reap = (dir) => {
+    try {
+      for (const f of readdirSync(jobsDir(dir))) {
+        if (!f.endsWith(".json")) continue;
+        const pid = JSON.parse(readFileSync(join(jobsDir(dir), f), "utf8")).pid;
+        if (!pid) continue;
+        try {
+          process.kill(-pid, "SIGKILL");
+        } catch {
+          try {
+            process.kill(pid, "SIGKILL");
+          } catch {}
+        }
+      }
+    } catch {}
+  };
+
+  it("returns at once with 'failures-c1: started detached', writes jobs/failures-c1.json (not reflect-c1), and the job later prints the Reflected line", () => {
+    const dir = tempDir();
+    try {
+      seed(dir);
+      const release = join(dir, "release");
+      const argsFile = join(dir, "args.json");
+      const bin = gated(dir, release, argsFile);
+      const started = run(["reflect", "--failures", "c1", dir, "--claude-bin", bin, "--max-usd", "0.5", "--detach"], dir);
+      expect(started.status, started.stderr).toBe(0);
+      expect(started.stdout).toContain("failures-c1: started detached");
+      expect(existsSync(join(jobsDir(dir), "failures-c1.json"))).toBe(true);
+      expect(existsSync(join(jobsDir(dir), "reflect-c1.json"))).toBe(false);
+      const pending = run(["job", "failures-c1", dir], dir);
+      expect(pending.stdout).toContain("pending");
+      writeFileSync(release, "go", "utf8");
+      const done = run(["job", "failures-c1", dir, "--wait", "30"], dir);
+      expect(done.status, done.stdout + done.stderr).toBe(0);
+      expect(done.stdout).toContain("Reflected");
+      const args = JSON.parse(readFileSync(argsFile, "utf8"));
+      expect(args[args.indexOf("--max-budget-usd") + 1]).toBe("0.5");
+      expect(args[args.indexOf("--model") + 1]).toBe("haiku");
+    } finally {
+      reap(dir);
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("a second --detach while failures-c1 is still running exits 1 and starts no second job", () => {
+    const dir = tempDir();
+    try {
+      seed(dir);
+      const release = join(dir, "release");
+      const bin = gated(dir, release, join(dir, "args.json"));
+      expect(run(["reflect", "--failures", "c1", dir, "--claude-bin", bin, "--detach"], dir).status).toBe(0);
+      const again = run(["reflect", "--failures", "c1", dir, "--claude-bin", bin, "--detach"], dir);
+      expect(again.status).toBe(1);
+      writeFileSync(release, "go", "utf8");
+    } finally {
+      reap(dir);
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+// Card memory-dir-requires-doug: rehearsal-sweep-1-6 (2026-10-28) ran memory.mjs recall from plugins/doug-flow/scripts and
+// openMemory created an empty .doug/.state/memory/memory.db there. dirFrom now refuses a directory with no .doug/.
+describe("memory.mjs refuses a directory that is not a Doug project (card memory-dir-requires-doug)", () => {
+  it("recall from a cwd with no .doug/ exits 1 with 'not a Doug project' and creates no file", () => {
+    const cwd = bareDir();
+    try {
+      const res = run(["recall", "anything"], cwd);
+      expect(res.status, res.stderr).toBe(1);
+      expect(res.stderr).toContain("not a Doug project");
+      expect(res.stdout).toBe("");
+      expect(readdirSync(cwd)).toEqual([]);
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it("recall with a [dir] positional that has no .doug/ is refused and creates nothing there, even from a cwd that has .doug/", () => {
+    const cwd = tempDir();
+    const target = bareDir();
+    try {
+      const res = run(["recall", "anything", target], cwd);
+      expect(res.status, res.stderr).toBe(1);
+      expect(res.stderr).toContain("not a Doug project");
+      expect(readdirSync(target)).toEqual([]);
+      expect(readdirSync(join(cwd, ".doug"))).toEqual([]);
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+      rmSync(target, { recursive: true, force: true });
+    }
+  });
+
+  it("a Doug project with .doug/ but no store still works: recall exits 0 with the keyword-only header", () => {
+    const cwd = tempDir();
+    try {
+      const res = run(["recall", "anything"], cwd);
+      expect(res.status, res.stderr).toBe(0);
+      expect(res.stdout).toContain("recall: keyword-only");
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it("the refusal applies to other subcommands too (lessons) and a usage error still exits 2", () => {
+    const cwd = bareDir();
+    try {
+      const res = run(["lessons"], cwd);
+      expect(res.status).toBe(1);
+      expect(res.stderr).toContain("not a Doug project");
+      expect(readdirSync(cwd)).toEqual([]);
+      expect(run(["recall"], cwd).status).toBe(2);
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+});
+
+// Card memory-docs-detach-job: docs/memory.md documents reflect --detach, memory.mjs job, job --earlier, and the refusal.
+describe("docs/memory.md documents reflect --detach and memory.mjs job", () => {
+  const doc = readFileSync(join(here, "..", "..", "..", "docs", "memory.md"), "utf8");
+  const section = (heading) => {
+    const i = doc.indexOf(heading);
+    expect(i, `${heading} present`).toBeGreaterThanOrEqual(0);
+    const rest = doc.slice(i + heading.length);
+    const next = rest.search(/\n## /);
+    return next < 0 ? rest : rest.slice(0, next);
+  };
+
+  it("the reflect section names --detach on the report and --hand forms, the start line, and the job names", () => {
+    const s = section("## `memory.mjs reflect`");
+    expect(s).toContain("[--detach]");
+    expect(s).toContain("reflect --hand <card-id> [dir] --commit <sha> [--rounds <n>]");
+    expect(s).toMatch(/--rounds <n>\][^\n]*--detach|--detach[^\n]*--note/);
+    expect(s).toContain("<name>: started detached (pid <pid>); read it with: memory.mjs job <name>");
+    expect(s).toContain("reflect-<card-id>");
+    expect(s).toContain("reflect-<--card, else --run, else");
+  });
+
+  it("the job section documents usage, files, the three states, --wait, --earlier, and exit codes", () => {
+    const s = section("## `memory.mjs job`");
+    expect(s).toContain("memory.mjs job <name> [dir] [--wait <seconds>]");
+    expect(s).toContain("memory.mjs job --earlier [dir]");
+    expect(s).toContain(".doug/.state/jobs/<name>.json");
+    expect(s).toContain("<name>.log");
+    expect(s).toContain("(job <name>, <n> s)");
+    expect(s).toContain("<name>: pending (started <iso>, pid <pid>)");
+    expect(s).toContain("<name>: failed (exit <n>|signal <s>)");
+    expect(s).toContain("is gone and wrote no result");
+    expect(s).toContain("earlier job <line>");
+    expect(s).toContain("no earlier jobs unread");
+    expect(s).toMatch(/whole seconds/);
+    expect(s).toMatch(/no such job/);
+  });
+
+  it("the job section documents the refusal when a live job holds the name, and reuse after it ended", () => {
+    const s = section("## `memory.mjs job`");
+    expect(s).toContain("job <name> is already running (pid <pid>); read it with: memory.mjs job <name>");
+    expect(s).toMatch(/exit 1/);
+    expect(s).toMatch(/untouched/);
+    expect(s).toMatch(/reused/);
   });
 });

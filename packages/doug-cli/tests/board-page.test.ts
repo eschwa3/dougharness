@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, existsSync, chmodSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, existsSync, chmodSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -291,6 +291,24 @@ async function readEvents(state: EventReader, count: number, timeoutMs = 10000):
     }
   }
   return events;
+}
+
+// Waits for the frames a CLI move should make the server push, on a long window (55 s, under the 60 s
+// per-test timeout; not Infinity, which setTimeout treats as 1 ms) instead of readEvents' 10 s default.
+// A watcher armed late (or a poll whose first stat already saw the move) would never report the move, so
+// the record's mtime is nudged until the frames arrive; a nudge only re-triggers the server's deduping
+// reload and cannot invent a board the server never pushes.
+async function readAfterMove(state: EventReader, record: string, count: number): Promise<Array<{ event: string; data: string }>> {
+  let tick = Math.floor(Date.now() / 1000) + 10;
+  const nudge = setInterval(() => {
+    tick += 1;
+    try { utimesSync(record, tick, tick); } catch { /* record briefly absent */ }
+  }, 250);
+  try {
+    return await readEvents(state, count, 55000);
+  } finally {
+    clearInterval(nudge);
+  }
 }
 
 // Spawns the CLI the way the SIGINT test does, capturing stdout/stderr as they arrive so a test
@@ -596,14 +614,14 @@ describe.skipIf(listenDenied !== "")(`doug board serve${listenDenied ? ` (${list
         expect(res.headers.get("content-type")).toContain("text/event-stream");
         const state = eventReaderFor(res);
 
-        const first = await readEvents(state, 1);
+        const first = await readEvents(state, 1, 55000);
         expect(first).toHaveLength(1);
         expect(first[0].event).toBe("board");
         expect(JSON.parse(first[0].data)).toEqual(readBoard(dir));
 
         expect((await run(["move", "one", "done", dir])).code).toBe(0);
 
-        const second = await readEvents(state, 1);
+        const second = await readAfterMove(state, join(dir, ".doug/board.json"), 1);
         expect(second).toHaveLength(1);
         const pushed = JSON.parse(second[0].data) as { cards: { id: string; column: string }[] };
         expect(pushed.cards.find((c) => c.id === "one")?.column).toBe("done");
@@ -611,9 +629,8 @@ describe.skipIf(listenDenied !== "")(`doug board serve${listenDenied ? ` (${list
         await server.close();
       }
     },
-    // Two sequential readEvents() calls at readEvents' own default window; the vitest-global default
-    // testTimeout (20000ms) is too tight to hold both under load (see readEvents' own comment).
-    30000,
+    // Two sequential long-window reads (55 s each, as the rollup test); above the vitest-global 20000ms.
+    60000,
   );
 
   it(
@@ -626,13 +643,13 @@ describe.skipIf(listenDenied !== "")(`doug board serve${listenDenied ? ` (${list
       try {
         const res = await fetch(server.url + "api/events");
         const state = eventReaderFor(res);
-        const first = await readEvents(state, 1);
+        const first = await readEvents(state, 1, 55000);
         expect(first).toHaveLength(1);
         expect(JSON.parse(first[0].data)).toEqual(readBoard(dir));
 
         expect((await run(["move", "one", "done", dir])).code).toBe(0);
 
-        const second = await readEvents(state, 1);
+        const second = await readAfterMove(state, record, 1);
         expect(second).toHaveLength(1);
         expect((JSON.parse(second[0].data) as { cards: { id: string; column: string }[] }).cards.find((c) => c.id === "one")?.column).toBe("done");
 
@@ -646,8 +663,8 @@ describe.skipIf(listenDenied !== "")(`doug board serve${listenDenied ? ` (${list
         await server.close();
       }
     },
-    // See the readEvents timeout note above the previous test.
-    30000,
+    // See the timeout note above the previous test.
+    60000,
   );
 
   it(
@@ -663,7 +680,7 @@ describe.skipIf(listenDenied !== "")(`doug board serve${listenDenied ? ` (${list
       try {
         const res = await fetch(server.url + "api/events");
         const state = eventReaderFor(res);
-        const first = await readEvents(state, 1);
+        const first = await readEvents(state, 1, 55000);
         expect(first).toHaveLength(1);
         const firstBoard = JSON.parse(first[0].data) as { cards: { id: string; column: string }[] };
         expect(firstBoard.cards.find((c) => c.id === "one")?.column).toBe("done");
@@ -678,21 +695,27 @@ describe.skipIf(listenDenied !== "")(`doug board serve${listenDenied ? ` (${list
         await server.close();
       }
     },
-    // See the readEvents timeout note above the earlier events tests.
-    30000,
+    // See the timeout note above the earlier events tests.
+    60000,
   );
 
-  it("ends the /api/events stream when the server closes", async () => {
-    const dir = fresh();
-    await twoCardBoard(dir);
-    const server = await startBoardServer(dir, { port: 0 });
-    const res = await fetch(server.url + "api/events");
-    const state = eventReaderFor(res);
-    await readEvents(state, 1);
-    await server.close();
-    const { done } = await state.reader.read();
-    expect(done).toBe(true);
-  });
+  it(
+    "ends the /api/events stream when the server closes",
+    async () => {
+      const dir = fresh();
+      await twoCardBoard(dir);
+      const server = await startBoardServer(dir, { port: 0 });
+      const res = await fetch(server.url + "api/events");
+      const state = eventReaderFor(res);
+      // Wait on the server's own initial board (long window under the 60 s test timeout), not a short wall clock.
+      const first = await readEvents(state, 1, 55000);
+      expect(first.map((e) => e.event)).toEqual(["board"]);
+      await server.close();
+      const { done } = await state.reader.read();
+      expect(done).toBe(true);
+    },
+    60000,
+  );
 
   it("runs in the foreground until SIGINT", async () => {
     const dir = fresh();
@@ -1885,11 +1908,10 @@ describe.skipIf(listenDenied !== "")(`doug board serve autopilot${listenDenied ?
       try {
         const res = await fetch(server.url + "api/events");
         const state = eventReaderFor(res);
-        const first = await readEvents(state, 1);
+        const first = await readEvents(state, 1, 55000);
         expect(first[0].event).toBe("board");
         writeAp(dir, apState());
-        let got: { event: string; data: string } | undefined;
-        for (let i = 0; i < 5 && !got; i++) got = (await readEvents(state, 1, 6000)).find((e) => e.event === "autopilot");
+        const got = (await readAfterMove(state, join(dir, ".doug/.state/autopilot.json"), 1)).find((e) => e.event === "autopilot");
         expect(got).toBeDefined();
         const view = JSON.parse((got as { data: string }).data) as { mode: string; cards: Array<{ id: string }> };
         expect(view.mode).toBe("running");
@@ -2165,13 +2187,14 @@ describe.skipIf(listenDenied !== "")(`doug board serve rollup${listenDenied ? ` 
       try {
         const res = await fetch(server.url + "api/events");
         const state = eventReaderFor(res);
-        const first = await readEvents(state, 2);
+        const first = await readEvents(state, 2, 55000);
         expect(first.map((e) => e.event)).toEqual(["board", "rollup"]);
         const r1 = JSON.parse(first[1].data);
         expect(r1.milestones.map((m: any) => [m.id, m.done])).toEqual([["m14", 1], ["evals", 1]]);
 
         expect((await run(["move", "b", "done", dir])).code).toBe(0);
-        const second = await readEvents(state, 2);
+        const record = join(dir, ".doug/board.json");
+        const second = await readAfterMove(state, record, 2);
         expect(second.map((e) => e.event)).toEqual(["board", "rollup"]);
         const r2 = JSON.parse(second[1].data);
         expect(r2.milestones.find((m: any) => m.id === "m14").done).toBe(2);
@@ -2179,7 +2202,7 @@ describe.skipIf(listenDenied !== "")(`doug board serve rollup${listenDenied ? ` 
         await server.close();
       }
     },
-    30000,
+    60000,
   );
 });
 

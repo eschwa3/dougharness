@@ -325,10 +325,17 @@ function normalize(s) {
 }
 
 // wc -l semantics: the count of newline-terminated lines, not split("\n").length (which counts one extra empty
-// element for a file ending in "\n"). CLAUDE.md's own header says "Keep it under 60 lines" against this count.
+// element for a file ending in "\n"). CLAUDE.md's own header says "Keep it to 200 lines or fewer" against this count.
 export function countLines(text) {
   if (text === "") return 0;
   return text.endsWith("\n") ? text.split("\n").length - 1 : text.split("\n").length;
+}
+
+// The one CLAUDE.md size limit, shared by learn.mjs and decisions.mjs: 200 lines are allowed, 201 are over. 200 is
+// Anthropic's documented target per CLAUDE.md file, not a measured threshold.
+export const CLAUDE_MD_MAX_LINES = 200;
+export function exceedsClaudeMdLimit(text) {
+  return countLines(text) > CLAUDE_MD_MAX_LINES;
 }
 
 function findSection(lines, heading) {
@@ -532,7 +539,7 @@ export function proposeChanges(signals, { dir, claudeMd, config, skills = [] } =
 
   // promote: a pitfall cited by RULE_MIN_CARDS distinct cards over RULE_MIN_SESSIONS distinct sessions (card
   // memory-failure-lessons, ADR 0019 line 60). With known files it becomes a path-scoped .claude/rules file; with none, a
-  // CLAUDE.md Gotchas bullet (refused at the 60-line cap). Feedback lessons have no trigger.
+  // CLAUDE.md Gotchas bullet (refused over the 200-line limit). Feedback lessons have no trigger.
   for (const r of signals.lessons.pitfalls ?? []) {
     if (r.cards.length < RULE_MIN_CARDS || r.sessions.length < RULE_MIN_SESSIONS) continue;
     const evidence = { id: r.id, cards: r.cards, sessions: r.sessions, citations: r.citations, files: r.files };
@@ -553,8 +560,8 @@ export function proposeChanges(signals, { dir, claudeMd, config, skills = [] } =
       proposals.push({ id: nextId(), kind: "promote", target: "CLAUDE.md", reason: `${reason}, but CLAUDE.md has no "${heading}" section`, evidence, diff: null });
       continue;
     }
-    if (countLines(updated) >= 60) {
-      proposals.push({ id: nextId(), kind: "promote", target: "CLAUDE.md", reason: `${reason}, but CLAUDE.md is at its 60-line limit (would be ${countLines(updated)})`, evidence, diff: null });
+    if (exceedsClaudeMdLimit(updated)) {
+      proposals.push({ id: nextId(), kind: "promote", target: "CLAUDE.md", reason: `${reason}, but CLAUDE.md is over its ${CLAUDE_MD_MAX_LINES}-line limit (would be ${countLines(updated)})`, evidence, diff: null });
       continue;
     }
     proposals.push({ id: nextId(), kind: "promote", target: "CLAUDE.md", reason, evidence, diff: unifiedDiff("CLAUDE.md", claudeMd, updated) });

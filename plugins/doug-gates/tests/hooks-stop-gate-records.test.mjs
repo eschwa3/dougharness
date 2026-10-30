@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach } from "vitest";
-import { writeFileSync, mkdirSync, readFileSync, existsSync } from "node:fs";
+import { writeFileSync, mkdirSync, readFileSync, existsSync, realpathSync } from "node:fs";
 import { execFileSync, spawn } from "node:child_process";
 import { join, dirname } from "node:path";
 import { makeProject, runHookScript } from "./helpers.mjs";
@@ -11,7 +11,7 @@ import { makeProject, runHookScript } from "./helpers.mjs";
 import { classifyFinalBlock } from "../lib/block-ledger.mjs";
 import { changedFiles } from "../lib/baseline.mjs";
 import * as ledger from "../lib/block-ledger.mjs";
-import { computeTree } from "../lib/verified-tree.mjs";
+import { computeTree, writeRecord as writeTreeRecord } from "../lib/verified-tree.mjs";
 // card stop-gate-skips-orphan-subagent-stops: the state file the test seeds directly is written/read through
 // loadState/saveState (the module's own default shape), never a guessed JSON literal.
 import { loadState, saveState } from "../lib/state.mjs";
@@ -1037,179 +1037,12 @@ describe("card gate-output-names-failures", () => {
   });
 });
 
-// card stop-gate-credits-pre-commit: the pre-commit hook (.githooks/pre-commit, tested in
-// git-hooks.test.mjs) writes a machine-readable record of its own run to
-// .doug/.state/pre-commit/last-run.json (lead's design: { version: 1, tree, ok, at, commands: [{ name,
-// command, exit, durationMs }] }). The Stop gate credits a passing record instead of re-running the same
-// commands when the working tree has no changes beyond HEAD, the record parses, is version 1, ok, matches
-// HEAD's tree, every command exited 0, and its command list equals resolveCommands(cfg) in order — crediting
-// pushes `{ name, command, ok: true, credited: "pre-commit" }` into results and runs no command, but every
-// other check (evidence, red-by-design, state.verified, the block ledger) still runs exactly as today. S7
-// (the vendored copy staying byte-identical) is already covered generically by
-// plugins/doug-gates/tests/vendored-copies.test.mjs; not duplicated here.
-describe("stop-gate credits a passing pre-commit record (card stop-gate-credits-pre-commit)", () => {
-  // A cheap, observable command: it writes ran.marker so a test can tell whether it actually ran, the same
-  // convention the session-start-baseline tests above use.
-  const preCommitConfig = () => ({
-    ...baseConfig,
-    commands: { test: `${process.execPath} -e "require('fs').writeFileSync('ran.marker','1')"` },
-  });
-  const commitAll = (dir, message) => {
-    execFileSync("git", ["add", "-A"], { cwd: dir });
-    execFileSync("git", ["commit", "-q", "-m", message], { cwd: dir });
-  };
-  const headTree = (dir) => execFileSync("git", ["rev-parse", "HEAD^{tree}"], { cwd: dir, encoding: "utf8" }).trim();
-  const writeRecord = (dir, record) => {
-    mkdirSync(join(dir, ".doug/.state/pre-commit"), { recursive: true });
-    writeFileSync(join(dir, ".doug/.state/pre-commit/last-run.json"), JSON.stringify(record));
-  };
-  // A record matching HEAD exactly, for the given cfg's resolved commands (here always the single "test"
-  // command preCommitConfig defines).
-  const passingRecord = (dir, cfg) => ({
-    version: 1,
-    tree: headTree(dir),
-    ok: true,
-    at: new Date().toISOString(),
-    commands: [{ name: "test", command: cfg.commands.test, exit: 0, durationMs: 5 }],
-  });
-  const markerRan = (dir) => existsSync(join(dir, "ran.marker"));
-  // Marks this session as having made an edit (state.editedFiles), so `onlyIfEdited`'s "nothing changed"
-  // early exit never fires before the credit check is reached — the tree can still be clean (as it is right
-  // after a commit) while the session did make changes this turn.
-  const markEdited = (dir) => runHookScript("edit-loop", { tool_name: "Edit", tool_input: { file_path: "a.ts" } }, { dir });
-
-  it("S1: a clean tree whose HEAD tree matches a passing pre-commit record skips the commands, allows, and sets state.verified", () => {
-    const cfg = preCommitConfig();
-    const dir = makeProject({ config: cfg, git: true });
-    commitAll(dir, "init");
-    markEdited(dir);
-    writeRecord(dir, passingRecord(dir, cfg));
-
-    const r = runHookScript("stop-gate", { hook_event_name: "Stop" }, { dir });
-    expect(r.json, JSON.stringify(r.json)).toBeNull(); // allowed
-    expect(markerRan(dir), "the credited command must not run").toBe(false);
-    const state = JSON.parse(readFileSync(join(dir, ".doug/.state/test-session.json"), "utf8"));
-    expect(state.lastGate.ok).toBe(true);
-    expect(state.lastGate.results[0]).toMatchObject({ name: "test", ok: true, credited: "pre-commit" });
-    expect(state.verified, "state.verified must be set on a credited green gate").toBeTruthy();
-  });
-
-  it("S1 (evidence still applies): a credited run still blocks a session with changes and no test command of its own on record", () => {
-    const cfg = preCommitConfig();
-    const cfgEvidence = { ...cfg, stopGate: { ...cfg.stopGate, requireEvidence: true } };
-    const dir = makeProject({ config: cfgEvidence, git: true });
-    commitAll(dir, "init");
-    markEdited(dir);
-    writeRecord(dir, passingRecord(dir, cfgEvidence));
-
-    const r = runHookScript("stop-gate", { hook_event_name: "Stop" }, { dir });
-    expect(r.json.decision).toBe("block");
-    expect(r.json.reason).toContain("No test or verify command ran in this session");
-    expect(markerRan(dir), "credited commands still must not run just because evidence is missing").toBe(false);
-  });
-
-  it("S2: a dirty tree after the commit still runs the commands", () => {
-    const cfg = preCommitConfig();
-    const dir = makeProject({ config: cfg, git: true });
-    commitAll(dir, "init");
-    writeRecord(dir, passingRecord(dir, cfg));
-    writeFileSync(join(dir, "dirty.txt"), "uncommitted");
-
-    runHookScript("stop-gate", { hook_event_name: "Stop" }, { dir });
-    expect(markerRan(dir), "a dirty tree must not be credited").toBe(true);
-  });
-
-  it("S3: a record with ok: false (a non-zero exit) still runs the commands", () => {
-    const cfg = preCommitConfig();
-    const dir = makeProject({ config: cfg, git: true });
-    commitAll(dir, "init");
-    const record = passingRecord(dir, cfg);
-    record.ok = false;
-    record.commands[0].exit = 1;
-    writeRecord(dir, record);
-    markEdited(dir);
-
-    runHookScript("stop-gate", { hook_event_name: "Stop" }, { dir });
-    expect(markerRan(dir), "a failing pre-commit record must not be credited").toBe(true);
-  });
-
-  // Round 2 reviewer finding: S3 above flips `ok` and a command's `exit` together, so the credit check
-  // could read the exit codes alone (dropping `if (record.ok !== true) return null;`) and still pass S3
-  // (every command's exit is 0 elsewhere, but the flipped one's exit is 1, so the exit check alone already
-  // catches it). This is the shape the hook now actually writes for a dirty working tree (a working-tree/
-  // index mismatch, or an untracked file): ok:false with every command still exited 0 (the commands
-  // themselves passed; the tree just isn't what was recorded). The `ok` field must be checked in its own
-  // right, not inferred from the commands' exit codes.
-  it("S3b: a record with ok:false but every command exited 0 (the dirty-tree shape) still runs the commands", () => {
-    const cfg = preCommitConfig();
-    const dir = makeProject({ config: cfg, git: true });
-    commitAll(dir, "init");
-    const record = passingRecord(dir, cfg); // every command exit: 0
-    record.ok = false; // e.g. "working tree differs from the committed index"
-    writeRecord(dir, record);
-    markEdited(dir);
-
-    runHookScript("stop-gate", { hook_event_name: "Stop" }, { dir });
-    expect(markerRan(dir), "an ok:false record must not be credited even when every command exited 0").toBe(true);
-  });
-
-  it("S4: a record whose command list differs from the configured commands still runs the commands", () => {
-    const cfg = preCommitConfig();
-    const dir = makeProject({ config: cfg, git: true });
-    commitAll(dir, "init");
-    const record = passingRecord(dir, cfg);
-    record.commands = [{ name: "other", command: "echo hi", exit: 0, durationMs: 5 }];
-    writeRecord(dir, record);
-    markEdited(dir);
-
-    runHookScript("stop-gate", { hook_event_name: "Stop" }, { dir });
-    expect(markerRan(dir), "a mismatched command list must not be credited").toBe(true);
-  });
-
-  it("S5a: a record that is not JSON still runs the commands, without crashing the hook", () => {
-    const cfg = preCommitConfig();
-    const dir = makeProject({ config: cfg, git: true });
-    commitAll(dir, "init");
-    mkdirSync(join(dir, ".doug/.state/pre-commit"), { recursive: true });
-    writeFileSync(join(dir, ".doug/.state/pre-commit/last-run.json"), "not json{{{");
-    markEdited(dir);
-
-    const r = runHookScript("stop-gate", { hook_event_name: "Stop" }, { dir });
-    expect(r.status).toBe(0); // the reader never throws (a hook reader must never throw)
-    expect(markerRan(dir), "a corrupt (non-JSON) record must not be credited").toBe(true);
-  });
-
-  it("S5b: a record of the wrong shape (commands not an array, tree a number) still runs the commands, without crashing the hook", () => {
-    const cfg = preCommitConfig();
-    const dir = makeProject({ config: cfg, git: true });
-    commitAll(dir, "init");
-    writeRecord(dir, { version: 1, tree: 12345, ok: true, at: new Date().toISOString(), commands: "nope" });
-    markEdited(dir);
-
-    const r = runHookScript("stop-gate", { hook_event_name: "Stop" }, { dir });
-    expect(r.status).toBe(0);
-    expect(markerRan(dir), "a malformed-shape record must not be credited").toBe(true);
-  });
-
-  it("S6: a record for a different (stale) tree still runs the commands", () => {
-    const cfg = preCommitConfig();
-    const dir = makeProject({ config: cfg, git: true });
-    commitAll(dir, "init");
-    const record = passingRecord(dir, cfg);
-    record.tree = "0".repeat(40);
-    writeRecord(dir, record);
-    markEdited(dir);
-
-    runHookScript("stop-gate", { hook_event_name: "Stop" }, { dir });
-    expect(markerRan(dir), "a stale-tree record must not be credited").toBe(true);
-  });
-});
-
-// card ratchet-pre-commit-credit: a credited pre-commit record runs no command, so the count check must run
-// on the totals the hook recorded per command (record entry `totals`: the parseTotals result object) against
-// state.testTotals, through the same code path, block text, waiver rule and conflict rule as a real run.
-// A baselined command whose entry has no readable totals is not credited (fail closed to running).
-describe("stop-gate count check on a credited pre-commit record (card ratchet-pre-commit-credit)", () => {
+// card remove-pre-commit-credit: a credit from the verified-tree record (.doug/.state/verified-tree.json) runs
+// no command, so the count check must run on the totals the record holds per command (record.totals[command]:
+// the parseTotals result object) against state.testTotals, through the same code path, block text, waiver
+// rule and conflict rule as a real run. A baselined command with no readable recorded totals is not credited
+// (fail closed to running). These cases moved here from the retired pre-commit credit path.
+describe("stop-gate count check on a credited verified-tree record (card remove-pre-commit-credit)", () => {
   const LAST_GREEN = ".doug/.state/test-totals.json";
   const WAIVERS = ".doug/.state/test-count-waivers";
   const T = { total: 137, skipped: 0, todo: 0 };
@@ -1217,7 +1050,7 @@ describe("stop-gate count check on a credited pre-commit record (card ratchet-pr
   const okTotals = (t) => ({ status: "ok", totals: t });
 
   // Clean committed tree, edited session, state.testTotals seeded for CMD (unless baseline === null), and a
-  // record matching HEAD whose single entry carries `entry` fields (e.g. totals).
+  // verified-tree record of the tree whose single entry carries `entry` fields (e.g. totals).
   // `waiverCommitMsg`: state.baselineHead is pinned to the init commit and a further empty commit with that
   // message lands after it, so the message is a commit "since the session's baseline".
   function makeCredit({ baseline = T, entry = {}, waiverFile, lastGreen, waiverCommitMsg } = {}) {
@@ -1234,12 +1067,20 @@ describe("stop-gate count check on a credited pre-commit record (card ratchet-pr
       if (waiverCommitMsg) state.baselineHead = baseHead;
       saveState(dir, "test-session", state);
     }
-    mkdirSync(join(dir, ".doug/.state/pre-commit"), { recursive: true });
-    const tree = execFileSync("git", ["rev-parse", "HEAD^{tree}"], { cwd: dir, encoding: "utf8" }).trim();
-    writeFileSync(
-      join(dir, ".doug/.state/pre-commit/last-run.json"),
-      JSON.stringify({ version: 1, tree, ok: true, at: new Date().toISOString(), commands: [{ name: "test", command: CMD, exit: 0, durationMs: 5, ...entry }] }),
-    );
+    const { totals: entryTotals, ...entryRest } = entry;
+    expect(
+      writeTreeRecord(dir, {
+        version: 1,
+        tree: computeTree(dir),
+        node: process.version,
+        at: new Date().toISOString(),
+        by: "verify",
+        ranIn: realpathSync(dir),
+        commands: [{ name: "test", command: CMD, exit: 0, durationMs: 5, ...entryRest }],
+        totals: "totals" in entry ? { [CMD]: entryTotals } : {},
+      }),
+      "fixture: the verified-tree record must be written",
+    ).toBe(true);
     if (waiverFile !== undefined) writeFileSync(join(dir, WAIVERS), waiverFile);
     if (lastGreen !== undefined) writeFileSync(join(dir, LAST_GREEN), JSON.stringify(lastGreen));
     return dir;
@@ -1276,7 +1117,7 @@ describe("stop-gate count check on a credited pre-commit record (card ratchet-pr
     const r = stopGate(dir);
     expect(r.json, JSON.stringify(r.json)).toBeNull();
     expect(ranMarker(dir), "the credited command must not run").toBe(false);
-    expect(state(dir).lastGate.results[0]).toMatchObject({ ok: true, credited: "pre-commit" });
+    expect(state(dir).lastGate.results[0]).toMatchObject({ ok: true, credited: "verified-tree" });
   });
 
   it("R2: a count-red credit covered by a waiver line in a commit message since the session's baseline passes; credited, command not run", () => {
@@ -1287,7 +1128,7 @@ describe("stop-gate count check on a credited pre-commit record (card ratchet-pr
     const r = stopGate(dir);
     expect(r.json, JSON.stringify(r.json)).toBeNull();
     expect(ranMarker(dir), "the credited command must not run").toBe(false);
-    expect(state(dir).lastGate.results[0]).toMatchObject({ ok: true, credited: "pre-commit" });
+    expect(state(dir).lastGate.results[0]).toMatchObject({ ok: true, credited: "verified-tree" });
   });
 
   it("R2b (fixture check): the same drop with a non-covering commit-message waiver blocks", () => {
@@ -1300,13 +1141,13 @@ describe("stop-gate count check on a credited pre-commit record (card ratchet-pr
     expect(r.json.reason).toContain("total dropped from");
   });
 
-  it("C4: a record entry with no totals, for a command with a baseline, is not credited: the command runs", () => {
+  it("C4: a record with no totals for the command, for a command with a baseline, is not credited: the command runs", () => {
     const dir = makeCredit({ entry: {} });
     stopGate(dir);
     expect(ranMarker(dir), "a baselined command without recorded totals must run, not be credited").toBe(true);
   });
 
-  it("CR2: a record entry with no totals is not credited when only the last-green record holds the command's baseline: the command runs", () => {
+  it("CR2: a record with no totals for the command is not credited when only the last-green record holds the command's baseline: the command runs", () => {
     const dir = makeCredit({ baseline: null, entry: {}, lastGreen: { [CMD]: T } });
     stopGate(dir);
     expect(ranMarker(dir), "a command baselined by the last-green record must run, not be credited").toBe(true);
@@ -1318,7 +1159,7 @@ describe("stop-gate count check on a credited pre-commit record (card ratchet-pr
     expect(ranMarker(dir)).toBe(true);
   });
 
-  it("C4 (list baseline): a record entry with no totals, for a command with a list-shaped baseline [T], is not credited: the command runs", () => {
+  it("C4 (list baseline): a record with no totals for the command, for a command with a list-shaped baseline [T], is not credited: the command runs", () => {
     const dir = makeCredit({ baseline: [T], entry: {} });
     stopGate(dir);
     expect(ranMarker(dir), "a list-baselined command without recorded totals must run, not be credited").toBe(true);
@@ -1355,7 +1196,7 @@ describe("stop-gate count check on a credited pre-commit record (card ratchet-pr
     const r = stopGate(dir);
     expect(r.json, JSON.stringify(r.json)).toBeNull();
     expect(ranMarker(dir)).toBe(false);
-    expect(state(dir).lastGate.results[0]).toMatchObject({ ok: true, credited: "pre-commit" });
+    expect(state(dir).lastGate.results[0]).toMatchObject({ ok: true, credited: "verified-tree" });
     expect(JSON.parse(readFileSync(join(dir, LAST_GREEN), "utf8"))[CMD]).toEqual(LIST_BASE);
   });
 
@@ -1410,7 +1251,7 @@ describe("stop-gate count check on a credited pre-commit record (card ratchet-pr
     const r = stopGate(dir);
     expect(r.json, JSON.stringify(r.json)).toBeNull();
     expect(ranMarker(dir)).toBe(false);
-    expect(state(dir).lastGate.results[0]).toMatchObject({ ok: true, credited: "pre-commit" });
+    expect(state(dir).lastGate.results[0]).toMatchObject({ ok: true, credited: "verified-tree" });
     // ADR 0013: the last-green entry is the list of summaries (here a list of one).
     expect(JSON.parse(readFileSync(join(dir, LAST_GREEN), "utf8"))[CMD]).toEqual([T]);
   });
@@ -1420,7 +1261,7 @@ describe("stop-gate count check on a credited pre-commit record (card ratchet-pr
     const r = stopGate(dir);
     expect(r.json, JSON.stringify(r.json)).toBeNull();
     expect(ranMarker(dir), "no baseline: credited, not run").toBe(false);
-    expect(state(dir).lastGate.results[0]).toMatchObject({ ok: true, credited: "pre-commit" });
+    expect(state(dir).lastGate.results[0]).toMatchObject({ ok: true, credited: "verified-tree" });
   });
 });
 
@@ -2248,5 +2089,185 @@ describe("card block-reason-redacts-command", () => {
     expect(r.json.decision).toBe("block");
     expect(r.json.reason).toMatch(/type error/);
     noLeak(r.json.reason);
+  });
+});
+
+// card stop-gate-reason-lines-redact: every other reason line that names a configured command (count-check
+// problems and notes, the budget 'not run' line, the missing-evidence line) redacts it like the failed-command line.
+describe("card stop-gate-reason-lines-redact", () => {
+  const KEY = ["AKIA", "IOSF", "ODNN", "7EXA", "MPLE"].join("");
+  const noLeak = (text, key = KEY) => {
+    for (let i = 0; i + 6 <= key.length; i++) expect(text, `leaks "${key.slice(i, i + 6)}"`).not.toContain(key.slice(i, i + 6));
+  };
+  const LAST_GREEN = ".doug/.state/test-totals.json";
+  const CMD = `TOKEN=${KEY} cat summary.txt`;
+  const summary = (total) => ` Test Files  1 passed (1)\n      Tests  ${total} passed (${total})\n   Start at  08:34:30\n   Duration  242ms\n`;
+  const noSummary = "nothing to see here\n";
+
+  function project({ lastGreen, output, secrets, commands, stopGate = {} } = {}) {
+    const cmds = commands || { test: CMD };
+    const config = {
+      ...baseConfig,
+      commands: cmds,
+      stopGate: { commands: Object.keys(cmds), onlyIfEdited: true, maxBlocks: 3, timeoutMs: 10000, requireEvidence: false, ...stopGate },
+      ...(secrets ? { secrets } : {}),
+    };
+    const dir = makeProject({ config, git: true });
+    mkdirSync(join(dir, ".doug/.state"), { recursive: true });
+    if (lastGreen !== undefined) writeFileSync(join(dir, LAST_GREEN), JSON.stringify(lastGreen));
+    if (output !== undefined) writeFileSync(join(dir, "summary.txt"), output);
+    writeFileSync(join(dir, "a.ts"), "x");
+    runHookScript("edit-loop", { tool_name: "Edit", tool_input: { file_path: "a.ts" } }, { dir });
+    return dir;
+  }
+  const stop = (dir) => runHookScript("stop-gate", { hook_event_name: "Stop" }, { dir });
+  const countNotes = (dir) => {
+    const file = join(dir, ".doug/.state/trace/test-session.jsonl");
+    if (!existsSync(file)) return [];
+    return readFileSync(file, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l)).filter((l) => l.event === "CountCheck").map((l) => String(l.reason));
+  };
+  const T = (total) => ({ total, skipped: 0, todo: 0 });
+
+  it("the count-regressed reason line redacts the command", () => {
+    const dir = project({ lastGreen: { [CMD]: T(137) }, output: summary(131) });
+    const r = stop(dir);
+    expect(r.json && r.json.decision).toBe("block");
+    expect(r.json.reason).toContain("test count regressed");
+    expect(r.json.reason).toContain("[redacted: awsKeyId]");
+    noLeak(r.json.reason);
+  });
+
+  it("the summary-count mismatch reason line redacts the command", () => {
+    const dir = project({ lastGreen: { [CMD]: [T(100), T(37)] }, output: summary(137) });
+    const r = stop(dir);
+    expect(r.json && r.json.decision).toBe("block");
+    expect(r.json.reason).toContain("the baseline has 2");
+    expect(r.json.reason).toContain("[redacted: awsKeyId]");
+    noLeak(r.json.reason);
+  });
+
+  it("the no-summary CountCheck note redacts the command", () => {
+    const dir = project({ lastGreen: { [CMD]: T(137) }, output: noSummary });
+    const r = stop(dir);
+    expect(r.json, "the gate is green").toBeNull();
+    const notes = countNotes(dir).filter((n) => n.includes("no test summary"));
+    expect(notes.length).toBeGreaterThan(0);
+    for (const n of notes) {
+      expect(n).toContain("[redacted: awsKeyId]");
+      noLeak(n);
+    }
+  });
+
+  it("the no-baseline CountCheck note redacts the command", () => {
+    const dir = project({ output: summary(137) });
+    const r = stop(dir);
+    expect(r.json, "the gate is green").toBeNull();
+    const notes = countNotes(dir).filter((n) => n.includes("baseline"));
+    expect(notes.length).toBeGreaterThan(0);
+    for (const n of notes) {
+      expect(n).toContain("[redacted: awsKeyId]");
+      noLeak(n);
+    }
+  });
+
+  it("the budget not-run reason line redacts the command", () => {
+    const node = process.execPath;
+    const dir = project({
+      commands: { slow: `${node} -e "setTimeout(() => {}, 10000)"`, second: `TOKEN=${KEY} ${node} -e "process.exit(0)"` },
+      stopGate: { timeoutMs: 60000, hookTimeoutSec: 2 },
+    });
+    const r = stop(dir);
+    expect(r.json && r.json.decision).toBe("block");
+    expect(r.json.reason).toContain("not run");
+    expect(r.json.reason).toContain("[redacted: awsKeyId]");
+    noLeak(r.json.reason);
+  });
+
+  it("the missing-evidence reason line redacts the configured commands it lists", () => {
+    const dir = project({ commands: { test: `TOKEN=${KEY} ${process.execPath} -e "process.exit(0)"` }, stopGate: { requireEvidence: true } });
+    const r = stop(dir);
+    expect(r.json && r.json.decision).toBe("block");
+    expect(r.json.reason).toContain("looked for");
+    expect(r.json.reason).toContain("[redacted: awsKeyId]");
+    noLeak(r.json.reason);
+  });
+
+  it("secrets.enabled false leaves the command raw in the count-regressed reason line", () => {
+    const dir = project({ lastGreen: { [CMD]: T(137) }, output: summary(131), secrets: { enabled: false } });
+    const r = stop(dir);
+    expect(r.json && r.json.decision).toBe("block");
+    expect(r.json.reason).toContain("test count regressed");
+    expect(r.json.reason).toContain(KEY);
+  });
+});
+
+// card memory-failures-wiring: each blocks.jsonl line carries `files`, the sorted, unique, repo-relative
+// paths the failed commands' untruncated output names (failing test files plus tsc error paths); [] when a
+// block names none (stand-downs, partial refusals, no record). A reused red keeps the files of the run it reuses.
+describe("card memory-failures-wiring (blocks.jsonl files)", () => {
+  const LEDGER = ".doug/.state/blocks.jsonl";
+  const lines = (dir) =>
+    existsSync(join(dir, LEDGER)) ? readFileSync(join(dir, LEDGER), "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l)) : [];
+  const node = process.execPath;
+  // Prints tsc line first and the test FAIL line second, so a sorted result differs from print order.
+  const namingCmd = `${node} -e "console.log('src/y.ts(3,4): error TS2322: nope');console.log('FAIL src/x.test.mjs');process.exit(1)"`;
+  function edited(command) {
+    const dir = makeProject({
+      config: {
+        ...baseConfig,
+        commands: { test: command },
+        stopGate: { commands: ["test"], onlyIfEdited: true, maxBlocks: 3, timeoutMs: 10000, requireEvidence: false },
+      },
+      git: true,
+    });
+    writeFileSync(join(dir, "a.ts"), "x");
+    runHookScript("edit-loop", { tool_name: "Edit", tool_input: { file_path: "a.ts" } }, { dir });
+    return dir;
+  }
+  const stop = (dir) => runHookScript("stop-gate", { hook_event_name: "Stop" }, { dir });
+
+  it("F1: a blocked main Stop whose output names a test file and a tsc path records files, sorted and relative", () => {
+    const dir = edited(namingCmd);
+    expect(stop(dir).json.decision).toBe("block");
+    const ls = lines(dir);
+    expect(ls).toHaveLength(1);
+    expect(ls[0].files).toEqual(["src/x.test.mjs", "src/y.ts"]);
+  });
+
+  it("F2: a failed command that names no file records files []", () => {
+    const dir = edited(`${node} -e "console.log('plain failure');process.exit(1)"`);
+    expect(stop(dir).json.decision).toBe("block");
+    expect(lines(dir)[0].files).toEqual([]);
+  });
+
+  it("F3: a reused red (unchanged tree, command not re-run) writes a second line with the same files", () => {
+    const dir = edited(namingCmd);
+    stop(dir);
+    const r2 = stop(dir);
+    expect(r2.json.reason).toMatch(/nothing changed/i);
+    const ls = lines(dir);
+    expect(ls).toHaveLength(2);
+    expect(ls[0].files).toEqual(["src/x.test.mjs", "src/y.ts"]);
+    expect(ls[1].files).toEqual(ls[0].files);
+  });
+
+  it("F4: a stand-down line carries files []", () => {
+    const dir = edited("exit 1");
+    mkdirSync(join(dir, ".doug/.state"), { recursive: true });
+    writeFileSync(join(dir, ".doug/.state/test-session.json"), JSON.stringify({ stopBlocks: 3 }));
+    const r = stop(dir);
+    expect(r.json.systemMessage).toContain("standing down");
+    const line = lines(dir).find((l) => l.class === "stood-down");
+    expect(line, JSON.stringify(lines(dir))).toBeTruthy();
+    expect(line.files).toEqual([]);
+  });
+
+  it("F5: appendBlockLine with no record writes files []; with a record's files it keeps them", () => {
+    const dir = makeProject({ config: baseConfig, git: false });
+    ledger.appendBlockLine(dir, { hook: "stop-gate", agent: null, reason: "r", class: "real", session: "s" });
+    ledger.appendBlockLine(dir, { hook: "stop-gate", agent: null, reason: "r", class: "real", session: "s", record: { files: ["a/b.ts"] } });
+    const ls = lines(dir);
+    expect(ls[0].files).toEqual([]);
+    expect(ls[1].files).toEqual(["a/b.ts"]);
   });
 });

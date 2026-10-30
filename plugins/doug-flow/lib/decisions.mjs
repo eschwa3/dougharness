@@ -10,7 +10,7 @@
 // when a matching file is read. Source: https://code.claude.com/docs/en/memory.md#path-specific-rules
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
-import { unifiedDiff, writeProposals, countLines, insertBulletUnderHeading, removeExactLine, renderRule } from "./learn.mjs";
+import { unifiedDiff, writeProposals, countLines, CLAUDE_MD_MAX_LINES, exceedsClaudeMdLimit, insertBulletUnderHeading, removeExactLine, renderRule } from "./learn.mjs";
 
 const DECISIONS_RELDIR = "docs/decisions";
 const RULES_RELDIR = ".claude/rules";
@@ -295,7 +295,7 @@ export function proposeClaudeMd({ dir, edits, now = new Date(), dryRun = false }
     return { ok: false, reason: "this edit would change the fenced Commands block, which is not editable here" };
   }
   const after = countLines(newText);
-  if (after > 60) return { ok: false, reason: `CLAUDE.md would be ${after} lines, over its 60-line limit` };
+  if (exceedsClaudeMdLimit(newText)) return { ok: false, reason: `CLAUDE.md would be ${after} lines, over its ${CLAUDE_MD_MAX_LINES}-line limit` };
 
   const diffResult = diffOrRefuse(CLAUDE_MD_RELPATH, oldText, newText);
   if (!diffResult.ok) return diffResult;

@@ -13,7 +13,10 @@ const script = join(here, "..", "scripts", "memory.mjs");
 const run = (args, cwd) => spawnSync(process.execPath, [script, ...args], { cwd, encoding: "utf8", env: { ...process.env, CLAUDE_PROJECT_DIR: "" } });
 
 function tempDir(prefix) {
-  return mkdtempSync(join(tmpdir(), prefix));
+  const dir = mkdtempSync(join(tmpdir(), prefix));
+  // A Doug project (memory.mjs refuses a directory with no .doug/). Claude-dir fixtures get one too, which is harmless.
+  mkdirSync(join(dir, ".doug"));
+  return dir;
 }
 
 const HARNESS_FILE = `---

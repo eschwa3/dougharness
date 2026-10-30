@@ -197,6 +197,23 @@ describe("coordinator", () => {
     expect(r.needsPlan).toEqual(["f2"]);
   });
 
+  it("C16 pickCards holds a planned flow card behind an earlier planless flow card", () => {
+    const ready = [flow("f1"), flow("f2")];
+    const plans = { f2: plan(["f2a", "src/two.ts"]) };
+    const r = pickCards({ ready, inFlight: [], slots: 3, plans });
+    expect(r.needsPlan).toEqual(["f1"]);
+    expect(r.launch).toEqual([]);
+    expect(r.held).toEqual([{ id: "f2", with: "f1", why: "the plan of f1 is not known yet" }]);
+  });
+
+  it("C16 pickCards holds a hand card behind an earlier planless flow card", () => {
+    const ready = [flow("f1", "flow-comp"), hand("h", "Change docs/unrelated.md.", "other-comp")];
+    const r = pickCards({ ready, inFlight: [], slots: 3, plans: {} });
+    expect(r.needsPlan).toEqual(["f1"]);
+    expect(r.launch).toEqual([]);
+    expect(r.held).toEqual([{ id: "h", with: "f1", why: "the plan of f1 is not known yet" }]);
+  });
+
   it("C17 pickCards: three cards where two conflict launch two in board order and hold the third with with and why", () => {
     const ready = [
       hand("a", "Change lib/a.mjs.", "flow"),

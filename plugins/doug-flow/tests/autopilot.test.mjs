@@ -15,6 +15,12 @@ const here = dirname(fileURLToPath(import.meta.url));
 const script = join(here, "..", "scripts", "autopilot.mjs");
 
 const tmp = () => realpathSync(mkdtempSync(join(tmpdir(), "doug-autopilot-")));
+// Card memory-failures-wiring: a stopped report starts a detached `reflect --failures` that calls claude. Every
+// spawn in this file inherits a claude bin that exits 1 at once and spends nothing; a test that wants to see the
+// call sets its own DOUG_CLAUDE_BIN in the env it passes.
+const NO_SPEND_BIN = join(tmp(), "fake-claude-no-spend.mjs");
+writeFileSync(NO_SPEND_BIN, "#!/usr/bin/env node\nprocess.exit(1);\n", { mode: 0o755 });
+process.env.DOUG_CLAUDE_BIN = NO_SPEND_BIN;
 const BOARD = {
   version: 1,
   columns: [{ id: "ready", title: "Ready" }],
@@ -2700,6 +2706,64 @@ describe("card memory-run-history: report writes the run history", () => {
     expect(r.stdout.trim()).not.toBe("");
     expect(r.stderr).toContain("cannot write the run history for h3");
   });
+
+  // Card memory-failures-wiring: a stopped hand card starts `memory.mjs reflect --failures <card> --max-usd 0.5`
+  // detached (job failures-<card>) after its run history is written; a done card starts none.
+  describe("card memory-failures-wiring: a stopped hand card reflects on its failures", () => {
+    const jobFile = (dir) => join(dir, ".doug/.state/jobs/failures-h3.json");
+    function recorder(dir) {
+      const q = join(dir, "fake-claude-rec.mjs");
+      writeFileSync(
+        q,
+        "#!/usr/bin/env node\n" +
+          'import { readFileSync, writeFileSync } from "node:fs";\n' +
+          `writeFileSync(${JSON.stringify(join(dir, "fake-argv.json"))}, JSON.stringify(process.argv.slice(2)));\n` +
+          `writeFileSync(${JSON.stringify(join(dir, "fake-prompt.txt"))}, readFileSync(0, "utf8"));\n` +
+          `process.stdout.write(${JSON.stringify(JSON.stringify({ structured_output: { lessons: [] }, session_id: "s-fake", total_cost_usd: 0, is_error: false }))});\n`,
+        { mode: 0o755 },
+      );
+      return q;
+    }
+    const waitFor = (fn, ms = 30000) => {
+      const end = Date.now() + ms;
+      while (!fn() && Date.now() < end) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
+      return fn();
+    };
+
+    it("a stopped hand report starts the failures-h3 job with the 0.5 cap, and the cheap-row model reads the stop from the written history", () => {
+      const p = proj();
+      p.env.DOUG_CLAUDE_BIN = recorder(p.dir);
+      const r = rep(p, stopped());
+      expect(r.status, r.stderr).toBe(0);
+      expect(existsSync(jobFile(p.dir))).toBe(true);
+      const argv = JSON.parse(readFileSync(jobFile(p.dir), "utf8")).argv;
+      expect(argv).toEqual(expect.arrayContaining(["reflect", "--failures", "h3", "--max-usd", "0.5"]));
+      expect(argv).not.toContain("--detach");
+      expect(waitFor(() => existsSync(join(p.dir, "fake-argv.json")) && existsSync(join(p.dir, "fake-prompt.txt")))).toBe(true);
+      const args = JSON.parse(readFileSync(join(p.dir, "fake-argv.json"), "utf8"));
+      expect(args[args.indexOf("--max-budget-usd") + 1]).toBe("0.5");
+      expect(args[args.indexOf("--model") + 1]).toBe("haiku");
+      expect(readFileSync(join(p.dir, "fake-prompt.txt"), "utf8")).toContain("protect-paths refused X");
+    });
+
+    it("a done hand report starts no failures job", () => {
+      const p = proj();
+      p.env.DOUG_CLAUDE_BIN = recorder(p.dir);
+      expect(rep(p, { card: { id: "h3" }, outcome: "done", commit: "abc1234", history: [] }).status).toBe(0);
+      expect(existsSync(jobFile(p.dir))).toBe(false);
+    });
+
+    it("a failures job that cannot start (the name is held by a live process) does not fail the report", () => {
+      const p = proj();
+      p.env.DOUG_CLAUDE_BIN = recorder(p.dir);
+      mkdirSync(join(p.dir, ".doug/.state/jobs"), { recursive: true });
+      writeFileSync(jobFile(p.dir), JSON.stringify({ name: "failures-h3", argv: ["x"], pid: process.pid, startedAt: new Date().toISOString() }));
+      const r = rep(p, stopped());
+      expect(r.status, r.stderr).toBe(0);
+      expect(r.stdout).toMatch(/^autopilot: h3 /m);
+      expect(existsSync(histPath(p.dir))).toBe(true);
+    });
+  });
 });
 
 // Card memory-run-coverage: `autopilot.mjs report` also covers a flow queen: a stopped flow report (ok false, not
@@ -2935,5 +2999,69 @@ describe("card memory-run-coverage: report covers a flow queen", () => {
     const p = proj();
     expect(rep(p, { ok: false, paused: true, levels: [] }).status).toBe(0);
     expect(existsSync(histPath(p.dir))).toBe(false);
+  });
+
+  // Card memory-failures-wiring: a stopped flow card starts `memory.mjs reflect --failures <card> --max-usd 0.5`
+  // detached (job failures-<card>) after its run history is written; a landed or paused flow card starts none.
+  describe("card memory-failures-wiring: a stopped flow card reflects on its failures", () => {
+    const jobFile = (dir) => join(dir, ".doug/.state/jobs/failures-f1.json");
+    function recorder(dir) {
+      const p = join(dir, "fake-claude-rec.mjs");
+      writeFileSync(
+        p,
+        "#!/usr/bin/env node\n" +
+          'import { readFileSync, writeFileSync } from "node:fs";\n' +
+          `writeFileSync(${JSON.stringify(join(dir, "fake-argv.json"))}, JSON.stringify(process.argv.slice(2)));\n` +
+          `writeFileSync(${JSON.stringify(join(dir, "fake-prompt.txt"))}, readFileSync(0, "utf8"));\n` +
+          `process.stdout.write(${JSON.stringify(JSON.stringify({ structured_output: { lessons: [] }, session_id: "s-fake", total_cost_usd: 0, is_error: false }))});\n`,
+        { mode: 0o755 },
+      );
+      return p;
+    }
+    const waitFor = (fn, ms = 30000) => {
+      const end = Date.now() + ms;
+      while (!fn() && Date.now() < end) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
+      return fn();
+    };
+
+    it("a stopped flow report (ok false) starts the failures-f1 job with the 0.5 cap, and the cheap-row model reads the stop from the written history", () => {
+      const p = proj();
+      p.env.DOUG_CLAUDE_BIN = recorder(p.dir);
+      const r = rep(p, stoppedFlow());
+      expect(r.status, r.stderr).toBe(0);
+      expect(existsSync(jobFile(p.dir))).toBe(true);
+      const argv = JSON.parse(readFileSync(jobFile(p.dir), "utf8")).argv;
+      expect(argv).toEqual(expect.arrayContaining(["reflect", "--failures", "f1", "--max-usd", "0.5"]));
+      expect(argv).not.toContain("--detach");
+      expect(waitFor(() => existsSync(join(p.dir, "fake-argv.json")) && existsSync(join(p.dir, "fake-prompt.txt")))).toBe(true);
+      const args = JSON.parse(readFileSync(join(p.dir, "fake-argv.json"), "utf8"));
+      expect(args[args.indexOf("--max-budget-usd") + 1]).toBe("0.5");
+      expect(args[args.indexOf("--model") + 1]).toBe("haiku");
+      expect(readFileSync(join(p.dir, "fake-prompt.txt"), "utf8")).toContain("history:f1/wf_f1:");
+    });
+
+    it("a paused flow report starts no failures job", () => {
+      const p = proj();
+      p.env.DOUG_CLAUDE_BIN = recorder(p.dir);
+      expect(rep(p, stoppedFlow({ paused: true })).status).toBe(0);
+      expect(existsSync(jobFile(p.dir))).toBe(false);
+    });
+
+    it("a landed flow report (ok true) starts no failures job", () => {
+      const p = proj();
+      p.env.DOUG_CLAUDE_BIN = recorder(p.dir);
+      expect(rep(p, { ok: true, levels: [{ index: 0, tasks: [task("t1")] }] }).status).toBe(0);
+      expect(existsSync(jobFile(p.dir))).toBe(false);
+    });
+
+    it("a failures job that cannot start (the name is held by a live process) does not fail the report", () => {
+      const p = proj();
+      p.env.DOUG_CLAUDE_BIN = recorder(p.dir);
+      mkdirSync(join(p.dir, ".doug/.state/jobs"), { recursive: true });
+      writeFileSync(jobFile(p.dir), JSON.stringify({ name: "failures-f1", argv: ["x"], pid: process.pid, startedAt: new Date().toISOString() }));
+      const r = rep(p, stoppedFlow());
+      expect(r.status, r.stderr).toBe(0);
+      expect(r.stdout).toMatch(/^autopilot: f1 ask/m);
+    });
   });
 });

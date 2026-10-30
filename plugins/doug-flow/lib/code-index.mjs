@@ -305,7 +305,7 @@ export async function buildIndex(m, dir, opts = {}) {
       .map((r) => r.id);
     const indexedAt = toIsoTimestamp(now);
 
-    m.exec("BEGIN");
+    m.exec("BEGIN IMMEDIATE");
     try {
       for (const id of existingIds) {
         if (newIds.has(id)) continue;
@@ -352,7 +352,7 @@ export async function buildIndex(m, dir, opts = {}) {
       .prepare("SELECT id FROM code_chunks WHERE path = ?")
       .all(path)
       .map((r) => r.id);
-    m.exec("BEGIN");
+    m.exec("BEGIN IMMEDIATE");
     try {
       for (const id of ids) {
         m.prepare("DELETE FROM code_chunks WHERE id = ?").run(id);

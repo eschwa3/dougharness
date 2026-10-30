@@ -160,13 +160,13 @@ this never throws or exits nonzero.
 ```
 memory.mjs reflect <report.json> [dir] [--run <wf-id>] [--card <id>] [--commit <sha>]
                     [--adversary "<id>=<class>[: <reason>]"]... [--claude-bin <path>] [--claude-dir <path>]
-                    [--model <name>] [--max-usd <n>] [--dry-run] [--json]
+                    [--model <name>] [--max-usd <n>] [--detach] [--dry-run] [--json]
 ```
 
 Runs after `record` in `run-report` (card `memory-reflect`): report/dir/adversary parsing is the same as
 `record`'s, and an `--adversary` id the report doesn't have fails the same way.
 
-**`reflect --hand <card-id> [dir] --commit <sha> [--rounds <n>] [--review "R1=<class>[: <reason>]"]... [--note <text>]`**
+**`reflect --hand <card-id> [dir] --commit <sha> [--rounds <n>] [--review "R1=<class>[: <reason>]"]... [--note <text>] [--detach]`**
 (card `memory-every-session`) reflects on a hand landing, which has no workflow report. It assembles one at
 `.doug/.state/reports/<card-id>/hand-report.json` (canonical, no timestamp, so a second run hashes the same and
 is a no-op) from the briefs and reviewer reports `doug-hand` saved there and `lessons.json`: one task with
@@ -175,6 +175,11 @@ fixed blocker ledger entry per `--review` id, so a pitfall needs a `--review` cl
 one round. The prompt gains a hand section: each file cut at 4000 chars (`…[truncated]`), 16000 in total, the
 note last. Everything else is the flow pass; `--commit` is required (exit 2); there is no schema change and
 nothing is stored on the outcome row.
+
+**`--detach`** (card `detach-background-chores`) starts the same reflect as a detached job and returns at once, printing
+`<name>: started detached (pid <pid>); read it with: memory.mjs job <name>`. The job is `reflect-<--card, else --run, else
+the first 12 hex of the report's sha256>` for the report form and `reflect-<card-id>` for `--hand` (the `--failures` form
+is `failures-<card>`). Read it with `memory.mjs job`, below. A start under a name a live job holds is refused (see there).
 
 **Counters (deterministic, no LLM, always runs first).** For each task in the report with a non-empty
 `memoryUsed`: only an id in `harmfulIds` (the lead's judgement that the lesson misled the work) gets `harmful + 1`; a
@@ -262,7 +267,7 @@ last balanced top-level `{...}` object on stdout, not the whole buffer with a si
 **`--dry-run`** applies nothing at all — no counters, no `reflections` row, no lessons appended — and makes no
 model call (cost $0.0000); it prints the counters it would credit and the prompt it would send.
 
-**`reflect --failures <card-id> [dir] [--session <id>] [--claude-bin <path>] [--model <name>] [--max-usd <n>] [--dry-run] [--json]`**
+**`reflect --failures <card-id> [dir] [--session <id>] [--claude-bin <path>] [--model <name>] [--max-usd <n>] [--detach] [--dry-run] [--json]`**
 (card `memory-failure-lessons`) reflects on the failure slice of a card's run history
 (`.doug/.state/history/<card>/*.jsonl`) instead of a report: stopped card or flow reports, `block` entries classed
 `real`, and `denial` entries. Other block classes (race, load-timeout, expected-red, stood-down, test-count) are
@@ -272,11 +277,46 @@ citation is rejected. A proposal may name a live pitfall in `repeats`: no lesson
 changed; an occurrence is recorded for that lesson instead. No Jaccard check runs in this pass. At most 3 lessons are
 appended per pass. The pass is idempotent per slice (a `reflections` row keyed `failures:<sha256 of the item refs>`);
 an empty slice never calls the model. `--dry-run` writes nothing, makes no model call and prints the prompt it would send. It is exclusive with `--hand` and a report path
-(exit 2), and is not wired into autopilot, run-report or doug-hand: the pass's spend cap is an open decision.
+(exit 2). `--detach` runs it as job `failures-<card>` (read with `job`). Autopilot (after a stopped hand or flow card's run
+history is written) and doug-hand (on a stop) start it detached with `--max-usd 0.5` on the cheap row; the autopilot queue
+approval or the doug-hand start is the approval (user, 2026-10-28). The cap is per invocation, so a card that stops again
+can spend up to $0.5 again.
+
+**Code-side repeats.** Each `blocks.jsonl` line carries `files`: the sorted, unique, repo-relative paths the failed
+commands' output names (failing test files and tsc error paths), `[]` when none. Before the model call, a `real` block
+with the same class that shares a file with a recorded occurrence of a live pitfall is recorded as another occurrence of
+it, tagged `via: "file"`. Empty files never match.
 
 **Occurrence ledger.** `.doug/.state/memory/pitfalls.jsonl` is append-only, one line `{ lesson, citation, card, run,
-session, at }` per occurrence, de-duplicated on lesson plus citation. `learn.mjs` counts a pitfall's distinct cards
+session, at, class, files }` (plus `via: "file"` for a code-side match) per occurrence, de-duplicated on lesson plus citation. `learn.mjs` counts a pitfall's distinct cards
 and sessions from it (see docs/learn.md).
+
+## `memory.mjs job`
+
+```
+memory.mjs job <name> [dir] [--wait <seconds>]
+memory.mjs job --earlier [dir]
+```
+
+Reads a detached job (card `memory-docs-detach-job`). State is `.doug/.state/jobs/<name>.json`, output
+`<name>.log`. One line per read, in one of three states:
+
+- done: reflect's one-line summary plus ` (job <name>, <n> s)`; exit 0.
+- pending: `<name>: pending (started <iso>, pid <pid>)`; exit 0.
+- failed: `<name>: failed (exit <n>|signal <s>)[: <last log line>]`, or, when the process is gone without a result,
+  `<name>: failed (the job process <pid> is gone and wrote no result)`; exit 1.
+
+`--wait <seconds>` polls until the job is done or failed or the cap passes (whole seconds, else exit 2); a job still
+pending at the cap prints the pending line. No job file exits 1 with `<name>: no such job in <dir>`; an invalid name exits 2. Reading a done or failed
+job marks it read.
+
+`job --earlier` lists every unread job, sorted by name, as `earlier job <line>`: pending ones stay unread, done and
+failed ones are marked read. It prints `no earlier jobs unread` when there are none and exits 1 when any listed job
+failed.
+
+**Refusal.** A detached start under a name a live job holds (no end recorded and its pid alive) is refused with exit 1
+and `job <name> is already running (pid <pid>); read it with: memory.mjs job <name>`, leaving the live job's file and
+log untouched. A name whose job ended, or whose process is gone, is reused: the old file is replaced.
 
 ## Session recall
 
@@ -781,7 +821,7 @@ cites where the change was learned: a lesson id, a `docs/live-runs.md` date, or 
 - Per add: the entry is not an object; the line does not start with `- `; `source` is empty; the named heading
   is not found in CLAUDE.md.
 - After applying every remove and add: the text from the `## Models` line to end of file changed (the section
-  `plugins/doug-flow/lib/models.mjs` parses); the fenced ```sh Commands block changed; the result is over 60
+  `plugins/doug-flow/lib/models.mjs` parses); the fenced ```sh Commands block changed; the result is over 200
   lines (CLAUDE.md's own cap, counted `wc -l` style, named with the resulting count).
 - The new text equals the old text — the existing "already has exactly this content" refusal.
 
@@ -803,6 +843,6 @@ already enforces it). Rejected and bumped proposals never get a candidate. For a
 checks the edits object with `proposeClaudeMd(..., { dryRun: true })`; when it passes, the edits file goes to
 `.doug/.state/learn/claude-md-candidates/<lesson id>.json` (nothing is written under `--dry-run`) and reflect
 prints `claude-md candidate for lesson <id>: node .../memory.mjs claude-md propose --file <file>`. A refusal (a
-Models or Commands change, a missing heading, over 60 lines) is dropped and printed as
+Models or Commands change, a missing heading, over 200 lines) is dropped and printed as
 `claude-md candidate for lesson <id> dropped: <reason>`. `--json` carries `claudeMd` and `claudeMdDropped`.
 Reflect never writes CLAUDE.md and never runs `learn.mjs apply`; running the printed command only makes a diff.

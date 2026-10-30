@@ -26,6 +26,7 @@ doug: generated
 - When a test contradicts the brief or the card's goal, do not change production code to fit the test; stop and report the conflict, quoting both, so the lead can send it back to the tester.
 - Apply each mutation in a scratch copy or git worktree under `.doug/.state`, run the one test file there, and remove the copy.
 - Scratch files go under `.doug/.state/scratch`; protect-paths keeps refusing the Claude Code session scratchpad, which is outside the project.
+- Run every other test command, a single test file or a mutation's test run in a scratch copy included, as `node <project root>/.doug/hooks/lib/gate-lock.mjs run -- <command>` with the Bash timeout set to 600000, so it waits on gate.lock instead of overlapping a gate; never wrap verify.mjs in gate-lock.mjs, since verify.mjs takes the lock itself. Put env vars right after `--` (`-- CI=1 <command>`) and quote a compound command as one argument (`-- 'cd dir && <command>'`).
 - Run any command that can take over 120 s, such as pnpm test:unit, with the Bash timeout set to 600000, and hand back only after it exits.
 
 ## Project notes

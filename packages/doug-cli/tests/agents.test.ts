@@ -601,3 +601,29 @@ describe("generateAgents timeout rule (card agent-rules-no-pm)", () => {
     }
   });
 });
+
+describe("generated agents queue test runs behind gate.lock (card seat-test-runs-take-gate-lock)", () => {
+  const GL = "as `node <project root>/.doug/hooks/lib/gate-lock.mjs run -- <command>`";
+  const NOWRAP = "never wrap verify.mjs in gate-lock.mjs, since verify.mjs takes the lock itself";
+  for (const [name, fx] of [["ts-pnpm", tsPnpm]] as const) {
+    it(`coder, reviewer and tester carry the lock-runner rule (${name})`, () => {
+      const d = detect(fx);
+      const files = byPath(generateAgents(d, generateConfig(d)));
+      for (const a of ["coder", "reviewer", "tester"]) {
+        const c = files[`.claude/agents/${a}.md`];
+        expect(c, a).toContain(GL);
+        expect(c, a).toContain(NOWRAP);
+      }
+      expect(files[".claude/agents/tester.md"]).toContain("Run a full test suite only through `node .doug/hooks/scripts/verify.mjs`");
+    });
+    it(`the lock-runner rule names the env-prefix and quoted compound forms (${name})`, () => {
+      const d = detect(fx);
+      const files = byPath(generateAgents(d, generateConfig(d)));
+      for (const a of ["coder", "reviewer", "tester"]) {
+        const line = files[`.claude/agents/${a}.md`].split("\n").find((l) => l.includes("gate-lock.mjs run -- <command>")) ?? "";
+        expect(line, a).toMatch(/CI=1/);
+        expect(line, a).toMatch(/quot|sh -c/);
+      }
+    });
+  }
+});

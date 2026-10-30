@@ -43,7 +43,9 @@ for (const a of argv) {
 const [cmd, ...rest] = positional;
 
 function dirFrom(args, n) {
-  return resolve(process.env.CLAUDE_PROJECT_DIR || args[n] || process.cwd());
+  const d = resolve(process.env.CLAUDE_PROJECT_DIR || args[n] || process.cwd());
+  if (!existsSync(join(d, ".doug"))) fail(`not a Doug project: ${d} has no .doug/`, 1);
+  return d;
 }
 
 function readClaudeMd(dir) {

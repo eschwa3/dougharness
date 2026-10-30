@@ -1295,26 +1295,7 @@ describe("card worktree-agent-gate", () => {
 
   const cwdsRun = (marker) => (existsSync(marker) ? readFileSync(marker, "utf8").split("\n").filter(Boolean) : []);
   const real = (p) => realpathSync(p);
-  const treeOf = (d) => git(d, "rev-parse", "HEAD^{tree}");
-  const seedPreCommit = (wt, cfg) => {
-    mkdirSync(join(wt, ".doug/.state/pre-commit"), { recursive: true });
-    writeFileSync(
-      join(wt, ".doug/.state/pre-commit/last-run.json"),
-      JSON.stringify({ version: 1, tree: treeOf(wt), ok: true, at: new Date().toISOString(), commands: [{ name: "test", command: cfg.commands.test, exit: 0, durationMs: 5 }] }),
-    );
-  };
-
-  it("W1 a worktree agent that committed, with a passing pre-commit record in its worktree, stops without any command run", () => {
-    const { dir, wt, marker, cfg } = makeFixture();
-    wtCommit(wt, "src/a.ts", "agent A work", "A");
-    seedPreCommit(wt, cfg);
-    agentEdits(dir, "agA", join(wt, "src/a.ts"));
-    const r = subagentStop(dir, "agA");
-    expect(r.json, JSON.stringify(r.json)).toBeNull();
-    expect(cwdsRun(marker), "the worktree's own passing record must be credited: no command may run anywhere").toEqual([]);
-  });
-
-  it("W1b the same, credited from a verified-tree record of the worktree's tree", () => {
+  it("W1b a worktree agent that committed, with a verified-tree record of the worktree's tree in its worktree, stops without any command run", () => {
     const { dir, wt, marker, cfg } = makeFixture();
     wtCommit(wt, "src/a.ts", "agent A work", "A");
     const tree = computeTree(wt);
@@ -1532,23 +1513,28 @@ describe("card worktree-agent-gate", () => {
     removeTreeRecord(wt); // nothing for credit to use: only the post-wait comparison can skip the commands
     const lockPath = gateLockPath(dir);
     const holderScript = join(dir, ".doug/.state/holder-w14.mjs");
+    const releasedPath = join(dir, ".doug/.state/holder-w14.released");
     writeFileSync(
       holderScript,
       [
         'import { writeFileSync, unlinkSync } from "node:fs";',
         "setTimeout(() => {",
         `  writeFileSync(${JSON.stringify(stateOf(dir))}, ${JSON.stringify(savedState)});`,
+        `  writeFileSync(${JSON.stringify(releasedPath)}, String(Date.now()));`,
         `  try { unlinkSync(${JSON.stringify(lockPath)}); } catch {}`,
         "}, 1200);",
       ].join("\n"),
     );
+    // The edit-loop spawn runs before the holder starts, so only putLock sits between the holder's timer and the gate.
+    agentEdits(dir, "agB", join(wt, "src/a.ts"));
     const holder = spawn(process.execPath, [holderScript], { cwd: dir, stdio: "ignore" });
     putLock(dir, JSON.stringify({ pid: holder.pid, session: "holder-session", at: Date.now() }));
     try {
-      agentEdits(dir, "agB", join(wt, "src/a.ts"));
-      const started = Date.now();
+      const beforeStop = Date.now();
       const r = subagentStop(dir, "agB");
-      expect(Date.now() - started, "a live lock must actually be waited for").toBeGreaterThanOrEqual(900);
+      // subagentStop is synchronous: the release marker is on disk only if the gate returned after the holder released.
+      expect(existsSync(releasedPath), "a live lock must actually be waited for: the gate returned before the holder released it").toBe(true);
+      expect(Number(readFileSync(releasedPath, "utf8")), "the holder released the lock after the stop began").toBeGreaterThanOrEqual(beforeStop);
       expect(r.json, JSON.stringify(r.json)).toBeNull();
       expect(cwdsRun(marker).map(real), "the reloaded verified tree matches the worktree's fingerprint: no command may run again").toEqual([real(wt)]);
     } finally {
@@ -2076,5 +2062,176 @@ describe("card stop-gate-worktree-agent-fingerprint", () => {
     writeFileSync(f, JSON.stringify(rec));
     stopIn(dir, "ag1", wt);
     expect(cwdsRun(marker).map(real)).toEqual([real(wt)]);
+  });
+});
+
+// card queen-seat-stop-gates-worktree: a card-queen seat edits only through Bash (every command starts
+// `cd <repo>/.claude/worktrees/card-<id> && ...`), so no change-tool trace line names its worktree, and its
+// SubagentStop cwd is the main checkout. verifyDirs also reads the agent's own Bash/Monitor trace lines for
+// absolute worktree paths (any event, any ok); a shell token never adds the main checkout. These fire the trace
+// hook for real, with the main checkout changed during the agent's life as concurrent lead work does live.
+describe("card queen-seat-stop-gates-worktree", () => {
+  const git = (cwd, ...args) => execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
+  const real = (p) => realpathSync(p);
+
+  function makeFixture() {
+    const markerDir = mkdtempSync(join(tmpdir(), "doug-qsw-marker-"));
+    const marker = join(markerDir, "marker.log");
+    const cfg = {
+      ...baseConfig,
+      commands: { test: `${process.execPath} -e "require('fs').appendFileSync('${marker}', process.cwd()+'\\n')"` },
+      stopGate: { commands: ["test"], onlyIfEdited: true, maxBlocks: 3, timeoutMs: 10000, requireEvidence: false },
+      trace: { enabled: true },
+    };
+    const dir = makeProject({ config: cfg, git: true });
+    mkdirSync(join(dir, "src"));
+    writeFileSync(join(dir, "src/a.ts"), "base");
+    git(dir, "add", "-A");
+    git(dir, "commit", "-q", "-m", "base");
+    const wt = join(dir, ".claude/worktrees/card-x");
+    git(dir, "worktree", "add", "-q", wt, "-b", "card-x-branch");
+    writeFileSync(join(dir, "src/a.ts"), "main edited before the agent started");
+    runHookScript("edit-loop", { tool_name: "Edit", tool_input: { file_path: "src/a.ts" } }, { dir });
+    return { dir, wt, marker };
+  }
+
+  const type = "coder";
+  const ids = (id) => ({ agent_id: id, agent_type: type });
+  const fireStart = (dir, id) => runHookScript("trace", { hook_event_name: "SubagentStart", ...ids(id) }, { dir });
+  // Shell lines are appended raw so the stored detail is the full command: the real trace hook clips a detail at 120
+  // chars, which a long tmpdir path hits at an environment-dependent spot (the clip itself is Q10).
+  const traceFile = (dir) => join(dir, ".doug/.state/trace/test-session.jsonl");
+  const rawLine = (dir, id, event, tool, detail, ok = null) => {
+    mkdirSync(dirname(traceFile(dir)), { recursive: true });
+    const l = { t: new Date().toISOString(), event, session: "test-session", agent: id, agentType: type, tool, toolUseId: null, detail, ok, tokens: null, context: null, reason: null };
+    appendFileSync(traceFile(dir), JSON.stringify(l) + "\n");
+  };
+  const fire = (dir, id, event, tool, tool_input, extra = {}) => {
+    const ok = event === "PostToolUse" ? !(extra.tool_response && extra.tool_response.is_error) : null;
+    rawLine(dir, id, event, tool, tool_input.command ?? tool_input.file_path, ok);
+  };
+  const bash = (dir, id, command) => fire(dir, id, "PreToolUse", "Bash", { command });
+  const stop = (dir, id) => runHookScript("stop-gate", { hook_event_name: "SubagentStop", cwd: dir, ...ids(id) }, { dir });
+  const mainMoves = (dir) => writeFileSync(join(dir, "src/a.ts"), "main edited again during the agent's life");
+  const cwdsRun = (marker) => (existsSync(marker) ? readFileSync(marker, "utf8").split("\n").filter(Boolean) : []);
+
+  it("Q1 a Bash-only seat whose commands start `cd <wt> &&` is verified in its worktree only, not the main checkout", () => {
+    const { dir, wt, marker } = makeFixture();
+    fireStart(dir, "ag1");
+    bash(dir, "ag1", `cd ${wt} && git status --short`);
+    writeFileSync(join(wt, "src/a.ts"), "edited through the shell");
+    mainMoves(dir);
+    stop(dir, "ag1");
+    expect(cwdsRun(marker).map(real)).toEqual([real(wt)]);
+  });
+
+  it("Q2 the `W=<wt>; git -C \"$W\" status` form (no cd) names the worktree", () => {
+    const { dir, wt, marker } = makeFixture();
+    fireStart(dir, "ag1");
+    bash(dir, "ag1", `W=${wt}; git -C "$W" status --short`);
+    writeFileSync(join(wt, "src/a.ts"), "edited through the shell");
+    mainMoves(dir);
+    stop(dir, "ag1");
+    expect(cwdsRun(marker).map(real)).toEqual([real(wt)]);
+  });
+
+  it("Q3 a Bash-only seat naming an unchanged worktree skips verification even though main changed", () => {
+    const { dir, wt, marker } = makeFixture();
+    fireStart(dir, "ag1");
+    bash(dir, "ag1", `cd ${wt} && git status --short`);
+    mainMoves(dir);
+    const r = stop(dir, "ag1");
+    expect(r.json, JSON.stringify(r.json)).toBeNull();
+    expect(cwdsRun(marker), "no command may run in any tree").toEqual([]);
+  });
+
+  it("Q4 a PostToolUse Bash line with ok:false and no Pre line still names the worktree", () => {
+    const { dir, wt, marker } = makeFixture();
+    fireStart(dir, "ag1");
+    fire(dir, "ag1", "PostToolUse", "Bash", { command: `cd ${wt} && false` }, { tool_response: { is_error: true } });
+    writeFileSync(join(wt, "src/a.ts"), "edited through the shell");
+    mainMoves(dir);
+    stop(dir, "ag1");
+    expect(cwdsRun(marker).map(real)).toEqual([real(wt)]);
+  });
+
+  it("Q5 a Monitor line naming the worktree selects it", () => {
+    const { dir, wt, marker } = makeFixture();
+    fireStart(dir, "ag1");
+    fire(dir, "ag1", "PreToolUse", "Monitor", { command: `cd ${wt} && tail -f log` });
+    writeFileSync(join(wt, "src/a.ts"), "edited through the shell");
+    mainMoves(dir);
+    stop(dir, "ag1");
+    expect(cwdsRun(marker).map(real)).toEqual([real(wt)]);
+  });
+
+  it("Q6 a shell token naming a main-checkout path does not add the main checkout", () => {
+    const { dir, wt, marker } = makeFixture();
+    fireStart(dir, "ag1");
+    // Two absolute paths do not fit the 120-char detail clip, so the main path gets its own command.
+    bash(dir, "ag1", `node ${dir}/m.mjs`);
+    bash(dir, "ag1", `cd ${wt} && git status --short`);
+    writeFileSync(join(wt, "src/a.ts"), "edited through the shell");
+    mainMoves(dir);
+    stop(dir, "ag1");
+    expect(cwdsRun(marker).map(real)).toEqual([real(wt)]);
+  });
+
+  it("Q7 a Bash-only agent whose commands name no worktree is still verified in the main checkout", () => {
+    const { dir, marker } = makeFixture();
+    fireStart(dir, "ag1");
+    bash(dir, "ag1", "grep -n x plugins/a.mjs");
+    mainMoves(dir);
+    stop(dir, "ag1");
+    expect(cwdsRun(marker).map(real)).toEqual([real(dir)]);
+  });
+
+  it("Q8 a Write in main plus a Bash `cd <wt>` verifies both trees, each once", () => {
+    const { dir, wt, marker } = makeFixture();
+    fireStart(dir, "ag1");
+    fire(dir, "ag1", "PostToolUse", "Write", { file_path: join(dir, "src/a.ts") }, { tool_response: { ok: true } });
+    bash(dir, "ag1", `cd ${wt} && git status --short`);
+    bash(dir, "ag1", `cd ${wt} && git diff`);
+    writeFileSync(join(wt, "src/a.ts"), "edited through the shell");
+    mainMoves(dir);
+    stop(dir, "ag1");
+    const got = cwdsRun(marker).map(real);
+    expect(got.filter((p) => p === real(dir))).toHaveLength(1);
+    expect(got.filter((p) => p === real(wt))).toHaveLength(1);
+    expect(got).toHaveLength(2);
+  });
+
+  it("Q9 another agent's Bash line naming the worktree adds nothing to this agent's stop", () => {
+    const { dir, wt, marker } = makeFixture();
+    fireStart(dir, "ag1");
+    fireStart(dir, "ag2");
+    bash(dir, "ag2", `cd ${wt} && git status --short`);
+    bash(dir, "ag1", "grep -n x plugins/a.mjs");
+    writeFileSync(join(wt, "src/a.ts"), "edited by the other agent");
+    mainMoves(dir);
+    stop(dir, "ag1");
+    expect(cwdsRun(marker).map(real)).toEqual([real(dir)]);
+  });
+
+  it("Q10 a token clipped where a sibling worktree's name ends names nothing, but one clipped after `<name>/` still names it", () => {
+    const { dir, wt, marker } = makeFixture();
+    const sib = join(dir, ".claude/worktrees/card-x-y");
+    git(dir, "worktree", "add", "-q", sib, "-b", "card-x-y-branch");
+    fireStart(dir, "ag1");
+    // what the trace hook stores for a detail cut right after the sibling's prefix name `card-x`
+    rawLine(dir, "ag1", "PreToolUse", "Bash", `echo ${dir}/.claude/worktrees/card-x\u2026`);
+    writeFileSync(join(sib, "src/a.ts"), "edited in the sibling");
+    mainMoves(dir);
+    stop(dir, "ag1");
+    expect(cwdsRun(marker).map(real)).toEqual([real(dir)]);
+    // a cut after the name and its slash still names the worktree
+    const m2 = makeFixture();
+    fireStart(m2.dir, "ag1");
+    rawLine(m2.dir, "ag1", "PreToolUse", "Bash", `cd ${m2.wt}/\u2026`);
+    writeFileSync(join(m2.wt, "src/a.ts"), "edited through the shell");
+    mainMoves(m2.dir);
+    stop(m2.dir, "ag1");
+    expect(cwdsRun(m2.marker).map(real)).toEqual([real(m2.wt)]);
+    expect(wt).toBeTruthy();
   });
 });

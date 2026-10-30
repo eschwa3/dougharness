@@ -91,9 +91,9 @@ import { isAppliedContent } from "../lib/proposals.mjs";
 import { gitHead, mergeSnapshot, readDecisions, readPlanSummary, readPlanSummaries, snapshotSection } from "../lib/anchor.mjs";
 import { contextReading, recordAgentContext } from "../lib/agent-context.mjs";
 import { parseTotals, readSummaries, sumTotals, compareTotals, deltaTotals, waiverCovers } from "../lib/test-totals.mjs";
-import { failingTestFilesFrom, nonTestTscPathsFrom, classifyFinalBlock, appendBlockLine, outputTail, redactText } from "../lib/block-ledger.mjs";
+import { failingTestFilesFrom, tscErrorPaths, nonTestTscPathsFrom, classifyFinalBlock, appendBlockLine, outputTail, redactText } from "../lib/block-ledger.mjs";
 import { docsGateDecision } from "../lib/docs-gate.mjs";
-import { gateLockPath, readGateLock, pidIsLive, writeGateLock, takeOverGateLock, resolveHookTimeoutSec, lockStaleByAge, normalizedTimeoutMs, lockWaitBoundMs } from "../lib/gate-lock.mjs";
+import { gateLockPath, readGateLock, pidIsLive, writeGateLock, takeOverGateLock, acquireGateLock, resolveHookTimeoutSec, lockStaleByAge, normalizedTimeoutMs, lockWaitBoundMs } from "../lib/gate-lock.mjs";
 import { resolveCommands, computeTree, readRecord, writeRecord as writeTreeRecord, removeRecord as removeTreeRecord, creditable, totalsUsable, exitCreditUsable } from "../lib/verified-tree.mjs";
 
 // Only the last this many characters of last_assistant_message are ever scanned for a partial claim
@@ -560,7 +560,10 @@ function treeUnchangedSinceStart(dir, cfg, sessionId, subagent, input, currentFi
 // .claude/worktrees names the main checkout, except <dir>/.doug/.state and anything under it (untracked state,
 // never project code) which names nothing; any other path names nothing. The set is the cwd's worktree plus
 // every tree its trace paths name (a worktree that no longer exists as a directory is skipped). Empty, a main
-// Stop, or any failure resolves to [dir]. Only the verification target varies per tree: state, trace,
+// Stop, or any failure resolves to [dir]. Card queen-seat-stop-gates-worktree: a Bash or Monitor line of the
+// agent (Pre or Post, whatever ok) also names a worktree by any absolute path token in its detail (a seat
+// that edits only through `cd <wt> && ...`); a shell token never names the main checkout.
+// Only the verification target varies per tree: state, trace,
 // gate.lock, the ledger, and evidence stay under `dir`. Never throws.
 function verifyDirs(dir, cfg, sessionId, input, subagent) {
   try {
@@ -598,7 +601,22 @@ function verifyDirs(dir, cfg, sessionId, input, subagent) {
       const file = tracePath(dir, sessionId);
       if (existsSync(file)) {
         for (const l of readTrace(file)) {
-          if (l.agent !== subagent.id || l.event !== "PostToolUse" || !CHANGE_TOOLS.has(l.tool) || l.ok === false) continue;
+          if (l.agent !== subagent.id) continue;
+          if (SHELL_TOOLS.has(l.tool) && (l.event === "PreToolUse" || l.event === "PostToolUse")) {
+            // card queen-seat-stop-gates-worktree: a shell command names a worktree by an absolute path token;
+            // a main-checkout path in it names nothing.
+            for (const tok of String(l.detail || "").split(/[\s;&|()<>'"`=]+/)) {
+              if (!tok.startsWith("/")) continue;
+              // the trace clips a detail at 120 chars with a trailing ellipsis; a clipped token names a worktree
+              // only when the name is followed by "/" inside it (else the cut name may be a sibling's prefix)
+              const clipped = tok.endsWith("…");
+              const t = clipped ? tok.slice(0, -1) : tok;
+              const n = wtName(t);
+              if (n && (!clipped || t.includes("/" + n + "/"))) addWt(n);
+            }
+            continue;
+          }
+          if (l.event !== "PostToolUse" || !CHANGE_TOOLS.has(l.tool) || l.ok === false) continue;
           const name = wtName(l.detail);
           if (name) addWt(name);
           else if (inMain(l.detail)) add(dir);
@@ -865,14 +883,14 @@ function countCheck(dir, cfg, state, input, ran, vdir) {
       // logging must never fail the gate
     }
   };
-  // Each entry is `{ command, stdout }` (a real run: parsed here) or `{ command, result }` (a credited pre-commit
+  // Each entry is `{ command, stdout }` (a real run: parsed here) or `{ command, result }` (a credited verified-tree
   // run: the parseTotals-shaped result the hook recorded). Both take the identical path below.
   for (const { command, stdout, result } of ran) {
     try {
       const p = result !== undefined ? result : parseTotals(stdout);
       const summaries = p.status === "ok" ? readSummaries(p) : null;
       if (!summaries) {
-        note(`count check did not run for \`${command}\`: no test summary in its output`);
+        note(`count check did not run for \`${redactText(command, cfg.secrets)}\`: no test summary in its output`);
         continue;
       }
       const baseline = baselineFor(command);
@@ -880,11 +898,11 @@ function countCheck(dir, cfg, state, input, ran, vdir) {
       const baseList = all ? readSummaries(all[command]) : null;
       if (!baseList) {
         parsed[command] = summaries;
-        note(`count check did not run for \`${command}\`: no baseline totals for it (${summaries.length} test summar${summaries.length === 1 ? "y" : "ies"} printed: ${summaries.map((s) => `total ${s.total}, skipped ${s.skipped}, todo ${s.todo}`).join("; ")})`);
+        note(`count check did not run for \`${redactText(command, cfg.secrets)}\`: no baseline totals for it (${summaries.length} test summar${summaries.length === 1 ? "y" : "ies"} printed: ${summaries.map((s) => `total ${s.total}, skipped ${s.skipped}, todo ${s.todo}`).join("; ")})`);
         continue;
       }
       if (baseList.length !== summaries.length) {
-        problems.push(`\`${command}\` printed ${summaries.length} test summar${summaries.length === 1 ? "y" : "ies"}; the baseline has ${baseList.length}. The test count cannot be trusted. A waiver does not cover this; take a new baseline if a package was added or removed.`);
+        problems.push(`\`${redactText(command, cfg.secrets)}\` printed ${summaries.length} test summar${summaries.length === 1 ? "y" : "ies"}; the baseline has ${baseList.length}. The test count cannot be trusted. A waiver does not cover this; take a new baseline if a package was added or removed.`);
         continue;
       }
       parsed[command] = summaries;
@@ -896,10 +914,10 @@ function countCheck(dir, cfg, state, input, ran, vdir) {
       if (waiverCovers(waiverSources(dir, state.baselineHead), delta)) continue;
       const lines = found.map((f) => `${f.kind} ${f.kind === "total" ? "dropped" : "rose"} from ${f.baseline} (baseline) to ${f.now} (now)`);
       problems.push(
-        `\`${command}\` test count regressed: ${lines.join("; ")}. Deleting or skipping tests does not make a change green. Restore them, or waive it with a line \`test-count-waiver: total=${delta.total} skipped=${delta.skipped} todo=${delta.todo}; <reason>\` in the commit message or ${WAIVER_FILE_RELPATH}.`,
+        `\`${redactText(command, cfg.secrets)}\` test count regressed: ${lines.join("; ")}. Deleting or skipping tests does not make a change green. Restore them, or waive it with a line \`test-count-waiver: total=${delta.total} skipped=${delta.skipped} todo=${delta.todo}; <reason>\` in the commit message or ${WAIVER_FILE_RELPATH}.`,
       );
     } catch {
-      note(`count check did not run for \`${command}\`: error while checking`);
+      note(`count check did not run for \`${redactText(command, cfg.secrets)}\`: error while checking`);
     }
   }
   return { problems, parsed };
@@ -923,19 +941,6 @@ function writeLastGreen(dir, parsed) {
   }
 }
 
-// card stop-gate-credits-pre-commit: `git rev-parse HEAD^{tree}`, the tree sha of the current commit — what
-// the pre-commit hook's own record (.doug/.state/pre-commit/last-run.json) compares its `tree` field against.
-// Null on any failure (no git, no HEAD yet, ...): a reader must never throw.
-function headTreeSha(dir) {
-  try {
-    const out = execFileSync("git", ["rev-parse", "HEAD^{tree}"], { cwd: dir, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], timeout: 5000 });
-    const sha = out.trim();
-    return /^[0-9a-f]{40}$/.test(sha) ? sha : null;
-  } catch {
-    return null;
-  }
-}
-
 // card ratchet-pre-commit-credit: a recorded parseTotals result, normalised, or null when it is not readable.
 function readableRecordedTotals(t) {
   try {
@@ -948,10 +953,10 @@ function readableRecordedTotals(t) {
 }
 
 // card verified-tree-record: a verified-tree record (lib/verified-tree.mjs) of `tree` (the working tree now), same
-// Node and command set, credits the commands instead of re-running them. Same return shape as preCommitCredit:
+// Node and command set, credits the commands instead of re-running them. Returns
 // one `{ name, command, ok: true, credited: "verified-tree", recorded? }` per resolveCommands entry in config
 // order. A command with a baseline in state.testTotals and no readable recorded totals returns null (the commands
-// run), the same rule as preCommitCredit. Never throws: any failure is null, and null runs the commands.
+// run). Never throws: any failure is null, and null runs the commands.
 function treeCredit(dir, cfg, state, tree, mainDir) {
   try {
     if (!tree) return null;
@@ -970,59 +975,6 @@ function treeCredit(dir, cfg, state, tree, mainDir) {
       const hasBaseline = base ? readSummaries(base[command]) !== null : false;
       if (hasBaseline && (!recorded || recorded.status === "none")) return null;
       out.push({ name, command, ok: true, credited: "verified-tree", ...(recorded ? { recorded } : {}) });
-    }
-    return out;
-  } catch {
-    return null;
-  }
-}
-
-// card stop-gate-credits-pre-commit: the pre-commit hook (.githooks/pre-commit) writes a machine-readable
-// record of its own run to .doug/.state/pre-commit/last-run.json (version, tree, ok, at, commands: [{ name,
-// command, exit, durationMs, totals? }], totals being the hook's parseTotals result for that command; a command with a baseline in state.testTotals is credited only if its totals are readable (a list of summaries, or an old ok or conflict shape), else the commands run). When the working tree has no changes beyond HEAD (nothing left in `changed`
-// once stopGate.ignoreChangedPaths paths are removed) and that record is a passing run, against HEAD's own
-// tree, of exactly today's configured commands in order, the Stop gate credits it instead of re-running the
-// same commands a second time — returning `{ name, command, ok: true, credited: "pre-commit" }` per command,
-// same length and order as resolveCommands(cfg). Returns null (run as today) on a missing, unparsable,
-// wrong-shape, failing, stale-tree, or mismatched-commands record, or a dirty tree — fail closed to running,
-// never to passing. A reader must never throw: every path here is wrapped, so a corrupt record never crashes
-// the hook (`runHook` fails open on a throw, which here would mean passing without running — forbidden).
-function preCommitCredit(dir, cfg, changed, state, mainDir) {
-  try {
-    if (!Array.isArray(changed)) return null;
-    const ignore = cfg.stopGate.ignoreChangedPaths || [];
-    const remaining = changed.filter((f) => !matchAny(ignore, f));
-    if (remaining.length > 0) return null;
-    const raw = readFileSync(join(dir, ".doug/.state/pre-commit/last-run.json"), "utf8");
-    const record = JSON.parse(raw);
-    if (!record || typeof record !== "object") return null;
-    if (record.version !== 1) return null;
-    if (record.ok !== true) return null;
-    if (typeof record.tree !== "string") return null;
-    if (!Array.isArray(record.commands)) return null;
-    const head = headTreeSha(dir);
-    if (!head || record.tree !== head) return null;
-    for (const c of record.commands) {
-      if (!c || typeof c !== "object" || c.exit !== 0) return null;
-    }
-    const configured = resolveCommands(cfg);
-    if (record.commands.length !== configured.length) return null;
-    for (let i = 0; i < configured.length; i++) {
-      if (!record.commands[i] || record.commands[i].command !== configured[i].command) return null;
-    }
-    // card ratchet-pre-commit-credit: a command with a baseline in state.testTotals is credited only when the
-    // record carries readable totals for it (a list of valid summaries, or an old ok or conflict shape);
-    // otherwise null and the commands really run. `recorded` is the parseTotals-shaped result for the count check.
-    // dir is the verify dir (a worktree for a worktree agent); mainDir the main checkout, as countCheck's dir.
-    const baselineFor = countBaselineFor(mainDir ?? dir, state, dir);
-    const out = [];
-    for (let i = 0; i < configured.length; i++) {
-      const { name, command } = configured[i];
-      const recorded = readableRecordedTotals(record.commands[i].totals);
-      const base = baselineFor(command);
-      const hasBaseline = base ? readSummaries(base[command]) !== null : false;
-      if (hasBaseline && (!recorded || recorded.status === "none")) return null;
-      out.push({ name, command, ok: true, credited: "pre-commit", ...(recorded ? { recorded } : {}) });
     }
     return out;
   } catch {
@@ -1735,7 +1687,6 @@ runHook("stop-gate", async (input) => {
         currentFingerprint &&
         (sameTree(rec.fingerprint, currentFingerprint) || (rec.scope === scopeNow && (redViaNoTestPaths = onlyNoTestPathsChanged(vdir, cfg, rec.fingerprint, vchanged)))) &&
         !(subagent && (redByDesignClaim(input.last_assistant_message) ?? redByDesignClaim(lastHandbackMessage(input.agent_transcript_path)))) &&
-        !preCommitCredit(vdir, cfg, vchanged, state, dir) &&
         !treeCredit(vdir, cfg, state, computeTree(vdir), dir)
       ) {
         lastRed = rec;
@@ -1779,6 +1730,7 @@ runHook("stop-gate", async (input) => {
         failures: Array.isArray(lastRed.failures) ? lastRed.failures : [],
         cwd: typeof lastRed.cwd === "string" ? lastRed.cwd : null,
         tree: typeof lastRed.tree === "string" ? lastRed.tree : null,
+        files: Array.isArray(lastRed.files) ? lastRed.files : [],
       };
       logBlock(reason, reuseClass, reuseRecord);
       traceMainBlock(reuseRecord);
@@ -1818,13 +1770,17 @@ runHook("stop-gate", async (input) => {
         lockOwned = false;
       } else {
         const lock = readGateLock(dir);
-        if (!lock || !pidIsLive(lock.pid) || lockStaleByAge(lock, hookTimeoutMs)) {
+        // Card gate-lock-takeover-exclusive: a stale-on-arrival lock is acquired exclusively; "busy" (a rival just
+        // took it) enters the wait branch below like a live holder, "unwritable" runs unlocked.
+        let arrivalWait = !(!lock || !pidIsLive(lock.pid) || lockStaleByAge(lock, hookTimeoutMs));
+        if (!arrivalWait) {
           // Stale (a dead pid, a lock file that fails to parse, or one older than the hook-timeout budget —
-          // card stop-gate-budget-under-hook-timeout: no legitimate holder can still be running that long):
-          // take it over at once, no wait.
-          takeOverGateLock(dir, input.session_id);
-          lockOwned = true;
-        } else {
+          // card stop-gate-budget-under-hook-timeout: no legitimate holder can still be running that long).
+          const got = acquireGateLock(dir, input.session_id, hookTimeoutMs);
+          if (got === "acquired") lockOwned = true;
+          else if (got === "busy") arrivalWait = true;
+        }
+        if (arrivalWait) {
           // The bound scales with the number of configured commands (reviewer-found gap): a holder legitimately
           // runs each of resolveCommands(cfg) with its own timeoutMs budget, one after another, so a flat
           // timeoutMs would give up on — and duplicate — a holder still legitimately partway through its own
@@ -1839,11 +1795,22 @@ runHook("stop-gate", async (input) => {
           // taking the lock over, since taking over and running past the platform's own timeout would just get
           // this gate killed mid-command too (an ungated stop, its block message discarded).
           let refusedLock = null;
+          let acquired = false;
           while (true) {
             const live = readGateLock(dir);
-            if (!live || !pidIsLive(live.pid) || lockStaleByAge(live, hookTimeoutMs)) break; // released, died, or stale by age
+            if (!live || !pidIsLive(live.pid) || lockStaleByAge(live, hookTimeoutMs)) {
+              // Released, died, or stale by age. Card gate-load-timeouts: take it exclusively, so two waiters
+              // leaving this loop together do not both run their suites (ledger blocks 425 and 426). A lost race
+              // goes back to waiting, still bounded by the two deadlines below.
+              const got = acquireGateLock(dir, input.session_id, hookTimeoutMs);
+              if (got !== "busy") {
+                acquired = got === "acquired";
+                lockOwned = acquired;
+                break;
+              }
+            }
             if (Date.now() >= budgetDeadline) {
-              refusedLock = live;
+              refusedLock = readGateLock(dir) || live || {};
               break;
             }
             if (Date.now() >= waitDeadline) break; // bounded: never hang the gate on someone else's lock
@@ -1891,8 +1858,10 @@ runHook("stop-gate", async (input) => {
             return verifiedUnchangedAllow(dir, cfg, state, input, subagent, deferralCapNote);
           }
           // Still different, or the wait hit its bound with the lock still held: take it over and run.
-          takeOverGateLock(dir, input.session_id);
-          lockOwned = true;
+          if (!acquired) {
+            takeOverGateLock(dir, input.session_id);
+            lockOwned = true;
+          }
         }
       }
     }
@@ -1971,20 +1940,21 @@ runHook("stop-gate", async (input) => {
         const r = failedRuns[i] || {};
         return { command: redactText(cf.command, cfg.secrets), exit: typeof r.status === "number" ? r.status : null, timedOut: !!r.timedOut, tail: outputTail(cf.output, cfg.secrets) };
       });
-      return { failures, cwd: vdir, tree: treeBefore ?? null };
+      // card memory-failures-wiring: the sorted, unique, repo-relative paths the failed commands' output names.
+      const files = [...new Set(commandFailures.flatMap((cf) => [...failingTestFilesFrom(cf.output, vdir), ...tscErrorPaths(cf.output, vdir)]))].sort();
+      return { failures, cwd: vdir, tree: treeBefore ?? null, files };
     } catch {
-      return { failures: [], cwd: vdir, tree: null }; // the line is written without the failures; the decision is unchanged
+      return { failures: [], cwd: vdir, tree: null, files: [] }; // the line is written without the failures; the decision is unchanged
     }
   };
   const failedRuns = []; // parallel to commandFailures: { status, timedOut } of each failed run (card block-ledger-failing-output)
-  const ranGreen = []; // count check input: { command, stdout } of each command that really ran and exited 0, plus { command, result } of each credited pre-commit command whose recorded totals are readable
-  // card stop-gate-credits-pre-commit: a passing pre-commit record for this exact tree and command set
-  // stands in for actually running them — see preCommitCredit above. Every other check below (evidence,
-  // red-by-design, state.verified, the block ledger) runs exactly as it would after a real run.
+  const ranGreen = []; // count check input: { command, stdout } of each command that really ran and exited 0, plus { command, result } of each credited verified-tree command whose recorded totals are readable
   // card verified-tree-record: treeBefore is the working tree immediately before the first command; a record of
-  // it (any writer: Stop, verify.mjs, land, pre-commit) is tried before preCommitCredit's last-run.json.
+  // it (any writer: Stop, verify.mjs, land, pre-commit) for this exact tree and command set stands in for
+  // actually running them. Every other check below (evidence, red-by-design, state.verified, the block ledger)
+  // runs exactly as it would after a real run.
   const treeBefore = skipVerification ? null : computeTree(vdir);
-  const credited = skipVerification ? null : (treeCredit(vdir, cfg, state, treeBefore, dir) ?? preCommitCredit(vdir, cfg, vchanged, state, dir));
+  const credited = skipVerification ? null : treeCredit(vdir, cfg, state, treeBefore, dir);
   // card gate-docs-skip-unless-named: a targeted run is never a full run (no record, no ratchet, no state.verified).
   const targeted = !credited && targetedFiles ? targetedFiles : null;
   if (!skipVerification && credited) {
@@ -2004,7 +1974,7 @@ runHook("stop-gate", async (input) => {
       if (remaining <= 0) {
         results.push({ name, command, ok: false, skipped: "budget" });
         problems.push(
-          `\`${command}\` not run: the stop gate's budget (hook timeout ${hookTimeoutSec} s) was used up before it could start.`,
+          `\`${redactText(command, cfg.secrets)}\` not run: the stop gate's budget (hook timeout ${hookTimeoutSec} s) was used up before it could start.`,
         );
         continue;
       }
@@ -2073,7 +2043,7 @@ runHook("stop-gate", async (input) => {
   let evidence = null;
   if (!skipVerification && cfg.stopGate.requireEvidence !== false && sessionMadeChanges) {
     evidence = verificationEvidence(state.commands || [], cfg);
-    if (evidence.ran.length === 0) problems.push(describeMissingEvidence(evidence.looked, results.every((r) => r.ok)));
+    if (evidence.ran.length === 0) problems.push(describeMissingEvidence(evidence.looked.map((c) => redactText(c, cfg.secrets)), results.every((r) => r.ok)));
   }
   const evidenceProblemAdded = problems.length > postCommandProblems;
 

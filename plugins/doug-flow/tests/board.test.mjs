@@ -4448,3 +4448,83 @@ describe("summary and batch record of a forced landing (card summary-forced-land
     expect(outcome(r.stdout)).toContain("acceptance 3/3 at land (the plan's)");
   });
 });
+
+// Card scripts-dir-requires-doug: board.mjs dirFrom resolved any cwd as the project, so a model cd'd into the scripts dir
+// wrote .doug/ state there (summary --card wrote a landing block with no board). Same refusal as memory.mjs; the legacy
+// docs/board.json record still counts as a project, and commands that need no project run anywhere.
+describe("board.mjs refuses a directory that is not a Doug project (card scripts-dir-requires-doug)", () => {
+  const bare = () => mkdtempSync(join(tmpdir(), "doug-board-bare-"));
+  const runIn = (args, cwd, env = { CLAUDE_PROJECT_DIR: "" }) => spawnSync(process.execPath, [cli, ...args], { cwd, encoding: "utf8", env: { ...process.env, ...env } });
+  const reportIn = (where) => {
+    const file = join(where, "report.json");
+    writeFileSync(file, JSON.stringify({ plan: "First", integrationBranch: "doug/a-b", ok: true, levels: [{ index: 0, tasks: [{ id: "a", card: "c1", implemented: true, verified: true, reviewed: true, adversary: { ran: true, verdict: "pass", blocked: false } }], integration: { ok: true } }] }));
+    return file;
+  };
+  const cleanup = (...dirs) => dirs.forEach((d) => rmSync(d, { recursive: true, force: true }));
+
+  it("summary --card from a cwd with no .doug/ exits 1 with the message and creates nothing", () => {
+    const cwd = bare();
+    const holder = bare();
+    try {
+      const res = runIn(["summary", reportIn(holder), "--card", "c1", "--summary", "S."], cwd);
+      expect(res.status, res.stderr).toBe(1);
+      expect(res.stderr).toContain("not a Doug project");
+      expect(res.stderr).toContain("has no .doug/");
+      expect(readdirSync(cwd)).toEqual([]);
+    } finally {
+      cleanup(cwd, holder);
+    }
+  });
+
+  it("CLAUDE_PROJECT_DIR naming a dir with no .doug/ is refused even when [dir] is a real project", () => {
+    const proj = project();
+    const target = bare();
+    try {
+      const res = runIn(["card", "first", proj], proj, { CLAUDE_PROJECT_DIR: target });
+      expect(res.status, res.stderr).toBe(1);
+      expect(res.stderr).toContain("not a Doug project");
+      expect(res.stderr).toContain(target);
+      expect(readdirSync(target)).toEqual([]);
+    } finally {
+      cleanup(proj, target);
+    }
+  });
+
+  it("a [dir] positional with no .doug/ is refused from a cwd that is a project, creating nothing there", () => {
+    const proj = project();
+    const target = bare();
+    const holder = bare();
+    try {
+      const res = runIn(["summary", reportIn(holder), "--card", "c1", "--summary", "S.", target], proj);
+      expect(res.status, res.stderr).toBe(1);
+      expect(res.stderr).toContain("not a Doug project");
+      expect(readdirSync(target)).toEqual([]);
+    } finally {
+      cleanup(proj, target, holder);
+    }
+  });
+
+  it("budgets without --from needs no project and works from a bare cwd", () => {
+    const cwd = bare();
+    try {
+      const res = runIn(["budgets"], cwd);
+      expect(res.status, res.stderr).toBe(0);
+      expect(res.stdout.startsWith("table: ")).toBe(true);
+    } finally {
+      cleanup(cwd);
+    }
+  });
+
+  it("a dir holding only the legacy docs/board.json is still a project", () => {
+    const dir = mkdtempSync(join(tmpdir(), "doug-board-legacy-"));
+    try {
+      mkdirSync(join(dir, "docs"));
+      writeFileSync(join(dir, "docs/board.json"), JSON.stringify(board()));
+      const res = runIn(["card", "first", dir], dir);
+      expect(res.status, res.stderr).toBe(0);
+      expect(res.stdout).toContain("first");
+    } finally {
+      cleanup(dir);
+    }
+  });
+});

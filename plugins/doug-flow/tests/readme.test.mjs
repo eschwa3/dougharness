@@ -736,6 +736,35 @@ describe("board docs show --summary on every record and summary form (card docs-
   });
 });
 
+// Card readme-v1-6: README and CHANGELOG describe 1.6.
+describe("README and CHANGELOG for 1.6 (card readme-v1-6)", () => {
+  const FEATURES = {
+    "gate.lock": /gate\.lock/,
+    "verified-tree": /verified-tree/i,
+    "detached reflect": /--detach|detached/i,
+    "memory.db lock wait": /busy/i,
+    "no .doug/ refusal": /no `?\.doug\/`?/i,
+  };
+  const missing = (text) => Object.entries(FEATURES).filter(([, re]) => !re.test(text)).map(([k]) => k);
+
+  it("W1: CHANGELOG 1.6.0 has at least 8 bullets and names every stability feature", () => {
+    const cl = sectionBody(readRoot("CHANGELOG.md"), "1.6.0");
+    expect(cl, "CHANGELOG.md has no ## 1.6.0 section").not.toBeNull();
+    expect(topLevelBullets(cl).length).toBeGreaterThanOrEqual(8);
+    const m = missing(cl);
+    expect(m, `CHANGELOG 1.6.0 lacks: ${m.join(", ")}`).toEqual([]);
+  });
+
+  it("W2: README Feature highlights name 1.6, drop New in 1.4, and name every stability feature", () => {
+    const hl = sectionBody(readRoot("README.md"), "Feature highlights") ?? "";
+    expect(hl, "README has no ## Feature highlights section").not.toBe("");
+    expect(hl).toContain("1.6");
+    expect(hl).not.toContain("New in 1.4");
+    const m = missing(hl);
+    expect(m, `README Feature highlights lacks: ${m.join(", ")}`).toEqual([]);
+  });
+});
+
 // Card readme-v1-4: README describes 1.4 (card readme-v1-3 taught the four how-tos).
 describe("README for 1.4 (card readme-v1-4)", () => {
   const changelogSection = () => sectionBody(readRoot("CHANGELOG.md"), "1.4.0");
@@ -749,25 +778,20 @@ describe("README for 1.4 (card readme-v1-4)", () => {
   };
   const TOPICS = ["Your first card", "Autopilot", "Gates and hooks", "Memory"];
 
-  it("V1: CHANGELOG.md's newest section is 1.5.0, then 1.4.0, then 1.3.0, and 1.4.0 lists at least 5 bullets", () => {
+  it("V1: CHANGELOG.md's newest section is 1.6.0, then 1.5.0, then 1.4.0, and 1.4.0 lists at least 5 bullets", () => {
     const hs = headings(readRoot("CHANGELOG.md"));
-    expect(hs[0]?.text).toBe("1.5.0");
-    expect(hs[1]?.text).toBe("1.4.0");
-    expect(hs[2]?.text).toBe("1.3.0");
+    expect(hs[0]?.text).toBe("1.6.0");
+    expect(hs[1]?.text).toBe("1.5.0");
+    expect(hs[2]?.text).toBe("1.4.0");
     const section = changelogSection();
     expect(section, "CHANGELOG.md has no ## 1.4.0 section").not.toBeNull();
     expect(topLevelBullets(section).length).toBeGreaterThanOrEqual(5);
   });
 
-  it("V2: the six 1.4 features appear in the CHANGELOG 1.4.0 section and in README's Feature highlights, which names 1.4", () => {
+  it("V2: the six 1.4 features appear in the CHANGELOG 1.4.0 section", () => {
     const cl = changelogSection() ?? "";
-    const hl = sectionBody(readRoot("README.md"), "Feature highlights") ?? "";
-    expect(hl, "README has no ## Feature highlights section").not.toBe("");
-    expect(hl).toContain("1.4");
     const missingCl = Object.entries(FEATURES).filter(([, re]) => !re.test(cl)).map(([k]) => k);
-    const missingHl = Object.entries(FEATURES).filter(([, re]) => !re.test(hl)).map(([k]) => k);
     expect(missingCl, `CHANGELOG 1.4.0 lacks: ${missingCl.join(", ")}`).toEqual([]);
-    expect(missingHl, `README Feature highlights lacks: ${missingHl.join(", ")}`).toEqual([]);
   });
 
   it("V3: README's 3rd and 4th headings are Feature highlights and How-tos, highlights have 3-7 bullets", () => {

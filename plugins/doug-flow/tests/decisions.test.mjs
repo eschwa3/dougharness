@@ -11,7 +11,7 @@ import { dirname, join, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createHash } from "node:crypto";
 import { nextDecisionNumber, slugify, renderDecision, proposeDecision, proposeAmendment, proposeRule, proposeClaudeMd } from "../lib/decisions.mjs";
-import { applyProposal, readAppliedLedger } from "../lib/learn.mjs";
+import { applyProposal, readAppliedLedger, countLines, CLAUDE_MD_MAX_LINES } from "../lib/learn.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = join(here, ".."); // plugins/doug-flow
@@ -28,6 +28,7 @@ function tempProject({ decisions = {} } = {}) {
   execFileSync("git", ["config", "user.name", "t"], { cwd: dir });
   writeFileSync(join(dir, ".gitignore"), ".doug/.state/\n");
   mkdirSync(join(dir, "docs/decisions"), { recursive: true });
+  mkdirSync(join(dir, ".doug")); // a Doug project: memory.mjs refuses a directory with no .doug/
   for (const [name, content] of Object.entries(decisions)) {
     writeFileSync(join(dir, "docs/decisions", name), content);
   }
@@ -369,6 +370,13 @@ function tempProjectWithClaudeMd(claudeMd = FIXTURE_CLAUDE_MD) {
   return dir;
 }
 
+// FIXTURE_CLAUDE_MD with distinct filler bullets under Gotchas so the file is exactly `n` lines.
+function paddedFixture(n) {
+  const filler = Array.from({ length: n - countLines(FIXTURE_CLAUDE_MD) }, (_, i) => `- Filler ${i}.\n`).join("");
+  return FIXTURE_CLAUDE_MD.replace("- Duplicate bullet.\n- Duplicate bullet.\n", `- Duplicate bullet.\n- Duplicate bullet.\n${filler}`);
+}
+const oneAdd = { add: [{ heading: "## Gotchas", line: "- One more.", source: "s" }] };
+
 describe("proposeClaudeMd", () => {
   // Also the "only .doug/hooks/scripts present" case: tempProjectWithClaudeMd's fixture hook lives solely at
   // .doug/hooks/scripts/bash-guard.mjs, so the enforcedBy: "bash-guard.mjs" remove below resolving to ok: true
@@ -469,12 +477,20 @@ describe("proposeClaudeMd", () => {
     expectRefusedNothingWritten(dir, { add: [{ heading: "## Gotchas", line: "not a bullet", source: "s" }] }, expect.stringContaining("start with"));
   });
 
-  it("refuses a result over 60 lines, naming the count", () => {
-    const dir = tempProjectWithClaudeMd();
-    const add = [];
-    for (let i = 0; i < 40; i++) add.push({ heading: "## Gotchas", line: `- Extra line ${i}.`, source: "s" });
-    const result = expectRefusedNothingWritten(dir, { add }, expect.stringMatching(/\b\d+\b/));
-    expect(result.reason).toContain("60");
+  it("accepts a result of exactly 200 lines, with a diff", () => {
+    expect(CLAUDE_MD_MAX_LINES).toBe(200);
+    const dir = tempProjectWithClaudeMd(paddedFixture(199));
+    expect(countLines(readFileSync(join(dir, "CLAUDE.md"), "utf8"))).toBe(199);
+    const result = proposeClaudeMd({ dir, edits: oneAdd });
+    expect(result.ok, result.reason).toBe(true);
+    expect(result.proposal.rationale.lines.after).toBe(200);
+    expect(readFileSync(result.diffPath, "utf8")).toContain("+- One more.");
+  });
+
+  it("refuses a result over 200 lines, naming the count and the limit", () => {
+    const dir = tempProjectWithClaudeMd(paddedFixture(200));
+    const result = expectRefusedNothingWritten(dir, oneAdd, expect.stringMatching(/\b201\b/));
+    expect(result.reason).toContain("200-line limit");
   });
 
   it("refuses a change that would touch the Models section", () => {
@@ -574,12 +590,10 @@ describe("proposeClaudeMd dryRun (card reflect-offers-claude-md)", () => {
     expect(readFileSync(join(dir, "CLAUDE.md"), "utf8")).toBe(FIXTURE_CLAUDE_MD);
   });
 
-  it("still refuses the 60-line case, the Models change, and the Commands change with the same reasons, writing nothing", () => {
-    const dir = tempProjectWithClaudeMd();
-    const many = [];
-    for (let i = 0; i < 40; i++) many.push({ heading: "## Gotchas", line: `- Extra line ${i}.`, source: "s" });
+  it("still refuses the 200-line case, the Models change, and the Commands change with the same reasons, writing nothing", () => {
+    const dir = tempProjectWithClaudeMd(paddedFixture(200));
     const cases = [
-      { add: many },
+      oneAdd,
       { add: [{ heading: "## Models", line: "- x", source: "s" }] },
       { remove: [{ line: "pnpm test", enforcedBy: "bash-guard.mjs", source: "s" }] },
     ];

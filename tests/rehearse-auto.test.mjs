@@ -6,8 +6,8 @@ import { describe, it, expect, afterAll, vi } from "vitest";
 import { writeFileSync, readFileSync, chmodSync, rmSync, existsSync, readdirSync, mkdirSync, cpSync } from "node:fs";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
-import { ESTIMATES, SCENARIOS, CLI, BOARD_MJS, TASKS_FILE, scenarioTotal, estimateLines, prepareFixture, runSessionStage, runActStage, SCENARIO_STAGES, rehearsalNote, cleanEnv, rehearsalGate, runScenario } from "../scripts/rehearse-lib.mjs";
-import { newBoard, addCard, saveBoard } from "../plugins/doug-flow/lib/board.mjs";
+import { HARD_STAGES, ESTIMATES, SCENARIOS, CLI, BOARD_MJS, TASKS_FILE, scenarioTotal, estimateLines, prepareFixture, runSessionStage, runActStage, SCENARIO_STAGES, rehearsalNote, cleanEnv, rehearsalGate, runScenario } from "../scripts/rehearse-lib.mjs";
+import { wallCapMinutes, usdCapDollars, newBoard, addCard, saveBoard } from "../plugins/doug-flow/lib/board.mjs";
 import { here, cli, TEST_PREFIX, trackedTempDir, makeFakeClaude, cannedStream, run, git, spawnScript, inLib, fixDurationBug, tempDirs } from "./rehearse-fixtures.mjs";
 
 // Every temp directory this file creates is removed here, whether the test that made it passed or not.
@@ -52,7 +52,7 @@ describe("card autopilot: the auto scenario's registry entries", () => {
     const prompt = build.prompt({ card: { id: "fix-hours" } });
     expect(prompt.startsWith("/doug-next --auto\n")).toBe(true);
     expect(prompt).not.toContain("--auto 2");
-    expect(prompt).toContain("I approved the queue as shown, with the caps you proposed.");
+    expect(prompt).toContain("I approved the queue");
     expect(prompt).toContain("Do not invoke the doug-board skill at any step: this checkout publishes nothing.");
     expect(prompt).not.toContain("core-next");
     expect(build.maxTurns).toBeGreaterThanOrEqual(100);
@@ -1269,5 +1269,68 @@ describe("card parallel-card-queens: assertParallelBuilt (R04)", () => {
     const result = await inLib("assertParallelBuilt", { dir, baseline, stream: goodStream() });
     expect(result.ok).toBe(false);
     expect(result.message).toMatch(/parent/i);
+  });
+});
+
+// Card rehearse-auto-build-names-queue: the auto and parallel build prompts name the approved queue (Ready card ids
+// in board order) and both caps, so a fresh session needs no queue "as shown". Caps are computed, never pinned.
+describe("card rehearse-auto-build-names-queue: the build prompts name the approved queue and caps", () => {
+  const S = (id, column = "ready") => ({ id, column, track: "hand", size: "S", class: "code" });
+  const twoS = [S("a"), S("b")];
+  const capsOf = (cards) => `wall cap of ${wallCapMinutes(cards)} min and a USD cap of $${usdCapDollars(cards).toFixed(2)}`;
+  const buildOf = (stages) => stages.find((st) => st.name === "build");
+  const autoBuild = buildOf(SCENARIO_STAGES.auto);
+  const parBuild = buildOf(SCENARIO_STAGES.parallel);
+  const ordersAuto = [S("fix-tax-rounding"), S("fix-catalog-search"), S("add-top-products", "backlog")];
+  const ordersPar = [S("fix-stock-reserve"), S("fix-catalog-search")];
+  const rentals = ["fix-late-return-fee", "member-grace-day", "overdue-reminders", "fix-deposit-refund", "fix-back-to-back-booking", "maintenance-blackout"].map((i) => S(i));
+  const rentalsAll = [...rentals, S("customer-statements", "backlog")];
+
+  it("auto build with no cards names the ts-basic queue in board order and its computed caps", () => {
+    const prompt = autoBuild.prompt({ card: { id: "fix-hours" } });
+    expect(prompt.startsWith("/doug-next --auto\n")).toBe(true);
+    expect(prompt).toContain("I approved the queue fix-hours, add-truncate");
+    expect(prompt).toContain(capsOf(twoS));
+    expect(prompt).not.toContain("as shown");
+    expect(prompt).not.toContain("caps you proposed");
+    expect(prompt).toContain("Do not invoke the doug-board skill at any step: this checkout publishes nothing.");
+  });
+  it("auto build for ts-orders names only the Ready cards, in board order, with caps over them", () => {
+    const prompt = autoBuild.prompt({ card: { id: "fix-tax-rounding" }, cards: ordersAuto });
+    expect(prompt).toContain("I approved the queue fix-tax-rounding, fix-catalog-search");
+    expect(prompt).not.toContain("add-top-products");
+    expect(prompt).toContain(capsOf(ordersAuto.slice(0, 2)));
+    expect(prompt).not.toContain("as shown");
+  });
+  it("parallel build for ts-orders names its queue and caps", () => {
+    const prompt = parBuild.prompt({ card: { id: "fix-stock-reserve" }, cards: ordersPar });
+    expect(prompt.startsWith("/doug-next --auto\n")).toBe(true);
+    expect(prompt).toContain("I approved the queue fix-stock-reserve, fix-catalog-search");
+    expect(prompt).toContain(capsOf(ordersPar));
+    expect(prompt).not.toContain("as shown");
+    expect(prompt).not.toContain("caps you proposed");
+  });
+  it("parallel build with no cards names fix-hours, add-truncate and caps", () => {
+    const prompt = parBuild.prompt({ card: { id: "fix-hours" } });
+    expect(prompt).toContain("I approved the queue fix-hours, add-truncate");
+    expect(prompt).toContain(capsOf(twoS));
+  });
+  it("hard-auto build for ts-rentals names all six Ready ids in order, not the Backlog card, with caps over the six", () => {
+    const prompt = buildOf(HARD_STAGES["hard-auto"]).prompt({ card: { id: rentals[0].id }, cards: rentalsAll });
+    expect(prompt).toContain(`I approved the queue ${rentals.map((c) => c.id).join(", ")}`);
+    expect(prompt).not.toContain("customer-statements");
+    expect(prompt).toContain(capsOf(rentals));
+  });
+  it("hard-parallel build also names its queue and caps", () => {
+    const prompt = buildOf(HARD_STAGES["hard-parallel"]).prompt({ card: { id: "fix-stock-reserve" }, cards: ordersPar });
+    expect(prompt).toContain("I approved the queue fix-stock-reserve, fix-catalog-search");
+    expect(prompt).toContain(capsOf(ordersPar));
+  });
+  it("both prompts say the approval predates this session and the queue must start now", () => {
+    for (const b of [autoBuild, parBuild]) {
+      const prompt = b.prompt({ card: { id: "fix-hours" } });
+      expect(prompt).toMatch(/before this session/);
+      expect(prompt).toMatch(/not ask again/);
+    }
   });
 });

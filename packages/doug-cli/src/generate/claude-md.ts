@@ -69,7 +69,7 @@ export function generateClaudeMd(d: Detection, cfg: DougConfig): string {
   lines.push("");
   lines.push("## Gotchas");
   lines.push("");
-  lines.push("<!-- Add project-specific pitfalls here, one line each. Keep this file under 60 lines. -->");
+  lines.push("<!-- Add project-specific pitfalls here, one line each. Keep this file to 200 lines or fewer. -->");
   lines.push("");
   lines.push(...MODELS_SECTION);
   return lines.join("\n");

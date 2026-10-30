@@ -162,7 +162,7 @@
 //                                                 ids that the card's fetched.jsonl lists; verified true; passes = --rounds, default 1; one fixed
 //                                                 blocker ledger entry per --review id), then reflects on it
 //                                                 exactly as above. --commit is required (exit 2). No schema change.
-//   memory.mjs reflect --failures <card-id> [dir] [--session <id>] [--claude-bin <path>] [--model <name>] [--max-usd <n>] [--dry-run] [--json]
+//   memory.mjs reflect --failures <card-id> [dir] [--session <id>] [--claude-bin <path>] [--model <name>] [--max-usd <n>] [--detach] [--dry-run] [--json]
 //                                                 (card memory-failure-lessons) the failure pass: reads the card's
 //                                                 run history for stopped reports, blocks classed real and
 //                                                 denials, prints the item count with the blocks it hid by class
@@ -172,7 +172,10 @@
 //                                                 .doug/.state/memory/pitfalls.jsonl (no new lesson, no helpful).
 //                                                 Exclusive with --hand and a report path (exit 2); idempotent on
 //                                                 the slice; --dry-run makes no model call and prints the prompt it would send;
-//                                                 not wired into any loop (its spend cap is open)
+//                                                 --detach runs it as job failures-<card>; autopilot and doug-hand start it
+//                                                 so when a card stops, --max-usd 0.5 on the cheap row (user, 2026-10-28).
+//                                                 A real block with the same class on a file a live pitfall's recorded
+//                                                 occurrence names is a code-side repeat (via 'file'); empty files never match
 //   memory.mjs ideas [dir] [--claude-bin <path>] [--model <name>] [--max-usd <n>] [--cap <n>] [--dry-run] [--json]
 //                                                 (card memory-idea-proposals, ADR 0019 L3) one cheap-row `claude
 //                                                 -p --json-schema` call (--max-usd default 0.5) over the live
@@ -275,15 +278,15 @@
 //                                                 remove: [{line,enforcedBy,source}], note }); writes only a diff
 //                                                 under .doug/.state/learn/, never CLAUDE.md itself; refuses when
 //                                                 an edit would touch the Models section or the fenced Commands
-//                                                 block, or would push CLAUDE.md over 60 lines. Approve and write
+//                                                 block, or would push CLAUDE.md over 200 lines. Approve and write
 //                                                 it with `learn.mjs apply <diff>`
 // lesson add and import embed only the row(s) they just wrote, best-effort, when a provider is configured: a
 // provider failure prints one stderr line and never turns into a nonzero exit for that add/import. A pending
 // row from an earlier add is left alone until `reembed` (or a later add/import) picks it up.
-import { readFileSync, existsSync, mkdirSync, writeFileSync, readdirSync, appendFileSync, statSync } from "node:fs";
+import { readFileSync, existsSync, mkdirSync, writeFileSync, readdirSync, appendFileSync, statSync, openSync, closeSync, renameSync, linkSync, unlinkSync } from "node:fs";
 import { resolve, join, dirname } from "node:path";
 import { createHash } from "node:crypto";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { parseAdversaryClasses, loadBoard, saveBoard, findCard } from "../lib/board.mjs";
 import { planFor, unwrapReport } from "../lib/plan.mjs";
 import { costRun } from "../lib/cost.mjs";
@@ -301,7 +304,7 @@ import {
 } from "../lib/embeddings.mjs";
 
 const argv = process.argv.slice(2);
-const FLAGS = new Set(["json", "all", "hand", "dry-run", "check", "no-check", "unconfirmed"]);
+const FLAGS = new Set(["json", "all", "hand", "dry-run", "check", "no-check", "unconfirmed", "detach", "earlier"]);
 const REPEATABLE = new Set(["adversary", "review", "harmful"]);
 const opts = {};
 const positional = [];
@@ -326,8 +329,145 @@ function fail(msg, code = 1) {
   process.exit(code);
 }
 
+// Card detach-background-chores: start `reflect` (or any command) as a detached job and read it later with
+// `memory.mjs job <name>`. State lives in <dir>/.doug/.state/jobs/<name>.json (pid, argv, startedAt, and on exit
+// exitCode/signal/endedAt, written by the runner); stdout and stderr go to <name>.log, never to the caller's
+// pipes, so the caller returns at once.
+function jobPaths(dir, name) {
+  const jobs = join(dir, ".doug", ".state", "jobs");
+  return { jobs, file: join(jobs, `${name}.json`), log: join(jobs, `${name}.log`) };
+}
+
+function readJobFile(file) {
+  try {
+    return JSON.parse(readFileSync(file, "utf8")) || {};
+  } catch {
+    return null;
+  }
+}
+
+// A job file is replaced whole (write a temp file, rename it over), so a concurrent reader never sees a truncated
+// file. `ifAbsent` links the temp file in instead, so the start command never overwrites a result the runner wrote
+// (startDetachedJob removes an ended job's old file first, so the new start record is linked in fresh).
+function writeJobFile(file, state, ifAbsent = false) {
+  const tmp = `${file}.${process.pid}.${Math.random().toString(36).slice(2)}.tmp`;
+  writeFileSync(tmp, JSON.stringify(state, null, 2) + "\n", "utf8");
+  try {
+    if (ifAbsent) linkSync(tmp, file);
+    else renameSync(tmp, file);
+  } catch (err) {
+    if (!ifAbsent || !err || err.code !== "EEXIST") throw err;
+  } finally {
+    if (ifAbsent) {
+      try {
+        unlinkSync(tmp);
+      } catch {}
+    }
+  }
+}
+
+function startDetachedJob(dir, name, command) {
+  const { jobs, file, log } = jobPaths(dir, name);
+  mkdirSync(jobs, { recursive: true });
+  // A name is reusable once its job ended or its process is gone; a live job holding it is never touched.
+  const held = readJobFile(file);
+  if (held && held.endedAt === undefined && held.exitCode === undefined && !held.signal && pidAlive(held.pid)) {
+    fail(`job ${name} is already running (pid ${held.pid}); read it with: memory.mjs job ${name}`, 1);
+  }
+  try {
+    unlinkSync(file);
+  } catch {}
+  const fd = openSync(log, "w");
+  const startedAt = new Date().toISOString();
+  let child;
+  try {
+    child = spawn(process.execPath, [process.argv[1], "__jobrun", dir, name, "--", ...command], {
+      detached: true,
+      stdio: ["ignore", fd, fd],
+      cwd: process.cwd(),
+      env: process.env,
+    });
+    child.unref();
+  } finally {
+    closeSync(fd);
+  }
+  writeJobFile(file, { name, argv: command, pid: child.pid, startedAt }, true);
+  return { name, pid: child.pid };
+}
+
+// The detached runner: runs `command` with the log as its stdout/stderr, then records how it ended.
+async function runJob(dir, name, command) {
+  const { file } = jobPaths(dir, name);
+  // Only this runner's own start record (same pid) lends startedAt and argv; nothing else carries over.
+  const prior = readJobFile(file) || {};
+  const own = prior.pid === process.pid;
+  const state = { name, argv: own && prior.argv ? prior.argv : command, startedAt: own && prior.startedAt ? prior.startedAt : new Date().toISOString(), pid: process.pid };
+  writeJobFile(file, state);
+  const end = await new Promise((resolveEnd) => {
+    const c = spawn(command[0], command.slice(1), { stdio: "inherit", cwd: process.cwd(), env: process.env });
+    c.on("error", (err) => {
+      process.stderr.write(`job: cannot start ${command[0]}: ${err.message}\n`);
+      resolveEnd({ exitCode: 127, signal: null });
+    });
+    c.on("close", (code, signal) => resolveEnd({ exitCode: code, signal }));
+  });
+  const done = { ...state, exitCode: end.exitCode, signal: end.signal, endedAt: new Date().toISOString() };
+  writeJobFile(file, done);
+}
+
+// One job's state as { state: "pending"|"done"|"failed", line, st }; null when there is no job file.
+function jobStatus(dir, name) {
+  const { file, log } = jobPaths(dir, name);
+  const st = readJobFile(file);
+  if (!st) return null;
+  let lines = [];
+  try {
+    lines = readFileSync(log, "utf8").split("\n");
+  } catch {
+    lines = [];
+  }
+  const ended = st.endedAt !== undefined || st.exitCode !== undefined || st.signal;
+  const lastLine = () => lines.map((l) => l.trim()).filter(Boolean).slice(-1)[0] || "";
+  if (!ended) {
+    if (pidAlive(st.pid)) return { state: "pending", line: `${name}: pending (started ${st.startedAt}, pid ${st.pid})`, st };
+    return { state: "failed", line: `${name}: failed (the job process ${st.pid} is gone and wrote no result)${lastLine() ? `; last output: ${lastLine()}` : ""}`, st };
+  }
+  if (st.exitCode === 0 && !st.signal) {
+    const secs = st.endedAt && st.startedAt ? Math.max(0, Math.round((Date.parse(st.endedAt) - Date.parse(st.startedAt)) / 1000)) : null;
+    return { state: "done", line: `${jobSummaryLine(lines)}${secs === null ? "" : ` (job ${name}, ${secs} s)`}`, st };
+  }
+  return { state: "failed", line: `${name}: failed (${st.signal ? `signal ${st.signal}` : `exit ${st.exitCode}`})${lastLine() ? `: ${lastLine()}` : ""}`, st };
+}
+
+// Mark a finished job as read, so a later landing's `job --earlier` does not report it again.
+function markJobReported(dir, name, st) {
+  try {
+    writeJobFile(jobPaths(dir, name).file, { ...st, reportedAt: new Date().toISOString() });
+  } catch {}
+}
+
+function pidAlive(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    return !!err && err.code === "EPERM";
+  }
+}
+
+function jobSummaryLine(lines) {
+  const nonEmpty = lines.filter((l) => l.trim());
+  const reflected = nonEmpty.filter((l) => /(?:^|\) )(?:Reflected on |Already reflected on )/.test(l));
+  if (reflected.length) return reflected[reflected.length - 1];
+  const flush = nonEmpty.filter((l) => !/^\s/.test(l));
+  return (flush.length ? flush : nonEmpty).slice(-1)[0] || "";
+}
+
 function dirFrom(args, n) {
-  return resolve(process.env.CLAUDE_PROJECT_DIR || args[n] || process.cwd());
+  const d = resolve(process.env.CLAUDE_PROJECT_DIR || args[n] || process.cwd());
+  if (!existsSync(join(d, ".doug"))) fail(`not a Doug project: ${d} has no .doug/`, 1);
+  return d;
 }
 
 function verifiedWord(v) {
@@ -771,7 +911,7 @@ try {
         'usage: memory.mjs reflect <report.json> [dir] [--run <wf-id>] [--card <id>] [--commit <sha>] [--adversary "<id>=<class>[: <reason>]"]... [--harmful <id>]... [--claude-bin <path>] [--claude-dir <path>] [--model <name>] [--max-usd <n>] [--dry-run] [--json]';
       if (opts.failures !== undefined) {
         const failuresUsage =
-          "usage: memory.mjs reflect --failures <card-id> [dir] [--session <id>] [--claude-bin <path>] [--model <name>] [--max-usd <n>] [--dry-run] [--json]";
+          "usage: memory.mjs reflect --failures <card-id> [dir] [--session <id>] [--claude-bin <path>] [--model <name>] [--max-usd <n>] [--detach] [--dry-run] [--json]";
         const card = textOrNull(opts.failures);
         if (!card || opts.hand) fail(`${failuresUsage}\n--failures takes a card id and is exclusive with --hand and a report path.`, 2);
         if (rest.length > 1) fail(failuresUsage, 2);
@@ -786,6 +926,11 @@ try {
           if (isFile) fail(`${failuresUsage}\n--failures takes a card id and is exclusive with --hand and a report path.`, 2);
         }
         const fdir = dirFrom(rest, 0);
+        if (opts.detach) {
+          const started = startDetachedJob(fdir, `failures-${card}`, [process.execPath, process.argv[1], ...argv.filter((a) => a !== "--detach")]);
+          process.stdout.write(`${started.name}: started detached (pid ${started.pid}); read it with: memory.mjs job ${started.name}\n`);
+          break;
+        }
         const fmodels = loadModels(fdir);
         const fmodel = textOrNull(opts.model) || (fmodels.tiers.cheap && fmodels.tiers.cheap.model) || "haiku";
         let fmaxUsd = 0.5;
@@ -874,6 +1019,11 @@ try {
         } catch (err) {
           fail(`${handUsage}\n${err.message}`, 2);
         }
+        if (opts.detach) {
+          const started = startDetachedJob(dir, `reflect-${id}`, [process.execPath, process.argv[1], ...argv.filter((a) => a !== "--detach")]);
+          process.stdout.write(`${started.name}: started detached (pid ${started.pid}); read it with: memory.mjs job ${started.name}\n`);
+          break;
+        }
         const base = join(dir, ".doug", ".state", "reports", id);
         const readDirFiles = (sub) => {
           const d = join(base, sub);
@@ -958,6 +1108,12 @@ try {
           fail(`cannot parse report file ${reportPath} as JSON: ${err.message}`);
         }
         classes = parseAdversaryClasses(opts.adversary || []);
+        if (opts.detach) {
+          const tag = textOrNull(opts.card) || textOrNull(opts.run) || createHash("sha256").update(reportText).digest("hex").slice(0, 12);
+          const started = startDetachedJob(dir, `reflect-${tag}`, [process.execPath, process.argv[1], ...argv.filter((a) => a !== "--detach")]);
+          process.stdout.write(`${started.name}: started detached (pid ${started.pid}); read it with: memory.mjs job ${started.name}\n`);
+          break;
+        }
       }
       const reportHash = createHash("sha256").update(reportText).digest("hex");
       const plan = planFor(dir, opts.card);
@@ -1049,6 +1205,59 @@ try {
         }
         for (const d of result.claudeMdDropped || []) process.stdout.write(`claude-md candidate for lesson ${d.lessonId} dropped: ${d.reason}\n`);
       }
+      break;
+    }
+    case "__jobrun": {
+      const raw = process.argv.slice(2);
+      const sep = raw.indexOf("--");
+      if (sep < 3 || sep === raw.length - 1) fail("usage: memory.mjs __jobrun <dir> <name> -- <command> [args...]", 2);
+      await runJob(raw[1], raw[2], raw.slice(sep + 1));
+      break;
+    }
+    case "job": {
+      const usage = "usage: memory.mjs job <name> [dir] [--wait <seconds>] | memory.mjs job --earlier [dir]";
+      if (opts.earlier) {
+        // Earlier landings' jobs nobody has read yet: pending, failed, or finished with the summary never printed.
+        const edir = dirFrom(rest, 0);
+        const { jobs } = jobPaths(edir, "x");
+        let names = [];
+        try {
+          names = readdirSync(jobs).filter((f) => f.endsWith(".json")).map((f) => f.slice(0, -5));
+        } catch {
+          names = [];
+        }
+        let failed = false;
+        let any = false;
+        for (const n of names.sort()) {
+          const js = jobStatus(edir, n);
+          if (!js || js.st.reportedAt) continue;
+          any = true;
+          process.stdout.write(`earlier job ${js.line}\n`);
+          if (js.state === "failed") failed = true;
+          if (js.state !== "pending") markJobReported(edir, n, js.st);
+        }
+        if (!any) process.stdout.write("no earlier jobs unread\n");
+        if (failed) process.exit(1);
+        break;
+      }
+      const [name] = rest;
+      if (!name || !/^[A-Za-z0-9._-]+$/.test(name)) fail(usage, 2);
+      let waitSec = 0;
+      if (opts.wait !== undefined) {
+        waitSec = /^\d+$/.test(String(opts.wait)) ? Number(opts.wait) : NaN;
+        if (!Number.isInteger(waitSec)) fail(`${usage}\n--wait must be a whole number of seconds, got ${JSON.stringify(opts.wait)}.`, 2);
+      }
+      const jdir = dirFrom(rest, 1);
+      const deadline = Date.now() + waitSec * 1000;
+      let js = jobStatus(jdir, name);
+      if (!js) fail(`${name}: no such job in ${jdir}`, 1);
+      while (js.state === "pending" && Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, Math.min(500, Math.max(1, deadline - Date.now()))));
+        js = jobStatus(jdir, name) || js;
+      }
+      process.stdout.write(`${js.line}\n`);
+      if (js.state !== "pending") markJobReported(jdir, name, js.st);
+      if (js.state === "failed") process.exit(1);
       break;
     }
     case "outcomes": {
@@ -2080,7 +2289,7 @@ try {
       break;
     }
     default:
-      fail("usage: memory.mjs <record|reflect|outcomes|arms|lessons|lesson|history|model|import|recall|brief-lessons|doctor|reembed|embed-check|index|condition|decision|rule|claude-md> ...", 2);
+      fail("usage: memory.mjs <record|reflect|job|outcomes|arms|lessons|lesson|history|model|import|recall|brief-lessons|doctor|reembed|embed-check|index|condition|decision|rule|claude-md> ...", 2);
   }
 } catch (err) {
   fail(err.message);

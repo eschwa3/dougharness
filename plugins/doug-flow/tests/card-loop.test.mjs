@@ -1852,6 +1852,71 @@ describe("card card-loop-reviewer-answer-reaches-coder: reviewer answers", () =>
   });
 });
 
+// Card card-loop-later-answer-reaches-coder: every user answer to a reviewer stop runs one coder round.
+describe("card card-loop-later-answer-reaches-coder: second reviewer answer", () => {
+  const major = (over = {}) => ({ id: "F2", severity: "major", file: "b.mjs", description: "meh", evidence: "ran X, saw Y", ...over });
+  const Q2 = "major with evidence still open after one fix pass: F2";
+  const A1 = "Fix F2.";
+  const A2 = "Fix F2 properly, the first attempt missed it.";
+  const twoAnswers = () => ({
+    answers: [
+      { seat: "reviewer", question: Q2, answer: A1, round: 2 },
+      { seat: "reviewer", question: Q2, answer: A2, round: 3 },
+    ],
+  });
+  const fail = (s, findings) => go(s, okHB("reviewer", s, { verdict: "fail", findings }));
+
+  // reviewer 1 fails, coder 2 (fix pass), reviewer 2 fails, coder 3 (answer 1), reviewer 3 fails: returns that result.
+  function toReviewer3() {
+    const s = stateAt("reviewer", CARD, twoAnswers());
+    const r1 = fail(s, [major()]);
+    const c2 = ok(r1.state);
+    const r2 = fail(c2.state, [major()]);
+    expect(r2.state.pending).toBe("coder");
+    expect(r2.action.brief.round).toBe(3);
+    const c3 = ok(r2.state);
+    expect(c3.state.pending).toBe("reviewer");
+    return { r2, r3: (findings) => fail(c3.state, findings) };
+  }
+
+  it("T100 a second answer to a later reviewer stop runs one more coder round, not a stop", () => {
+    const { r3 } = toReviewer3();
+    const r = r3([major()]);
+    expect(r.action.kind).toBe("seat");
+    expect(r.state.pending).toBe("coder");
+    expect(r.action.brief.round).toBe(4);
+    expect(r.action.brief.findings.map((f) => f.id)).toEqual(["F2"]);
+  });
+
+  it("T101 the coder round driven by the second answer carries both answers; coder 3 stays without the second", () => {
+    const { r2, r3 } = toReviewer3();
+    expect(r2.action.brief.answers).toEqual([{ question: Q2, answer: A1 }]);
+    const brief = r3([major()]).action.brief;
+    expect(brief.answers).toEqual([
+      { question: Q2, answer: A1 },
+      { question: Q2, answer: A2 },
+    ]);
+    expect(briefPrompt(brief, { worktreePath: WT })).toContain("A: " + A2);
+    expect(briefPrompt(r2.action.brief, { worktreePath: WT })).not.toContain(A2);
+  });
+
+  it("T102 each answer gives one coder round: a major open after the second one stops reviewer-major-open", () => {
+    const { r3 } = toReviewer3();
+    const c4 = ok(r3([major()]).state);
+    const r4 = fail(c4.state, [major()]);
+    expect(r4.action.kind).toBe("stopped");
+    expect(r4.action.reason).toBe("reviewer-major-open");
+  });
+
+  it("T103 each answer gives one coder round: a blocker open after the second one stops reviewer-blocker-open", () => {
+    const { r3 } = toReviewer3();
+    const c4 = ok(r3([major()]).state);
+    const r4 = fail(c4.state, [blocker()]);
+    expect(r4.action.kind).toBe("stopped");
+    expect(r4.action.reason).toBe("reviewer-blocker-open");
+  });
+});
+
 describe("card card-worktree-deps-survive-seats: install runs in the worktree and the gate reinstalls", () => {
   const REPO = "/abs/repo";
   const WTP = REPO + "/.claude/worktrees/card-c1";
@@ -1974,5 +2039,98 @@ describe("coverage", () => {
   it("T32 every STOP_REASONS entry is produced by at least one test", () => {
     expect([...seenReasons].sort()).toEqual([...STOP_REASONS].sort());
     expect(STOP_REASONS.length).toBe(12);
+  });
+});
+
+// Card seat-test-runs-take-gate-lock: seats' own suite runs queue behind gate.lock instead of overlapping a gate.
+describe("seat test runs take gate.lock", () => {
+  const RULES = {
+    "suites-through-verify": {
+      seats: ["tester", "coder", "reviewer", "gate"],
+      text: "Run a full test suite only through `node .doug/hooks/scripts/verify.mjs`, never the gate's commands (the commands in `stopGate.commands`) directly, with or without CI=1: verify.mjs takes gate.lock, so your suite queues behind a running gate instead of overlapping it.",
+    },
+    "tests-take-gate-lock": {
+      seats: ["tester", "coder", "reviewer"],
+      text: "Run every other test command, a single test file or a mutation's test run in a scratch copy included, as `node <card worktree>/.doug/hooks/lib/gate-lock.mjs run -- <command>` with the Bash timeout set to 600000, so it waits on gate.lock instead of overlapping a gate; never wrap verify.mjs in gate-lock.mjs, since verify.mjs takes the lock itself. Put env vars right after `--` (`-- CI=1 pnpm exec vitest run <file>`) and quote a compound command as one argument (`-- 'cd dir && vitest run x'`).",
+    },
+  };
+  const lanes = {
+    full: [CARD, { research: true }],
+    lean: [{ ...CARD, size: "S", class: "prose" }, { research: true }],
+    "tests-only": [{ ...CARD, class: "tests-only" }, { research: true }],
+  };
+
+  for (const [id, { seats, text }] of Object.entries(RULES)) {
+    it(`${id} text is pinned and has no mutations condition`, () => {
+      expect(BRIEF_RULES[id].text).toBe(text);
+      expect(BRIEF_RULES[id].when).toBeUndefined();
+    });
+
+    it(`${id} reaches exactly its seats on every lane, and renders in the prompt`, () => {
+      const seen = new Set();
+      for (const [lane, [card, opts]] of Object.entries(lanes)) {
+        const { actions } = walk(card, opts);
+        for (const a of actions.filter((x) => x.kind === "seat")) {
+          const rule = a.brief.rules.find((r) => r.id === id);
+          if (seats.includes(a.seat)) {
+            seen.add(lane + "/" + a.seat);
+            expect(rule, `${lane}/${a.seat}`).toBeDefined();
+            expect(rule.text).toBe(text);
+            expect(briefPrompt(a.brief, { repoRoot: "/r", worktreePath: "/w" }), `${lane}/${a.seat}`).toContain(text);
+          } else {
+            expect(rule, `${lane}/${a.seat}`).toBeUndefined();
+          }
+        }
+      }
+      expect(seen.has("lean/coder")).toBe(true);
+      expect(seen.has("lean/reviewer")).toBe(true);
+    });
+  }
+
+  it("the plugin seat agents carry both sentences", () => {
+    for (const f of ["tester", "coder", "reviewer", "implementer"]) {
+      const prose = readFileSync(join(HERE, "..", "agents", f + ".md"), "utf8");
+      expect(prose, f).toContain("Run a full test suite only through `node .doug/hooks/scripts/verify.mjs`");
+      expect(prose, f).toContain("never wrap verify.mjs in gate-lock.mjs, since verify.mjs takes the lock itself");
+      expect(prose, f).toContain("gate-lock.mjs run -- <command>");
+    }
+  });
+});
+
+// Card gate-lock-run-shell-forms: the lock-runner rule names the forms that work, and implementer.md agrees with
+// the flow's implement prompt.
+describe("gate-lock run shell forms prose", () => {
+  const agent = (f) => readFileSync(join(HERE, "..", "agents", f + ".md"), "utf8");
+
+  it("tests-take-gate-lock tells seats the env-prefix form and to quote a compound command as one argument", () => {
+    const t = BRIEF_RULES["tests-take-gate-lock"].text;
+    expect(t).toMatch(/CI=1/);
+    expect(t).toMatch(/quot|sh -c/);
+  });
+
+  it("the plugin seat agents carry the env-prefix and compound-command clause", () => {
+    for (const f of ["tester", "coder", "reviewer", "implementer"]) {
+      const line = agent(f).split("\n").find((l) => l.includes("gate-lock.mjs run -- <command>")) ?? "";
+      expect(line, f).toMatch(/CI=1/);
+      expect(line, f).toMatch(/quot|sh -c/);
+    }
+  });
+
+  it("implementer.md rule 8 allows the task's verification command as written", () => {
+    const rule8 = agent("implementer").split("\n").find((l) => l.startsWith("8. ")) ?? "";
+    expect(rule8).toMatch(/verification command/);
+    const impl = readFileSync(join(HERE, "..", "workflows", "doug-implement.js"), "utf8");
+    expect(impl).toContain("Run the verification command before finishing");
+  });
+
+  it("implementer.md rules 8 and 9 sit above the closing line, which is the last non-empty line", () => {
+    const prose = agent("implementer");
+    const closing = "Your final output is the structured result, not a message to a person.";
+    const at = prose.indexOf(closing);
+    expect(at).toBeGreaterThan(-1);
+    expect(prose.indexOf("8. Run a full test suite")).toBeGreaterThan(-1);
+    expect(prose.indexOf("8. Run a full test suite")).toBeLessThan(at);
+    expect(prose.indexOf("9. Run every other test command")).toBeLessThan(at);
+    expect(prose.trim().split("\n").pop()).toBe(closing);
   });
 });

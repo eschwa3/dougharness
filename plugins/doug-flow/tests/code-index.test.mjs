@@ -2,11 +2,11 @@
 // build, status, and search. Uses a real temp git repo fixture (the way tests/land.test.mjs builds one) and a
 // fixed-vector fake provider (the way tests/memory.test.mjs and tests/embeddings.test.mjs do).
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { openMemory } from "../lib/memory.mjs";
+import { openMemory, memoryPath, MEMORY_BUSY_TIMEOUT_MS } from "../lib/memory.mjs";
 import { listIndexableFiles, chunkText, buildIndex, indexStatus, searchIndex } from "../lib/code-index.mjs";
 
 const git = (dir, ...args) => execFileSync("git", args, { cwd: dir, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
@@ -752,5 +752,42 @@ describe("searchIndex", () => {
       expect(result.total).toBe(total);
       expect(result.unvectored).toBe(unvectored);
     });
+  });
+});
+
+// Card memory-db-begin-immediate: the holder takes RESERVED (BEGIN IMMEDIATE) so readers still get in and only the
+// deferred BEGIN's read-then-write upgrade conflicts; the busy handler is not called for that upgrade.
+async function holdReserved(file, ms) {
+  const code = `const { DatabaseSync } = require("node:sqlite");
+const db = new DatabaseSync(process.argv[1]);
+db.exec("BEGIN IMMEDIATE");
+process.stdout.write("held\\n");
+setTimeout(() => { db.exec("COMMIT"); db.close(); }, Number(process.argv[2]));`;
+  const child = spawn(process.execPath, ["-e", code, file, String(ms)], { stdio: ["ignore", "pipe", "inherit"] });
+  const exited = new Promise((res) => child.on("exit", res));
+  await new Promise((res, rej) => {
+    child.on("error", rej);
+    child.stdout.on("data", (d) => String(d).includes("held") && res());
+  });
+  return { exited };
+}
+
+describe("buildIndex: write lock held by a second process (card memory-db-begin-immediate)", () => {
+  it("buildIndex waits out a second process holding the write lock", async () => {
+    dir = repo({ "src/a.mjs": "export function a() {\n  return 1;\n}\n" });
+    m = openMemory(dir);
+    const { exited } = await holdReserved(memoryPath(dir), 800);
+    const t0 = Date.now();
+    let result;
+    let elapsed;
+    try {
+      result = await buildIndex(m, dir, { cfg: {} });
+      elapsed = Date.now() - t0;
+    } finally {
+      await exited;
+    }
+    expect(elapsed).toBeGreaterThanOrEqual(300);
+    expect(elapsed).toBeLessThan(MEMORY_BUSY_TIMEOUT_MS + 1000);
+    expect(result.filesChanged).toBe(1);
   });
 });

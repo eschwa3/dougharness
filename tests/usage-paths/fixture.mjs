@@ -10,6 +10,11 @@ const here = dirname(fileURLToPath(import.meta.url));
 export const ROOT = join(here, "..", "..");
 export const FLOW = join(ROOT, "plugins", "doug-flow");
 export const SCRIPTS = join(FLOW, "scripts");
+// Card memory-failures-wiring: a stopped autopilot report starts a detached `reflect --failures` that calls
+// claude. The claude bin every script here inherits exits 1 at once, so no scenario spends anything.
+export const NO_SPEND_BIN = join(realpathSync(mkdtempSync(join(tmpdir(), "doug-up-nospend-"))), "fake-claude-no-spend.mjs");
+writeFileSync(NO_SPEND_BIN, "#!/usr/bin/env node\nprocess.exit(1);\n", { mode: 0o755 });
+
 export const NOTE_PATH = join(ROOT, "docs", "research", "usage-path-scenarios.md");
 
 export const tmp = (prefix = "doug-up-") => realpathSync(mkdtempSync(join(tmpdir(), prefix)));
@@ -25,7 +30,7 @@ function cli(script) {
   return (dir, ...args) =>
     spawnSync(process.execPath, [join(SCRIPTS, script), ...args, "--dir", dir], {
       encoding: "utf8",
-      env: { ...process.env, CLAUDE_PROJECT_DIR: dir, DOUG_OLLAMA_BASE_URL: "http://127.0.0.1:1" },
+      env: { ...process.env, CLAUDE_PROJECT_DIR: dir, DOUG_OLLAMA_BASE_URL: "http://127.0.0.1:1", DOUG_CLAUDE_BIN: NO_SPEND_BIN },
     });
 }
 export const autopilot = cli("autopilot.mjs");
@@ -34,7 +39,7 @@ function positional(script) {
   return (dir, ...args) =>
     spawnSync(process.execPath, [join(SCRIPTS, script), ...args, dir], {
       encoding: "utf8",
-      env: { ...process.env, CLAUDE_PROJECT_DIR: "", DOUG_OLLAMA_BASE_URL: "http://127.0.0.1:1" },
+      env: { ...process.env, CLAUDE_PROJECT_DIR: "", DOUG_OLLAMA_BASE_URL: "http://127.0.0.1:1", DOUG_CLAUDE_BIN: NO_SPEND_BIN },
     });
 }
 export const boardCli = positional("board.mjs");

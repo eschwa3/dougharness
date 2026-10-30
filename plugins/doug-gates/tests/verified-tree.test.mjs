@@ -2,7 +2,7 @@
 // scripts/verify.mjs end to end. Design: .doug/.state/briefs/verified-tree-record-design.md sections 1, 4, 6.
 import { describe, it, expect } from "vitest";
 import { spawnSync, spawn } from "node:child_process";
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, readdirSync, rmSync, renameSync, statSync, realpathSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, readdirSync, rmSync, renameSync, statSync, realpathSync, chmodSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -799,6 +799,31 @@ describe("verify.mjs takes gate.lock (card verify-takes-gate-lock)", () => {
     expect(red.status, red.out).toBe(1);
     expect(red.out).toContain("RED-MARK");
     expect(existsSync(gateLockPath(dir)), "no lock left after a red run").toBe(false);
+  }, 30000);
+
+  // Card gate-lock-takeover-exclusive (F1): a lock that reads as stale on arrival but that acquireGateLock reports
+  // busy (a rival just took it) is waited on, never overwritten. A chmod 000 lock is the deterministic stand-in:
+  // the lock file exists (wx create fails), reads as stale (unreadable), and acquire answers "busy".
+  it("T5: a lock that reads stale but is reported busy on arrival is waited on for the bound, not overwritten", async () => {
+    const dir = write0();
+    function write0() {
+      return makeRepo({ "t.mjs": `import { appendFileSync, mkdirSync } from "node:fs";\nmkdirSync(".doug/.state", { recursive: true });\nappendFileSync(".doug/.state/ran.marker", "ran\\n");\nconsole.log("Tests  3 passed (3)");\n`, ".doug/config.json": JSON.stringify(CONFIG), ".gitignore": ".doug/.state/\n" });
+    }
+    holdLock(dir, 999999);
+    chmodSync(gateLockPath(dir), 0o000);
+    try {
+      const r = await startVerify(dir, ["--timeout-ms", "3000"]).done;
+      expect(r.status, r.out).toBe(0);
+      expect(r.ms, "busy must be waited on for the bound (timeoutMs x 1 command), not taken over at once").toBeGreaterThanOrEqual(2500);
+      expect(r.out).toMatch(/waited \d+ ms on gate\.lock/);
+      expect(runs(dir)).toBe(1);
+    } finally {
+      try {
+        chmodSync(gateLockPath(dir), 0o644);
+      } catch {
+        // already gone
+      }
+    }
   }, 30000);
 
   // Card gate-lock-shared: gate.lock is shared by every worktree of the repo, so verify.mjs run inside worktree

@@ -1,9 +1,9 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { spawnSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, writeFileSync, statSync, existsSync, readFileSync, readdirSync } from "node:fs";
+import { spawnSync, spawn } from "node:child_process";
+import { mkdtempSync, mkdirSync, writeFileSync, statSync, existsSync, readFileSync, readdirSync, copyFileSync, chmodSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
-import { HOOKS_DIR, cleanEnv, git, makeRepo, commit, extractLogPath } from "./git-hooks-fixtures.mjs";
+import { HOOKS_DIR, cleanEnv, git, makeRepo, commit, commitA, extractLogPath } from "./git-hooks-fixtures.mjs";
 
 // Load-proofing (card gate-docs-skip-unless-named, same mechanism as 7d1c99b / rehearse.test.mjs): vitest's worker
 // answers its main process over an RPC whose calls time out after 60 s. A synchronous spawn blocks this worker's
@@ -85,17 +85,15 @@ describe("checked-in pre-commit hook", () => {
     expect(out).toContain("pre-commit: pnpm typecheck failed; commit refused");
   });
 
-  // Updated for card stop-gate-credits-pre-commit: every run (pass or fail) now writes
-  // .doug/.state/pre-commit/last-run.json (the machine-readable record the Stop gate credits), so a green
-  // commit no longer leaves that directory empty. This still pins the original guarantee — no per-step log
-  // survives a green run — by excluding only that one expected file.
-  it("G3: on a green commit, no step log is left under .doug/.state/pre-commit (only last-run.json)", () => {
+  // card remove-pre-commit-credit: the hook writes no pre-commit run record of its own, so a green commit leaves
+  // nothing at all under .doug/.state/pre-commit (the verified-tree record lives one level up).
+  it("G3: on a green commit, nothing is left under .doug/.state/pre-commit", () => {
     const cwd = makeRepo({ typecheckExit: 0, unitExit: 0 });
     const { status } = commit(cwd);
     expect(status).toBe(0);
     const dir = join(cwd, ".doug/.state/pre-commit");
-    const remaining = (existsSync(dir) ? readdirSync(dir) : []).filter((f) => f !== "last-run.json");
-    expect(remaining, `expected no step-log files left under .doug/.state/pre-commit, found: ${remaining.join(", ")}`).toEqual([]);
+    const remaining = existsSync(dir) ? readdirSync(dir) : [];
+    expect(remaining, `expected nothing left under .doug/.state/pre-commit, found: ${remaining.join(", ")}`).toEqual([]);
   });
 
   // Review round 1 (coordinator's BLOCKER): review B1 already made a missing/non-numeric $log.status file
@@ -114,190 +112,19 @@ describe("checked-in pre-commit hook", () => {
     expect(out).toContain("commit refused");
   });
 
-  // card stop-gate-credits-pre-commit: the hook records a machine-readable result of its own run, so the
-  // Stop gate can credit a passing pre-commit run instead of re-running the same commands. Record path
-  // (lead's design): .doug/.state/pre-commit/last-run.json, shape
-  // { version: 1, tree: "<40-hex>", ok: bool, at: "<ISO time>",
-  //   commands: [ { name, command, exit, durationMs }, ... ] }.
-  describe("pre-commit run record (card stop-gate-credits-pre-commit)", () => {
-    const recordPath = (cwd) => join(cwd, ".doug/.state/pre-commit/last-run.json");
-    const headTree = (cwd) => git(cwd, ["rev-parse", "HEAD^{tree}"]).stdout.trim();
-
-    it("P1: a passing commit writes last-run.json with ok true, the new commit's tree, and two commands with exit 0 and numeric durationMs", () => {
-      const cwd = makeRepo({ typecheckExit: 0, unitExit: 0 });
-      const { status, out } = commit(cwd);
-      expect(status, out).toBe(0);
-      expect(existsSync(recordPath(cwd)), `expected ${recordPath(cwd)} to exist after a passing commit`).toBe(true);
-      const record = JSON.parse(readFileSync(recordPath(cwd), "utf8"));
-      expect(record.version).toBe(1);
-      expect(record.ok).toBe(true);
-      expect(record.tree).toBe(headTree(cwd));
-      expect(record.commands).toHaveLength(2);
-      expect(record.commands.map((c) => c.name)).toEqual(["typecheck", "test:unit"]);
-      expect(record.commands.map((c) => c.command)).toEqual(["pnpm typecheck", "pnpm test:unit"]);
-      for (const c of record.commands) {
-        expect(c.exit).toBe(0);
-        expect(typeof c.durationMs, `expected a numeric durationMs, got ${JSON.stringify(c.durationMs)}`).toBe("number");
-        expect(Number.isFinite(c.durationMs)).toBe(true);
-      }
-    });
-
-    it("P2: a failing test:unit run never leaves a passing record in place, even overwriting an earlier passing one", () => {
-      const cwd = makeRepo({ typecheckExit: 0, unitExit: 0 });
-      const first = commit(cwd);
-      expect(first.status, first.out).toBe(0);
-      // Sanity: a passing record exists from the first (green) commit before the failing attempt below.
-      expect(JSON.parse(readFileSync(recordPath(cwd), "utf8")).ok).toBe(true);
-
-      writeFileSync(join(cwd, "test-unit.mjs"), `console.log("UNIT-MARKER");\nprocess.exit(1);\n`);
-      git(cwd, ["add", "-A"]);
-      const second = commit(cwd);
-      expect(second.status).not.toBe(0);
-
-      if (existsSync(recordPath(cwd))) {
-        const record = JSON.parse(readFileSync(recordPath(cwd), "utf8"));
-        expect(
-          record.ok,
-          `expected no passing record left after a failing pre-commit run, got: ${JSON.stringify(record)}`,
-        ).toBe(false);
-      }
-    });
-
-    it("P3: `git commit -a` (a tracked file modified but not staged) records the resulting commit's tree", () => {
-      const cwd = makeRepo({ typecheckExit: 0, unitExit: 0 });
-      const first = commit(cwd);
-      expect(first.status, first.out).toBe(0);
-
-      // Modify a tracked file without staging it, then commit with -a: git points GIT_INDEX_FILE at a
-      // temporary index for this commit, so the record's tree must reflect that index, not a plain
-      // `git write-tree` of whatever the real .git/index currently holds.
-      const original = readFileSync(join(cwd, "typecheck.mjs"), "utf8");
-      writeFileSync(join(cwd, "typecheck.mjs"), original + "// touched, not staged\n");
-      const r = git(cwd, ["commit", "-a", "-q", "-m", "y"], { GIT_DIR: join(cwd, ".git"), GIT_WORK_TREE: cwd });
-      expect(r.status, `${r.stdout}${r.stderr}`).toBe(0);
-
-      const record = JSON.parse(readFileSync(recordPath(cwd), "utf8"));
-      expect(record.ok).toBe(true);
-      expect(record.tree).toBe(headTree(cwd));
-    });
-
-    // Round 2 (reviewer BLOCKER): the commands above run against the WORKING TREE, but the record's `tree`
-    // is the committed INDEX. A file staged one way and left a different way on disk lets a broken committed
-    // version hide behind a passing working-tree run; an untracked file the tests depend on is invisible to
-    // `git write-tree` the same way. Fix (lead's design): the hook also fails ok:true unless the working
-    // tree has nothing beyond the index being committed — `git diff --quiet` (against GIT_INDEX_FILE, run
-    // before the unset) and no untracked files (`git ls-files --others --exclude-standard`), both ignoring
-    // .doug/.state/, .doug/anchor.md, and .claude/worktrees/. The commit itself is never refused for this;
-    // only `ok` moves off true.
-    it("P4: staged content differs from disk (a different unstaged edit atop the staged one) → commit succeeds but the record is not ok", () => {
-      const cwd = makeRepo({ typecheckExit: 0, unitExit: 0 });
-      // Stage one passing version of test-unit.mjs...
-      writeFileSync(join(cwd, "test-unit.mjs"), `console.log("UNIT-MARKER-STAGED");\nprocess.exit(0);\n`);
-      git(cwd, ["add", "test-unit.mjs"]);
-      // ...then leave a DIFFERENT passing version on disk, unstaged: the commit records the staged one, but
-      // the hook's commands run against this one.
-      writeFileSync(join(cwd, "test-unit.mjs"), `console.log("UNIT-MARKER-DISK");\nprocess.exit(0);\n`);
-
-      const { status, out } = commit(cwd);
-      expect(status, out).toBe(0); // the commit itself is not refused for this
-      expect(existsSync(recordPath(cwd))).toBe(true);
-      const record = JSON.parse(readFileSync(recordPath(cwd), "utf8"));
-      expect(
-        record.ok,
-        `expected ok !== true (disk deviates from the committed index): ${JSON.stringify(record)}`,
-      ).not.toBe(true);
-    });
-
-    it("P5: an untracked (not ignored) file present at commit time → commit succeeds but the record is not ok", () => {
-      const cwd = makeRepo({ typecheckExit: 0, unitExit: 0 });
-      writeFileSync(join(cwd, "untracked-extra.txt"), "not part of the commit");
-      const { status, out } = commit(cwd);
-      expect(status, out).toBe(0);
-      expect(existsSync(recordPath(cwd))).toBe(true);
-      const record = JSON.parse(readFileSync(recordPath(cwd), "utf8"));
-      expect(
-        record.ok,
-        `expected ok !== true with an untracked file present: ${JSON.stringify(record)}`,
-      ).not.toBe(true);
-    });
-
-    it("P6: only .doug/anchor.md dirty-unstaged plus an untracked file under .doug/.state/ → record ok:true (exclusions honoured)", () => {
-      const cwd = makeRepo({ typecheckExit: 0, unitExit: 0 });
-      mkdirSync(join(cwd, ".doug"), { recursive: true });
-      writeFileSync(join(cwd, ".doug/anchor.md"), "# anchor\n");
-      git(cwd, ["add", "-A"]); // anchor.md is tracked from this first commit on
-      const first = commit(cwd);
-      expect(first.status, first.out).toBe(0);
-
-      // Dirty anchor.md on disk, unstaged (no part of this next commit), and an untracked file under
-      // .doug/.state/ that is not one of the hook's own logs — both must be excluded from the check.
-      writeFileSync(join(cwd, ".doug/anchor.md"), "# anchor, changed after the commit\n");
-      mkdirSync(join(cwd, ".doug/.state"), { recursive: true });
-      writeFileSync(join(cwd, ".doug/.state/scratch.txt"), "not part of any commit");
-      // A real, staged, matching-disk change to commit.
-      writeFileSync(join(cwd, "notes.txt"), "x");
-      git(cwd, ["add", "notes.txt"]);
-
-      const second = commit(cwd);
-      expect(second.status, second.out).toBe(0);
-      const record = JSON.parse(readFileSync(recordPath(cwd), "utf8"));
-      expect(
-        record.ok,
-        `expected ok:true with only excluded paths dirty/untracked: ${JSON.stringify(record)}`,
-      ).toBe(true);
-    });
-
-    it("P7: `git commit -a`, everything tracked and nothing untracked, still records ok:true (the temp-index diff check must pass too, not just the tree)", () => {
-      const cwd = makeRepo({ typecheckExit: 0, unitExit: 0 });
-      const first = commit(cwd);
-      expect(first.status, first.out).toBe(0);
-
-      const original = readFileSync(join(cwd, "package.json"), "utf8");
-      writeFileSync(join(cwd, "package.json"), original.replace("fixture", "fixture-v2"));
-      const r = git(cwd, ["commit", "-a", "-q", "-m", "y"], { GIT_DIR: join(cwd, ".git"), GIT_WORK_TREE: cwd });
-      expect(r.status, `${r.stdout}${r.stderr}`).toBe(0);
-
-      const record = JSON.parse(readFileSync(recordPath(cwd), "utf8"));
-      expect(
-        record.ok,
-        `expected ok:true for a clean -a commit with nothing untracked: ${JSON.stringify(record)}`,
-      ).toBe(true);
-    });
-
-    // Round 2 reviewer finding: an unquoted `for f in $combined` walk over the untracked-file list
-    // glob-expands each entry against the working tree. An untracked file literally named
-    // ".doug/anchor.m[d]" (bracket glob metacharacters) sits right next to the tracked, committed
-    // ".doug/anchor.md" this fixture also has — "m[d]" is a valid glob matching "md", so the untracked
-    // path's own name expands into the excluded ".doug/anchor.md" and is wrongly dropped from the check.
-    // The exclusion list must compare literal names, never glob-match them.
-    it("P8: an untracked file literally named \".doug/anchor.m[d]\" at commit time still leaves ok !== true", () => {
-      const cwd = makeRepo({ typecheckExit: 0, unitExit: 0 });
-      mkdirSync(join(cwd, ".doug"), { recursive: true });
-      writeFileSync(join(cwd, ".doug/anchor.md"), "# anchor\n");
-      git(cwd, ["add", "-A"]); // anchor.md tracked and committed below
-      const first = commit(cwd);
-      expect(first.status, first.out).toBe(0);
-
-      writeFileSync(join(cwd, ".doug/anchor.m[d]"), "not the excluded path");
-      writeFileSync(join(cwd, "notes.txt"), "x");
-      git(cwd, ["add", "notes.txt"]);
-
-      const second = commit(cwd);
-      expect(second.status, second.out).toBe(0);
-      const record = JSON.parse(readFileSync(recordPath(cwd), "utf8"));
-      expect(
-        record.ok,
-        `expected ok !== true with an untracked ".doug/anchor.m[d]" present: ${JSON.stringify(record)}`,
-      ).not.toBe(true);
-    });
+  // card remove-pre-commit-credit: the parsed test totals reach .doug/.state/verified-tree.json (the only
+  // record the hook writes), keyed by command; only status "ok" totals are stored there.
+  describe("hook totals reach the verified-tree record (card remove-pre-commit-credit)", () => {
+    const vtPath = (cwd) => join(cwd, ".doug/.state/verified-tree.json");
+    const readVt = (cwd) => JSON.parse(readFileSync(vtPath(cwd), "utf8"));
 
     // card ratchet-pre-commit-credit: each command's entry also carries `totals`, the parseTotals result
     // (lib/test-totals.mjs) of that step's output, so the Stop gate can run the count check on a credit.
     // Fixture fact for the coder: the hook runs in the temp repo's top level, which has no plugins/ tree, so
     // this test copies the real lib/test-totals.mjs to <repo>/plugins/doug-gates/lib/test-totals.mjs and
-    // stages it (keeping the tree clean so ok stays true). The hook must import it from there (repo
+    // stages it (the hook runs with the lib present at the repo top level). The hook must import it from there (repo
     // top-level), as the lead's design says; it has no imports of its own.
-    it("P9: the record's commands carry parseTotals results: test:unit {status:ok,summaries:[{4,1,0}],totals:{4,1,0}} from a vitest-shaped summary, typecheck {status:none}; the commit still succeeds", () => {
+    it("P9: the verified-tree record's totals carry the test:unit parseTotals result {status:ok,summaries:[{4,1,0}],totals:{4,1,0}} from a vitest-shaped summary; typecheck's {status:none} is not stored; the commit still succeeds", () => {
       const cwd = makeRepo({ typecheckExit: 0, unitExit: 0 });
       const libSrc = join(HOOKS_DIR, "..", "plugins/doug-gates/lib/test-totals.mjs");
       mkdirSync(join(cwd, "plugins/doug-gates/lib"), { recursive: true });
@@ -309,13 +136,12 @@ describe("checked-in pre-commit hook", () => {
       git(cwd, ["add", "-A"]);
       const { status, out } = commit(cwd);
       expect(status, out).toBe(0);
-      const record = JSON.parse(readFileSync(recordPath(cwd), "utf8"));
+      const record = readVt(cwd);
       expect(record.version).toBe(1);
-      expect(record.ok).toBe(true);
-      const byName = Object.fromEntries(record.commands.map((c) => [c.name, c]));
+      expect(record.by).toBe("pre-commit");
       // ADR 0013: the recorded result carries the list of summaries too (a list of one here).
-      expect(byName["test:unit"].totals, JSON.stringify(record)).toEqual({ status: "ok", summaries: [{ total: 4, skipped: 1, todo: 0 }], totals: { total: 4, skipped: 1, todo: 0 } });
-      expect(byName["typecheck"].totals, JSON.stringify(record)).toEqual({ status: "none" });
+      expect(record.totals["pnpm test:unit"], JSON.stringify(record)).toEqual({ status: "ok", summaries: [{ total: 4, skipped: 1, todo: 0 }], totals: { total: 4, skipped: 1, todo: 0 } });
+      expect(record.totals["pnpm typecheck"], JSON.stringify(record)).toBeUndefined();
     });
 
     // R1 (an old pin) is replaced for ADR 0013: two differing summaries are no longer a recorded "conflict";
@@ -331,8 +157,8 @@ describe("checked-in pre-commit hook", () => {
       git(cwd, ["add", "-A"]);
       const { status, out } = commit(cwd);
       expect(status, out).toBe(0);
-      const record = JSON.parse(readFileSync(recordPath(cwd), "utf8"));
-      const t = record.commands.find((c) => c.name === "test:unit").totals;
+      const record = readVt(cwd);
+      const t = record.totals["pnpm test:unit"];
       expect(t, JSON.stringify(record)).toEqual({
         status: "ok",
         summaries: [{ total: 1, skipped: 0, todo: 0 }, { total: 4, skipped: 1, todo: 0 }],
@@ -351,8 +177,8 @@ describe("checked-in pre-commit hook", () => {
       git(cwd, ["add", "-A"]);
       const { status, out } = commit(cwd);
       expect(status, out).toBe(0);
-      const record = JSON.parse(readFileSync(recordPath(cwd), "utf8"));
-      const t = record.commands.find((c) => c.name === "test:unit").totals;
+      const record = readVt(cwd);
+      const t = record.totals["pnpm test:unit"];
       expect(t.summaries, JSON.stringify(record)).toHaveLength(2);
       expect(t.totals).toEqual({ total: 6, skipped: 0, todo: 0 });
     });
@@ -368,7 +194,6 @@ describe("checked-in pre-commit hook", () => {
 // card pre-commit-skip-no-test-paths: when every staged path is on preCommit.noTestPaths (.doug/config.json),
 // the hook skips both commands, says so on one line, and leaves no passing record. Anything else runs the gate.
 describe("no-test paths (card pre-commit-skip-no-test-paths)", () => {
-  const recordPath = (cwd) => join(cwd, ".doug/.state/pre-commit/last-run.json");
   const SKIP_LINE = "pre-commit: gate skipped";
 
   // A fixture with one green baseline commit (config + board.json tracked), then a changed board.json staged
@@ -438,19 +263,6 @@ describe("no-test paths (card pre-commit-skip-no-test-paths)", () => {
     expect(r.status, out).toBe(0);
     expect(ran(out), out).toBe(true);
     expect(out).not.toContain(SKIP_LINE);
-  });
-
-  it("S4: a skipped commit writes no passing record and removes the stale one from the earlier green commit", () => {
-    const cwd = boardRepo(boardConfig);
-    const before = JSON.parse(readFileSync(recordPath(cwd), "utf8"));
-    expect(before.ok, "sanity: the baseline green commit left a passing record").toBe(true);
-    const { status, out } = commit(cwd);
-    expect(status, out).toBe(0);
-    expect(out).toContain(SKIP_LINE);
-    if (existsSync(recordPath(cwd))) {
-      const record = JSON.parse(readFileSync(recordPath(cwd), "utf8"));
-      expect(record.ok, `a skipped run must not leave a passing record: ${JSON.stringify(record)}`).not.toBe(true);
-    }
   });
 
   it("S5a: an empty noTestPaths list with only board.json staged -> the gate runs", () => {
@@ -657,5 +469,191 @@ describe("verified-tree record (card verified-tree-record)", () => {
     expect(out).not.toContain("TYPECHECK-MARKER");
     expect(existsSync(recPath(cwd))).toBe(true);
     expect(readFileSync(recPath(cwd)).equals(before)).toBe(true);
+  });
+});
+
+// card gate-load-timeouts: the pre-commit suites go through the shared gate.lock (ledger blocks 422, 432 and 435: a
+// commit's full suite ran with no lock next to a gate's). Each case runs the real hook in a temp repo whose lock
+// lives at <repo>/.git/doug/gate.lock, never this repository's.
+describe("pre-commit takes gate.lock around each step (card gate-load-timeouts)", () => {
+  const lockOf = (cwd) => join(cwd, ".git/doug/gate.lock");
+  const seenOf = (cwd) => join(cwd, ".doug/.state/lock-seen.json");
+  const startOf = (cwd) => join(cwd, ".doug/.state/unit-start.txt");
+
+  // test-unit.mjs logs its start time and copies whatever gate.lock looks like while it runs.
+  function logUnit(cwd, config) {
+    mkdirSync(join(cwd, ".doug/.state"), { recursive: true });
+    writeFileSync(
+      join(cwd, "test-unit.mjs"),
+      [
+        'import { copyFileSync, writeFileSync } from "node:fs";',
+        `writeFileSync(${JSON.stringify(startOf(cwd))}, String(Date.now()));`,
+        `try { copyFileSync(${JSON.stringify(lockOf(cwd))}, ${JSON.stringify(seenOf(cwd))}); } catch {}`,
+        'console.log("UNIT-MARKER");',
+        "",
+      ].join("\n"),
+    );
+    if (config) {
+      mkdirSync(join(cwd, ".doug"), { recursive: true });
+      writeFileSync(join(cwd, ".doug/config.json"), JSON.stringify(config));
+    }
+    git(cwd, ["add", "-A"]);
+  }
+  const put = (cwd, pid) => {
+    mkdirSync(dirname(lockOf(cwd)), { recursive: true });
+    writeFileSync(lockOf(cwd), JSON.stringify({ pid, session: "fake-holder", at: Date.now() }));
+  };
+  const sleeper = () => spawn(process.execPath, ["-e", "setTimeout(() => {}, 90000)"], { stdio: "ignore" });
+
+  it("PL1: a commit waits for a live holder to release gate.lock, then runs its suite, holds the lock itself and frees it", async () => {
+    const cwd = makeRepo({ typecheckExit: 0, unitExit: 0 });
+    logUnit(cwd);
+    const releaseFile = join(cwd, ".doug/.state/release.txt");
+    const holder = spawn(
+      process.execPath,
+      [
+        "-e",
+        `setTimeout(() => { const fs = require("fs"); fs.writeFileSync(${JSON.stringify(releaseFile)}, String(Date.now())); try { fs.unlinkSync(${JSON.stringify(lockOf(cwd))}); } catch {} }, 2500); setTimeout(() => {}, 20000);`,
+      ],
+      { stdio: "ignore" },
+    );
+    try {
+      put(cwd, holder.pid);
+      const { status, out } = await commitA(cwd);
+      expect(status, out).toBe(0);
+      expect(existsSync(releaseFile), "the holder must have released while the hook waited").toBe(true);
+      const released = Number(readFileSync(releaseFile, "utf8"));
+      const started = Number(readFileSync(startOf(cwd), "utf8"));
+      expect(started, "the suite must not start before the holder released the lock").toBeGreaterThanOrEqual(released);
+      const seen = JSON.parse(readFileSync(seenOf(cwd), "utf8"));
+      expect(seen.pid, "while the suite ran, the lock names the hook's runner, not the old holder").not.toBe(holder.pid);
+      expect(existsSync(lockOf(cwd)), "the runner releases the lock after its command").toBe(false);
+    } finally {
+      holder.kill("SIGKILL");
+    }
+  });
+
+  it("PL2: with no holder, the suite runs under a lock that is gone again afterwards", async () => {
+    const cwd = makeRepo({ typecheckExit: 0, unitExit: 0 });
+    logUnit(cwd);
+    const { status, out } = await commitA(cwd);
+    expect(status, out).toBe(0);
+    expect(existsSync(seenOf(cwd)), "gate.lock must exist while the suite runs").toBe(true);
+    expect(JSON.parse(readFileSync(seenOf(cwd), "utf8")).pid).toBeGreaterThan(0);
+    expect(existsSync(lockOf(cwd)), "no lock left behind after a green commit").toBe(false);
+  });
+
+  it("PL3: a failing suite still refuses the commit and still releases the lock", async () => {
+    const cwd = makeRepo({ typecheckExit: 0, unitExit: 1 });
+    const { status, out } = await commitA(cwd);
+    expect(status).not.toBe(0);
+    expect(out).toContain("UNIT-MARKER");
+    expect(existsSync(lockOf(cwd)), "a red step frees the lock too").toBe(false);
+  });
+
+  it("PL4: a live holder that never releases is waited for only up to stopGate.timeoutMs, then the commit runs anyway", async () => {
+    const cwd = makeRepo({ typecheckExit: 0, unitExit: 0 });
+    logUnit(cwd, { stopGate: { commands: ["test:unit"], timeoutMs: 1000 } });
+    const holder = sleeper();
+    try {
+      put(cwd, holder.pid);
+      const t0 = Date.now();
+      const { status, out } = await commitA(cwd);
+      const elapsed = Date.now() - t0;
+      expect(status, out).toBe(0);
+      expect(out).toContain("UNIT-MARKER");
+      expect(elapsed, "the live lock must actually be waited for").toBeGreaterThanOrEqual(900);
+      expect(elapsed, "the wait is bounded, never a hang").toBeLessThan(15_000);
+    } finally {
+      holder.kill("SIGKILL");
+    }
+  });
+
+  it("PL5: a lock naming a dead pid is taken at once, not waited out", async () => {
+    const cwd = makeRepo({ typecheckExit: 0, unitExit: 0 });
+    logUnit(cwd, { stopGate: { commands: ["test:unit"], timeoutMs: 15000 } });
+    const dead = spawnSync(process.execPath, ["-e", "0"]);
+    const deadPid = (() => {
+      const c = spawn(process.execPath, ["-e", "0"], { stdio: "ignore" });
+      return c.pid;
+    })();
+    await new Promise((r) => setTimeout(r, 500)); // let it exit
+    expect(dead.status).toBe(0);
+    put(cwd, deadPid);
+    const t0 = Date.now();
+    const { status, out } = await commitA(cwd);
+    const elapsed = Date.now() - t0;
+    expect(status, out).toBe(0);
+    expect(elapsed, "a dead holder must not be waited on").toBeLessThan(8000);
+    const seen = JSON.parse(readFileSync(seenOf(cwd), "utf8"));
+    expect(seen.pid, "the runner replaced the stale lock with its own").not.toBe(deadPid);
+    expect(existsSync(lockOf(cwd))).toBe(false);
+  });
+  // Card gate-lock-takeover-exclusive (F2): one lock for the whole hook, so the steps share one holder and one wait.
+  function logBoth(cwd, config) {
+    mkdirSync(join(cwd, ".doug/.state"), { recursive: true });
+    for (const [file, marker, seen] of [
+      ["typecheck.mjs", "TYPECHECK-MARKER", "seen-typecheck.json"],
+      ["test-unit.mjs", "UNIT-MARKER", "seen-unit.json"],
+    ]) {
+      writeFileSync(
+        join(cwd, file),
+        [
+          'import { copyFileSync } from "node:fs";',
+          `try { copyFileSync(${JSON.stringify(lockOf(cwd))}, ${JSON.stringify(join(cwd, ".doug/.state", seen))}); } catch {}`,
+          `console.log(${JSON.stringify(marker)});`,
+          "",
+        ].join("\n"),
+      );
+    }
+    if (config) writeFileSync(join(cwd, ".doug/config.json"), JSON.stringify(config));
+    git(cwd, ["add", "-A"]);
+  }
+
+  it("PL6: typecheck and test:unit run under one lock held by one process for the whole hook, gone after the commit", async () => {
+    const cwd = makeRepo({ typecheckExit: 0, unitExit: 0 });
+    logBoth(cwd);
+    const { status, out } = await commitA(cwd);
+    expect(status, out).toBe(0);
+    const a = join(cwd, ".doug/.state/seen-typecheck.json");
+    const b = join(cwd, ".doug/.state/seen-unit.json");
+    expect(existsSync(a), "gate.lock must exist while typecheck runs").toBe(true);
+    expect(existsSync(b), "gate.lock must exist while test:unit runs").toBe(true);
+    const pa = JSON.parse(readFileSync(a, "utf8")).pid;
+    const pb = JSON.parse(readFileSync(b, "utf8")).pid;
+    expect(pa).toBeGreaterThan(0);
+    expect(pb, "both steps see the same holder: the lock is taken once for the whole hook").toBe(pa);
+    expect(existsSync(lockOf(cwd)), "no lock left behind after a green commit").toBe(false);
+  });
+
+  it("PL7: a live holder that never releases is waited on once for the whole hook, not once per step", async () => {
+    const cwd = makeRepo({ typecheckExit: 0, unitExit: 0 });
+    logBoth(cwd, { stopGate: { commands: ["test:unit"], timeoutMs: 1000 } });
+    const holder = sleeper();
+    try {
+      put(cwd, holder.pid);
+      const { status, out } = await commitA(cwd);
+      expect(status, out).toBe(0);
+      expect(out).toContain("TYPECHECK-MARKER");
+      expect(out).toContain("UNIT-MARKER");
+      const warnings = out.match(/gate\.lock still held/g) ?? [];
+      expect(warnings.length, `the give-up warning must print once for the whole hook:\n${out}`).toBe(1);
+    } finally {
+      holder.kill("SIGKILL");
+    }
+  });
+
+  // Card gate-lock-takeover-exclusive (F3): a missing lock runner refuses the commit naming the runner.
+  it("PL8: a missing gate-lock runner refuses the commit with a line naming the runner, not the step", async () => {
+    const cwd = makeRepo({ typecheckExit: 0, unitExit: 0 });
+    const hooks = join(mkdtempSync(join(tmpdir(), "doug-githooks-nolock-")), ".githooks");
+    mkdirSync(hooks, { recursive: true });
+    copyFileSync(join(HOOKS_DIR, "pre-commit"), join(hooks, "pre-commit"));
+    chmodSync(join(hooks, "pre-commit"), 0o755);
+    git(cwd, ["config", "core.hooksPath", hooks]);
+    const { status, out } = await commitA(cwd);
+    expect(status, out).not.toBe(0);
+    expect(out, "the hook's own refusal line must name the lock runner").toMatch(/^pre-commit: .*gate-lock\.mjs.*commit refused/m);
+    expect(out).not.toMatch(/pnpm typecheck failed/);
   });
 });

@@ -77,7 +77,7 @@ content (or `null` when there is nothing to diff - a limit hit, or a text-only f
   names the files they changed, the proposal is kind `rule`: a new `.claude/rules/pitfall-<id>.md` scoped by those
   files (`paths:` frontmatter, the lesson text and its citations as the body). With no known files it is a `- `
   bullet under `## Gotchas`, skipped when the text is already in CLAUDE.md and refused with `diff: null` when the
-  result would put CLAUDE.md at or over its own 60-line limit.
+  result would put CLAUDE.md over its own 200-line limit.
 - **demote**: a Bash denial repeated `count >= 2` whose `detail` matches one of a small fixed table of known
   CLAUDE.md rules (see `DEMOTE_RULES` in `lib/learn.mjs`: the branch `-D` rule, the raw `pnpm test` rule, the
   commit-trailer rule) becomes a diff to `.doug/config.json` enabling that rule's config key, when the exact

@@ -3,7 +3,7 @@
 // worktrees are in hooks-stop-gate-runner.test.mjs (B1w) and verified-tree.test.mjs (W1).
 import { describe, it, expect, afterEach } from "vitest";
 import { mkdtempSync, mkdirSync, writeFileSync, existsSync, realpathSync, chmodSync, readFileSync, rmSync } from "node:fs";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join, isAbsolute, relative, dirname, basename } from "node:path";
 import { gateLockPath, readGateLock, writeGateLock, takeOverGateLock } from "../lib/gate-lock.mjs";
@@ -176,5 +176,50 @@ describe("writing the lock creates its own parent directory (card gate-lock-shar
       expect(() => readGateLock(main)).not.toThrow();
       expect(readGateLock(main), `content ${JSON.stringify(content)}`).toBeNull();
     }
+  });
+});
+
+// Card gate-lock-run-shell-forms: `run --` must accept the forms seats write (env prefix, quoted compound command),
+// keep argv intact for multi-argument commands, and never fail silently.
+describe("gate-lock.mjs run -- shell forms", () => {
+  const LIB = new URL("../lib/gate-lock.mjs", import.meta.url).pathname;
+  const run = (cwd, args) => {
+    const { CI: _ci, ...env } = process.env; // the ambient CI=1 of a gate run must not satisfy R1's no-prefix half
+    const r = spawnSync(process.execPath, [LIB, "run", "--", ...args], { cwd, encoding: "utf8", env });
+    return { status: r.status, stderr: r.stderr ?? "", stdout: r.stdout ?? "" };
+  };
+
+  it("R1: an env prefix after -- is set in the command's environment and the command's status is returned", () => {
+    const dir = makeRepo();
+    const script = "process.exit(process.env.CI==='1'?0:3)";
+    expect(run(dir, ["CI=1", "node", "-e", script]).status).toBe(0);
+    expect(run(dir, ["node", "-e", script]).status).toBe(3);
+  });
+
+  it("R2: one quoted compound argument runs through a shell and returns its status", () => {
+    const dir = makeRepo();
+    mkdirSync(join(dir, "sub"));
+    const cmd = `cd sub && node -e "process.exit(process.cwd().endsWith('sub')?0:5)"`;
+    expect(run(dir, [cmd]).status).toBe(0);
+    expect(run(dir, [`cd sub && node -e "process.exit(7)"`]).status).toBe(7);
+  });
+
+  it("R3: a multi-argument command keeps each argument intact (no re-splitting)", () => {
+    const dir = makeRepo();
+    expect(run(dir, ["node", "-e", "process.exit(process.argv[1]==='a b'?0:4)", "a b"]).status).toBe(0);
+  });
+
+  it("R4: a command that cannot be spawned names itself on stderr and exits non-zero", () => {
+    const dir = makeRepo();
+    const r = run(dir, ["no-such-binary-xyz"]);
+    expect(r.status).not.toBe(0);
+    expect(r.stderr).toContain("no-such-binary-xyz");
+  });
+
+  it("R4b: a multi-argument command that cannot be spawned names itself on stderr and exits non-zero", () => {
+    const dir = makeRepo();
+    const r = run(dir, ["no-such-binary-xyz", "arg"]);
+    expect(r.status).not.toBe(0);
+    expect(r.stderr).toContain("no-such-binary-xyz");
   });
 });
