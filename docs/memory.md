@@ -126,8 +126,7 @@ citation is `file`, none is `none`), multiplies it by that class's weight (shipp
 bench showed no gain). The factor is applied to the score's magnitude, so a negative cosine is lowered too, never
 raised. `helpful` does not enter the shipped score: it rises on every verified use and would feed itself; a capped
 or decayed helpful term exists behind the `feedback` option of `recallLessons` (`helpfulCap`, `helpfulDecay`) and
-ships off. The defaults are `RECALL_FEEDBACK` in `lib/memory.mjs`; `node evals/bench-memory.mjs feedback` measures
-the arms (docs/memory-benchmark.md section 12).
+ships off. The defaults are `RECALL_FEEDBACK` in `lib/memory.mjs`.
 
 **Archive.** A lesson with `harmful >= 2` and `harmful >= helpful` (`ARCHIVE_HARMFUL_MIN`, `meetsArchiveRule`) is
 archived by `memory.mjs reflect --harmful` in the same transaction as the counters (not on a dry run): `archived`
@@ -382,8 +381,6 @@ Citations are checked in code, never guessed. One resolves when it is the id of 
 Regen prints `Wrote .doug/project-model.md: <n> statements, <chars> characters (cap 2000); dropped <u> unresolved, <c> over cap; <cost>`. `--dry-run` makes no model call, writes nothing, prints the prompt it would send, then a `Would write` line; `--json --dry-run` prints `{ path, dryRun, prompt, usd: 0, usdSource }`. `--json` prints `{ path, statements, chars, cap, unresolved, overCap, dropped, usd, usdSource, dryRun }`. No memory store exits 1 with one stderr line and no model call. A failed call exits 1, and zero surviving statements exits 1 saying nothing was written with the drop counts; neither touches an existing file.
 
 `model show` prints `.doug/project-model.md` verbatim and creates nothing; a missing file is one stderr line and exit 1. `model` with no or an unknown subcommand prints usage and exits 2.
-
-The bench arm `node evals/bench-memory.mjs project-model --model-file .doug/project-model.md` measures what the file adds over index+fetch (docs/memory-benchmark.md section 13).
 
 ## `memory.mjs doctor`
 

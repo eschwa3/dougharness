@@ -2,7 +2,7 @@
 // SessionStart, every source (no matcher — startup, resume, clear, compact, fork all confirmed to fire this):
 // capture the dirty-tree baseline as early as this event allows, so a tree the session never touches can skip
 // verification entirely at Stop instead of waiting for the stop gate's own first-run fallback capture
-// (card stop-gate-session-start; see docs/research/stop-gate-session-start.md for what is and is not
+// (card stop-gate-session-start; see the card's research note for what is and is not
 // confirmed about this event). Idempotent: only writes state.baseline when it is absent, so firing late,
 // firing again for a subagent sharing the parent session_id, or firing more than once, can never clobber a
 // baseline that is already there.

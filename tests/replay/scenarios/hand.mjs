@@ -1,4 +1,4 @@
-// Replay script for the hand scenario (docs/specs/ci-e2e/architecture.md 4.2): the gate session stops at the
+// Replay script for the hand scenario (the ci-e2e spec 4.2): the gate session stops at the
 // gate, the build session fixes the card, commits, records the hand landing and moves the card to Done. Written
 // by hand per stage after makeHandScenarioFake (tests/rehearse.test.mjs); no archived stream is copied.
 //

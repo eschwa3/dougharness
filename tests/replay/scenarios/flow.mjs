@@ -1,4 +1,4 @@
-// Replay of the flow scenario (docs/specs/ci-e2e/architecture.md 4.2, G3). Spec decision 3: the fake writes what
+// Replay of the flow scenario (the ci-e2e spec 4.2, G3). Spec decision 3: the fake writes what
 // doug-implement.js would have written (task branches and worktrees, the fix in each, the integration branch with the
 // merges, the report); the replay tests the stage asserts and the land act, not the workflow. No model runs.
 //

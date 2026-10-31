@@ -10,7 +10,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { join, dirname, posix } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 export const VERSIONED_MANIFESTS = [
   "package.json",
@@ -269,12 +269,55 @@ function npmNormaliseBinPath(value) {
   return secured.startsWith("./") ? "" : secured;
 }
 
+const PACKAGE_FILES_ROOTS = [
+  ["plugins/doug-flow", "cli/node_modules/@dougharness/flow"],
+  ["plugins/doug-gates", "cli/node_modules/@dougharness/gates"],
+];
+
+/**
+ * Maps a repo path to its path under the stage out dir, or null when the stage does not copy it.
+ * A bundled plugin file maps when its first segment is in that package's `files`; a cli or codex
+ * src .ts maps to the compiled .js under dist.
+ */
+export function stagedPathFor(root, repoPath) {
+  for (const [pkgDir, staged] of PACKAGE_FILES_ROOTS) {
+    if (!repoPath.startsWith(pkgDir + "/")) continue;
+    const rel = repoPath.slice(pkgDir.length + 1);
+    let files = [];
+    try {
+      const pkg = JSON.parse(readFileSync(join(root, pkgDir, "package.json"), "utf8"));
+      if (Array.isArray(pkg.files)) files = pkg.files;
+    } catch {
+      return null;
+    }
+    const first = rel.split("/")[0];
+    return rel.includes("/") && files.includes(first) ? staged + "/" + rel : null;
+  }
+  if (repoPath.startsWith("packages/doug-cli/templates/")) return "cli/templates/" + repoPath.slice("packages/doug-cli/templates/".length);
+  for (const [srcDir, staged] of [["packages/doug-cli/src/", "cli/dist/"], ["packages/doug-codex/src/", "codex/dist/"]]) {
+    if (repoPath.startsWith(srcDir) && repoPath.endsWith(".ts")) return staged + repoPath.slice(srcDir.length, -3) + ".js";
+  }
+  return null;
+}
+
+/**
+ * The export's TRANSFORMS when <root>/scripts/export-public.mjs exists, else [] (the public tree
+ * has no exporter and its text is already transformed). A dynamic import, since the exporter is
+ * excluded from the public tree.
+ */
+export async function loadTransforms(root) {
+  const path = join(root, "scripts/export-public.mjs");
+  if (!existsSync(path)) return [];
+  const mod = await import(pathToFileURL(path).href);
+  return Array.isArray(mod.TRANSFORMS) ? mod.TRANSFORMS : [];
+}
+
 /**
  * Stages the cli and codex npm packages under outDir (default <root>/.doug/.state/release).
  * Returns { ok: true, staged: { cli, codex } } or { ok: false, problems } or
  * { ok: false, reason }. Writes nothing on any failure.
  */
-export function stageRelease(root, outDir) {
+export function stageRelease(root, outDir, { transforms = [] } = {}) {
   const out = outDir || join(root, ".doug/.state/release");
 
   const problems = checkRelease(root);
@@ -352,6 +395,29 @@ export function stageRelease(root, outDir) {
     }
   }
 
+  // Apply the export's TRANSFORMS to the staged copies, so npm text equals GitHub text.
+  const transformProblems = [];
+  for (const t of transforms) {
+    const rel = stagedPathFor(root, t.file);
+    if (rel == null) continue;
+    const target = join(out, rel);
+    if (!existsSync(target)) {
+      transformProblems.push(`${t.file}: staged file ${rel} not found`);
+      continue;
+    }
+    const parts = readFileSync(target, "utf8").split(t.from);
+    if (parts.length === 1) {
+      transformProblems.push(`${t.file}: expected string not found in ${rel}: ${JSON.stringify(t.from)}`);
+      continue;
+    }
+    writeFileSync(target, parts.join(t.to));
+  }
+  if (transformProblems.length > 0) {
+    rmSync(cliOut, { recursive: true, force: true });
+    rmSync(codexOut, { recursive: true, force: true });
+    return { ok: false, problems: transformProblems };
+  }
+
   return { ok: true, staged: { cli: cliOut, codex: codexOut } };
 }
 
@@ -361,7 +427,7 @@ function parseStageArgs(rest) {
   return { outDir: rest[outIdx + 1] };
 }
 
-function main() {
+async function main() {
   const root = fileURLToPath(new URL("..", import.meta.url));
   const [cmd, ...rest] = process.argv.slice(2);
 
@@ -379,7 +445,7 @@ function main() {
 
   if (cmd === "stage") {
     const { outDir } = parseStageArgs(rest);
-    const result = stageRelease(root, outDir);
+    const result = stageRelease(root, outDir, { transforms: await loadTransforms(root) });
     if (!result.ok) {
       if (result.problems) {
         for (const problem of result.problems) console.error(problem);
@@ -402,5 +468,8 @@ function main() {
 
 const invokedDirectly = process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1];
 if (invokedDirectly) {
-  main();
+  await main().catch((err) => {
+    console.error(`release: ${err && err.message ? err.message : err}`);
+    process.exit(1);
+  });
 }

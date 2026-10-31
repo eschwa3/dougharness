@@ -1,5 +1,4 @@
-// Closes the four testing gaps a measurement of the harness gate found (card seam-contracts,
-// .doug/.state/research/seam-contracts.md): nothing today ties doug-implement.js's report key `reviewIssues` to
+// Closes the four testing gaps a measurement of the harness gate found (card seam-contracts): nothing today ties doug-implement.js's report key `reviewIssues` to
 // lib/memory.mjs's read of `task.reviewIssues` (a); a skill's documented board/plan/memory.mjs subcommand can stop
 // existing while the suite stays green (b); and `claude plugin validate` catches a broken plugin manifest but
 // nothing exercises it (d). Seam (c) - doug init's PreToolUse wiring actually firing - lives in

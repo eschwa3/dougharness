@@ -339,14 +339,14 @@ describe("card-queen workflow (parallel-card-queens B10)", () => {
     }
   });
 
-  it("Q09d the queen's tester, coder, reviewer and commit prompts print the no-trailers rule; setup, research, lead and gate do not", async () => {
+  it("Q09d the queen's commit prompt prints the no-trailers rule; no other seat's prompt does", async () => {
     const text = "Commit without Co-Authored-By or Claude-Session trailers.";
     expect(loadSource()).toContain(text);
     const { agent, calls } = fakeAgent();
     await runQueen(ARGS, agent);
     expect(calls.map((c) => c.seat)).toEqual(SEATS_IN_ORDER);
     for (const c of calls) {
-      if (["tester", "coder", "reviewer", "commit"].includes(c.seat)) expect(c.prompt, `${c.seat} prompt`).toContain(text);
+      if (c.seat === "commit") expect(c.prompt, `${c.seat} prompt`).toContain(text);
       else expect(c.prompt, `${c.seat} prompt`).not.toContain(text);
     }
   });
@@ -532,6 +532,15 @@ describe("card-queen inlined gate-timeout", () => {
 
 // Card commit-seat-no-file-edits: the inlined contract stops a commit whose tree differs from the gated tree.
 describe("card-queen commit tree", () => {
+  it("Q18b the queen's commit prompt carries BASE and the commit-tree and reword rules", async () => {
+    const { agent, calls } = fakeAgent();
+    await runQueen(ARGS, agent);
+    const c = calls.find((x) => x.seat === "commit");
+    expect(c.prompt).toMatch(/^BASE: \S+/m);
+    expect(c.prompt).toContain("verified-tree.mjs commit-tree HEAD");
+    expect(c.prompt).toContain("git commit --amend --only -m");
+  });
+
   it("Q18 a commit hand-back tree differing from the gate's stops commit-tree-mismatch at commit", async () => {
     const { agent, calls } = fakeAgent((seat) => (seat === "commit" ? okHB(seat, { tree: "b".repeat(40) }) : okHB(seat)));
     const report = await runQueen(ARGS, agent);
@@ -635,5 +644,35 @@ describe("card queen: reviewer answer reaches the coder on resume", () => {
     expect(coders[2].prompt).toBe(midCoders[2].prompt);
     expect(coders[3].prompt).toContain("A: Fix F2 properly, the first attempt missed it.");
     expect(coders[2].prompt).not.toContain("Fix F2 properly");
+  });
+});
+
+describe("card queen: coder and tester seats write no git", () => {
+  const text = "Never run git add, git commit, or any other command that writes to the card branch or its index (git stash, git reset, git checkout -- <file>); the commit seat is the only seat that commits. A scratch copy or git worktree under .doug/.state for mutations is allowed.";
+
+  it("Q10 the queen's tester and coder prompts print the no-git-writes rule; no other seat's does", async () => {
+    expect(loadSource()).toContain(text);
+    const { agent, calls } = fakeAgent();
+    await runQueen(ARGS, agent);
+    for (const c of calls) {
+      if (["tester", "coder"].includes(c.seat)) expect(c.prompt, `${c.seat} prompt`).toContain(text);
+      else expect(c.prompt, `${c.seat} prompt`).not.toContain(text);
+    }
+  });
+
+  it("Q11 a coder hand-back that runs git commit stops the queen with hand-back-invalid at coder", async () => {
+    const { agent } = fakeAgent((seat) => (seat === "coder" ? okHB("coder", { commandsRun: [{ command: 'git commit -m "x"', exitCode: 0 }] }) : okHB(seat)));
+    const report = await runQueen(ARGS, agent);
+    expect(report.outcome).toBe("stopped");
+    expect(report.reason).toBe("hand-back-invalid");
+    expect(report.stoppedAt).toBe("coder");
+  });
+
+  it("Q12 a tester hand-back that runs git commit stops the queen with hand-back-invalid at tester", async () => {
+    const { agent } = fakeAgent((seat) => (seat === "tester" ? okHB("tester", { commandsRun: [{ command: "git add a b", exitCode: 0 }] }) : okHB(seat)));
+    const report = await runQueen(ARGS, agent);
+    expect(report.outcome).toBe("stopped");
+    expect(report.reason).toBe("hand-back-invalid");
+    expect(report.stoppedAt).toBe("tester");
   });
 });

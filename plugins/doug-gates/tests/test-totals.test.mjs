@@ -3,8 +3,8 @@ import { readFileSync } from "node:fs";
 import { stripAnsi, parseTotals, compareTotals, deltaTotals, parseWaiver, waiverCovers, validTotals, readSummaries, sumTotals } from "../lib/test-totals.mjs";
 
 // Card test-count-ratchet, the pure module. Every expectation follows from the card goal or decisions D3-D8 of
-// .doug/.state/briefs/test-count-ratchet.md; the vitest lines are the ones quoted in
-// .doug/.state/research/test-count-ratchet.md.
+// the card's brief; the vitest lines are the ones quoted in
+// the card's research note.
 //
 // Export shapes these tests pin (the brief leaves names open):
 //   stripAnsi(text) -> string

@@ -258,7 +258,7 @@ describe("briefs", () => {
     for (const id of ["commit-foreground", "commit-no-background", "commit-sha-from-git-log"]) expect(ids("coder")).not.toContain(id);
     expect(ids("coder")).not.toContain("red-claim");
     expect(ids("reviewer")).not.toContain("no-test-edit-without-reason");
-    expect(ids("tester")).toContain("no-trailers");
+    expect(ids("tester")).not.toContain("no-trailers");
     expect(ids("lead")).not.toContain("stay-in-goal");
     expect(ids("tester")).not.toContain("tests-only-no-production-edit");
     for (const r of Object.values(BRIEF_RULES)) {
@@ -272,18 +272,18 @@ describe("briefs", () => {
     expect(tids).not.toContain("red-claim");
   });
 
-  it("T10a no-trailers reaches every seat that may commit (tester, coder, reviewer, commit), including the coder fix pass, and no other seat", () => {
+  it("T10a no-trailers reaches the commit seat only; tester, coder (fix pass included), reviewer and every other seat get none", () => {
     const TEXT = "Commit without Co-Authored-By or Claude-Session trailers.";
     expect(BRIEF_RULES["no-trailers"].text).toBe(TEXT);
     const { actions } = walk({ ...CARD }, { research: true });
     const rulesOf = (a) => a.brief.rules.filter((r) => r.id === "no-trailers");
     const seatActions = (seat) => actions.filter((x) => x.kind === "seat" && x.seat === seat);
-    for (const seat of ["tester", "coder", "reviewer", "commit"]) {
-      const a = seatActions(seat)[0];
-      expect(a, seat).toBeTruthy();
-      expect(rulesOf(a), seat).toEqual([{ id: "no-trailers", text: TEXT }]);
+    {
+      const a = seatActions("commit")[0];
+      expect(a, "commit").toBeTruthy();
+      expect(rulesOf(a), "commit").toEqual([{ id: "no-trailers", text: TEXT }]);
     }
-    for (const seat of ["setup", "research", "lead", "gate"]) {
+    for (const seat of ["tester", "coder", "reviewer", "setup", "research", "lead", "gate"]) {
       const a = seatActions(seat)[0];
       expect(a, seat).toBeTruthy();
       expect(rulesOf(a), seat).toEqual([]);
@@ -292,7 +292,7 @@ describe("briefs", () => {
     const coders = fix.actions.filter((x) => x.kind === "seat" && x.seat === "coder");
     expect(coders.length).toBeGreaterThanOrEqual(2);
     expect(coders[1].brief.round).toBe(2);
-    expect(rulesOf(coders[1])).toEqual([{ id: "no-trailers", text: TEXT }]);
+    expect(rulesOf(coders[1])).toEqual([]);
   });
 
   it("T10b the lead is told to fetch the full text of each indexed lesson it needs, right after the verbatim rule; no other seat carries it", () => {
@@ -1030,6 +1030,78 @@ describe("gate seat writes no git", () => {
   });
 });
 
+describe("coder and tester seats write no git", () => {
+  const RULE = "Never run git add, git commit, or any other command that writes to the card branch or its index (git stash, git reset, git checkout -- <file>); the commit seat is the only seat that commits. A scratch copy or git worktree under .doug/.state for mutations is allowed.";
+  const CODER_ERR = "coder seat must not run git add or git commit";
+  const TESTER_ERR = "tester seat must not run git add or git commit";
+  const CMDS = [
+    ["git commit", 'git commit -m "x"'],
+    ["git add", "git add a b"],
+    ["a compound command", 'cd /p && git commit -m "x"'],
+    ["git -C <path>", "git -C /p commit -m x"],
+  ];
+  const ruleOf = (action) => action.brief.rules.find((r) => r.id === "no-git-writes");
+
+  it("T53 the coder brief carries no-git-writes with the exact text, on the first round and a fix pass", () => {
+    const first = ruleOf(currentAction(stateAt("coder")));
+    expect(first && first.text).toBe(RULE);
+    const s = stateAt("reviewer");
+    const r = go(s, okHB("reviewer", s, { verdict: "fail", findings: [blocker()] }));
+    expect(r.action.seat).toBe("coder");
+    const fix = ruleOf(r.action);
+    expect(fix && fix.text).toBe(RULE);
+  });
+
+  it("T54 the tester brief carries no-git-writes with the exact text, on the full and tests-only lane", () => {
+    const full = ruleOf(currentAction(stateAt("tester")));
+    expect(full && full.text).toBe(RULE);
+    const only = ruleOf(currentAction(stateAt("tester", { ...CARD, class: "tests-only" })));
+    expect(only && only.text).toBe(RULE);
+  });
+
+  it("T55 no other seat's brief carries no-git-writes", () => {
+    for (const seat of ["setup", "research", "lead", "reviewer", "gate", "commit"]) {
+      const s = stateAt(seat, CARD, { research: true });
+      expect(currentAction(s).brief.rules.map((r) => r.id), seat).not.toContain("no-git-writes");
+    }
+  });
+
+  it.each(CMDS)("T56 a coder hand-back with %s is invalid and stops at coder", (_n, command) => {
+    const s = stateAt("coder");
+    const hb = okHB("coder", s, { commandsRun: [{ command: "pnpm exec vitest run a.test.mjs", exitCode: 0 }, { command, exitCode: 0 }] });
+    expect(validateHandBack(s, hb).join("; ")).toContain(CODER_ERR);
+    const r = go(s, hb);
+    expect(r.action.kind).toBe("stopped");
+    expect(r.action.reason).toBe("hand-back-invalid");
+    expect(r.action.report.stoppedAt).toBe("coder");
+  });
+
+  it.each(CMDS)("T57 a tester hand-back with %s in commandsRun is invalid and stops at tester", (_n, command) => {
+    const s = stateAt("tester");
+    const hb = okHB("tester", s, { commandsRun: [{ command, exitCode: 0 }] });
+    expect(validateHandBack(s, hb).join("; ")).toContain(TESTER_ERR);
+    const r = go(s, hb);
+    expect(r.action.kind).toBe("stopped");
+    expect(r.action.reason).toBe("hand-back-invalid");
+    expect(r.action.report.stoppedAt).toBe("tester");
+  });
+
+  it("T58 read-only git and scratch worktree commands pass for coder and tester", () => {
+    const commands = ["git status --short", "git diff --stat", "git log --oneline -3", "git worktree add .doug/.state/scratch/w HEAD", "pnpm exec vitest run a.test.mjs"].map((command) => ({ command, exitCode: 0 }));
+    const c = stateAt("coder");
+    expect(validateHandBack(c, okHB("coder", c, { commandsRun: commands }))).toEqual([]);
+    const t = stateAt("tester");
+    expect(validateHandBack(t, okHB("tester", t, { commandsRun: commands }))).toEqual([]);
+  });
+
+  it("T59 the tester hand-back schema takes an optional commandsRun array", () => {
+    const sch = handBackSchema("tester", stateAt("tester"));
+    expect(sch.properties.commandsRun).toBeTruthy();
+    expect(sch.properties.commandsRun.type).toBe("array");
+    expect(sch.required).not.toContain("commandsRun");
+  });
+});
+
 describe("unrunnable mutations", () => {
   const REASON = "CLI test outside the scratch copy";
   const notRunHB = (s, over = {}) =>
@@ -1691,7 +1763,7 @@ describe("commit seat tree", () => {
   const NO_EDIT =
     "Never edit, create, delete, or format a file: commit exactly the tree the gate seat passed (GATED TREE). A change the commit seems to need goes in blocked, never into the tree.";
   const COMMIT_TREE =
-    "After git commit returns, run node .doug/hooks/lib/verified-tree.mjs tree with the card worktree path as its argument and report its output as tree; a tree that differs from GATED TREE stops the card.";
+    "After git commit returns, run node .doug/hooks/lib/verified-tree.mjs commit-tree HEAD with the card worktree path as its second argument and report its output as tree: it hashes HEAD's tree without verified-tree's EXCLUDED paths, the same measure as GATED TREE; a tree that differs from GATED TREE stops the card. Never compare GATED TREE with git rev-parse HEAD^{tree}, which keeps .doug/anchor.md.";
   const GATE_TREE =
     "After the gate commands, run node .doug/hooks/lib/verified-tree.mjs tree with the card worktree path as its argument and report its output as tree.";
   const ruleOf = (a, id) => a.brief.rules.find((r) => r.id === id);
@@ -1771,6 +1843,32 @@ describe("commit seat tree", () => {
     const { actions } = walk(CARD, { research: true });
     for (const x of actions.filter((y) => y.kind === "seat" && y.seat !== "commit")) {
       expect(briefPrompt(x.brief, { repoRoot: "/r", worktreePath: "/w" }), x.seat).not.toContain("GATED TREE:");
+    }
+  });
+
+  it("T88 only the commit brief carries commit-reword-tree-equal, naming the amend and no stop", () => {
+    const rule = BRIEF_RULES["commit-reword-tree-equal"];
+    expect(rule?.seats).toEqual(["commit"]);
+    expect(rule.text).toContain("git commit --amend --only -m");
+    expect(rule.text).toContain("do not stop or set blocked");
+    expect(rule.text).toContain("commit-tree HEAD");
+    expect(rule.text).toContain("git merge-base --is-ancestor HEAD");
+    const { actions } = walk(CARD, { research: true });
+    for (const a of actions.filter((x) => x.kind === "seat")) {
+      expect(!!ruleOf(a, "commit-reword-tree-equal"), a.seat).toBe(a.seat === "commit");
+    }
+  });
+
+  it("T89 the commit prompt carries BASE: <base>; other seats' prompts carry no BASE: line", () => {
+    const opts = { repoRoot: "/r", worktreePath: "/w" };
+    const def = currentAction(toCommit());
+    expect(briefPrompt(def.brief, opts)).toContain("BASE: main");
+    let s = stateAt("gate", CARD, { base: "dev" });
+    s = go(s, okHB("gate", s, { tree: TREE_A })).state;
+    expect(briefPrompt(currentAction(s).brief, opts)).toContain("BASE: dev");
+    const { actions } = walk(CARD, { research: true });
+    for (const x of actions.filter((y) => y.kind === "seat" && y.seat !== "commit")) {
+      expect(briefPrompt(x.brief, opts), x.seat).not.toMatch(/^BASE:/m);
     }
   });
 
@@ -2132,5 +2230,48 @@ describe("gate-lock run shell forms prose", () => {
     expect(prose.indexOf("8. Run a full test suite")).toBeLessThan(at);
     expect(prose.indexOf("9. Run every other test command")).toBeLessThan(at);
     expect(prose.trim().split("\n").pop()).toBe(closing);
+  });
+});
+
+describe("hookBlocked placeholder message", () => {
+  const stopsOrAdvances = (seat, message) => {
+    const s = stateAt(seat);
+    return go(s, okHB(seat, s, { hookBlocked: { message } }));
+  };
+
+  it("T104 hookBlocked with a placeholder message (none) does not stop: commit lands done, coder goes on to the reviewer", () => {
+    const commit = stopsOrAdvances("commit", "none");
+    expect(commit.action.kind).toBe("done");
+    expect(commit.action.report.commit?.sha ?? "abc1234").toContain("abc1234");
+    const coder = stopsOrAdvances("coder", "none");
+    expect(coder.action.kind).toBe("seat");
+    expect(coder.action.seat).toBe("reviewer");
+  });
+
+  it("T105 placeholder match ignores case and surrounding space for none, n/a and null", () => {
+    for (const m of ["None", "NONE", " none ", "N/A", "n/a", "Null", "NULL", "\tnull\n"]) {
+      const r = stopsOrAdvances("commit", m);
+      expect(r.action.kind, JSON.stringify(m)).toBe("done");
+    }
+  });
+
+  it("T106 a blank hookBlocked message is no block and passes validation", () => {
+    for (const m of ["", "   ", "\n"]) {
+      const r = stopsOrAdvances("commit", m);
+      expect(r.action.kind, JSON.stringify(m)).toBe("done");
+      const c = stopsOrAdvances("coder", m);
+      expect(c.action.kind, JSON.stringify(m)).toBe("seat");
+    }
+  });
+
+  it("T107 a real hookBlocked message stops with hook-blocked even when it starts with none", () => {
+    for (const m of ["protect-paths refused the edit", "none of the paths were writable: protect-paths refused", "n/a: guard-bash denied it", "nullified by hook"]) {
+      for (const seat of ["coder", "commit"]) {
+        const r = stopsOrAdvances(seat, m);
+        expect(r.action.kind, m).toBe("stopped");
+        expect(r.action.reason, m).toBe("hook-blocked");
+        expect(r.action.report.detail).toContain(m);
+      }
+    }
   });
 });

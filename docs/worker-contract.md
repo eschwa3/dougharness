@@ -97,7 +97,7 @@ The final level's integrate stage also runs every plan acceptance command on the
 
 Seats, in order: `setup` (creates the one card worktree and runs the project's install as `cd <worktree> && <install>`; later seats are told its absolute path), `research` (only when asked for), `lead` (returns the lessons block verbatim, cited facts, test files and the mutation list), `tester`, `coder`, `reviewer`, `gate`, `commit`. Lanes: full (tester, coder), lean (size S prose or docs: coder only, no mutations), tests-only (tester then reviewer, no coder).
 
-Every hand-back names its `seat` and may carry `hookBlocked: { message }`, `designQuestion`, `blocked`, and `leftOut` (follow-ups). Bodies:
+Every hand-back names its `seat` and may carry `hookBlocked: { message }` (a placeholder message, none, n/a, null or blank, counts as no block), `designQuestion`, `blocked`, and `leftOut` (follow-ups). Bodies:
 
 - `setup`: `worktree` (absolute), `branch`, `install` (`{ command, exitCode }`, or null when no install command was given).
 - `research`: `note` (the researcher's cited note text, handed back inline because the researcher is read-only; an absolute path is still accepted). A queen run's report carries it as `researchNote`, and `autopilot.mjs report` writes it to `.doug/.state/research/<card id>.md` so `board.mjs record` promotes it.
@@ -107,7 +107,7 @@ Every hand-back names its `seat` and may carry `hookBlocked: { message }`, `desi
 - `reviewer`: `verdict` (`pass` or `fail`), `findings` (`blocker`, `major`, `minor`; a blocker without `evidence` counts as major; a major with `evidence` gets the same one fix pass as a blocker, a major without evidence and a minor go to the gate), `commandsRun`, `mutationResults` (every listed id verbatim, each notRun id from the coder with `failed` true or false; `notRun` is refused; extra ids carry `own: true`).
 - `gate`: `commands` (`{ command, exitCode }`; any exit other than 0, including null, is red), `gateLine`, `tree` (the output of `node .doug/hooks/lib/verified-tree.mjs tree <card worktree>`, run after the gate commands).
 - `gate` reinstall: when the card has an install command and `node_modules` is missing in the worktree, the gate seat runs `cd <worktree> && <install>` first and reports it as the first `commands` item (rule `gate-reinstall-missing-deps`). A reinstall that exits non-zero stops the card as `setup-failed` with no red counted; a green one is ignored and the gate commands decide.
-- `commit`: `sha`, `branch`, `tree` (the same command, run after `git commit` returns; the commit seat edits no file, and a tree differing from the gate's stops the card as `commit-tree-mismatch`).
+- `commit`: `sha`, `branch`, `tree` (the output of `node .doug/hooks/lib/verified-tree.mjs commit-tree HEAD <card worktree>`, run after `git commit` returns; it hashes HEAD without the EXCLUDED paths, like the gate's measure; a tree-equal commit already on the branch is reworded, not recommitted (rule `commit-reword-tree-equal`); the commit seat edits no file, and a tree differing from the gate's stops the card as `commit-tree-mismatch`).
 
 Tester, coder and reviewer report each listed mutation under its exact listed id (the brief's MUTATION IDS line); never renumber, shorten, or rename one (a split mutation adds one letter: M8a, M8b). The rule applies only when the card has mutations (the lean lane has none).
 

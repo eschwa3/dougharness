@@ -162,7 +162,7 @@ describe("sharesEntity and modeStats' lexical/semantic split", () => {
     expect(stats.mrr).toBeCloseTo((1 + 0.5) / 2, 10);
     expect(stats.hits).toBe(2);
   });
-  // Per .doug/.state/research/measure-recall-own-rewrite.md: a query with zero expected items has nothing to
+  // Per the card's research note: a query with zero expected items has nothing to
   // score for recall, so it is excluded from the recall@k mean (0/0), but it still counts as a 0 in the
   // precision@k and MRR means — it is a real query the run scored, not a query that never happened.
   it("counts a query with no expected items as 0 in the precision and MRR means, but excludes it from the recall mean", () => {

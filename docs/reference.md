@@ -203,7 +203,7 @@ doug board labels init [dir]  # migrates a board with no label groups: type hold
 `doug init` proposes `"statusLine": { "type": "command", "command": "node .doug/hooks/scripts/statusline.mjs" }` in `.claude/settings.json`. The script reads the status-line JSON on stdin and prints one line, e.g.:
 
 ```
-Doug 1.6.0 · Opus · main · ctx 8%
+Doug 1.6.1 · Opus · main · ctx 8%
 ```
 
 The segments are the product name from `.doug/config.json`, the installed `doug-gates` version (`.doug/hooks/VERSION`, falling back to config `doug.version`), `model.display_name`, the current git branch, and the used context-window percentage. Fallbacks: `ctx --` before the first API call or after `/compact`, no branch segment outside a git repo, and the bare line `Doug` on any error. Always exits 0. Tests in `plugins/doug-gates/tests/statusline.test.mjs`.

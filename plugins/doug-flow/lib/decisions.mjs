@@ -42,7 +42,7 @@ export function slugify(title) {
   return collapsed.slice(0, 60).replace(/-+$/, "");
 }
 
-// The repo's ADR shape, exactly like docs/decisions/0006-out-of-workflow-access.md: "# NNNN. <title>", blank,
+// The repo's ADR shape, exactly like the repo's accepted ADRs: "# NNNN. <title>", blank,
 // "Date: YYYY-MM-DD. Status: accepted.", blank, then the body verbatim (the author's own markdown - never
 // wrapped or reformatted), with exactly one trailing newline on the whole file regardless of how the body's own
 // trailing whitespace was written.

@@ -778,11 +778,12 @@ describe("README for 1.4 (card readme-v1-4)", () => {
   };
   const TOPICS = ["Your first card", "Autopilot", "Gates and hooks", "Memory"];
 
-  it("V1: CHANGELOG.md's newest section is 1.6.0, then 1.5.0, then 1.4.0, and 1.4.0 lists at least 5 bullets", () => {
+  it("V1: CHANGELOG.md's newest section is 1.6.1, then 1.6.0, then 1.5.0, then 1.4.0, and 1.4.0 lists at least 5 bullets", () => {
     const hs = headings(readRoot("CHANGELOG.md"));
-    expect(hs[0]?.text).toBe("1.6.0");
-    expect(hs[1]?.text).toBe("1.5.0");
-    expect(hs[2]?.text).toBe("1.4.0");
+    expect(hs[0]?.text).toBe("1.6.1");
+    expect(hs[1]?.text).toBe("1.6.0");
+    expect(hs[2]?.text).toBe("1.5.0");
+    expect(hs[3]?.text).toBe("1.4.0");
     const section = changelogSection();
     expect(section, "CHANGELOG.md has no ## 1.4.0 section").not.toBeNull();
     expect(topLevelBullets(section).length).toBeGreaterThanOrEqual(5);

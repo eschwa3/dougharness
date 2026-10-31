@@ -1,4 +1,4 @@
-// Core of the e2e replay harness (docs/specs/ci-e2e/architecture.md 5.1): the invocation parser, step picker,
+// Core of the e2e replay harness (the ci-e2e spec 5.1): the invocation parser, step picker,
 // stream builder, Stop-hook runner and findings writer in tests/replay/, and the fake claude binary itself.
 // The fake is pointed at a scenario module of this file's own through DOUG_REPLAY_SCENARIO_FILE, so no scenario
 // file under tests/replay/scenarios/ is needed. Child processes go through the async `run`; findings paths are

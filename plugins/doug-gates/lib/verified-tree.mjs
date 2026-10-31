@@ -88,6 +88,37 @@ export function computeTree(dir, opts) {
   }
 }
 
+// The tree of a commit (`rev`) with EXCLUDED removed: the same measure as computeTree, taken from a commit
+// instead of the working tree. Never throws; null on failure (bad rev, non-repo, gitlink).
+export function computeCommitTree(dir, rev, opts) {
+  let tmpIndex = null;
+  try {
+    if (typeof rev !== "string" || rev === "" || rev.startsWith("-")) return null;
+    const tmpDir = (opts && opts.tmpDir) || join(dir, ".doug/.state");
+    const baseEnv = cleanGitEnv();
+    if (git(dir, ["rev-parse", "--git-path", "index"], baseEnv).status !== 0) return null;
+    mkdirSync(tmpDir, { recursive: true });
+    tmpIndex = join(tmpDir, `verified-tree.index.${process.pid}.${randomBytes(4).toString("hex")}`);
+    const env = cleanGitEnv({ GIT_INDEX_FILE: tmpIndex });
+    if (git(dir, ["read-tree", rev + "^{tree}"], env).status !== 0) return null;
+    if (git(dir, ["rm", "-r", "-q", "-f", "--cached", "--ignore-unmatch", "--", ...EXCLUDED], env).status !== 0) return null;
+    const staged = git(dir, ["ls-files", "-s"], env);
+    if (staged.status !== 0) return null;
+    if (String(staged.stdout).split("\n").some((l) => l.startsWith("160000 "))) return null;
+    const w = git(dir, ["write-tree"], env);
+    if (w.status !== 0) return null;
+    const sha = String(w.stdout).trim();
+    return SHA_RE.test(sha) ? sha : null;
+  } catch {
+    return null;
+  } finally {
+    if (tmpIndex) {
+      unlinkQuiet(tmpIndex);
+      unlinkQuiet(`${tmpIndex}.lock`);
+    }
+  }
+}
+
 const isObj = (x) => x !== null && typeof x === "object" && !Array.isArray(x);
 
 export function validRecord(r) {
@@ -218,7 +249,8 @@ export function creditable(dir, cfg, record, currentTree, commands) {
 
 // CLI for the pre-commit hook: `node verified-tree.mjs tree [dir]` prints the tree sha (empty on failure);
 // `node verified-tree.mjs record <treeBefore> <commandsJson> [dir]` writes a by-pre-commit record when the
-// working tree is still treeBefore. Always exits 0.
+// working tree is still treeBefore; `node verified-tree.mjs commit-tree <rev> [dir]` prints the EXCLUDED-free
+// tree of a commit (empty on failure). Always exits 0.
 function isMain() {
   try {
     return !!process.argv[1] && import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href;
@@ -231,6 +263,8 @@ if (isMain()) {
     const [cmd, a, b, c] = process.argv.slice(2);
     if (cmd === "tree") {
       process.stdout.write(computeTree(a || process.cwd()) || "");
+    } else if (cmd === "commit-tree") {
+      process.stdout.write(computeCommitTree(b || process.cwd(), a) || "");
     } else if (cmd === "record") {
       const dir = c || process.cwd();
       const after = computeTree(dir);

@@ -10,7 +10,7 @@
 // text) or semantic (it shares none); the hybrid pass additionally reports semanticWins, the semantic hits
 // keyword-only missed.
 //
-// Metric definitions and sources (docs/research/measure-recall-own-rewrite.md):
+// Metric definitions and sources:
 //   P@k = (relevant items in the top k) / k
 //     Manning, Raghavan, Schütze, "Introduction to Information Retrieval", ch. 8.3/8.4:
 //     https://nlp.stanford.edu/IR-book/html/htmledition/evaluation-of-unranked-retrieval-sets-1.html

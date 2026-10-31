@@ -132,7 +132,7 @@ const BRIEF_RULES = {
   },
   "no-trailers": {
     text: "Commit without Co-Authored-By or Claude-Session trailers.",
-    seats: ["tester", "coder", "reviewer", "commit"],
+    seats: ["commit"],
   },
   "commit-foreground": {
     text: "Run git commit in the foreground with the Bash tool timeout set to 600000 ms: the pre-commit hook runs the full unit suite and takes over the 2-minute default.",
@@ -145,6 +145,10 @@ const BRIEF_RULES = {
   "commit-sha-from-git-log": {
     text: "Report the sha only from git log -1 --format=%H after git commit has returned; never report a sha you did not read from it.",
     seats: ["commit"],
+  },
+  "no-git-writes": {
+    text: "Never run git add, git commit, or any other command that writes to the card branch or its index (git stash, git reset, git checkout -- <file>); the commit seat is the only seat that commits. A scratch copy or git worktree under .doug/.state for mutations is allowed.",
+    seats: ["tester", "coder"],
   },
   "gate-no-git-writes": {
     text: "Run the gate commands only. Never run git add, git commit, or any other command that writes to git; the commit seat is the only seat that commits.",
@@ -164,7 +168,11 @@ const BRIEF_RULES = {
     seats: ["commit"],
   },
   "commit-reports-tree": {
-    text: "After git commit returns, run node .doug/hooks/lib/verified-tree.mjs tree with the card worktree path as its argument and report its output as tree; a tree that differs from GATED TREE stops the card.",
+    text: "After git commit returns, run node .doug/hooks/lib/verified-tree.mjs commit-tree HEAD with the card worktree path as its second argument and report its output as tree: it hashes HEAD's tree without verified-tree's EXCLUDED paths, the same measure as GATED TREE; a tree that differs from GATED TREE stops the card. Never compare GATED TREE with git rev-parse HEAD^{tree}, which keeps .doug/anchor.md.",
+    seats: ["commit"],
+  },
+  "commit-reword-tree-equal": {
+    text: "Before committing: when git status --porcelain lists nothing outside .doug/.state, .claude/worktrees and .doug/anchor.md, HEAD is not on BASE (git merge-base --is-ancestor HEAD <BASE> exits 1), and verified-tree.mjs commit-tree HEAD prints GATED TREE, the gated tree is already committed: make no new commit and do not stop or set blocked for it. When that commit's subject does not start with `<card id>: `, reword it in the foreground with git commit --amend --only -m '<card id>: <subject>' (the message changes, the tree does not), then report sha and tree as usual.",
     seats: ["commit"],
   },
   "gate-reports-tree": {
@@ -247,6 +255,7 @@ const HAND_BACK_SCHEMAS = {
     "tester",
     {
       files: { type: "array", items: NES, minItems: 1 },
+      commandsRun: { type: "array", items: CMD },
       tests_red_by_design: STRS,
       mutationResults: { type: "array", items: MUT_RESULT },
     },
@@ -315,6 +324,13 @@ const cp = (x) => JSON.parse(JSON.stringify(x));
 const isObj = (x) => x !== null && typeof x === "object" && !Array.isArray(x);
 const isStr = (x) => typeof x === "string";
 const nonBlank = (x) => typeof x === "string" && x.trim() !== "";
+const HOOK_BLOCK_PLACEHOLDERS = ["none", "n/a", "null"];
+// The message of a real hook block, or null when hookBlocked is absent, blank, or a placeholder (none, n/a, null).
+function hookBlockMessage(hb) {
+  if (!isObj(hb) || !isStr(hb.message)) return null;
+  const t = hb.message.trim();
+  return t === "" || HOOK_BLOCK_PLACEHOLDERS.includes(t.toLowerCase()) ? null : hb.message;
+}
 const isAbs = (x) => nonBlank(x) && (x.startsWith("/") || /^[A-Za-z]:[\\/]/.test(x));
 const exitOk = (x) => x === null || Number.isInteger(x);
 const strArr = (x) => Array.isArray(x) && x.every(isStr);
@@ -491,7 +507,10 @@ function buildBrief(s) {
   }
   if (seat === "gate" && s.install) brief.install = s.install;
   if (seat === "gate" || seat === "reviewer") brief.gateCommand = s.gateCommand;
-  if (seat === "commit") brief.gateTree = s.gateTree;
+  if (seat === "commit") {
+    brief.gateTree = s.gateTree;
+    brief.base = s.base;
+  }
   return brief;
 }
 
@@ -552,8 +571,8 @@ function validate(state, hb) {
   const seat = state.pending;
   if (!seat) return ["no seat is pending"];
   if (hb.seat !== seat) errs.push(`seat must be "${seat}", got ${JSON.stringify(hb.seat) ?? "nothing"}`);
-  if (hb.hookBlocked !== undefined && !(isObj(hb.hookBlocked) && nonBlank(hb.hookBlocked.message))) {
-    errs.push("hookBlocked needs a non-empty message");
+  if (hb.hookBlocked !== undefined && !(isObj(hb.hookBlocked) && isStr(hb.hookBlocked.message))) {
+    errs.push("hookBlocked needs a string message");
   }
   if (hb.designQuestion !== undefined && !isStr(hb.designQuestion)) errs.push("designQuestion must be a string");
   if (hb.blocked !== undefined && !isStr(hb.blocked)) errs.push("blocked must be a string");
@@ -611,6 +630,12 @@ function validate(state, hb) {
       if (hb.tests_red_by_design !== undefined && !strArr(hb.tests_red_by_design)) {
         errs.push("tests_red_by_design must be an array of strings");
       }
+      if (hb.commandsRun !== undefined) {
+        checkCmds(hb.commandsRun, "commandsRun", errs, false);
+        if (Array.isArray(hb.commandsRun) && hb.commandsRun.some((c) => c && isStr(c.command) && GIT_WRITE_RE.test(c.command))) {
+          errs.push("tester seat must not run git add or git commit");
+        }
+      }
       let shaped = true;
       if (hb.mutationResults !== undefined) shaped = checkMutResults(hb.mutationResults, "mutationResults", errs, state.lane === "tests-only");
       if (state.lane === "tests-only" && shaped && Array.isArray(hb.mutationResults)) {
@@ -629,6 +654,9 @@ function validate(state, hb) {
     case "coder": {
       if (!strArr(hb.filesChanged)) errs.push("filesChanged must be an array of strings");
       checkCmds(hb.commandsRun, "commandsRun", errs, false);
+      if (Array.isArray(hb.commandsRun) && hb.commandsRun.some((c) => c && isStr(c.command) && GIT_WRITE_RE.test(c.command))) {
+        errs.push("coder seat must not run git add or git commit");
+      }
       if (!Array.isArray(hb.testsEdited)) errs.push("testsEdited must be an array");
       else {
         hb.testsEdited.forEach((t, i) => {
@@ -759,7 +787,8 @@ function next(state, handBack) {
   if (strArr(H.leftOut)) s.acc = { ...s.acc, followUps: union(s.acc.followUps, H.leftOut) };
 
   // C3 .. C6
-  if (isObj(H.hookBlocked) && nonBlank(H.hookBlocked.message)) return stopWith(s, "hook-blocked", H.hookBlocked.message);
+  const hbMsg = hookBlockMessage(H.hookBlocked);
+  if (hbMsg !== null) return stopWith(s, "hook-blocked", hbMsg);
   if (nonBlank(H.designQuestion)) return stopWith(s, "design-decision", H.designQuestion);
   if (P === "gate" && Array.isArray(H.commands) && H.commands.some((c) => isObj(c) && c.timedOut === true)) {
     return stopWith({ ...s, lastGate: { commands: cp(H.commands), gateLine: H.gateLine } }, "gate-timeout", typeof H.gateLine === "string" ? H.gateLine : "a gate command timed out");
@@ -1011,6 +1040,7 @@ function briefPrompt(brief, { repoRoot, worktreePath } = {}) {
   }
   if (b.gateCommand) out.push("GATE COMMAND: " + b.gateCommand);
   if (b.gateTree) out.push("GATED TREE: " + b.gateTree);
+  if (b.seat === "commit" && b.base) out.push("BASE: " + b.base);
   out.push("RULES:\n" + bullets(b.rules.map((r) => r.text)));
   out.push("HAND-BACK: return JSON matching this schema:\n" + JSON.stringify(b.handBack, null, 2));
   return out.join("\n\n") + "\n";

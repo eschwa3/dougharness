@@ -331,7 +331,7 @@ describe("card stop-gate-read-only-subagent-skip", () => {
 
 // card stop-gate-skips-orphan-subagent-stops: Claude Code fires SubagentStop for agents that never had a
 // SubagentStart in this session's trace, carry no agent_type, and have no readable agent_transcript_path
-// (research note docs/research/gate-output-names-failures.md Q1). Today such an orphan gets subagent.type
+// (a research note, Q1). Today such an orphan gets subagent.type
 // "subagent" (stop-gate.mjs:599) and agentMadeNoChanges falls back to READ_ONLY_AGENT_TYPES, which does not
 // include "subagent", so the orphan runs the full verification suite. No implementation exists yet; O1, O4's
 // absent-transcript half, and O5/O6's negative stderr checks are expected to be red until the coder adds the

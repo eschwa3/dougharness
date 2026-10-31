@@ -79,7 +79,7 @@ export function generateConfig(d: Detection): DougConfig {
 
   // The project's own Claude Code auto-memory directory is outside the project by construction (it lives under
   // ~/.claude), so an honest Edit/Write there is refused by protect-paths.mjs unless it is allowlisted
-  // (docs/decisions/0006).
+  // (decision 0006).
   const autoMemoryDir = join(homedir(), ".claude", "projects", projectSlug(d.dir), "memory");
 
   // Stop gate: cheapest reliable checks first. Build is excluded unless it is the only type check. The Node

@@ -91,8 +91,7 @@ export function readyCapWarning(board) {
 // autopilot-wall-cap-by-size, wall-budget-size-class). Each size has `all`; a class key is present only when its
 // cell had WALL_BUDGET_MIN_N or more landings. `board.mjs budgets --from docs/live-runs.md` recomputes it.
 export const WALL_BUDGET_MIN_N = 5;
-// Source: `board.mjs budgets --from docs/live-runs.md` on 2026-10-12 over 373 cards with a Wall clock row (S 274, M 83, L 16;
-// rehearsal entries skipped, repeated ids summed).
+// Source: `board.mjs budgets --from docs/live-runs.md` over the landed cards with a Wall clock row, rehearsal entries skipped, repeated ids summed.
 export const WALL_BUDGET_MIN = {"S":{"all":52,"code":46,"docs":29,"gate-script":112,"prose":41,"tests-only":66},"M":{"all":106,"code":90,"gate-script":157},"L":{"all":170}};
 
 // A card's budget: its size's class cell when it has one, else the size's `all`. No or an unknown size counts as M.
@@ -168,9 +167,9 @@ export function wallBudgetTable(samples, board, { minN = WALL_BUDGET_MIN_N, fall
 // had USD_BUDGET_MIN_N or more landings with a Cost row. `board.mjs budgets --usd --from docs/live-runs.md`
 // recomputes it. There is no floor: the autopilot USD cap is the sum of these over the queue.
 export const USD_BUDGET_MIN_N = 5;
-// Source: `board.mjs budgets --usd --from docs/live-runs.md` on 2026-10-11 over 19 cards with a measured Cost (rehearsal entries
-// skipped, repeated ids summed): S 5, M 10, L 4, so no class cell reached USD_BUDGET_MIN_N and each size is its all-class p80.
-// Every row so far is a flow entry, since hand entries only gain a Cost row with this card. L rests on 4 cards.
+// Source: `board.mjs budgets --usd --from docs/live-runs.md` over the cards with a measured Cost (rehearsal entries
+// skipped, repeated ids summed), so no class cell reached USD_BUDGET_MIN_N and each size is its all-class p80.
+// Every row so far is a flow entry, since hand entries only gain a Cost row with this card.
 export const USD_BUDGET = {"S":{"all":3.32},"M":{"all":15.79},"L":{"all":14.51}};
 
 // A card's USD budget: its size's class cell when it has one, else the size's `all`. No or an unknown size counts as M.
@@ -1308,7 +1307,7 @@ export function runSummary({ report, forcedLanding = false, cost = null, codexCo
 // planner used and discarded and wrong for a note a landed commit cites — nothing is there to read afterward.
 // Copies, never moves: .doug/.state/ may still be read this session, and it stays gitignored either way. Returns
 // the docs-relative path it wrote, or null when the card has no note (most cards; nothing is printed for those).
-// The mechanism is one note per card, keyed by card id: a note not named for a card (memory-architecture.md) and
+// The mechanism is one note per card, keyed by card id: a note not named for a card (the architecture proposal) and
 // a directory of parts (memory-parts/) are out of it by shape, not by oversight, and stay in state, unpromoted.
 // A failure (a bad id, or the filesystem) throws rather than promoting nothing and staying quiet about it — the
 // silent loss of a cited note is the defect this function exists to close — so the caller must promote before

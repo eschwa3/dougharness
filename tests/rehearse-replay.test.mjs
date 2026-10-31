@@ -1,4 +1,4 @@
-// The e2e replays at $0 (docs/specs/ci-e2e/architecture.md 5.2): the hand-written fake claude (tests/replay/claude)
+// The e2e replays at $0 (the ci-e2e spec 5.2): the hand-written fake claude (tests/replay/claude)
 // carries every rehearsal scenario through scripts/rehearse.mjs --spend to a pass, and each scenario has one
 // failing replay that fails at a named stage. No model, no Codex, no spend: a shim dir holding claude, codex and
 // codex-review records any call to them in trip.log and exits 1, and the test requires that log to stay absent.

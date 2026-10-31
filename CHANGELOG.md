@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.6.1
+
+- Card loop: a placeholder `hookBlocked` message from a seat (`none`, `n/a`, `null` or blank) is no longer treated as a hook block.
+- Card loop: the coder and tester seats get the no-git-writes rule, and a hand-back that ran `git add` or `git commit` stops the card.
+- Card loop: the no-trailers rule reaches only the commit seat, and the coder's partial return no longer says to commit.
+- Card loop: the commit seat compares trees with `verified-tree.mjs commit-tree` (the same `EXCLUDED` set as the gate, so `.doug/anchor.md` no longer causes a false mismatch) and rewords a tree-equal commit that has a wrong subject instead of stopping.
+- Memory: the store re-reads `user_version` inside the `IMMEDIATE` transaction, so concurrent opens no longer rerun migrations.
+- Memory: `reflect --failures` lists a pitfall as repeated only when its occurrence is written.
+- Export: the export and the npm stage exclude the memory bench, card specs and the project model, and one export test scans every shipped file for paths or file names of excluded or private docs.
+- Release: `release:stage` applies the export `TRANSFORMS`, its cli `TRANSFORMS` are tested against the real built `dist`, and `stage` awaits `main()` and exits with a clean error.
+
 ## 1.6.0
 
 - Stop gate: suites serialise on `gate.lock`, a seat's single-file test runs take the lock too (`gate-lock.mjs run`, including shell forms), a takeover of a stale lock is exclusive, and concurrent gates no longer time out under load.

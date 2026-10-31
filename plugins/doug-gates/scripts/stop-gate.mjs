@@ -60,7 +60,7 @@
 // card stop-gate-skips-orphan-subagent-stops: Claude Code also fires SubagentStop events for agents that never
 // had a SubagentStart in this session's trace, carry no agent_type, and have no readable
 // agent_transcript_path, on a roughly 31-second cadence while a background Agent-tool subagent is running
-// (docs/research/gate-output-names-failures.md Q1: 88 such events in one session, 170 in another, zero in
+// (a research note: 88 such events in one session, 170 in another, zero in
 // sessions with no spawns). The source component is unverified — the build depends only on the observed
 // signature, never on the source's name. Each one that reached the verification path used to run the full
 // verification suite concurrently with the real subagent (11 did in one session, the load a prior card
@@ -710,7 +710,7 @@ function runPerTree(input, trees, dir, deadline, record) {
 }
 
 // card stop-gate-skips-orphan-subagent-stops: true when a SubagentStop's own event carries none of the three
-// signals of a real subagent of this session (docs/research/gate-output-names-failures.md Q1: Claude Code
+// signals of a real subagent of this session (a research note: Claude Code
 // fires SubagentStop for agents that never had a SubagentStart, carry no agent_type, and have no readable
 // agent_transcript_path, on a roughly 31-second cadence while a background Agent-tool subagent is running; the
 // source component is unverified — this depends only on the observed signature, never on the source's name).

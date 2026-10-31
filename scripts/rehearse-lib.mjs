@@ -4,7 +4,7 @@
 // CLI (never lib/board.mjs directly, so a batch or a research-note promotion is never bypassed). Spawning the
 // real `claude` binary (runStage) is the only side effect here that costs money; every other export is pure, or
 // touches only a fixture directory the caller made. Facts this module leans on are cited in
-// .doug/.state/research/workflow-rehearsal.md.
+// the card's research note.
 
 import { spawnSync, execFileSync } from "node:child_process";
 import { cpSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync, existsSync, rmSync, readdirSync } from "node:fs";
@@ -74,54 +74,54 @@ export const ESTIMATES = {
     // stages did together (item rehearsal-first-live-findings #1).
     stages: { gate: 0.75, implement: 1.75 },
     source:
-      "flow rehearsals on the ts-basic fixture measured $4.15/9 min (docs/live-runs.md, 2026-09-09), $3.93/10 min (2026-09-10), $2.13/9 min (2026-09-20), and $1.97/6.9 min (gate $0.58/3.3 min, implement $1.38/3.4 min, 2026-10-09); the former gate ($0.25) and plan ($0.75) estimates merge into one gate stage since /doug-next runs the planner before its own approval gate, leaving implement as before",
+      "flow rehearsals on the ts-basic fixture measured $4.15/9 min (2026-09-09), $3.93/10 min (2026-09-10), $2.13/9 min (2026-09-20), and $1.97/6.9 min (gate $0.58/3.3 min, implement $1.38/3.4 min, 2026-10-09); the former gate ($0.25) and plan ($0.75) estimates merge into one gate stage since /doug-next runs the planner before its own approval gate, leaving implement as before",
   },
   swarm: {
     stages: { implement: 3.0 },
     source:
-      "swarm rehearsal estimate from the two pre-shape-gate split runs on the ts-basic fixture ($4.32/12.7 min 2026-09-10, $3.86/7.3 min 2026-09-09, docs/live-runs.md); the scenario now runs the two-source-file task swarm-split-planned, which the shape gate (3eb9485) lets split, and its first run measured $2.32/4.9 min (implement $2.32/4.8 min, the lead split split-helpers into 2 briefs, 2026-10-09)",
+      "swarm rehearsal estimate from the two pre-shape-gate split runs on the ts-basic fixture ($4.32/12.7 min 2026-09-10, $3.86/7.3 min 2026-09-09); the scenario now runs the two-source-file task swarm-split-planned, which the shape gate (3eb9485) lets split, and its first run measured $2.32/4.9 min (implement $2.32/4.8 min, the lead split split-helpers into 2 briefs, 2026-10-09)",
   },
   hand: {
     stages: { gate: 0.5, build: 2.0 },
-    source: "hand rehearsal on the ts-basic fixture measured $2.16/3.8 min (docs/live-runs.md, 2026-09-09), measured before the tester seat and research step existed, and $1.72/3.2 min (gate $0.32/0.3 min, build $1.39/2.9 min, the first run with the tester seat and research step, 2026-10-09)",
+    source: "hand rehearsal on the ts-basic fixture measured $2.16/3.8 min (2026-09-09), measured before the tester seat and research step existed, and $1.72/3.2 min (gate $0.32/0.3 min, build $1.39/2.9 min, the first run with the tester seat and research step, 2026-10-09)",
   },
   auto: {
     stages: { gate: 0.5, build: 3.0 },
-    source: "autopilot rehearsal on the ts-basic fixture measured $2.69/6.4 min (gate $0.27/0.4 min, build $2.42/6 min, docs/live-runs.md, 2026-10-08, card autopilot-unlimited) and $2.67 (gate 0.5 min, build 6.6 min, card autopilot-edge-case-not-decision); stage figures rounded up to cover the measured stage cost",
+    source: "autopilot rehearsal on the ts-basic fixture measured $2.69/6.4 min (gate $0.27/0.4 min, build $2.42/6 min, 2026-10-08, card autopilot-unlimited) and $2.67 (gate 0.5 min, build 6.6 min, card autopilot-edge-case-not-decision); stage figures rounded up to cover the measured stage cost",
   },
   parallel: {
     stages: { gate: 0.5, build: 5.0 },
-    source: "parallel rehearsal on the ts-basic fixture (one flow card and one hand card at once) measured $4.32/6.3 min (gate $0.28/0.3 min, build $4.04/6 min, docs/live-runs.md, 2026-10-13, card parallel-card-queens); a failed run the same day cost $4.65; stage figures rounded up to cover the measured stage cost",
+    source: "parallel rehearsal on the ts-basic fixture (one flow card and one hand card at once) measured $4.32/6.3 min (gate $0.28/0.3 min, build $4.04/6 min, 2026-10-13, card parallel-card-queens); a failed run the same day cost $4.65; stage figures rounded up to cover the measured stage cost",
   },
   start: {
     stages: { idea: 0.5, architecture: 1.5, skeleton: 2.0, scope: 0.7 },
-    source: "project mode from an empty git repo, one session per phase (idea, architecture, skeleton, scope): the first passing live run measured $2.81/7.3 min (docs/live-runs.md, 2026-10-11, card doug-start-skill); the per-stage figures are the card's pre-run estimates, not measured per stage, and the skeleton figure is the hand build's measured $1.39 (docs/live-runs.md, 2026-10-09) plus init and board calls, rounded up",
+    source: "project mode from an empty git repo, one session per phase (idea, architecture, skeleton, scope): the first passing live run measured $2.81/7.3 min (2026-10-11, card doug-start-skill); the per-stage figures are the card's pre-run estimates, not measured per stage, and the skeleton figure is the hand build's measured $1.39 (2026-10-09) plus init and board calls, rounded up",
   },
   "start-feature": {
     stages: { spec: 0.5, architecture: 0.7, plan: 0.7 },
-    source: "feature mode on the ts-basic fixture's fix-hours card, one session per phase (spec, architecture, plan): the first passing live run measured $1.57/3.6 min (docs/live-runs.md, 2026-10-11, card doug-start-skill); the per-stage figures are the card's pre-run estimates, not measured per stage, and the plan figure is below the flow gate's measured $0.58 (docs/live-runs.md, 2026-10-09) plus the lead's turns",
+    source: "feature mode on the ts-basic fixture's fix-hours card, one session per phase (spec, architecture, plan): the first passing live run measured $1.57/3.6 min (2026-10-11, card doug-start-skill); the per-stage figures are the card's pre-run estimates, not measured per stage, and the plan figure is below the flow gate's measured $0.58 (2026-10-09) plus the lead's turns",
   },
   // Card fixture-repo-scenarios: the five command paths that had no scenario. All run on ts-orders and none has
   // run live yet, so every figure is a pre-run estimate (unmeasured on ts-orders).
   init: {
     stages: {},
-    source: "measured on ts-orders: doug init, doug doctor and a re-init run offline with no model call, so $0 (measured $0.00/0 min, docs/live-runs.md, 2026-10-22)",
+    source: "measured on ts-orders: doug init, doug doctor and a re-init run offline with no model call, so $0 (measured $0.00/0 min, 2026-10-22)",
   },
   board: {
     stages: {},
-    source: "measured on ts-orders: the doug board commands and the served page run offline with no model call, so $0 (measured $0.00/0 min, docs/live-runs.md, 2026-10-22)",
+    source: "measured on ts-orders: the doug board commands and the served page run offline with no model call, so $0 (measured $0.00/0 min, 2026-10-22)",
   },
   memory: {
     stages: { reflect: 0.05, "model-regen": 0.05, ideas: 0.05 },
-    source: "measured on ts-orders: three cheap-row `claude -p --json-schema` calls measured $0.02/0.4 min in total (docs/live-runs.md, 2026-10-22; per-stage cost not archived, so each stage is rounded up to $0.05); recall makes no model call",
+    source: "measured on ts-orders: three cheap-row `claude -p --json-schema` calls measured $0.02/0.4 min in total (2026-10-22; per-stage cost not archived, so each stage is rounded up to $0.05); recall makes no model call",
   },
   decide: {
     stages: { propose: 0.25 },
-    source: "measured on ts-orders: one /doug-decide session that runs memory.mjs decision propose and reads the diff measured $0.19/0.2 min (docs/live-runs.md, 2026-10-22), rounded up; the apply act makes no model call",
+    source: "measured on ts-orders: one /doug-decide session that runs memory.mjs decision propose and reads the diff measured $0.19/0.2 min (2026-10-22), rounded up; the apply act makes no model call",
   },
   "swarm-skill": {
     stages: { gate: 1.0, run: 3.5 },
-    source: "unmeasured on ts-orders: the gate session spawns the planner (the flow gate measured $0.58, docs/live-runs.md, 2026-10-09, rounded up for a three-file plan) and the run session is the swarm implement stage (a two-brief split measured $2.32, 2026-10-09, plus a third brief and the landing) (estimated 2026-10-22)",
+    source: "unmeasured on ts-orders: the gate session spawns the planner (the flow gate measured $0.58, 2026-10-09, rounded up for a three-file plan) and the run session is the swarm implement stage (a two-brief split measured $2.32, 2026-10-09, plus a third brief and the landing) (estimated 2026-10-22)",
   },
 };
 
@@ -133,31 +133,31 @@ export const HARD_FIXTURE_NAMES = ["ts-rentals"];
 export const HARD_BASES = ["hand", "flow", "swarm-skill", "start-feature", "auto", "parallel"];
 export const HARD_SCENARIOS = HARD_BASES.map((b) => `hard-${b}`);
 export const HARD_SESSION_TIMEOUT_MS = 180 * 60 * 1000;
-// Every figure is the cost measured on ts-rentals in the 2026-10-25 hard sweep (docs/live-runs.md, card rehearsals-hard-sweep), to the cent.
+// Every figure is the cost measured on ts-rentals in the 2026-10-25 hard sweep (card rehearsals-hard-sweep), to the cent.
 export const HARD_ESTIMATES = {
   "hard-hand": {
     stages: { gate: 0.38, build: 1.8 },
-    source: "measured on ts-rentals: $2.18/5.9 min (gate $0.38, build $1.80, docs/live-runs.md, 2026-10-25)",
+    source: "measured on ts-rentals: $2.18/5.9 min (gate $0.38, build $1.80, 2026-10-25)",
   },
   "hard-flow": {
     stages: { gate: 0.94, implement: 2.14 },
-    source: "measured on ts-rentals: $3.08/7.6 min (gate $0.94, implement $2.14, docs/live-runs.md, 2026-10-25)",
+    source: "measured on ts-rentals: $3.08/7.6 min (gate $0.94, implement $2.14, 2026-10-25)",
   },
   "hard-swarm-skill": {
     stages: { gate: 0.67, run: 2.79 },
-    source: "measured on ts-rentals: $3.46/7.1 min (gate $0.67, run $2.79, docs/live-runs.md, 2026-10-25)",
+    source: "measured on ts-rentals: $3.46/7.1 min (gate $0.67, run $2.79, 2026-10-25)",
   },
   "hard-start-feature": {
     stages: { spec: 0.95, architecture: 0.92, plan: 0.99 },
-    source: "measured on ts-rentals: $2.87/8.5 min (spec $0.95, architecture $0.92, plan $0.99, docs/live-runs.md, 2026-10-25); the stages sum to $2.86 at the cent",
+    source: "measured on ts-rentals: $2.87/8.5 min (spec $0.95, architecture $0.92, plan $0.99, 2026-10-25); the stages sum to $2.86 at the cent",
   },
   "hard-auto": {
     stages: { gate: 0.31, build: 15.23 },
-    source: "measured on ts-rentals: the passing rerun $15.54/26.3 min (gate $0.31, build $15.23, docs/live-runs.md, 2026-10-25); the first, failed run cost $14.64",
+    source: "measured on ts-rentals: the passing rerun $15.54/26.3 min (gate $0.31, build $15.23, 2026-10-25); the first, failed run cost $14.64",
   },
   "hard-parallel": {
     stages: { gate: 0.32, build: 15.0 },
-    source: "measured on ts-rentals: the passing rerun $15.33/17.3 min (gate $0.32, build $15.00, docs/live-runs.md, 2026-10-25); the stages sum to $15.32 at the cent; the first, failed run cost $15.42",
+    source: "measured on ts-rentals: the passing rerun $15.33/17.3 min (gate $0.32, build $15.00, 2026-10-25); the stages sum to $15.32 at the cent; the first, failed run cost $15.42",
   },
 };
 export function isHardScenario(name) {
@@ -179,20 +179,20 @@ export function scenarioFixtures(scenario) {
 }
 
 const ORDERS_SCALE = 1.5;
-// Measured ts-orders figures (docs/live-runs.md, the 2026-10-22 full ts-orders rehearsal, 4170165) for the original
+// Measured ts-orders figures (the 2026-10-22 full ts-orders rehearsal, 4170165) for the original
 // scenarios that passed there. Stage keys equal ESTIMATES[scenario].stages keys. The rest stay scaled and unmeasured.
 const ORDERS_MEASURED = {
   flow: {
     stages: { gate: 0.75, implement: 1.75 },
-    source: "measured on ts-orders: $2.34/6 min (gate $0.72, implement $1.62, docs/live-runs.md, 2026-10-22), rounded up",
+    source: "measured on ts-orders: $2.34/6 min (gate $0.72, implement $1.62, 2026-10-22), rounded up",
   },
   hand: {
     stages: { gate: 0.5, build: 2.0 },
-    source: "measured on ts-orders: $1.96/3.6 min (gate $0.38, build $1.58, docs/live-runs.md, 2026-10-22), rounded up",
+    source: "measured on ts-orders: $1.96/3.6 min (gate $0.38, build $1.58, 2026-10-22), rounded up",
   },
   "start-feature": {
     stages: { spec: 0.7, architecture: 0.7, plan: 0.7 },
-    source: "measured on ts-orders: $1.93/4.9 min (spec $0.63, architecture $0.64, plan $0.66, docs/live-runs.md, 2026-10-22), rounded up",
+    source: "measured on ts-orders: $1.93/4.9 min (spec $0.63, architecture $0.64, plan $0.66, 2026-10-22), rounded up",
   },
 };
 // The estimate for a scenario on a fixture. The default fixture's entry is ESTIMATES[scenario] itself. A scenario run

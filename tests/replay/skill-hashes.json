@@ -1,40 +1,40 @@
 {
   "auto": {
-    "plugins/doug-flow/skills/doug-next/SKILL.md": "22293c08e018a14b64ecb1f209533b96f4aeb31a1e0c9d99b89f68c3b2c9e2d6",
-    "plugins/doug-flow/skills/doug-hand/SKILL.md": "c3955de864b994e3801504c9fa880504cfb4618aff6ce7e9a768c8a0590cdc75"
+    "plugins/doug-flow/skills/doug-next/SKILL.md": "d55b3821ff5b1ca17bae3e66d9297a505f2e6006ddb7c22275ebfbe83f9a73ab",
+    "plugins/doug-flow/skills/doug-hand/SKILL.md": "092a4a9b827786138485e59346e1150fa65461301ee3f6be7fa68fefa32ce3ef"
   },
   "board": {},
   "decide": {
     "plugins/doug-flow/skills/doug-decide/SKILL.md": "796e53e52572ae44086412b19db6dad5dd67911f7dd4fce55f32445bab5c83b4"
   },
   "flow": {
-    "plugins/doug-flow/skills/doug-next/SKILL.md": "22293c08e018a14b64ecb1f209533b96f4aeb31a1e0c9d99b89f68c3b2c9e2d6",
+    "plugins/doug-flow/skills/doug-next/SKILL.md": "d55b3821ff5b1ca17bae3e66d9297a505f2e6006ddb7c22275ebfbe83f9a73ab",
     "plugins/doug-flow/skills/doug-plan/SKILL.md": "6a4a3e287e3bcbce016d8821167d11df45cc06fb9a51c53d90eb783adb5f9495",
     "plugins/doug-flow/skills/doug-implement/SKILL.md": "a832a55a80527cb2f9af68673cb7dac3da56dfa09ff676d8e3a18afb55382814",
     "plugins/doug-flow/workflows/doug-implement.js": "4013bf17f6ec7cfd17b0c0ad8879bcd90a8beef9855e13132764f0b65d4f59d4"
   },
   "hand": {
-    "plugins/doug-flow/skills/doug-next/SKILL.md": "22293c08e018a14b64ecb1f209533b96f4aeb31a1e0c9d99b89f68c3b2c9e2d6",
-    "plugins/doug-flow/skills/doug-hand/SKILL.md": "c3955de864b994e3801504c9fa880504cfb4618aff6ce7e9a768c8a0590cdc75"
+    "plugins/doug-flow/skills/doug-next/SKILL.md": "d55b3821ff5b1ca17bae3e66d9297a505f2e6006ddb7c22275ebfbe83f9a73ab",
+    "plugins/doug-flow/skills/doug-hand/SKILL.md": "092a4a9b827786138485e59346e1150fa65461301ee3f6be7fa68fefa32ce3ef"
   },
   "hard-auto": {
-    "plugins/doug-flow/skills/doug-next/SKILL.md": "22293c08e018a14b64ecb1f209533b96f4aeb31a1e0c9d99b89f68c3b2c9e2d6",
-    "plugins/doug-flow/skills/doug-hand/SKILL.md": "c3955de864b994e3801504c9fa880504cfb4618aff6ce7e9a768c8a0590cdc75"
+    "plugins/doug-flow/skills/doug-next/SKILL.md": "d55b3821ff5b1ca17bae3e66d9297a505f2e6006ddb7c22275ebfbe83f9a73ab",
+    "plugins/doug-flow/skills/doug-hand/SKILL.md": "092a4a9b827786138485e59346e1150fa65461301ee3f6be7fa68fefa32ce3ef"
   },
   "hard-flow": {
-    "plugins/doug-flow/skills/doug-next/SKILL.md": "22293c08e018a14b64ecb1f209533b96f4aeb31a1e0c9d99b89f68c3b2c9e2d6",
+    "plugins/doug-flow/skills/doug-next/SKILL.md": "d55b3821ff5b1ca17bae3e66d9297a505f2e6006ddb7c22275ebfbe83f9a73ab",
     "plugins/doug-flow/skills/doug-plan/SKILL.md": "6a4a3e287e3bcbce016d8821167d11df45cc06fb9a51c53d90eb783adb5f9495",
     "plugins/doug-flow/skills/doug-implement/SKILL.md": "a832a55a80527cb2f9af68673cb7dac3da56dfa09ff676d8e3a18afb55382814",
     "plugins/doug-flow/workflows/doug-implement.js": "4013bf17f6ec7cfd17b0c0ad8879bcd90a8beef9855e13132764f0b65d4f59d4"
   },
   "hard-hand": {
-    "plugins/doug-flow/skills/doug-next/SKILL.md": "22293c08e018a14b64ecb1f209533b96f4aeb31a1e0c9d99b89f68c3b2c9e2d6",
-    "plugins/doug-flow/skills/doug-hand/SKILL.md": "c3955de864b994e3801504c9fa880504cfb4618aff6ce7e9a768c8a0590cdc75"
+    "plugins/doug-flow/skills/doug-next/SKILL.md": "d55b3821ff5b1ca17bae3e66d9297a505f2e6006ddb7c22275ebfbe83f9a73ab",
+    "plugins/doug-flow/skills/doug-hand/SKILL.md": "092a4a9b827786138485e59346e1150fa65461301ee3f6be7fa68fefa32ce3ef"
   },
   "hard-parallel": {
-    "plugins/doug-flow/skills/doug-next/SKILL.md": "22293c08e018a14b64ecb1f209533b96f4aeb31a1e0c9d99b89f68c3b2c9e2d6",
-    "plugins/doug-flow/skills/doug-hand/SKILL.md": "c3955de864b994e3801504c9fa880504cfb4618aff6ce7e9a768c8a0590cdc75",
-    "plugins/doug-flow/workflows/card-queen.js": "3054b582149bcd8514f704f359dba0c81ba5176b2a84f8e0ae23c96b88f0e3ff"
+    "plugins/doug-flow/skills/doug-next/SKILL.md": "d55b3821ff5b1ca17bae3e66d9297a505f2e6006ddb7c22275ebfbe83f9a73ab",
+    "plugins/doug-flow/skills/doug-hand/SKILL.md": "092a4a9b827786138485e59346e1150fa65461301ee3f6be7fa68fefa32ce3ef",
+    "plugins/doug-flow/workflows/card-queen.js": "37e35ed00b2fe7e3cad234fedff2590a60fb11c08a64bc736cd0f78c89560789"
   },
   "hard-start-feature": {
     "plugins/doug-flow/skills/doug-start/SKILL.md": "f014f56032ac2477cfcdbb95fc99ee8b4e01f977924a99e74c463a70e584c69e"
@@ -47,9 +47,9 @@
   "init": {},
   "memory": {},
   "parallel": {
-    "plugins/doug-flow/skills/doug-next/SKILL.md": "22293c08e018a14b64ecb1f209533b96f4aeb31a1e0c9d99b89f68c3b2c9e2d6",
-    "plugins/doug-flow/skills/doug-hand/SKILL.md": "c3955de864b994e3801504c9fa880504cfb4618aff6ce7e9a768c8a0590cdc75",
-    "plugins/doug-flow/workflows/card-queen.js": "3054b582149bcd8514f704f359dba0c81ba5176b2a84f8e0ae23c96b88f0e3ff"
+    "plugins/doug-flow/skills/doug-next/SKILL.md": "d55b3821ff5b1ca17bae3e66d9297a505f2e6006ddb7c22275ebfbe83f9a73ab",
+    "plugins/doug-flow/skills/doug-hand/SKILL.md": "092a4a9b827786138485e59346e1150fa65461301ee3f6be7fa68fefa32ce3ef",
+    "plugins/doug-flow/workflows/card-queen.js": "37e35ed00b2fe7e3cad234fedff2590a60fb11c08a64bc736cd0f78c89560789"
   },
   "start": {
     "plugins/doug-flow/skills/doug-start/SKILL.md": "f014f56032ac2477cfcdbb95fc99ee8b4e01f977924a99e74c463a70e584c69e"

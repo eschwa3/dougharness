@@ -3,7 +3,7 @@ import type { DougConfig } from "./config.js";
 
 // Generates a short CLAUDE.md: verbatim commands, tooling facts, and nothing derivable from the code.
 // Research basis: agents reliably act on tooling instructions; overviews and style guides do not help
-// and cost tokens (docs/reviews/07-tailored-install-research.md).
+// and cost tokens.
 
 export function generateClaudeMd(d: Detection, cfg: DougConfig): string {
   const n = d.node;

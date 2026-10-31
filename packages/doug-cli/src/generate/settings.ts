@@ -177,7 +177,7 @@ export function dougHooks(gatesDir: string = gatesSourceDir()): Record<string, H
           throw new Error(`doug init: the ${event} hook ${hi} in ${path} has no command string (found ${describeValue(h.command)}).`);
         }
         // Pass through, don't validate - this card's decision (hooks-json-read-hardening; the schema facts it's
-        // based on are in docs/research/hooks-json-read-hardening.md, promoted there on landing): every field
+        // based on are in the card's research note): every field
         // the hook carries besides `command` rides along untouched, in hooks.json's key order, because the
         // generator's job is translating a file the plugin already runs from, not policing it against a schema
         // it doesn't fully know - Claude Code's handling of a key that isn't documented today is unverified,

@@ -2006,7 +2006,7 @@ describe("runSummary reads a batch report's acceptance without cross-card noise"
 });
 
 // Card board-card-class: an optional `class` field on a card, a closed enum, so a hand-track report's
-// condition can be pinned before the brief (decision 2, docs/proposals/hand-track-report.md).
+// condition can be pinned before the brief (decision 2 of the hand-track report proposal).
 describe("card class (card board-card-class)", () => {
   const CLASSES = ["tests-only", "prose", "gate-script", "code", "docs", "eval", "decision"];
   const enumMessage = "class must be tests-only, prose, gate-script, code, docs, eval, or decision";

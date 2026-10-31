@@ -6452,6 +6452,11 @@ describe("plugin layout", () => {
       expect(text, f).not.toMatch(/\b(opus|sonnet|haiku)\b/i);
     }
   });
+  it("(card seat-commit-instructions-contradict) coder.md's partial return does not tell the coder to commit", () => {
+    const coder = readFileSync(join(root, "agents/coder.md"), "utf8");
+    expect(coder).not.toContain("then commit");
+    expect(coder).toContain("finish the file you are on and its named test; do not commit, since the commit seat is the only seat that commits");
+  });
   it("tells the planner an acceptance command never repeats a verify command (card flow-suite-dedupe)", () => {
     expect(readFileSync(join(root, "agents/planner.md"), "utf8")).toContain("never repeats a verify command");
   });
@@ -7621,7 +7626,7 @@ describe("card run-report-codex-cost: the Codex cost sentences and flag are docu
 });
 
 // 2026-09-24 (card decision-0011-followthrough): ADR 0011's five decisions land as prose only. Each pin below
-// quotes the ADR's own wording (docs/decisions/0011-five-harness-decisions-scratch-copy-mutations-no-lead-tester.md)
+// quotes the ADR's own wording (decision 0011)
 // verbatim, never a paraphrase, so a coder who deletes the new sentence fails the pin.
 describe("card decision-0011-followthrough: ADR 0011's scratch-copy, scratch-location, unclassed-rows, and race-limit sentences", () => {
   // ADR item 1: mutations run in a scratch copy or worktree under .doug/.state, never the live checkout. One
@@ -8038,7 +8043,7 @@ function skillsProblems(repo) {
         const name = item[1];
         const who = `${f}: ${name}`;
         if (name.includes(":")) {
-          problems.push(`${who}: namespaced name form is unverified, use the bare name (docs/research/role-skills-preload.md)`);
+          problems.push(`${who}: namespaced name form is unverified, use the bare name (the card's research note)`);
           continue;
         }
         const found = resolve(name);
@@ -8301,7 +8306,7 @@ describe("card parallel-card-queens: doug-next Parallel cards paragraph", () => 
     "a resume never replans": "A resume never replans.",
     "ask while the others run": "When a queen's run needs the user, main asks while the other queens keep running.",
     "a cap launches no new queen": "A cap reached launches no new queen and lets the in-flight ones finish.",
-    "manual mode prompts per launch": 'In manual or accept-edits mode every queen launch prompts, and the Workflow allow rule or "Yes, and don\'t ask again" runs n queens unattended (docs/research/parallel-cards-research.md section 4).',
+    "manual mode prompts per launch": 'In manual or accept-edits mode every queen launch prompts, and the Workflow allow rule or "Yes, and don\'t ask again" runs n queens unattended' + (IS_SNAPSHOT ? "." : " (docs/research/parallel-cards-research.md section 4)."),
     "swarm and decision cards run alone": "A card tagged swarm (or `swarm: true`, or whose goal says to run it as a swarm) and a decision card run alone, as today, after the in-flight queens finish; `/doug-next <id>` by hand is unchanged.",
   };
   for (const [name, sentence] of Object.entries(sentences)) {
@@ -8772,7 +8777,7 @@ describe("card landing-one-sentence-summary: skill sentences", () => {
 });
 
 // Card doug-start-skill (ADR 0012): /doug-start is one skill with two modes. Every sentence pinned below is quoted from
-// ADR 0012 (docs/decisions/0012-doug-start-one-skill-for-a-new-project-and-for-a-feature.md) except the ones marked
+// ADR 0012 (decision 0012) except the ones marked
 // "assumed wording", which the coder must reproduce verbatim.
 describe("card doug-start-skill: /doug-start, its two modes, and the spec-writer agent", () => {
   const skillText = () => readFileSync(join(root, "skills/doug-start/SKILL.md"), "utf8");
@@ -9173,7 +9178,7 @@ describe("card closing-summary-recap: per-card recap", () => {
 });
 
 describe("card hand-shape-swarm-criterion: 2b swarm recommendation", () => {
-  const CRITERION = "Recommend a swarm only when the goal asks for two or more independent deliverables: separate pieces of work, each with its own test file, where none uses a function, type, or file another one adds (the 2026-09-19 split probe's four report commands, docs/live-runs.md); otherwise recommend by hand. Say in the question, in one clause, which side of this rule the card is on. The recommendation is the lead's reading of the goal, not a default.";
+  const CRITERION = "Recommend a swarm only when the goal asks for two or more independent deliverables: separate pieces of work, each with its own test file, where none uses a function, type, or file another one adds" + (IS_SNAPSHOT ? "" : " (the 2026-09-19 split probe's four report commands, docs/live-runs.md)") + "; otherwise recommend by hand. Say in the question, in one clause, which side of this rule the card is on. The recommendation is the lead's reading of the goal, not a default.";
   const t = readFileSync(join(root, "skills/doug-hand/SKILL.md"), "utf8");
   const i = t.indexOf("## 2b. Shape: by hand, or a swarm");
   const j = t.indexOf("\n## ", i + 1);

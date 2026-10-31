@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Files the findings of a broken replay or journey step as Backlog cards (architecture 4.4 of docs/specs/ci-e2e).
+// Files the findings of a broken replay or journey step as Backlog cards (architecture 4.4).
 // Usage: node scripts/e2e-cards.mjs [findings.json] [--dir <repo>]
 // The board is read with loadBoard and written only through the doug CLI (packages/doug-cli/dist/bin.js).
 import { existsSync, readFileSync } from "node:fs";

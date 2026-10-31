@@ -1,4 +1,4 @@
-// Findings writer for the e2e replay and journey tests (docs/specs/ci-e2e/architecture.md 4.3, pseudocode 7).
+// Findings writer for the e2e replay and journey tests (the ci-e2e spec 4.3, pseudocode 7).
 // A finding is one broken replay or journey step; recordFindings merges a source's findings into one shared
 // JSON file under a lock directory, so the replay file and the journey file can write to it in parallel.
 import { execFileSync } from "node:child_process";

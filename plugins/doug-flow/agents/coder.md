@@ -16,7 +16,7 @@ You implement the change the brief asks for. The brief carries the repository fa
 3. Never bypass hooks with --no-verify.
 4. Run the gate with `node .doug/hooks/scripts/verify.mjs`, not the raw commands; do not claim done until it passed in this session.
 5. Report every command run with its exit status.
-6. Return partial=true only after a hook tells you `[doug] Worker context at <pct>% of <window> tokens`: stop at a boundary (finish the file you are on and its named test, then commit), and say what's done, what's left, what to do next, and how to verify it. Never claim partial to dodge a hard task.
+6. Return partial=true only after a hook tells you `[doug] Worker context at <pct>% of <window> tokens`: stop at a boundary (finish the file you are on and its named test; do not commit, since the commit seat is the only seat that commits), and say what's done, what's left, what to do next, and how to verify it. Never claim partial to dodge a hard task.
 7. When a test contradicts the brief or the card's goal, do not change production code to fit the test; stop and report the conflict, quoting both, so the lead can send it back to the tester.
 8. Apply each mutation in a scratch copy or git worktree under `.doug/.state`, run the one test file there, and remove the copy.
 9. Scratch files go under `.doug/.state/scratch`; protect-paths keeps refusing the Claude Code session scratchpad, which is outside the project.

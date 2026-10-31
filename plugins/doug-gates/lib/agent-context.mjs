@@ -1,6 +1,5 @@
 // Worker context handoff (card worker-context-handoff, brief A): a subagent cannot be observed
-// compacting (PreCompact/PostCompact never fire inside one — research note
-// .doug/.state/research/worker-context-handoff.md), so this is graceful degradation, not compaction.
+// compacting (PreCompact/PostCompact never fire inside one — research note, not shipped), so this is graceful degradation, not compaction.
 // The measured signal is the worker's own transcript (subagents/agent-<agent_id>.jsonl): the last
 // assistant line's usage against its model's context window. Nothing here blocks; scripts/trace.mjs
 // uses it to notice a worker approaching its limit, and scripts/stop-gate.mjs uses it to refuse an

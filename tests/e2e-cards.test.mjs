@@ -1,4 +1,4 @@
-// scripts/e2e-cards.mjs (docs/specs/ci-e2e architecture 4.4): findings become Backlog cards through the doug board CLI.
+// scripts/e2e-cards.mjs (the ci-e2e spec, architecture 4.4): findings become Backlog cards through the doug board CLI.
 // Every case works in a temp dir made with `doug board init`, never the repository's board, and always passes --dir.
 import { describe, it, expect, afterAll, vi } from "vitest";
 import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";

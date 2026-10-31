@@ -1,4 +1,4 @@
-// Card ci-e2e (docs/specs/ci-e2e/architecture.md 5.5): docs/rehearsals.md names every replayed scenario, CI uploads the
+// Card ci-e2e (the ci-e2e spec 5.5): docs/rehearsals.md names every replayed scenario, CI uploads the
 // findings file on failure, and the CI test steps match the package.json scripts (test:e2e exists only when the
 // budget fallback applied). No figure from a measurement is pinned here.
 import { describe, it, expect } from "vitest";

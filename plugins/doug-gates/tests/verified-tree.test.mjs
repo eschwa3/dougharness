@@ -1034,3 +1034,54 @@ describe("totalsUsable and the pre-commit record writer (card land-card-record-e
     expect(readRecord(dir)?.ranIn).toBe(realpathSync(dir));
   });
 });
+
+// Card commit-seat-anchor-tree-mismatch: computeCommitTree hashes a commit with verified-tree's EXCLUDED applied.
+describe("computeCommitTree and the commit-tree CLI", () => {
+  const LIB = join(dirname(fileURLToPath(import.meta.url)), "..", "lib", "verified-tree.mjs");
+  const withAnchor = () => makeRepo({ ...BASE, ".doug/anchor.md": "anchor\n", ".doug/plan.json": "{}\n" });
+
+  it("CT1: a committed .doug/anchor.md is left out, so the commit measure equals computeTree and differs from HEAD^{tree}", () => {
+    const dir = withAnchor();
+    expect(typeof vtLib.computeCommitTree).toBe("function");
+    const ct = vtLib.computeCommitTree(dir, "HEAD");
+    expect(ct).toMatch(/^[0-9a-f]{40}$/);
+    expect(ct).toBe(computeTree(dir));
+    expect(ct).not.toBe(headTree(dir));
+    // plan.json is not excluded: changing it changes the measure
+    write(dir, ".doug/plan.json", '{"a":1}\n');
+    commitAll(dir, "plan");
+    expect(vtLib.computeCommitTree(dir, "HEAD")).not.toBe(ct);
+  });
+
+  it("CT2: it hashes the named commit, not the working tree", () => {
+    const dir = withAnchor();
+    const before = vtLib.computeCommitTree(dir, "HEAD");
+    write(dir, "a.js", "export const a = 2;\n");
+    expect(computeTree(dir)).not.toBe(before);
+    expect(vtLib.computeCommitTree(dir, "HEAD")).toBe(before);
+    commitAll(dir, "second");
+    expect(vtLib.computeCommitTree(dir, "HEAD~1")).toBe(before);
+    expect(vtLib.computeCommitTree(dir, "HEAD")).toBe(computeTree(dir));
+  });
+
+  it("CT3: never throws; null on a bad rev or a non-repo; leaves the real index alone", () => {
+    const dir = withAnchor();
+    const indexBefore = readFileSync(join(dir, ".git/index"));
+    expect(vtLib.computeCommitTree(dir, "no-such-rev")).toBeNull();
+    expect(vtLib.computeCommitTree(mkdtempSync(join(tmpdir(), "doug-vt-nogit-")), "HEAD")).toBeNull();
+    expect(() => vtLib.computeCommitTree("/does/not/exist/doug", "HEAD")).not.toThrow();
+    vtLib.computeCommitTree(dir, "HEAD");
+    expect(readFileSync(join(dir, ".git/index")).equals(indexBefore)).toBe(true);
+  });
+
+  it("CT4: the commit-tree CLI prints the measure with exit 0, and prints empty with exit 0 on a bad rev", () => {
+    const dir = withAnchor();
+    const r = spawnSync(process.execPath, [LIB, "commit-tree", "HEAD", dir], { encoding: "utf8", env: cleanEnv() });
+    expect(r.status, r.stderr).toBe(0);
+    expect(r.stdout.trim()).toBe(vtLib.computeCommitTree(dir, "HEAD"));
+    expect(r.stdout.trim()).toBe(computeTree(dir));
+    const bad = spawnSync(process.execPath, [LIB, "commit-tree", "no-such-rev", dir], { encoding: "utf8", env: cleanEnv() });
+    expect(bad.status).toBe(0);
+    expect(bad.stdout.trim()).toBe("");
+  });
+});

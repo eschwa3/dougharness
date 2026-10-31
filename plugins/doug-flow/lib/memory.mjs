@@ -274,8 +274,17 @@ const V1_OUTCOME_COLUMNS = [
   "in_scope", "budget_spent", "tokens", "usd", "commit_sha",
 ];
 
+// Called right after BEGIN IMMEDIATE: user_version was read before the lock, so another process may have migrated
+// while this one waited. If the store is no longer at `from`, release the lock and tell the step to skip.
+function stillAtVersion(db, from) {
+  if (db.prepare("PRAGMA user_version").get().user_version === from) return true;
+  db.exec("ROLLBACK");
+  return false;
+}
+
 function migrateV1ToV2(db) {
   db.exec("BEGIN IMMEDIATE");
+  if (!stillAtVersion(db, 1)) return;
   try {
     db.exec(`CREATE TABLE outcomes_v2 (${OUTCOMES_COLUMNS_SQL});`);
     db.exec(
@@ -301,6 +310,7 @@ const V2_LESSON_COLUMNS = [
 
 function migrateV2ToV3(db) {
   db.exec("BEGIN IMMEDIATE");
+  if (!stillAtVersion(db, 2)) return;
   try {
     db.exec(`CREATE TABLE lessons_v3 (${LESSONS_COLUMNS_SQL});`);
     db.exec(
@@ -321,6 +331,7 @@ function migrateV2ToV3(db) {
 // rebuild-under-a-temp-name dance, just the CREATE plus the version bump, in the same transactional pattern.
 function migrateV3ToV4(db) {
   db.exec("BEGIN IMMEDIATE");
+  if (!stillAtVersion(db, 3)) return;
   try {
     db.exec(`CREATE TABLE reflections (${REFLECTIONS_COLUMNS_SQL});`);
     db.exec("PRAGMA user_version = 4");
@@ -339,6 +350,7 @@ function migrateV3ToV4(db) {
 // genuine v4 store that only ever had the v4 columns.
 function migrateV4ToV5(db) {
   db.exec("BEGIN IMMEDIATE");
+  if (!stillAtVersion(db, 4)) return;
   try {
     const cols = db.prepare("PRAGMA table_info(outcomes)").all().map((c) => c.name);
     if (!cols.includes("partial")) db.exec("ALTER TABLE outcomes ADD COLUMN partial INTEGER;");
@@ -355,6 +367,7 @@ function migrateV4ToV5(db) {
 // cache, never add-only.
 function migrateV5ToV6(db) {
   db.exec("BEGIN IMMEDIATE");
+  if (!stillAtVersion(db, 5)) return;
   try {
     db.exec(CODE_INDEX_SCHEMA_SQL);
     db.exec("PRAGMA user_version = 6");
@@ -382,6 +395,7 @@ const V7_CONDITION_COLUMNS = [
 
 function migrateV6ToV7(db) {
   db.exec("BEGIN IMMEDIATE");
+  if (!stillAtVersion(db, 6)) return;
   try {
     const cols = db.prepare("PRAGMA table_info(outcomes)").all().map((c) => c.name);
     for (const [name, type] of V7_CONDITION_COLUMNS) {
@@ -404,6 +418,7 @@ const V8_CODEX_COLUMNS = [["codex_usd", "REAL"]];
 
 function migrateV7ToV8(db) {
   db.exec("BEGIN IMMEDIATE");
+  if (!stillAtVersion(db, 7)) return;
   try {
     const cols = db.prepare("PRAGMA table_info(outcomes)").all().map((c) => c.name);
     for (const [name, type] of V8_CODEX_COLUMNS) {
@@ -425,6 +440,7 @@ const V9_STOP_COLUMNS = [["stop_class", "TEXT"]];
 
 function migrateV8ToV9(db) {
   db.exec("BEGIN IMMEDIATE");
+  if (!stillAtVersion(db, 8)) return;
   try {
     const cols = db.prepare("PRAGMA table_info(outcomes)").all().map((c) => c.name);
     for (const [name, type] of V9_STOP_COLUMNS) {
@@ -446,6 +462,7 @@ const V10_MEMORY_COLUMNS = [["memory_config", "TEXT"]];
 
 function migrateV9ToV10(db) {
   db.exec("BEGIN IMMEDIATE");
+  if (!stillAtVersion(db, 9)) return;
   try {
     const cols = db.prepare("PRAGMA table_info(outcomes)").all().map((c) => c.name);
     for (const [name, type] of V10_MEMORY_COLUMNS) {
@@ -464,6 +481,7 @@ function migrateV9ToV10(db) {
 // store), then the version bump. seen is not in the no-rewrite trigger's column list.
 function migrateV10ToV11(db) {
   db.exec("BEGIN IMMEDIATE");
+  if (!stillAtVersion(db, 10)) return;
   try {
     const cols = db.prepare("PRAGMA table_info(lessons)").all().map((c) => c.name);
     if (!cols.includes("seen")) db.exec("ALTER TABLE lessons ADD COLUMN seen INTEGER NOT NULL DEFAULT 0;");
@@ -481,6 +499,7 @@ function migrateV10ToV11(db) {
 // and the no-delete trigger is unchanged: an archived row is kept.
 function migrateV11ToV12(db) {
   db.exec("BEGIN IMMEDIATE");
+  if (!stillAtVersion(db, 11)) return;
   try {
     const cols = db.prepare("PRAGMA table_info(lessons)").all().map((c) => c.name);
     if (!cols.includes("archived")) db.exec("ALTER TABLE lessons ADD COLUMN archived TEXT;");
@@ -504,8 +523,18 @@ export function openMemory(dir) {
   db.exec("PRAGMA foreign_keys = ON");
   const version = db.prepare("PRAGMA user_version").get().user_version;
   if (version === 0) {
-    db.exec(SCHEMA_SQL);
-    db.exec("PRAGMA user_version = 12");
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      // Another process may have created the schema while this one waited for the lock.
+      if (db.prepare("PRAGMA user_version").get().user_version === 0) {
+        db.exec(SCHEMA_SQL);
+        db.exec("PRAGMA user_version = 12");
+      }
+      db.exec("COMMIT");
+    } catch (err) {
+      db.exec("ROLLBACK");
+      throw err;
+    }
   } else if (version === 1) {
     migrateV1ToV2(db);
     migrateV2ToV3(db);
@@ -1188,7 +1217,7 @@ export function windowNote(hidden, staleDays = 30) {
 
 // --- Dense-ranked recall -----------------------------------------------------------------------------------
 // With a provider and vectors stored under its model/dims, every vectored live in-window lesson is ranked by
-// cosine similarity x recency weight x scope boost (memory-benchmark section 9: cosine x recency beat the old
+// cosine similarity x recency weight x scope boost (cosine x recency beat the old
 // 50+50 reciprocal rank fusion); BM25 hits that have no such vector are appended after all vectored lessons, in
 // BM25 order. Without a provider or vectors, BM25 x recency x scope is the ranking (mode keyword-only). Ties
 // break by lesson id ascending. Results are then citation-rechecked against checkoutDir before anything is
@@ -3296,8 +3325,11 @@ export async function runFailureReflect(m, opts = {}) {
   const repeated = [...fileRepeated];
   const rejected = [];
   const occur = (lesson, item) => {
-    if (!dryRun) recordPitfallOccurrence(dir, { lesson, citation: item.ref, card: item.card, run: item.run, session: item.session, at: now, class: item.class, files: item.files });
-    if (!repeated.includes(lesson)) repeated.push(lesson);
+    // List the pitfall only when this occurrence is new (written, or in a dry run would be); a block already recorded adds nothing.
+    const isNew = dryRun
+      ? !readPitfallOccurrences(dir).some((x) => x.lesson === lesson && x.citation === item.ref)
+      : recordPitfallOccurrence(dir, { lesson, citation: item.ref, card: item.card, run: item.run, session: item.session, at: now, class: item.class, files: item.files }).written;
+    if (isNew && !repeated.includes(lesson)) repeated.push(lesson);
   };
   for (const p of result.lessons) {
     const text = p && typeof p.text === "string" ? p.text : null;

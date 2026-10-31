@@ -57,10 +57,10 @@ documented at
 [code.claude.com/docs/en/hooks-guide.md](https://code.claude.com/docs/en/hooks-guide.md) (lifecycle table) and
 [code.claude.com/docs/en/hooks.md](https://code.claude.com/docs/en/hooks.md) (input schema); the Claude Code
 version that introduced it is not documented, so the trace hook registers the event and tolerates its absence
-rather than checking a version (`.doug/.state/research/learn-signals.md`). `PermissionDenied`'s documented
+rather than checking a version. `PermissionDenied`'s documented
 payload (`tool_name`, `tool_input`, `tool_use_id`, `denial_reason`) is fired by auto mode; **whether a manual
 deny in the permission prompt, or a hook's own deny, also fires `PermissionDenied` is unverified** - the
-research note (`.doug/.state/research/learn-signals.md`) marks it explicitly, which is why `unmatched` exists
+research note marks it explicitly, which is why `unmatched` exists
 alongside `denials` rather than folded into it: a real denial this repository's `PermissionDenied` payload
 happens not to cover would otherwise go uncounted rather than merely unproposed.
 

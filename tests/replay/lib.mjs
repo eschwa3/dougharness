@@ -1,4 +1,4 @@
-// Helpers for the hand-written replay fake tests/replay/claude (docs/specs/ci-e2e/architecture.md 4.1,
+// Helpers for the hand-written replay fake tests/replay/claude (the ci-e2e spec 4.1,
 // pseudocode 1 and 2). A scenario file builds one stream per session with Stream, makes its edits, commits and
 // Doug CLI calls through the helpers here (each also writes the matching tool_use line), and the fake then runs
 // the fixture's Stop hooks. Nothing here calls a model.

@@ -5474,6 +5474,57 @@ describe("card memory-failure-lessons", () => {
       expect(occ[0]).toMatchObject({ lesson: P.id, citation: C2REF, class: "real", files: ["src/a.mjs"] });
       expect(occ[0].via).toBeUndefined();
     });
+
+    const mkPitfallB = () => addLesson(m, { text: "Always rerun the linter after renaming exports because stale imports slip through", kind: "pitfall", citation: "history:c3/wf_1:2", card: "c3", source: { agent: "reflect" } });
+    const repeatsOf = (id) => async () => ({ lessons: [{ kind: "pitfall", text: "Repeat of the pitfall", citation: C2REF, notDerivableBecause: "learned only from this run", repeats: id }], sessionId: null, totalCostUsd: null });
+
+    it("a second stop whose model repeat cites an already recorded block does not list the pitfall as repeated", async () => {
+      const P = mkPitfall();
+      hist("c2", "wf_9", [brief, blk(blockOf("real", { files: ["src/a.mjs"] })), rep(STOP)]);
+      const propose = repeatsOf(P.id);
+      const first = await runC2({ propose });
+      expect(first.repeated).toContain(P.id);
+      hist("c2", "wf_10", [brief, rep(STOP)]);
+      const second = await runC2({ propose });
+      expect(second.alreadyReflected).toBeFalsy();
+      expect(second.repeated).not.toContain(P.id);
+      const row = m.prepare("SELECT bumped FROM reflections WHERE card = ? ORDER BY recorded DESC, rowid DESC").get("c2");
+      expect(JSON.parse(row.bumped)).not.toContain(P.id);
+      expect(c2Occ(P.id)).toHaveLength(1);
+      // a dry run of a third stop previews nothing new either
+      hist("c2", "wf_11", [brief, rep(STOP)]);
+      const dry = await runC2({ dryRun: true, propose });
+      expect(dry.repeated).not.toContain(P.id);
+    });
+
+    it("a dry run lists a first model repeat that would be written, and writes nothing", async () => {
+      const P = mkPitfall();
+      hist("c2", "wf_9", [brief, blk(blockOf("real", { files: ["src/a.mjs"] }))]);
+      const r = await runC2({ dryRun: true, propose: repeatsOf(P.id) });
+      expect(r.repeated).toContain(P.id);
+      expect(c2Occ(P.id)).toEqual([]);
+    });
+
+    it("code-side dry run: another pitfall's recorded line on the same citation does not hide a new repeat", async () => {
+      const A = mkPitfall();
+      const B = mkPitfallB();
+      writeOcc({ lesson: A.id, class: "real", files: ["src/a.mjs"], citation: "history:c1/wf_1:3" });
+      writeOcc({ lesson: B.id, class: "real", files: ["src/a.mjs"], citation: "history:c1/wf_1:4" });
+      writeOcc({ lesson: A.id, card: "c2", run: "wf_9", citation: C2REF, class: "real", files: [] });
+      hist("c2", "wf_9", [brief, blk(blockOf("real", { files: ["src/a.mjs"] }))]);
+      const r = await runC2({ dryRun: true });
+      expect(r.repeated).toContain(B.id);
+      expect(r.repeated).not.toContain(A.id);
+    });
+
+    it("model-path dry run: another pitfall's recorded line on the same citation does not hide a new repeat", async () => {
+      const A = mkPitfall();
+      const B = mkPitfallB();
+      writeOcc({ lesson: A.id, card: "c2", run: "wf_9", citation: C2REF, class: "real", files: [] });
+      hist("c2", "wf_9", [brief, blk(blockOf("real", { files: ["src/a.mjs"] }))]);
+      const r = await runC2({ dryRun: true, propose: repeatsOf(B.id) });
+      expect(r.repeated).toContain(B.id);
+    });
   });
 });
 
@@ -6214,5 +6265,63 @@ describe("write transactions wait out a second process's write lock (card memory
     expect(result.ok).toBe(true);
     expect(result.counters.helpful).toEqual([lesson.id]);
     expect(getLesson(m, lesson.id).helpful).toBe(1);
+  });
+});
+
+// --- version re-read inside the transaction (card memory-migrate-version-race) ------------------------------------
+// The holder takes RESERVED, runs `sql` inside the held transaction, and commits after ms. openMemory reads the stale
+// user_version while the holder holds (readers are allowed), waits on the lock, and must then see the new version.
+async function holdReservedWith(file, ms, sql) {
+  const code = `const { DatabaseSync } = require("node:sqlite");
+const db = new DatabaseSync(process.argv[1]);
+db.exec("BEGIN IMMEDIATE");
+process.stdout.write("held\\n");
+setTimeout(() => { db.exec(process.argv[3]); db.exec("COMMIT"); db.close(); }, Number(process.argv[2]));`;
+  const child = spawn(process.execPath, ["-e", code, file, String(ms), sql], { stdio: ["ignore", "pipe", "inherit"] });
+  const exited = new Promise((res) => child.on("exit", res));
+  await new Promise((res, rej) => {
+    child.on("error", rej);
+    child.stdout.on("data", (d) => String(d).includes("held") && res());
+  });
+  return { exited };
+}
+
+describe("openMemory re-reads user_version under the write lock (card memory-migrate-version-race)", () => {
+  it("an old store another process migrates while this one waits is not migrated twice", async () => {
+    const file = memoryPath(dir);
+    mkdirSync(dirname(file), { recursive: true });
+    const setup = new DatabaseSync(file);
+    setup.exec("CREATE TABLE outcomes(id TEXT); CREATE TABLE lessons(id TEXT); PRAGMA user_version = 5;");
+    setup.close();
+    const { exited } = await holdReservedWith(file, 800, "CREATE TABLE code_files(x); PRAGMA user_version = 12;");
+    let elapsed;
+    const t0 = Date.now();
+    try {
+      m = openMemory(dir);
+      elapsed = Date.now() - t0;
+    } finally {
+      await exited;
+    }
+    expect(elapsed).toBeGreaterThanOrEqual(300);
+    expect(m.prepare("PRAGMA user_version").get().user_version).toBe(12);
+  });
+
+  it("two first opens of an empty store do not both create the schema", async () => {
+    const file = memoryPath(dir);
+    mkdirSync(dirname(file), { recursive: true });
+    const setup = new DatabaseSync(file);
+    setup.exec("PRAGMA user_version = 0;");
+    setup.close();
+    const { exited } = await holdReservedWith(file, 800, "CREATE TABLE outcomes(x); PRAGMA user_version = 12;");
+    let elapsed;
+    const t0 = Date.now();
+    try {
+      m = openMemory(dir);
+      elapsed = Date.now() - t0;
+    } finally {
+      await exited;
+    }
+    expect(elapsed).toBeGreaterThanOrEqual(300);
+    expect(m.prepare("PRAGMA user_version").get().user_version).toBe(12);
   });
 });

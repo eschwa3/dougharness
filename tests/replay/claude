@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// The one hand-written fake `claude` for the e2e replays (docs/specs/ci-e2e/architecture.md 4.1). The scenario
+// The one hand-written fake `claude` for the e2e replays (the ci-e2e spec 4.1). The scenario
 // comes from DOUG_REPLAY_SCENARIO (or an absolute DOUG_REPLAY_SCENARIO_FILE), the stage from the prompt.
 // Exit 3 with nothing on stdout when no scenario or no unique step is found.
 const { existsSync, mkdtempSync, readFileSync, appendFileSync } = require("node:fs");

@@ -1158,7 +1158,7 @@ describe("commandForms and prefixed/shell-wrapped commands (card bash-rules-pref
 // literal; double quotes with backslash escapes of $, `, ", \, newline; ANSI-C $'...'; a $(...) or backtick
 // substitution body is unquoted-or-double-quoted text that is itself split by the same scanner, recursively)
 // shared by all three callers, and drops the stray-quote allowance it replaces. Every fact below is cited in
-// .doug/.state/research/bash-rules-quote-aware-split.md against real bash 3.2.57, zsh 5.9, and dash.
+// the card's research note against real bash 3.2.57, zsh 5.9, and dash.
 describe("quote-aware split (card bash-rules-quote-aware-split)", () => {
   const cfgQ = { ...cfg, bash: { ...cfg.bash, denyForcePushTo: ["main"] } };
   const evalQ = (cmd, currentBranch = "feature") => evaluateBash(cmd, { config: cfgQ, currentBranch });

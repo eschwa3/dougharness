@@ -1,4 +1,4 @@
-// Command journey (card ci-e2e, docs/specs/ci-e2e/architecture.md 5.3, spec outcome 6): Doug's commands walked in
+// Command journey (card ci-e2e, the ci-e2e spec 5.3, spec outcome 6): Doug's commands walked in
 // one temp git repo, numbered J1..J9, no claude. The steps share the repo, so they run in order inside one
 // sequential describe; a failed step records a journey-step finding (tests/replay/findings.mjs) and rethrows.
 // Cases that init-hooks.test.ts, git-hooks.test.mjs and land.test.mjs already pin are not repeated here.
