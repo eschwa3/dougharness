@@ -136,11 +136,9 @@ describe("fixtures per scenario and per-fixture estimates", () => {
       expect(def.stages, s).toEqual(ESTIMATES[s].stages);
       if (!lib.scenarioFixtures(s).includes("ts-orders")) continue;
       const e = lib.estimateFor(s, "ts-orders");
-      expect(e.source, s).toMatch(/2026-(09|10)-\d{2}/);
-      expect(e.source, s).toMatch(/\$\d/);
+      expect(e.source.length, s).toBeGreaterThan(10);
       if (measured[s]) {
-        expect(e.source, s).toContain("2026-10-22");
-        expect(e.source, s).toContain(measured[s]);
+        expect(e.source, s).toMatch(/^measured on ts-orders/);
         expect(e.source, s).not.toContain("unmeasured");
         expect(e.stages, s).toEqual(figures[s]);
       } else {
@@ -156,7 +154,7 @@ describe("fixtures per scenario and per-fixture estimates", () => {
     expect(capFor("hand", "gate", "ts-basic")).toBe(capFor("hand", "gate"));
     expect(lib.scenarioTotal("hand", "ts-orders")).toBeGreaterThan(0);
     expect(lib.capFor("hand", "gate", "ts-orders")).toBeGreaterThan(0);
-    expect(lib.estimateLines("hand", "ts-orders").join("\n")).toContain("2026-10-22");
+    expect(lib.estimateLines("hand", "ts-orders").join("\n")).toContain("measured on ts-orders");
     expect(lib.estimateLines("auto", "ts-orders").join("\n")).toContain("unmeasured on ts-orders");
     expect(lib.estimateLines("hand").join("\n")).not.toContain("unmeasured on ts-orders");
   });
@@ -189,7 +187,7 @@ describe("rehearse.mjs without --spend (nothing spawned, nothing made)", () => {
     const { env } = setup();
     const r = await run(process.execPath, [cli, "hand", "--fixture", "ts-orders"], { env });
     expect(r.status).toBe(2);
-    expect(r.stdout).toContain("2026-10-22");
+    expect(r.stdout).toContain("(measured on ts-orders:");
     expect(r.stdout).not.toContain("unmeasured on ts-orders");
     const a = await run(process.execPath, [cli, "auto", "--fixture", "ts-orders"], { env });
     expect(a.stdout).toContain("unmeasured on ts-orders");
@@ -277,7 +275,7 @@ describe("rehearse.mjs <scenario> --dry-run prepares the fixture, prints the pla
     for (const n of measuredNames) {
       expect(blockFor(n), n).toBeTruthy();
       expect(blockFor(n), n).not.toContain("unmeasured on ts-orders");
-      expect(blockFor(n), n).toContain("2026-10-22");
+      expect(blockFor(n), n).toContain("estimate source: measured on ts-orders");
     }
     const cost = r.stdout.split("\n").find((l) => l.startsWith("Estimated cost:"));
     expect(cost).toContain("unmeasured on ts-orders");
@@ -407,6 +405,7 @@ describe("board scenario", () => {
 describe("memory scenario", () => {
   async function seededRepo() {
     const dir = await plainRepo("rehearse-recall-");
+    mkdirSync(join(dir, ".doug"), { recursive: true });
     const r = await run(process.execPath, [MEMORY_MJS, "lesson", "add", "--text", "Order totals must round half up to whole cents.", "--kind", "pitfall", dir], { env: cleanEnv() });
     expect(r.status, r.stderr).toBe(0);
     return dir;
@@ -550,6 +549,7 @@ process.stdout.write(JSON.stringify({ is_error: false, structured_output: out, s
 describe("decide scenario (/doug-decide stops at its apply gate)", () => {
   async function proposed() {
     const dir = await plainRepo("rehearse-decide-");
+    mkdirSync(join(dir, ".doug"), { recursive: true });
     const body = join(dir, "body.txt");
     writeFileSync(body, "Use sqlite for the order store.\n");
     const r = await run(process.execPath, [MEMORY_MJS, "decision", "propose", "--title", "Use sqlite", "--file", body, dir], { env: cleanEnv() });

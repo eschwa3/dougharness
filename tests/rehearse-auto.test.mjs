@@ -39,8 +39,6 @@ describe("card autopilot: the auto scenario's registry entries", () => {
     expect(SCENARIOS).toContain("auto");
     expect(ESTIMATES.auto.stages).toEqual({ gate: 0.5, build: 3.0 });
     expect(scenarioTotal("auto")).toBeCloseTo(3.5, 10);
-    expect(ESTIMATES.auto.source).toContain("$2.69");
-    expect(ESTIMATES.auto.source).toContain("2026-10-08");
     expect(ESTIMATES.auto.source).not.toContain("unmeasured");
   });
   it("SCENARIO_STAGES.auto is a gate session then a build session, both on a bare /doug-next --auto (unlimited)", () => {
@@ -1024,8 +1022,6 @@ describe("card parallel-card-queens: the parallel scenario's registry entries (R
     expect(SCENARIOS).toContain("parallel");
     expect(ESTIMATES.parallel.stages).toEqual({ gate: 0.5, build: 5.0 });
     expect(scenarioTotal("parallel")).toBeCloseTo(5.5, 10);
-    expect(ESTIMATES.parallel.source).toContain("$4.32");
-    expect(ESTIMATES.parallel.source).toContain("2026-10-13");
     expect(ESTIMATES.parallel.source).not.toContain("unmeasured");
     expect(estimateLines().some((l) => l.includes("parallel") && l.includes("$5.50"))).toBe(true);
   });

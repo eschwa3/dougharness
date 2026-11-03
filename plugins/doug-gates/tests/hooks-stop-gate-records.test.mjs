@@ -1,6 +1,6 @@
 import { describe, it, expect, afterEach } from "vitest";
 import { writeFileSync, mkdirSync, readFileSync, existsSync, realpathSync } from "node:fs";
-import { execFileSync, spawn } from "node:child_process";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { join, dirname } from "node:path";
 import { makeProject, runHookScript } from "./helpers.mjs";
 // card stop-gate-block-ledger, round 3: classifyFinalBlock exercised directly (same precedent as runCommand
@@ -2269,5 +2269,61 @@ describe("card memory-failures-wiring (blocks.jsonl files)", () => {
     const ls = lines(dir);
     expect(ls[0].files).toEqual([]);
     expect(ls[1].files).toEqual(["a/b.ts"]);
+  });
+});
+
+// Card commit-seat-precommit-flake: failingTests(output) pulls failing test names out of a saved run log.
+describe("card commit-seat-precommit-flake: failingTests", () => {
+  const RUN = new URL("../lib/run.mjs", import.meta.url).pathname;
+  const T1 = "tests/sample-suite.test.mjs > commitSnapshot > commits a tracked file";
+  const T2 = "packages/doug-cli/tests/board-page-skip.test.ts > pushes the current board";
+  const log = [
+    " ✓ tests/ok.test.mjs (3 tests) 12ms",
+    `   × commitSnapshot > commits a tracked file 289ms`,
+    ` FAIL  ${T1}`,
+    "AssertionError: expected x",
+    ` FAIL  ${T2}`,
+    "AssertionError: expected y",
+    " Test Files  1 failed | 108 passed (109)",
+  ].join("\n");
+
+  it("F1 returns every FAIL line's name in order", async () => {
+    const { failingTests } = await import("../lib/run.mjs");
+    expect(failingTests(log)).toEqual([T1, T2]);
+  });
+
+  it("F2 strips ANSI colour and de-duplicates", async () => {
+    const { failingTests } = await import("../lib/run.mjs");
+    const line = `\x1b[31m FAIL \x1b[39m  ${T1}`;
+    expect(failingTests(`${line}\n${line}\n`)).toEqual([T1]);
+  });
+
+  it("F3 falls back to x lines without the marker or trailing duration", async () => {
+    const { failingTests } = await import("../lib/run.mjs");
+    expect(failingTests("   × suite > name 289ms\n   ✗ other > one\n")).toEqual(["suite > name", "other > one"]);
+  });
+
+  it("F4 never throws: no match or non-string input gives []", async () => {
+    const { failingTests } = await import("../lib/run.mjs");
+    expect(failingTests("all green\n")).toEqual([]);
+    for (const v of [undefined, null, 5, {}]) expect(failingTests(v)).toEqual([]);
+  });
+
+  it("F5 CLI failing-tests <log> prints one name per line and exits 0; a missing file prints nothing, exit 0", () => {
+    const dir = join(makeProject({ git: false }), ".doug/.state");
+    mkdirSync(dir, { recursive: true });
+    const f = join(dir, "attempt-1.log");
+    writeFileSync(f, log);
+    const ok = spawnSync(process.execPath, [RUN, "failing-tests", f], { encoding: "utf8" });
+    expect(ok.status).toBe(0);
+    expect(ok.stdout.trim().split("\n")).toEqual([T1, T2]);
+    const miss = spawnSync(process.execPath, [RUN, "failing-tests", join(dir, "nope.log")], { encoding: "utf8" });
+    expect(miss.status).toBe(0);
+    expect(miss.stdout).toBe("");
+  });
+
+  it("F6 the live .doug/hooks copy exposes the same CLI", () => {
+    const live = new URL("../../../.doug/hooks/lib/run.mjs", import.meta.url).pathname;
+    expect(readFileSync(live, "utf8")).toBe(readFileSync(RUN, "utf8"));
   });
 });

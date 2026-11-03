@@ -889,6 +889,22 @@ describe("card parallel-card-queens autopilot subcommands", () => {
     expect(JSON.parse(readFileSync(join(bare, ".doug/.state/reports/h1/queen-args.json"), "utf8")).options.install).toBe(null);
   });
 
+  it("A07b queen-args hand carries options.pins from tests/replay/skill-hashes.json; absent file gives no pins key", () => {
+    const dir = queenProject();
+    mkdirSync(join(dir, "tests/replay"), { recursive: true });
+    writeFileSync(join(dir, "tests/replay/skill-hashes.json"), JSON.stringify({
+      parallel: { "plugins/doug-flow/workflows/card-queen.js": "a", "b/SKILL.md": "b" },
+      "hard-parallel": { "plugins/doug-flow/workflows/card-queen.js": "c", "a/SKILL.md": "d" },
+    }));
+    const r = ap(dir, "queen-args", "h1", "--kind", "hand");
+    expect(r.status, r.stderr).toBe(0);
+    const a = JSON.parse(readFileSync(join(dir, ".doug/.state/reports/h1/queen-args.json"), "utf8"));
+    expect(a.options.pins).toEqual({ "tests/replay/skill-hashes.json": ["a/SKILL.md", "b/SKILL.md", "plugins/doug-flow/workflows/card-queen.js"] });
+    const bare = queenProject();
+    ap(bare, "queen-args", "h1", "--kind", "hand");
+    expect("pins" in JSON.parse(readFileSync(join(bare, ".doug/.state/reports/h1/queen-args.json"), "utf8")).options).toBe(false);
+  });
+
   it("agent-types hand prints the distinct AGENT_TYPES of card-queen.js, one per line (queen-agent-preflight)", () => {
     const dir = queenProject();
     const r = ap(dir, "agent-types", "--kind", "hand");
@@ -3063,5 +3079,117 @@ describe("card memory-run-coverage: report covers a flow queen", () => {
       expect(r.status, r.stderr).toBe(0);
       expect(r.stdout).toMatch(/^autopilot: f1 ask/m);
     });
+  });
+});
+
+// Card autopilot-follow-up-closing-question: `autopilot.mjs follow-ups` prints the run's filed follow-ups as one JSON
+// array on stdout, in filed order: [{ id, from?, position, chain }]. Kind user cards are not listed. chain is true
+// when the follow-up's source card was itself a follow-up: filed as kind follow-up in this run, or a board card whose
+// goal opens "Found" or "Context: Found". The source is the entry's --from, else the filed card's own board deps.
+describe("autopilot follow-ups (closing question)", () => {
+  const withBoard = (cards) => {
+    const dir = project();
+    writeFileSync(join(dir, ".doug/board.json"), JSON.stringify({ ...BOARD, cards: [...BOARD.cards, ...cards] }));
+    started(dir);
+    return dir;
+  };
+  const list = (dir) => {
+    const r = ap(dir, "follow-ups");
+    expect(r.status, r.stdout + r.stderr).toBe(0);
+    return JSON.parse(r.stdout);
+  };
+  const file = (dir, id, kind, from) => {
+    const r = ap(dir, "filed", id, "--kind", kind, ...(from ? ["--from", from] : []), "--position", "backlog bottom");
+    expect(r.status).toBe(0);
+  };
+
+  it("prints [] when the run filed nothing", () => {
+    const dir = withBoard([]);
+    expect(list(dir)).toEqual([]);
+  });
+
+  it("follow-ups output omits a filed entry of kind user (M8)", () => {
+    const dir = withBoard([]);
+    file(dir, "fu1", "follow-up", "alpha");
+    file(dir, "usercard", "user");
+    const out = list(dir);
+    expect(out.map((e) => e.id)).toEqual(["fu1"]);
+    expect(out[0]).toMatchObject({ id: "fu1", from: "alpha", position: "backlog bottom", chain: false });
+  });
+
+  it("follow-ups marks a within-run chain (source filed as follow-up in the same run, source not on the board) (M5)", () => {
+    const dir = withBoard([]);
+    file(dir, "first", "follow-up", "alpha");
+    file(dir, "second", "follow-up", "first");
+    const out = list(dir);
+    expect(out.find((e) => e.id === "first").chain).toBe(false);
+    expect(out.find((e) => e.id === "second").chain).toBe(true);
+  });
+
+  it("follow-ups marks a cross-session chain from a source card whose board goal opens 'Found landing x (abc1234 ...' (M6)", () => {
+    const dir = withBoard([
+      { id: "src1", column: "done", goal: "Found landing x (abc1234, 1 min). The reviewer said y." },
+      { id: "src2", column: "done", goal: "Context: Found landing x (abc1234). Decision: z." },
+      { id: "src3", column: "done", goal: "Found by the reviewer (R1) landing x (abc1234)." },
+    ]);
+    file(dir, "c1", "follow-up", "src1");
+    file(dir, "c2", "follow-up", "src2");
+    file(dir, "c3", "follow-up", "src3");
+    expect(list(dir).map((e) => e.chain)).toEqual([true, true, true]);
+  });
+
+  it("follow-ups reports chain false for a source card whose goal opens 'Context:' and which was not filed in the run (M7)", () => {
+    const dir = withBoard([
+      { id: "adr", column: "done", goal: "Context: The user asked \"fix it\". Decision: x (user answer)." },
+      { id: "plain", column: "done", goal: "Add the thing to the board." },
+    ]);
+    file(dir, "c1", "follow-up", "adr");
+    file(dir, "c2", "follow-up", "plain");
+    file(dir, "c3", "follow-up", "ghost-not-on-board");
+    expect(list(dir).map((e) => e.chain)).toEqual([false, false, false]);
+  });
+
+  it("follow-ups reports chain false when the source was filed in this run as kind user (M7)", () => {
+    const dir = withBoard([]);
+    file(dir, "userc", "user");
+    file(dir, "c1", "follow-up", "userc");
+    expect(list(dir)).toEqual([expect.objectContaining({ id: "c1", chain: false })]);
+  });
+
+  it("follow-ups marks chain for an entry with no from whose board card deps name a 'Found'-goal card (M9)", () => {
+    const dir = withBoard([
+      { id: "src", column: "done", goal: "Found landing x (abc1234). Rest." },
+      { id: "okdep", column: "done", goal: "Context: The user asked." },
+      { id: "nf1", column: "backlog", goal: "Context: new.", deps: ["src"] },
+      { id: "nf2", column: "backlog", goal: "Context: new.", deps: ["okdep"] },
+    ]);
+    file(dir, "nf1", "follow-up");
+    file(dir, "nf2", "follow-up");
+    file(dir, "notonboard", "follow-up");
+    const out = list(dir);
+    expect(out.map((e) => [e.id, e.chain])).toEqual([["nf1", true], ["nf2", false], ["notonboard", false]]);
+    expect(out[0].from).toBeUndefined();
+  });
+
+  it("follow-ups after `end` exits 0 and prints the list (M10)", () => {
+    const dir = withBoard([]);
+    file(dir, "fu1", "follow-up", "alpha");
+    expect(ap(dir, "end").status).toBe(0);
+    expect(state(dir).status).toBe("ended");
+    expect(list(dir).map((e) => e.id)).toEqual(["fu1"]);
+  });
+
+  it("follow-ups with a corrupt .doug/board.json exits 1 with a message naming the board (M11)", () => {
+    const dir = withBoard([]);
+    file(dir, "fu1", "follow-up", "alpha");
+    writeFileSync(join(dir, ".doug/board.json"), "{not json");
+    const r = ap(dir, "follow-ups");
+    expect(r.status).toBe(1);
+    expect(r.stdout + r.stderr).toMatch(/board/i);
+  });
+
+  it("follow-ups with no run exits 1", () => {
+    const dir = project();
+    expect(ap(dir, "follow-ups").status).toBe(1);
   });
 });

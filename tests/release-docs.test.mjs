@@ -35,6 +35,15 @@ describe("release docs", () => {
   // card readme-scannable: the Measured section moved from README.md to docs/reference.md, so each Measured
   // test reads docs/reference.md itself (not at describe scope, so a missing file only reddens these three).
 
+  it.skipIf(IS_SNAPSHOT)("docs/releasing.md says a non-TTY --yes run needs --otp", () => {
+    expect(releasing).toMatch(/non-TTY[^.]*--otp|--otp[^.]*non-TTY/);
+    expect(releasing).not.toContain("otherwise npm prompts for the OTP itself");
+  });
+
+  it.skipIf(IS_SNAPSHOT)("docs/releasing.md names the atomic public push", () => {
+    expect(releasing).toContain("git push --atomic origin main v<version>");
+  });
+
   it.skipIf(IS_SNAPSHOT)("the Measured section quotes at least four dollar figures, each verbatim in docs/live-runs.md", () => {
     const referenceDoc = read("docs/reference.md");
     const section = measuredSection(referenceDoc);
@@ -108,6 +117,16 @@ describe("release docs", () => {
 
   it.skipIf(IS_SNAPSHOT)("docs/releasing.md preflight step names the ignored board file", () => {
     expect(releasing).toContain("`.doug/board.json`");
+  });
+
+  it.skipIf(IS_SNAPSHOT)("docs/releasing.md documents the anchor ignore, --yes, the npm login check, and the pack-check/publish steps", () => {
+    expect(releasing).toContain("`.doug/anchor.md`");
+    expect(releasing).toContain("--yes");
+    expect(releasing).toMatch(/npm whoami|npm login/);
+    expect(releasing).toContain("pack-check");
+    expect(releasing).toContain("push-dev");
+    expect(releasing).toContain("--no-npm");
+    expect(releasing).not.toContain("the rest stays manual");
   });
 
   it.skipIf(IS_SNAPSHOT)("docs/releasing.md has a Dev setup section naming the local-plugin steps", () => {

@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { makeProject, runHookScript, decision, context } from "./helpers.mjs";
@@ -154,6 +155,27 @@ const PERL_DOLLAR_LINE = "my " + "$" + "secret = " + "'" + V13 + "'" + ";";
 const QUOTED_PEM_PATH = "private_key: " + '"' + "/etc/ssl/private/server" + ".pem" + '"';
 const QUOTED_VAULT_URL = "secret: " + '"' + "https" + "://vault.example.com/v1/secret/data/prod" + '"';
 
+// -- Export secret scan card: Anthropic, OpenAI and npm token shapes, built from parts --
+const BODY_MIX = "aB3_-xY9Qz7K2mZp9TdW4vLb8NcR3sYh6JfG1aEu0oXi"; // 44 chars of [A-Za-z0-9_-]
+const BODY_90 = BODY_MIX + BODY_MIX + "cD"; // 90 chars
+const BODY_ALNUM_48 = "Q7xK2mZp9TdW4vLb8NcR3sYh6JfG1aEu0oXiB5nM4wVt2Hq8"; // 48 alnum
+const BODY_ALNUM_36 = "Q7xK2mZp9TdW4vLb8NcR3sYh6JfG1aEu0oXi"; // 36 alnum
+const ANT_KEY = "sk-" + "ant-" + "api03-" + BODY_90;
+const OPENAI_LEGACY = "sk-" + BODY_ALNUM_48;
+const OPENAI_PROJ = "sk-" + "proj-" + BODY_90 + BODY_MIX;
+const OPENAI_SVC = "sk-" + "svcacct-" + BODY_90;
+const OPENAI_ADMIN = "sk-" + "admin-" + BODY_ALNUM_48;
+const NPM_TOKEN = "npm" + "_" + BODY_ALNUM_36;
+const NPM_TOKEN_LONG = "npm" + "_" + BODY_ALNUM_36 + "abcd";
+const NPM_TOKEN_SHORT = "npm" + "_" + BODY_ALNUM_36.slice(0, 35); // one short of 36
+
+const ADV_ANT = ("sk-" + "ant-").repeat(150000); // ~1 MB
+const ADV_ANT_LONG = "sk-" + "ant-" + "a".repeat(1 << 20);
+const ADV_OPENAI = ("sk-" + "proj-").repeat(131072); // ~1 MB
+const ADV_OPENAI_LEGACY_LONG = "sk-" + "a".repeat(1 << 20);
+const ADV_NPM_NEAR = ("npm" + "_" + "a".repeat(35)).repeat(29000); // ~1 MB, every start one char short
+const ADV_NPM_LONG = "npm" + "_" + "a".repeat(1 << 20);
+
 const VENDOR_SOURCE_FILES = [
   "../lib/secret-rules.mjs",
   "../scripts/secret-scan.mjs",
@@ -184,6 +206,9 @@ describe("rule sources", () => {
       pemPrivateKey: "rfc-editor.org",
       githubToken: ["docs.github.com", "github.blog"],
       slackToken: "docs.slack.dev",
+      anthropicKey: ["platform.claude.com", "docs.anthropic.com", "docs.claude.com"],
+      openaiKey: ["platform.openai.com", "developers.openai.com", "raw.githubusercontent.com/openai/", "github.com/openai/"],
+      npmToken: ["github.blog", "docs.npmjs.com"],
     };
     for (const rule of RULES) {
       if (rule.id === "inlineAssignment") continue;
@@ -447,6 +472,32 @@ describe("linear-time patterns (M1)", () => {
   });
 });
 
+describe("linear-time patterns (export secret scan card)", () => {
+  it("scans a 1 MB Anthropic-prefix adversarial string within budget", () => {
+    expectLinearScan(ADV_ANT);
+  });
+
+  it("scans a 1 MB single Anthropic-shaped run within budget", () => {
+    expectLinearScan(ADV_ANT_LONG);
+  });
+
+  it("scans a 1 MB OpenAI-prefix adversarial string within budget", () => {
+    expectLinearScan(ADV_OPENAI);
+  });
+
+  it("scans a 1 MB single legacy OpenAI-shaped run within budget", () => {
+    expectLinearScan(ADV_OPENAI_LEGACY_LONG);
+  });
+
+  it("scans a 1 MB npm-shaped string of one-short tokens within budget", () => {
+    expectLinearScan(ADV_NPM_NEAR);
+  });
+
+  it("scans a 1 MB single npm-shaped run within budget", () => {
+    expectLinearScan(ADV_NPM_LONG);
+  });
+});
+
 describe("inlineAssignment (Round 3, false positives, R3-1)", () => {
   it("does not flag $PWD used as a shell variable in export PATH or docker -v", () => {
     expect(scanText(PATH_PWD_LINE, DEFAULTS.secrets), PATH_PWD_LINE).toBeNull();
@@ -513,6 +564,146 @@ describe("inlineAssignment (Round 4)", () => {
   it("does not flag a quoted value that is a path or URL (the Round 3 carve-out covered bare values only)", () => {
     expect(scanText(QUOTED_PEM_PATH, DEFAULTS.secrets), QUOTED_PEM_PATH).toBeNull();
     expect(scanText(QUOTED_VAULT_URL, DEFAULTS.secrets), QUOTED_VAULT_URL).toBeNull();
+  });
+});
+
+describe("anthropicKey", () => {
+  it("hits an sk-ant-api03- key with a long body", () => {
+    expect(scanText(ANT_KEY, DEFAULTS.secrets)).toEqual({ rule: "anthropicKey", what: "an Anthropic API key" });
+  });
+
+  it("does not hit a key glued to a preceding alphanumeric character", () => {
+    expect(scanText("x" + ANT_KEY, DEFAULTS.secrets)).toBeNull();
+  });
+
+  it("names anthropicKey, not inlineAssignment, for a key assigned to an env var", () => {
+    expect(scanText("ANTHROPIC_API_KEY=" + ANT_KEY, DEFAULTS.secrets).rule).toBe("anthropicKey");
+  });
+
+  it("does not hit the documented prefix alone, in prose, or with an ellipsis body", () => {
+    expect(scanText("keys start with sk-" + "ant-", DEFAULTS.secrets)).toBeNull();
+    expect(scanText("keys start with sk-" + "ant- and sk-" + "proj-, shown once", DEFAULTS.secrets)).toBeNull();
+    expect(scanText("see sk-" + "ant-api03-... in the console", DEFAULTS.secrets)).toBeNull();
+    expect(scanText("sk-" + "ant-api03-xxxx", DEFAULTS.secrets)).toBeNull();
+  });
+
+  it("honors secrets.rules.anthropicKey = false", () => {
+    const secrets = { ...DEFAULTS.secrets, rules: { ...DEFAULTS.secrets.rules, anthropicKey: false } };
+    expect(scanText(ANT_KEY, secrets)).toBeNull();
+  });
+});
+
+describe("openaiKey", () => {
+  it("hits a legacy sk- key (48 alphanumerics)", () => {
+    expect(scanText(OPENAI_LEGACY, DEFAULTS.secrets)).toEqual({ rule: "openaiKey", what: "an OpenAI API key" });
+  });
+
+  it("hits sk-proj-, sk-svcacct- and sk-admin- keys", () => {
+    for (const t of [OPENAI_PROJ, OPENAI_SVC, OPENAI_ADMIN]) {
+      expect(scanText(t, DEFAULTS.secrets), t.slice(0, 12)).toEqual({ rule: "openaiKey", what: "an OpenAI API key" });
+    }
+  });
+
+  it("names openaiKey, not inlineAssignment, for a key assigned to an env var", () => {
+    expect(scanText("OPENAI_API_KEY=" + OPENAI_PROJ, DEFAULTS.secrets).rule).toBe("openaiKey");
+  });
+
+  it("does not hit the short placeholders in OpenAI's own spec", () => {
+    for (const t of ["sk-" + "abcdefghijklmnop123", "sk-" + "admin-1234abcd", "sk-" + "abc...def", "sk-" + "admin...def"]) {
+      expect(scanText(t, DEFAULTS.secrets), t).toBeNull();
+    }
+  });
+
+  it("does not hit kebab words and ids that contain sk-", () => {
+    for (const t of [
+      "task-queen-args-0001",
+      "risk-register",
+      "desk-lamp",
+      "sk-" + "learn",
+      "pip install sk-" + "learn",
+      "ask-for-help-with-this-very-long-kebab-case-identifier-name-here",
+      "task-queen-args-0001-with-a-long-suffix-of-extra-kebab-words-here",
+    ]) {
+      expect(scanText(t, DEFAULTS.secrets), t).toBeNull();
+    }
+  });
+
+  it("does not hit a key glued to a preceding alphanumeric character", () => {
+    expect(scanText("x" + OPENAI_LEGACY, DEFAULTS.secrets)).toBeNull();
+  });
+
+  it("honors secrets.rules.openaiKey = false", () => {
+    const secrets = { ...DEFAULTS.secrets, rules: { ...DEFAULTS.secrets.rules, openaiKey: false } };
+    expect(scanText(OPENAI_PROJ, secrets)).toBeNull();
+  });
+});
+
+describe("npmToken", () => {
+  it("hits npm_ followed by 36 alphanumerics, and longer", () => {
+    expect(scanText(NPM_TOKEN, DEFAULTS.secrets)).toEqual({ rule: "npmToken", what: "an npm access token" });
+    expect(scanText(NPM_TOKEN_LONG, DEFAULTS.secrets).rule).toBe("npmToken");
+  });
+
+  it("names npmToken for a .npmrc auth line and for an env assignment", () => {
+    expect(scanText("//registry.npmjs.org/:_authToken=" + NPM_TOKEN, DEFAULTS.secrets).rule).toBe("npmToken");
+    expect(scanText("NPM_TOKEN=" + NPM_TOKEN, DEFAULTS.secrets).rule).toBe("npmToken");
+  });
+
+  it("does not hit npm's own variables", () => {
+    for (const t of [
+      "npm_package_version",
+      "npm_config_registry",
+      "npm_config_user_agent",
+      "$npm_lifecycle_event",
+      'echo "$npm_package_version"',
+      "process.env.npm_config_user_agent",
+      "npm_config_onnxruntime_node_install=1",
+    ]) {
+      expect(scanText(t, DEFAULTS.secrets), t).toBeNull();
+    }
+  });
+
+  it("does not hit a token one character short, or one glued to a preceding alphanumeric", () => {
+    expect(scanText(NPM_TOKEN_SHORT, DEFAULTS.secrets)).toBeNull();
+    expect(scanText("x" + NPM_TOKEN, DEFAULTS.secrets)).toBeNull();
+  });
+
+  it("honors secrets.rules.npmToken = false", () => {
+    const secrets = { ...DEFAULTS.secrets, rules: { ...DEFAULTS.secrets.rules, npmToken: false } };
+    expect(scanText(NPM_TOKEN, secrets)).toBeNull();
+  });
+});
+
+describe("new rules in the shared table", () => {
+  it("lists the three ids, enabled, in DEFAULTS and in RULES before inlineAssignment", () => {
+    for (const id of ["anthropicKey", "openaiKey", "npmToken"]) {
+      expect(DEFAULTS.secrets.rules[id], id).toBe(true);
+      expect(RULES.findIndex((r) => r.id === id), id).toBeGreaterThanOrEqual(0);
+      expect(RULES.findIndex((r) => r.id === id), id).toBeLessThan(RULES.findIndex((r) => r.id === "inlineAssignment"));
+    }
+  });
+
+  it("scanText over every tracked text file of this repo gets zero hits from the three new rules", () => {
+    const root = join(here, "../../..");
+    const ls = spawnSync("git", ["ls-files", "-z"], { cwd: root, encoding: "utf8", maxBuffer: 1 << 28 });
+    expect(ls.status).toBe(0);
+    const only = { rules: { awsKeyId: false, pemPrivateKey: false, githubToken: false, slackToken: false, inlineAssignment: false } };
+    let scanned = 0;
+    const hits = [];
+    for (const rel of ls.stdout.split("\0").filter(Boolean)) {
+      let buf;
+      try {
+        buf = readFileSync(join(root, rel));
+      } catch {
+        continue; // deleted in the working tree, or a symlink target gone
+      }
+      if (buf.includes(0)) continue;
+      scanned++;
+      const hit = scanText(buf.toString("utf8"), only);
+      if (hit) hits.push(rel + " [" + hit.rule + "]");
+    }
+    expect(scanned).toBeGreaterThan(100);
+    expect(hits).toEqual([]);
   });
 });
 
@@ -607,6 +798,27 @@ describe("secret-scan hook", () => {
     expect(decision(r)).toBe("deny");
     const reason = r.json.hookSpecificOutput.permissionDecisionReason;
     expect(reason).not.toContain(GH_GHP);
+  });
+
+  it("denies a Write carrying an Anthropic, OpenAI or npm token, naming the rule and not echoing the token", () => {
+    const dir = makeProject();
+    for (const [tok, rule] of [
+      [ANT_KEY, "anthropicKey"],
+      [OPENAI_PROJ, "openaiKey"],
+      [NPM_TOKEN, "npmToken"],
+    ]) {
+      const r = runHookScript("secret-scan", { tool_name: "Write", tool_input: { file_path: "src/a.ts", content: `const k = "${tok}";` } }, { dir });
+      expect(decision(r), rule).toBe("deny");
+      const reason = r.json.hookSpecificOutput.permissionDecisionReason;
+      expect(reason).toContain(rule);
+      expect(reason).not.toContain(tok);
+    }
+  });
+
+  it("allows a Bash command that reads npm's own variables", () => {
+    const dir = makeProject();
+    const r = runHookScript("secret-scan", { tool_name: "Bash", tool_input: { command: 'echo "$npm_package_version" "$npm_config_user_agent" $npm_lifecycle_event' } }, { dir });
+    expect(r.json).toBeNull();
   });
 
   it("allows an Edit whose old_string carries a secret but new_string is clean", () => {

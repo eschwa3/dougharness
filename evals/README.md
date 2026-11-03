@@ -28,6 +28,10 @@ node evals/run.mjs --suite ts-app --conditions pipeline,swarm,swarm-cheap,crew,s
 
 Results are written to `evals/out/` (gitignored). Costs real tokens; the runner prints cost per session from Claude Code's JSON output.
 
+## Predictions before a live run (card eval-preregistration)
+
+Write the prediction first: an entry in `docs/evals-predictions.md`, dated and committed before launch (hypothesis, metric, confirming effect size, falsifier, runs, and what changes under each outcome). `node evals/run.mjs` warns on stderr for any condition with no entry dated on or before today; `--predictions <file>` points it at another file. The warning does not stop the run.
+
 ## Accuracy, not landing (card eval-accuracy)
 
 Landing (the task's checks pass, every changed file is in scope) says a session finished; it says nothing about

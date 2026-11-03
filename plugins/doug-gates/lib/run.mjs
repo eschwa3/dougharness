@@ -1,4 +1,6 @@
 import { spawnSync } from "node:child_process";
+import { readFileSync, realpathSync } from "node:fs";
+import { pathToFileURL } from "node:url";
 
 // card gates-runner-no-color: NO_COLOR, not FORCE_COLOR — vitest's colour library (picocolors/tinyrainbow)
 // treats any FORCE_COLOR key as colour on, even "0", which broke the stop gate's captured output and the
@@ -147,5 +149,50 @@ export function failureSummary(output, maxLines = 40) {
   } catch {
     // review m1: `raw` is already a plain, safely-coerced string, so this fallback cannot itself throw.
     return tail(raw, maxLines);
+  }
+}
+
+// card commit-seat-precommit-flake: the failing test names in a saved run log. Every `FAIL <name>` line's name,
+// ANSI stripped, de-duplicated, in output order; with no FAIL line, the `×`/`✗` lines minus marker and trailing
+// duration. Never throws; anything else gives [].
+export function failingTests(output) {
+  try {
+    if (typeof output !== "string") return [];
+    const lines = output.split("\n").map(stripAnsi);
+    const uniq = (a) => [...new Set(a)];
+    const fails = [];
+    for (const l of lines) {
+      const m = /^\s*FAIL\s+(\S.*)$/.exec(l);
+      if (m) fails.push(m[1].trim());
+    }
+    if (fails.length) return uniq(fails);
+    const marks = [];
+    for (const l of lines) {
+      const m = /^\s*[×✗]\s+(\S.*)$/.exec(l);
+      if (m) marks.push(m[1].replace(/\s+\d+ms\s*$/, "").trim());
+    }
+    return uniq(marks.filter(Boolean));
+  } catch {
+    return [];
+  }
+}
+
+// CLI: `node run.mjs failing-tests <log>` prints one name per line (nothing on none or an unreadable file). Always exits 0.
+function isMain() {
+  try {
+    return !!process.argv[1] && import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href;
+  } catch {
+    return false;
+  }
+}
+if (isMain()) {
+  try {
+    const [cmd, file] = process.argv.slice(2);
+    if (cmd === "failing-tests" && file) {
+      const names = failingTests(readFileSync(file, "utf8"));
+      if (names.length) process.stdout.write(names.join("\n") + "\n");
+    }
+  } catch {
+    // never fail
   }
 }

@@ -12,6 +12,7 @@
 // Usage: node evals/run.mjs [--tasks id,id]
 //          [--conditions baseline,gates,full,pipeline,swarm,swarm-cheap,crew,swarm-crew,testers,memory] [--runs 1]
 //          [--max-turns 30] [--max-budget-usd 15] [--judge auto|codex|claude|off] [--judge-model opus] [--dry-run]
+//          [--predictions docs/evals-predictions.md]
 //
 // Task fields beyond allowedFiles, heldOut, mustPass, mustNotChange, mustNotExist, plan (see tasks/ts-basic.json):
 //   seed        files copied into the fixture before the session and committed with it (evals/seed/<from> -> <to>)
@@ -338,7 +339,7 @@ function lastJsonObject(text) {
 function treeSnapshot(dir) {
   const porcelain = execFileSync("git", ["status", "--porcelain"], { cwd: dir, encoding: "utf8" });
   const diff = execFileSync("git", ["diff", "HEAD"], { cwd: dir, encoding: "utf8" });
-  return createHash("sha256").update(porcelain).update(" ").update(diff).digest("hex");
+  return createHash("sha256").update(porcelain).update("\u0000").update(diff).digest("hex");
 }
 
 // A blinded copy of dir's judged state, so the judge (which reads whatever files the checked-out tree holds,
@@ -582,8 +583,40 @@ function runWorkflowSession(dir, task, maxTurns, arm, maxBudgetUsd) {
   };
 }
 
+export const PREDICTIONS_FILE = join(root, "docs/evals-predictions.md");
+
+// Card eval-preregistration: a dated entry in the predictions doc names each condition a run compares.
+export function predictionEntries(markdown) {
+  if (typeof markdown !== "string") return [];
+  const out = [];
+  let fenced = false;
+  for (const line of markdown.split("\n")) {
+    if (/^\s*```/.test(line)) { fenced = !fenced; continue; }
+    if (fenced) continue;
+    const m = /^##\s+(\d{4}-\d{2}-\d{2})\s+(.+)$/.exec(line);
+    if (!m) continue;
+    const date = m[1];
+    const d = new Date(date + "T00:00:00Z");
+    if (Number.isNaN(d.getTime()) || d.toISOString().slice(0, 10) !== date) continue;
+    const arms = m[2].split(":")[0].split(",").map((a) => a.trim()).filter((a) => /^[a-z][a-z0-9-]*$/.test(a));
+    out.push({ date, arms });
+  }
+  return out;
+}
+
+export function missingPredictions(conditions, markdown, today) {
+  const entries = predictionEntries(markdown).filter((e) => e.date <= today);
+  const named = new Set(entries.flatMap((e) => e.arms));
+  return [...new Set(conditions)].filter((c) => !named.has(c));
+}
+
+export function predictionWarning(missing, file) {
+  if (!missing || missing.length === 0) return null;
+  return `warning: no dated prediction in ${file} for ${missing.join(", ")}; add one to docs/evals-predictions.md and commit it before launch`;
+}
+
 function parseArgs(argv) {
-  const o = { tasks: null, conditions: ["baseline", "gates", "full"], runs: 1, maxTurns: 30, dryRun: false, suite: "ts-basic", maxBudgetUsd: 15, judge: "auto", judgeModel: "opus" };
+  const o = { tasks: null, conditions: ["baseline", "gates", "full"], runs: 1, maxTurns: 30, dryRun: false, suite: "ts-basic", maxBudgetUsd: 15, judge: "auto", judgeModel: "opus", predictions: PREDICTIONS_FILE };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--tasks") o.tasks = argv[++i].split(",");
@@ -594,6 +627,7 @@ function parseArgs(argv) {
     else if (a === "--max-budget-usd") o.maxBudgetUsd = Number(argv[++i]);
     else if (a === "--judge") o.judge = argv[++i];
     else if (a === "--judge-model") o.judgeModel = argv[++i];
+    else if (a === "--predictions") o.predictions = argv[++i];
     else if (a === "--dry-run") o.dryRun = true;
   }
   return o;
@@ -843,6 +877,14 @@ async function main() {
   for (const [id, conditions] of skipped) console.log(`skipping ${id} under ${conditions.join(", ")}: no plan (an arm runs the workflow on the task's plan)`);
 
   console.log(`Suite ${opts.suite}: ${tasks.length} tasks × ${opts.conditions.length} conditions × ${opts.runs} runs = ${plan.length} claude -p sessions (max ${opts.maxTurns} turns each).`);
+  {
+    let markdown = null;
+    try { markdown = readFileSync(opts.predictions, "utf8"); } catch { markdown = null; }
+    const now = new Date();
+    const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
+    const warning = predictionWarning(missingPredictions(plan.map((p) => p.condition), markdown, today), opts.predictions);
+    if (warning) console.warn(warning);
+  }
   if (opts.dryRun) {
     for (const p of plan) console.log(`  ${p.task.id.padEnd(16)} ${p.condition.padEnd(11)} run ${p.run}`);
     console.log("Dry run. Nothing executed.");

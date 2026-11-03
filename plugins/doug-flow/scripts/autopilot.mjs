@@ -8,6 +8,7 @@
 //   autopilot.mjs land <id> --commit <sha>
 //   autopilot.mjs stop <id> --reason "<why>"
 //   autopilot.mjs filed <id> --kind <follow-up|user> [--from <card>] --position "<text>"
+//   autopilot.mjs follow-ups   prints the run's filed follow-ups (kind follow-up only) as JSON [{ id, from?, position, chain }]; chain is true when the source (--from, else the card's board deps) was itself a follow-up
 //   autopilot.mjs caps [--usd <n>] [--wall <min>] [--context <pct>]
 //   autopilot.mjs pick [--max <n>] [--milestone <id>]            JSON { launch, needsPlan, held, alone }; a held line per held card on stderr
 //   autopilot.mjs queen-args <id> --kind <flow|hand> [--with <id,id,...>] [--research on|off]   writes .doug/.state/reports/<id>/queen-args.json and the per-card queen.js beside it, prints both paths (args, then queen.js)
@@ -33,7 +34,7 @@ import { AUTOPILOT_FILE, STEPS, clearable, readAutopilot } from "../lib/autopilo
 import { contextThreshold } from "../lib/context.mjs";
 import { classifyNotification, pickCards, queenLabel, renameQueenMeta, workersMax } from "../lib/coordinator.mjs";
 import { nextReadyCards } from "../lib/board.mjs";
-import { SEATS } from "../lib/card-loop.mjs";
+import { RERUN_ALONE, SEATS } from "../lib/card-loop.mjs";
 import { planFor, reportPathFor } from "../lib/plan.mjs";
 import { readMemoryConfig, readMemoryStaleDays } from "../lib/embeddings.mjs";
 
@@ -105,7 +106,6 @@ function cardOf(s, cardId) {
   return c;
 }
 const IN_FLIGHT = ["running", "done", "landing"];
-const RERUN_ALONE = "Rerun alone: no other queen is in flight now.";
 const othersInFlight = (s, id) => s.cards.filter((x) => x.id !== id && IN_FLIGHT.includes(x.state));
 // The saved stop report and queen-args of a card, for the commands that answer an asking stop.
 function savedStop(id, c) {
@@ -266,6 +266,28 @@ switch (cmd) {
     say(`filed ${id} (${kind})`);
     break;
   }
+  case "follow-ups": {
+    const s = load();
+    let board;
+    try {
+      board = JSON.parse(readFileSync(join(dir, ".doug/board.json"), "utf8"));
+    } catch (e) {
+      fail(`cannot read the board to mark chains: ${e.code || e.message}`);
+    }
+    const cards = Array.isArray(board.cards) ? board.cards : [];
+    const filed = Array.isArray(s.filed) ? s.filed : [];
+    const followUpIds = new Set(filed.filter((f) => f.kind === "follow-up").map((f) => f.id));
+    const foundGoal = (cid) => /^(Context: )?Found/.test(String(cards.find((b) => b.id === cid)?.goal ?? ""));
+    const isChainSource = (cid) => followUpIds.has(cid) || foundGoal(cid);
+    const out = filed
+      .filter((f) => f.kind === "follow-up")
+      .map((f) => {
+        const sources = f.from ? [f.from] : (cards.find((b) => b.id === f.id)?.deps ?? []);
+        return { id: f.id, ...(f.from ? { from: f.from } : {}), position: f.position, chain: sources.some(isChainSource) };
+      });
+    process.stdout.write(JSON.stringify(out) + "\n");
+    break;
+  }
   case "caps": {
     const keys = ["usd", "wall", "context"].filter((k) => opts[k] !== undefined);
     if (!keys.length) usage("caps needs --usd, --wall, or --context");
@@ -367,6 +389,17 @@ switch (cmd) {
       } catch {
         // not a git repo or a detached HEAD: main
       }
+      let pins;
+      try {
+        const h = JSON.parse(readFileSync(join(dir, "tests/replay/skill-hashes.json"), "utf8"));
+        if (h && typeof h === "object" && !Array.isArray(h)) {
+          const paths = new Set();
+          for (const m of Object.values(h)) if (m && typeof m === "object") for (const p of Object.keys(m)) paths.add(p);
+          pins = { "tests/replay/skill-hashes.json": [...paths].sort() };
+        }
+      } catch {
+        // absent or unreadable: no pins
+      }
       args = {
         card: { id: b.id, title: b.title ?? null, size: b.size ?? null, class: b.class ?? null, goal: b.goal ?? "" },
         options: {
@@ -376,6 +409,7 @@ switch (cmd) {
           gateCommand: "node .doug/hooks/scripts/verify.mjs",
           branch: `card/${id}`,
           base,
+          ...(pins ? { pins } : {}),
         },
         models: loadModels(dir),
         repoRoot: dir,
@@ -794,5 +828,5 @@ switch (cmd) {
     break;
   }
   default:
-    usage(`unknown subcommand${cmd ? ` ${cmd}` : ""}; use start, add, card, step, land, stop, filed, caps, pick, launched, report, answer, rerun-alone, leave, resumed, lock-wait, clear, or end`);
+    usage(`unknown subcommand${cmd ? ` ${cmd}` : ""}; use start, add, card, step, land, stop, filed, follow-ups, caps, pick, launched, report, answer, rerun-alone, leave, resumed, lock-wait, clear, or end`);
 }

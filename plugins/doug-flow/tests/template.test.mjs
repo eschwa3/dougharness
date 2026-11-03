@@ -8414,9 +8414,7 @@ describe("card user-card-mid-autopilot", () => {
 
 describe("card user-card-mini-adr", () => {
   const body = (n) =>
-    "A card the user asks for is a mini ADR, not a one-line goal. Before filing it, the lead asks the scoping questions in one `AskUserQuestion` of up to 4 questions, and writes the answers into the goal. The goal carries the fixed headings Context / Decision / Options / Questions; `docs/decisions` stays for real ADRs. Only a user-requested card takes this form: a follow-up the lead files keeps " +
-    n +
-    "'s lighter form, so autopilot follow-ups stay question-free.";
+    "A card the user asks for is a mini ADR, not a one-line goal. Before filing it, the lead asks the scoping questions in one `AskUserQuestion` of up to 4 questions, and writes the answers into the goal. The goal carries the fixed headings Context / Decision / Options / Questions; `docs/decisions` stays for real ADRs. Only a user-requested card is scoped with a question: a follow-up the lead files carries the same headings, each Decision line marked (lead, not asked), and is still filed without a question, so autopilot follow-ups stay question-free.";
   const cases = [
     { skill: "doug-next", follow: "## 6. Follow-up cards", gate: "## 7. Human gate: continue", ref: "section 6" },
     { skill: "doug-hand", follow: "## 5. Follow-up cards", gate: "## 6. Human gate: continue", ref: "step 5" },
@@ -8444,6 +8442,7 @@ describe("card user-card-mini-adr", () => {
       const s = section();
       expect(s, "section missing").not.toBe("");
       expect(s).toContain(body(c.ref));
+      expect(s, "the old lighter-form clause must be gone").not.toContain("keeps " + c.ref + "'s lighter form");
       for (const p of [
         "Context / Decision / Options / Questions",
         "one `AskUserQuestion` of up to 4 questions",
@@ -9333,5 +9332,81 @@ describe("card gate-shows-file-in-chat: gates show the file in the chat first", 
     expect(hand).toContain(
       "put the complete output of `plan.mjs show` in the chat, verbatim, in a fenced code block, before the AskUserQuestion (never a summary instead)",
     );
+  });
+});
+
+// Card autopilot-follow-up-closing-question: follow-ups meet the mini-ADR bar and rest on checked premises
+// (all three loops); autopilot asks one closing multi-select question about the run's filed follow-ups.
+describe("card autopilot-follow-up-closing-question: skill text", () => {
+  const read = (skill) => readFileSync(join(root, "skills", skill, "SKILL.md"), "utf8");
+  const slice = (t, heading) => {
+    const i = t.indexOf(heading);
+    if (i < 0) return "";
+    const j = t.indexOf("\n## ", i + heading.length);
+    return j < 0 ? t.slice(i) : t.slice(i, j);
+  };
+  const loops = [
+    { skill: "doug-next", heading: "## 6. Follow-up cards" },
+    { skill: "doug-hand", heading: "## 5. Follow-up cards" },
+    { skill: "doug-swarm", heading: "## 6. Follow-up cards" },
+  ];
+  const perLoop = {
+    "marginal or false findings stay in the landing note (4)":
+      "A finding the lead classes marginal or false goes in the landing note and is never filed.",
+    "the checked premise (6)":
+      "A follow-up goal names each fact it rests on (a file, log, or record exists; the failure reproduces) and how the lead checked it before filing, with the command or path.",
+    "the capture step only (6)":
+      "A goal whose fix needs data that does not exist yet is filed as the capture step only, and the later fix is named under its Questions, not filed.",
+    "the follow-up mini ADR (7)":
+      "A follow-up goal carries the same Context / Decision / Options / Questions headings as a card the user asks for, Context opening `Context: Found landing <id> (<commit>) by <pass>:` and then quoting the finding verbatim, so the closing question's chain check matches the opening, each Decision line marked (lead, not asked); it is still filed without a question.",
+    "replace the mechanism at depth two (8)":
+      "When a follow-up would be the second in a chain on the same mechanism (one parser, rule, or seat check), its goal is to replace that mechanism so the whole class closes (for example a whole-command grammar instead of one more input form), not to add one more case.",
+  };
+  for (const [name, sentence] of Object.entries(perLoop)) {
+    for (const l of loops) {
+      it(`${l.skill}'s follow-up section pins ${name}`, () => {
+        const s = slice(read(l.skill), l.heading);
+        expect(s, `${l.heading} missing`).not.toBe("");
+        expect(s).toContain(sentence);
+      });
+    }
+  }
+  for (const l of loops) {
+    it(`${l.skill}'s follow-up section still carries no question machinery`, () => {
+      const s = slice(read(l.skill), l.heading);
+      for (const w of ["AskUserQuestion", "multiSelect", "(Recommended)"]) expect(s).not.toContain(w);
+    });
+  }
+
+  const auto = () => slice(read("doug-next"), "## Autopilot (--auto)");
+  const autoPins = {
+    "the closing question (1)":
+      "At the close, after `autopilot.mjs end`, the lead asks one multi-select `AskUserQuestion` listing the follow-ups the run filed, one option per follow-up, read from the follow-ups call below.",
+    "the option limit":
+      "A question holds at most 4 options: more follow-ups are split across the call's questions, and one follow-up alone is listed beside a none option.",
+    "picking a card (2)":
+      "A follow-up the user picks is moved to Ready with `doug board move <id> ready`, and a fresh `/doug-next --auto` run starts for it with its own cap approval.",
+    "the chain mark (3)":
+      "A follow-up whose `chain` is true is marked as a chain in its option.",
+    "the replacement recommendation (8)":
+      "A chain follow-up whose goal replaces its mechanism so the whole class closes gets an option that recommends picking it over the case fix; only a chain follow-up that adds one more case recommends leaving it in Backlog.",
+    "unpicked stay in Backlog (5)": "Unpicked follow-ups stay in Backlog.",
+    "no follow-ups, no question (5)": "A run that filed no follow-ups asks no question.",
+    "the follow-ups bullet":
+      "- `node \"${CLAUDE_PLUGIN_ROOT}/scripts/autopilot.mjs\" follow-ups` at the closing summary, after `end`, prints the run's filed follow-ups as JSON, each with `chain` true or false, for the closing question.",
+  };
+  for (const [name, sentence] of Object.entries(autoPins)) {
+    it(`doug-next's Autopilot section pins ${name}`, () => {
+      expect(auto(), `missing from the Autopilot section: ${sentence}`).toContain(sentence);
+    });
+  }
+  it("the follow-ups call is named once in doug-next, in the Autopilot section only", () => {
+    const t = read("doug-next");
+    const call = 'autopilot.mjs" follow-ups';
+    expect(t.split(call).length - 1).toBe(1);
+    expect(auto()).toContain(call);
+  });
+  it("doug-hand and doug-swarm do not ask the closing question", () => {
+    for (const skill of ["doug-hand", "doug-swarm"]) expect(read(skill)).not.toContain("follow-ups call below");
   });
 });

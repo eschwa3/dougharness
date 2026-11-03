@@ -29,10 +29,10 @@ export const DEFAULTS = Object.freeze({
     packageManagerGuard: true,
   },
   // Deny secrets in edits/commands (lib/secret-rules.mjs): an AWS key id, a PEM private-key header,
-  // a GitHub/Slack token, or an inline password/secret/api_key/token assignment with a literal value.
+  // a GitHub/Slack/Anthropic/OpenAI/npm token, or an inline password/secret/api_key/token assignment with a literal value.
   secrets: {
     enabled: true,
-    rules: { awsKeyId: true, pemPrivateKey: true, githubToken: true, slackToken: true, inlineAssignment: true },
+    rules: { awsKeyId: true, pemPrivateKey: true, githubToken: true, slackToken: true, anthropicKey: true, openaiKey: true, npmToken: true, inlineAssignment: true },
     placeholders: ["your_", "your-", "xxx", "placeholder", "example", "changeme", "dummy", "fake", "sample", "redacted"],
     ignorePaths: [],
   },

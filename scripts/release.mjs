@@ -8,9 +8,15 @@ import {
   rmSync,
   cpSync,
   writeFileSync,
+  readdirSync,
+  lstatSync,
 } from "node:fs";
-import { join, dirname, posix } from "node:path";
+import { join, dirname, posix, relative, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { isBinary, secretScanFiles } from "../plugins/doug-gates/lib/secret-files.mjs";
+import { loadConfig } from "../plugins/doug-gates/lib/config.mjs";
+
+export { secretScanFiles };
 
 export const VERSIONED_MANIFESTS = [
   "package.json",
@@ -313,11 +319,46 @@ export async function loadTransforms(root) {
 }
 
 /**
+ * The export's privacyCheck when <root>/scripts/export-public.mjs exists and exports one, else
+ * null (the public tree has no exporter). A dynamic import, like loadTransforms.
+ */
+export async function loadPrivacyCheck(root) {
+  const path = join(root, "scripts/export-public.mjs");
+  if (!existsSync(path)) return null;
+  const mod = await import(pathToFileURL(path).href);
+  return typeof mod.privacyCheck === "function" ? mod.privacyCheck : null;
+}
+
+function readStagedTextFiles(out, dirs) {
+  const files = [];
+  const binaries = [];
+  const visit = (dir) => {
+    for (const name of readdirSync(dir)) {
+      const abs = join(dir, name);
+      const st = lstatSync(abs);
+      if (st.isDirectory()) visit(abs);
+      else if (st.isFile()) {
+        const buf = readFileSync(abs);
+        const rel = relative(out, abs).split(sep).join("/");
+        if (isBinary(buf)) {
+          binaries.push(rel);
+          continue;
+        }
+        files.push({ path: rel, text: buf.toString("utf8") });
+      }
+    }
+  };
+  for (const d of dirs) visit(d);
+  files.binaries = binaries;
+  return files;
+}
+
+/**
  * Stages the cli and codex npm packages under outDir (default <root>/.doug/.state/release).
  * Returns { ok: true, staged: { cli, codex } } or { ok: false, problems } or
  * { ok: false, reason }. Writes nothing on any failure.
  */
-export function stageRelease(root, outDir, { transforms = [] } = {}) {
+export function stageRelease(root, outDir, { transforms = [], privacyCheck = null } = {}) {
   const out = outDir || join(root, ".doug/.state/release");
 
   const problems = checkRelease(root);
@@ -418,7 +459,32 @@ export function stageRelease(root, outDir, { transforms = [] } = {}) {
     return { ok: false, problems: transformProblems };
   }
 
-  return { ok: true, staged: { cli: cliOut, codex: codexOut } };
+  const stagedFiles = readStagedTextFiles(out, [cliOut, codexOut]);
+  if (typeof privacyCheck === "function") {
+    const denyHits = privacyCheck(stagedFiles);
+    if (denyHits.length > 0) {
+      rmSync(cliOut, { recursive: true, force: true });
+      rmSync(codexOut, { recursive: true, force: true });
+      return { ok: false, problems: denyHits.map((h) => `privacy check: ${h.path}:${h.line} [${h.name}]`) };
+    }
+  }
+
+  const secretHits = secretScanFiles(stagedFiles, loadConfig(root).secrets);
+  if (secretHits.length > 0) {
+    rmSync(cliOut, { recursive: true, force: true });
+    rmSync(codexOut, { recursive: true, force: true });
+    return { ok: false, problems: secretHits.map((h) => `secret scan: ${h.path}:${h.line} [${h.rule}]`) };
+  }
+
+  return { ok: true, staged: { cli: cliOut, codex: codexOut }, binaries: stagedFiles.binaries };
+}
+
+/** Stages from root with the exporter's TRANSFORMS and privacyCheck (both absent in the public tree). */
+export async function stageFromRoot(root, outDir) {
+  return stageRelease(root, outDir, {
+    transforms: await loadTransforms(root),
+    privacyCheck: await loadPrivacyCheck(root),
+  });
 }
 
 function parseStageArgs(rest) {
@@ -445,7 +511,7 @@ async function main() {
 
   if (cmd === "stage") {
     const { outDir } = parseStageArgs(rest);
-    const result = stageRelease(root, outDir, { transforms: await loadTransforms(root) });
+    const result = await stageFromRoot(root, outDir);
     if (!result.ok) {
       if (result.problems) {
         for (const problem of result.problems) console.error(problem);
@@ -457,6 +523,7 @@ async function main() {
     }
     console.log(`staged cli package: ${result.staged.cli}`);
     console.log(`staged codex package: ${result.staged.codex}`);
+    console.log(`binary files not scanned (${result.binaries.length}): ${result.binaries.join(", ") || "none"}`);
     console.log("next: run the manual pre-publish check, then npm publish.");
     process.exit(0);
     return;

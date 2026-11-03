@@ -1,5 +1,19 @@
 # Changelog
 
+## 1.6.2
+
+- Release: `pnpm release` now mints the whole release except npm auth, pushes `main` and the tag atomically, refuses `--yes` without `--otp` when there is no TTY, and names the missing output directory when a resume cannot find it.
+- Release: `release:stage` runs the privacy deny-pattern scan over every staged file, and the export and the npm stage scan shipped text with the shared secret rules, which gain Anthropic, OpenAI and npm token rules.
+- Secrets: the secret scans treat a file as binary only when a NUL byte is in its first 8000 bytes, so a text file with a later NUL is scanned; the npm stage lists the binary files it skips, as the export does.
+- Export: the shipped `rehearse-lib.mjs` carries measured run figures and dates.
+- Card loop: a seat that recovers from a hook block is no longer stopped. A complete valid hand-back with a `hookBlocked` message advances, and the message becomes a follow-up naming the seat. A commit hand-back recovers only with its sha set and the gated tree.
+- Card loop: the commit seat logs the pre-commit output and names the failing tests.
+- Card loop: a card that changes a pinned file owns its pin in `tests/replay/skill-hashes.json`.
+- Card loop: a user answer to a gate stop reaches the build seat (tester or coder) for one extra round before the reviewer and gate run again. A rerun-alone answer still only reruns the gate.
+- Autopilot: follow-ups name checked premises, use mini-ADR goals, and end with one closing question.
+- Evals: `evals/run.mjs` warns on stderr when a launched condition has no dated entry in `docs/evals-predictions.md`, where predictions are recorded before a live arm.
+- Tests: the rehearsal scenario tests pin provenance text instead of dates and add `.doug/` to the memory and decide fixtures.
+
 ## 1.6.1
 
 - Card loop: a placeholder `hookBlocked` message from a seat (`none`, `n/a`, `null` or blank) is no longer treated as a hook block.

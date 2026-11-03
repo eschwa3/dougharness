@@ -167,7 +167,6 @@ describe("the hard registry sits beside the cheap one", () => {
       expect(Object.keys(lib.HARD_ESTIMATES[h].stages), h).toEqual(sessionOrCommand(h.replace(/^hard-/, "")));
       expect(lib.HARD_ESTIMATES[h].source, h).toMatch(/^measured on ts-rentals:/);
       expect(lib.HARD_ESTIMATES[h].source, h).not.toContain("unmeasured");
-      expect(lib.HARD_ESTIMATES[h].source, h).toContain("2026-10-25");
     }
     expect(lib.HARD_ESTIMATES["hard-hand"].stages).toEqual({ gate: 0.38, build: 1.8 });
     expect(lib.HARD_ESTIMATES["hard-flow"].stages).toEqual({ gate: 0.94, implement: 2.14 });

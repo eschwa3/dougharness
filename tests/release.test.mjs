@@ -14,7 +14,9 @@ import {
 import { fileURLToPath } from "node:url";
 import { join, dirname } from "node:path";
 import { tmpdir } from "node:os";
-import { checkRelease, loadTransforms, stageRelease, stagedPathFor } from "../scripts/release.mjs";
+import { checkRelease, loadPrivacyCheck, loadTransforms, secretScanFiles, stageFromRoot, stageRelease, stagedPathFor } from "../scripts/release.mjs";
+import { DEFAULTS } from "../plugins/doug-gates/lib/config.mjs";
+import { isBinary } from "../plugins/doug-gates/lib/secret-files.mjs";
 
 const repoRoot = fileURLToPath(new URL("..", import.meta.url));
 
@@ -456,6 +458,411 @@ describe("stageRelease applies transforms (fixture root, no build needed)", () =
   });
 });
 
+// Card export-secret-scan: tokens are built from parts so this file never carries one whole.
+const TOK_BODY = "Q7xK2mZp9TdW4vLb8NcR3sYh6JfG1aEu0oXi";
+const NPM_TOK = "npm" + "_" + TOK_BODY;
+const ANT_TOK = "sk-" + "ant-" + "api03-" + TOK_BODY + TOK_BODY + TOK_BODY;
+
+describe("secretScanFiles", () => {
+  const secrets = DEFAULTS.secrets;
+
+  it("returns [] for clean files and for npm's own variables", () => {
+    expect(
+      secretScanFiles(
+        [
+          { path: "a.md", text: "plain prose\nkeys start with sk-" + "ant-\n" },
+          { path: "b.sh", text: 'echo "$npm_package_version" $npm_lifecycle_event\n' },
+        ],
+        secrets,
+      ),
+    ).toEqual([]);
+  });
+
+  it("reports path, 1-based line and rule id, and nothing else", () => {
+    const hits = secretScanFiles([{ path: "docs/x.md", text: "clean\nclean\nsee " + NPM_TOK + " here\n" }], secrets);
+    expect(hits).toEqual([{ path: "docs/x.md", line: 3, rule: "npmToken" }]);
+    expect(JSON.stringify(hits)).not.toContain(NPM_TOK);
+    expect(JSON.stringify(hits)).not.toContain(TOK_BODY.slice(0, 8));
+  });
+
+  it("reports one entry per hitting line across files, in order", () => {
+    const hits = secretScanFiles(
+      [
+        { path: "a.txt", text: NPM_TOK + "\n" + ANT_TOK + " " + NPM_TOK + "\nok\n" },
+        { path: "b.txt", text: "ok\n" + NPM_TOK },
+      ],
+      secrets,
+    );
+    expect(hits.map((h) => h.path + ":" + h.line)).toEqual(["a.txt:1", "a.txt:2", "b.txt:2"]);
+    expect(hits.map((h) => h.rule)).toEqual(["npmToken", "anthropicKey", "npmToken"]);
+  });
+
+  it("names anthropicKey, not inlineAssignment, for a shipped .env carrying ANTHROPIC_API_KEY", () => {
+    expect(secretScanFiles([{ path: ".env", text: "ANTHROPIC_API_KEY=" + ANT_TOK + "\n" }], secrets)).toEqual([
+      { path: ".env", line: 1, rule: "anthropicKey" },
+    ]);
+  });
+
+  it("names npmToken for a shipped .npmrc carrying an auth token", () => {
+    expect(secretScanFiles([{ path: ".npmrc", text: "//registry.npmjs.org/:_authToken=" + NPM_TOK + "\n" }], secrets)).toEqual([
+      { path: ".npmrc", line: 1, rule: "npmToken" },
+    ]);
+  });
+
+  it("does not hit an .npmrc that references an env variable", () => {
+    expect(secretScanFiles([{ path: ".npmrc", text: "//registry.npmjs.org/:_authToken=${NPM_TOKEN}\n" }], secrets)).toEqual([]);
+  });
+
+  it("honours secrets.ignorePaths as globs over the shipped path", () => {
+    const withIgnore = { ...secrets, ignorePaths: ["fixtures/**"] };
+    const hits = secretScanFiles(
+      [
+        { path: "fixtures/a.txt", text: NPM_TOK },
+        { path: "b.txt", text: NPM_TOK },
+      ],
+      withIgnore,
+    );
+    expect(hits).toEqual([{ path: "b.txt", line: 1, rule: "npmToken" }]);
+  });
+
+  it("honours secrets.rules switches and secrets.placeholders", () => {
+    const off = { ...secrets, rules: { ...secrets.rules, npmToken: false } };
+    expect(secretScanFiles([{ path: "a.txt", text: NPM_TOK }], off)).toEqual([]);
+    const line = "API_KEY=" + "fixture-abc123456789\n";
+    expect(secretScanFiles([{ path: "a.env", text: line }], { ...secrets, placeholders: [] }).map((h) => h.rule)).toEqual(["inlineAssignment"]);
+    expect(secretScanFiles([{ path: "a.env", text: line }], { ...secrets, placeholders: ["fixture-"] })).toEqual([]);
+  });
+
+  it("scans whatever secrets.enabled says (the release scan is not the edit gate)", () => {
+    expect(secretScanFiles([{ path: "a.txt", text: NPM_TOK }], { ...secrets, enabled: false })).toEqual([
+      { path: "a.txt", line: 1, rule: "npmToken" },
+    ]);
+  });
+});
+
+describe("stageRelease secret scan (fixture root, no build needed)", () => {
+  function makeFixture() {
+    const root = makeFixtureRoot();
+    const put = (rel, text) => {
+      mkdirSync(dirname(join(root, rel)), { recursive: true });
+      writeFileSync(join(root, rel), text);
+    };
+    for (const pkg of ["plugins/doug-flow", "plugins/doug-gates"]) {
+      for (const entry of readJson(root, `${pkg}/package.json`).files) {
+        mkdirSync(join(root, pkg, entry), { recursive: true });
+        writeFileSync(join(root, pkg, entry, ".keep"), "");
+      }
+    }
+    put("packages/doug-cli/dist/bin.js", "// bin\n");
+    put("packages/doug-cli/templates/t.txt", "t\n");
+    put("packages/doug-codex/dist/bin.js", "// codex bin\n");
+    return { root, put };
+  }
+
+  function expectRefused(seedPath, stagedPath, line) {
+    const { root, put } = makeFixture();
+    const out = join(root, "stage-out");
+    try {
+      put(seedPath, "// first line\n// " + NPM_TOK + "\n");
+      const res = stageRelease(root, out);
+      expect(res.ok).toBe(false);
+      expect(res.problems).toContain(`secret scan: ${stagedPath}:${line} [npmToken]`);
+      expect(JSON.stringify(res)).not.toContain(NPM_TOK);
+      expect(JSON.stringify(res)).not.toContain(TOK_BODY.slice(0, 8));
+      expect(existsSync(join(out, "cli"))).toBe(false);
+      expect(existsSync(join(out, "codex"))).toBe(false);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }
+
+  it("passes a clean fixture", () => {
+    const { root } = makeFixture();
+    try {
+      const res = stageRelease(root, join(root, "stage-out"));
+      expect(res.ok, JSON.stringify(res)).toBe(true);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("fails on a token in the cli package", () => {
+    expectRefused("packages/doug-cli/dist/bin.js", "cli/dist/bin.js", 2);
+  });
+
+  it("fails on a token in the codex package", () => {
+    expectRefused("packages/doug-codex/dist/bin.js", "codex/dist/bin.js", 2);
+  });
+
+  it("fails on a token in the bundled gates", () => {
+    expectRefused(
+      "plugins/doug-gates/scripts/stop-gate.mjs",
+      "cli/node_modules/@dougharness/gates/scripts/stop-gate.mjs",
+      2,
+    );
+  });
+
+  it("fails on a token in the bundled flow", () => {
+    expectRefused("plugins/doug-flow/lib/x.mjs", "cli/node_modules/@dougharness/flow/lib/x.mjs", 2);
+  });
+});
+
+// Card secret-scan-nul-text-files: binary means a NUL within the first 8000 bytes (git's rule), in the export and the stage.
+describe("isBinary (git's first-8000-bytes rule)", () => {
+  it("is true for a NUL at byte index 0 and at 7999", () => {
+    expect(isBinary(Buffer.from("\u0000abc"))).toBe(true);
+    expect(isBinary(Buffer.concat([Buffer.alloc(7999, "a"), Buffer.from([0])]))).toBe(true);
+  });
+
+  it("is false for a NUL at byte index 8000 and for NUL-free text", () => {
+    expect(isBinary(Buffer.concat([Buffer.alloc(8000, "a"), Buffer.from([0])]))).toBe(false);
+    expect(isBinary(Buffer.from("plain text\n"))).toBe(false);
+  });
+});
+
+describe("stageRelease NUL handling (fixture root, no build needed)", () => {
+  function makeFixture() {
+    const root = makeFixtureRoot();
+    const put = (rel, data) => {
+      mkdirSync(dirname(join(root, rel)), { recursive: true });
+      writeFileSync(join(root, rel), data);
+    };
+    for (const pkg of ["plugins/doug-flow", "plugins/doug-gates"]) {
+      for (const entry of readJson(root, `${pkg}/package.json`).files) {
+        mkdirSync(join(root, pkg, entry), { recursive: true });
+        writeFileSync(join(root, pkg, entry, ".keep"), "");
+      }
+    }
+    put("packages/doug-cli/dist/bin.js", "// bin\n");
+    put("packages/doug-cli/templates/t.txt", "t\n");
+    put("packages/doug-codex/dist/bin.js", "// codex bin\n");
+    return { root, put };
+  }
+
+  it("scans a text file whose only NUL is past byte 8000 and refuses its token", () => {
+    const { root, put } = makeFixture();
+    try {
+      put("packages/doug-cli/dist/late.js", "x".repeat(9000) + "\n// nul: \u0000\n// " + NPM_TOK + "\n");
+      const res = stageRelease(root, join(root, "stage-out"));
+      expect(res.ok).toBe(false);
+      expect(res.problems).toContain("secret scan: cli/dist/late.js:3 [npmToken]");
+      expect(JSON.stringify(res)).not.toContain(NPM_TOK);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("lists a file with a NUL in its first 8000 bytes in the result's binaries, not as text", () => {
+    const { root, put } = makeFixture();
+    try {
+      put("packages/doug-cli/dist/blob.bin", Buffer.from("\u0000binary " + NPM_TOK));
+      const res = stageRelease(root, join(root, "stage-out"));
+      expect(res.ok, JSON.stringify(res)).toBe(true);
+      expect(res.binaries).toContain("cli/dist/blob.bin");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("release.mjs stage prints 'binary files not scanned (N): ...' naming the skipped file", () => {
+    const { root, put } = makeFixture();
+    try {
+      mkdirSync(join(root, "scripts"), { recursive: true });
+      cpSync(join(repoRoot, "scripts/release.mjs"), join(root, "scripts/release.mjs"));
+      cpSync(join(repoRoot, "plugins/doug-gates/lib"), join(root, "plugins/doug-gates/lib"), { recursive: true });
+      put("packages/doug-cli/dist/blob.bin", Buffer.from("\u0000binary"));
+      const out = join(root, "stage-out");
+      const r = spawnSync(process.execPath, [join(root, "scripts/release.mjs"), "stage", "--out", out], { encoding: "utf8" });
+      expect(r.status, r.stdout + r.stderr).toBe(0);
+      expect(r.stdout).toMatch(/binary files not scanned \(1\): .*cli\/dist\/blob\.bin/);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
+// Card npm-stage-deny-scan: a stand-in deny check (the real DENY_PATTERNS live in the dev-only exporter).
+const DENY_WORD = "DENY" + "ME";
+const fakePrivacyCheck = (files) => {
+  const hits = [];
+  for (const f of files) {
+    f.text.split("\n").forEach((l, i) => {
+      if (l.includes(DENY_WORD)) hits.push({ path: f.path, line: i + 1, name: "fake pattern", text: l });
+    });
+  }
+  return hits;
+};
+const FAKE_EXPORTER = `export const TRANSFORMS = [];
+export function privacyCheck(files) {
+  const hits = [];
+  for (const f of files) f.text.split("\\n").forEach((l, i) => { if (l.includes(${JSON.stringify(DENY_WORD)})) hits.push({ path: f.path, line: i + 1, name: "fake pattern", text: l }); });
+  return hits;
+}
+`;
+
+describe("stageRelease privacy check (fixture root, no build needed)", () => {
+  function makeFixture() {
+    const root = makeFixtureRoot();
+    const put = (rel, text) => {
+      mkdirSync(dirname(join(root, rel)), { recursive: true });
+      writeFileSync(join(root, rel), text);
+    };
+    for (const pkg of ["plugins/doug-flow", "plugins/doug-gates"]) {
+      for (const entry of readJson(root, `${pkg}/package.json`).files) {
+        mkdirSync(join(root, pkg, entry), { recursive: true });
+        writeFileSync(join(root, pkg, entry, ".keep"), "");
+      }
+    }
+    put("packages/doug-cli/dist/bin.js", "// bin\n");
+    put("packages/doug-cli/templates/t.txt", "t\n");
+    put("packages/doug-codex/dist/bin.js", "// codex bin\n");
+    return { root, put };
+  }
+
+  function expectRefused(seedPath, stagedPath, line) {
+    const { root, put } = makeFixture();
+    const out = join(root, "stage-out");
+    try {
+      put(seedPath, "// first line\n// " + DENY_WORD + "\n");
+      const res = stageRelease(root, out, { privacyCheck: fakePrivacyCheck });
+      expect(res.ok).toBe(false);
+      expect(res.problems).toContain(`privacy check: ${stagedPath}:${line} [fake pattern]`);
+      expect(JSON.stringify(res)).not.toContain(DENY_WORD);
+      expect(existsSync(join(out, "cli"))).toBe(false);
+      expect(existsSync(join(out, "codex"))).toBe(false);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }
+
+  it("passes a clean fixture", () => {
+    const { root } = makeFixture();
+    try {
+      const res = stageRelease(root, join(root, "stage-out"), { privacyCheck: fakePrivacyCheck });
+      expect(res.ok, JSON.stringify(res)).toBe(true);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("fails on a deny hit in the cli package", () => {
+    expectRefused("packages/doug-cli/dist/bin.js", "cli/dist/bin.js", 2);
+  });
+
+  it("fails on a deny hit in the codex package", () => {
+    expectRefused("packages/doug-codex/dist/bin.js", "codex/dist/bin.js", 2);
+  });
+
+  it("fails on a deny hit in the bundled gates", () => {
+    expectRefused("plugins/doug-gates/scripts/stop-gate.mjs", "cli/node_modules/@dougharness/gates/scripts/stop-gate.mjs", 2);
+  });
+
+  it("fails on a deny hit in the bundled flow", () => {
+    expectRefused("plugins/doug-flow/lib/x.mjs", "cli/node_modules/@dougharness/flow/lib/x.mjs", 2);
+  });
+
+  it("a deny hit removed by a transform passes (the scan reads the transformed text)", () => {
+    const { root, put } = makeFixture();
+    const skill = "plugins/doug-flow/skills/doug-next/SKILL.md";
+    try {
+      put(skill, "before " + DENY_WORD + " after\n");
+      const transforms = [{ file: skill, from: DENY_WORD, to: "clean" }];
+      const res = stageRelease(root, join(root, "stage-out"), { transforms, privacyCheck: fakePrivacyCheck });
+      expect(res.ok, JSON.stringify(res)).toBe(true);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("without a privacyCheck option the stage does not run a deny scan", () => {
+    const { root, put } = makeFixture();
+    try {
+      put("packages/doug-cli/dist/bin.js", "// " + DENY_WORD + "\n");
+      expect(stageRelease(root, join(root, "stage-out")).ok).toBe(true);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("loadPrivacyCheck and stageFromRoot (fixture root with a fake exporter)", () => {
+  it("loadPrivacyCheck returns null for a root without scripts/export-public.mjs (the public tree)", async () => {
+    const root = mkdtempSync(join(tmpdir(), "release-noprivacy-"));
+    try {
+      expect(await loadPrivacyCheck(root)).toBeNull();
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("loadPrivacyCheck returns null when the exporter exports no privacyCheck", async () => {
+    const root = mkdtempSync(join(tmpdir(), "release-noprivacy-"));
+    try {
+      mkdirSync(join(root, "scripts"), { recursive: true });
+      writeFileSync(join(root, "scripts/export-public.mjs"), "export const TRANSFORMS = [];\n");
+      expect(await loadPrivacyCheck(root)).toBeNull();
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  function stageFixture() {
+    const root = makeFixtureRoot();
+    const put = (rel, text) => {
+      mkdirSync(dirname(join(root, rel)), { recursive: true });
+      writeFileSync(join(root, rel), text);
+    };
+    for (const pkg of ["plugins/doug-flow", "plugins/doug-gates"]) {
+      for (const entry of readJson(root, `${pkg}/package.json`).files) {
+        mkdirSync(join(root, pkg, entry), { recursive: true });
+        writeFileSync(join(root, pkg, entry, ".keep"), "");
+      }
+    }
+    put("packages/doug-cli/dist/bin.js", "// bin\n");
+    put("packages/doug-cli/templates/t.txt", "t\n");
+    put("packages/doug-codex/dist/bin.js", "// codex bin\n");
+    put("scripts/export-public.mjs", FAKE_EXPORTER);
+    return { root, put };
+  }
+
+  it("loadPrivacyCheck returns the exporter's check", async () => {
+    const { root } = stageFixture();
+    try {
+      const check = await loadPrivacyCheck(root);
+      expect(typeof check).toBe("function");
+      expect(check([{ path: "a", text: "x\n" + DENY_WORD }]).map((h) => [h.path, h.line, h.name])).toEqual([["a", 2, "fake pattern"]]);
+      expect(check([{ path: "a", text: "clean" }])).toEqual([]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("stageFromRoot fails on a seeded hit using the loaded exporter", async () => {
+    const { root, put } = stageFixture();
+    const out = join(root, "stage-out");
+    try {
+      put("packages/doug-codex/dist/bin.js", "// codex\n// " + DENY_WORD + "\n");
+      const res = await stageFromRoot(root, out);
+      expect(res.ok).toBe(false);
+      expect(res.problems).toContain("privacy check: codex/dist/bin.js:2 [fake pattern]");
+      expect(existsSync(join(out, "cli"))).toBe(false);
+      expect(existsSync(join(out, "codex"))).toBe(false);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("stageFromRoot passes a clean fixture", async () => {
+    const { root } = stageFixture();
+    try {
+      const res = await stageFromRoot(root, join(root, "stage-out"));
+      expect(res.ok, JSON.stringify(res)).toBe(true);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
 function npmVersionOk() {
   const result = spawnSync("npm", ["--version"], { encoding: "utf8" });
   return result.status === 0;
@@ -463,6 +870,7 @@ function npmVersionOk() {
 
 const cliDistBin = join(repoRoot, "packages/doug-cli/dist/bin.js");
 const codexDistBin = join(repoRoot, "packages/doug-codex/dist/bin.js");
+const noExportPublic = !existsSync(join(repoRoot, "scripts/export-public.mjs"));
 const distMissing = !existsSync(cliDistBin) || !existsSync(codexDistBin);
 const npmMissing = !npmVersionOk();
 const skipStage = distMissing || npmMissing;
@@ -703,6 +1111,8 @@ describe("release.mjs main rejection", () => {
     try {
       mkdirSync(join(root, "scripts"), { recursive: true });
       cpSync(join(repoRoot, "scripts/release.mjs"), join(root, "scripts/release.mjs"));
+      // release.mjs imports the shared secret scanner (card export-secret-scan) from the gates lib.
+      cpSync(join(repoRoot, "plugins/doug-gates/lib"), join(root, "plugins/doug-gates/lib"), { recursive: true });
       writeFileSync(join(root, "scripts/export-public.mjs"), 'throw new Error("boom from export-public");\n');
       const result = spawnSync(process.execPath, [join(root, "scripts/release.mjs"), "stage"], {
         encoding: "utf8",
@@ -710,6 +1120,21 @@ describe("release.mjs main rejection", () => {
       expect(result.stderr).toContain("release: boom from export-public");
       expect(result.stderr).not.toMatch(/^\s+at /m);
       expect(result.status).toBe(1);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it.skipIf(noExportPublic)("does not deadlock: the real export-public.mjs loaded by loadTransforms never imports release.mjs back", () => {
+    const root = mkdtempSync(join(tmpdir(), "release-main-cycle-"));
+    try {
+      mkdirSync(join(root, "scripts"), { recursive: true });
+      cpSync(join(repoRoot, "scripts/release.mjs"), join(root, "scripts/release.mjs"));
+      cpSync(join(repoRoot, "scripts/export-public.mjs"), join(root, "scripts/export-public.mjs"));
+      cpSync(join(repoRoot, "plugins/doug-gates/lib"), join(root, "plugins/doug-gates/lib"), { recursive: true });
+      const result = spawnSync(process.execPath, [join(root, "scripts/release.mjs"), "stage"], { encoding: "utf8" });
+      expect(result.stderr).not.toContain("unsettled top-level await");
+      expect(result.status).not.toBe(13);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

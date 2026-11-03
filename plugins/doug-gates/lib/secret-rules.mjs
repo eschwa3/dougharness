@@ -29,6 +29,26 @@ const GITHUB_TOKEN_SRC =
   "|\\bgithub_pat_[A-Za-z0-9_]{22,255}(?![A-Za-z0-9])" +
   "|\\bghs_[0-9]{1,10}_[A-Za-z0-9_-]{8,2048}\\.[A-Za-z0-9_-]{8,2048}\\.[A-Za-z0-9_-]{8,2048}(?![A-Za-z0-9])";
 
+// Anthropic API keys: the Console documents the key as starting with sk-ant- (example sk-ant-api03-...),
+// platform.claude.com/docs/en/get-api-key.md. Length and charset after the prefix are undocumented; the
+// 32-255 body of [A-Za-z0-9_-] is Doug's own floor and ceiling, so a bare prefix in prose or an
+// ellipsis example never hits. The left boundary is a lookbehind and every repeat is bounded.
+const ANTHROPIC_KEY_SRC = "(?<![A-Za-z0-9_-])sk-ant-[A-Za-z0-9_-]{32,255}(?![A-Za-z0-9_-])";
+
+// OpenAI API keys: the official OpenAPI spec shows sk- and sk-admin- keys
+// (raw.githubusercontent.com/openai/openai-openapi/master/openapi.yaml); its examples are short
+// placeholders. The sk-proj- and sk-svcacct- prefixes are not in that spec and are Doug's own extension,
+// as is the 32-character floor (so the spec's short examples and words like sk-learn never hit).
+const OPENAI_KEY_SRC =
+  "(?<![A-Za-z0-9_-])sk-(?:(?:proj|svcacct|admin)-[A-Za-z0-9_-]{32,255}|[A-Za-z0-9]{32,255})(?![A-Za-z0-9_-])";
+
+// npm access tokens: the npm_ prefix and underscore delimiter, a Base62 CRC32 checksum in the last six
+// characters (github.blog/security/announcing-npms-new-access-token-format/). The post states no body
+// length or charset; 36 alphanumerics (30 random plus the checksum, matching GitHub's format) is an
+// inference. npm's own variables (npm_package_version and kin) carry an underscore after a short word,
+// so they never match.
+const NPM_TOKEN_SRC = "(?<![A-Za-z0-9_])npm_[A-Za-z0-9]{36,255}(?![A-Za-z0-9])";
+
 // Slack tokens: bot/user/workflow/app-level strings begin xoxb-/xoxp-/xwfp-/xapp-, each divided into
 // dash-separated sections whose final section is the secret (docs.slack.dev/authentication/tokens);
 // rotation gives refresh tokens a bare "xoxe-" prefix (docs.slack.dev/authentication/using-token-
@@ -185,6 +205,24 @@ export const RULES = [
     what: "a Slack token",
     source: ["https://docs.slack.dev/authentication/tokens", "https://docs.slack.dev/authentication/using-token-rotation"],
     test: (text) => scanSlackToken(text),
+  },
+  {
+    id: "anthropicKey",
+    what: "an Anthropic API key",
+    source: "https://platform.claude.com/docs/en/get-api-key.md",
+    test: (text) => new RegExp(ANTHROPIC_KEY_SRC).test(text),
+  },
+  {
+    id: "openaiKey",
+    what: "an OpenAI API key",
+    source: "https://raw.githubusercontent.com/openai/openai-openapi/master/openapi.yaml",
+    test: (text) => new RegExp(OPENAI_KEY_SRC).test(text),
+  },
+  {
+    id: "npmToken",
+    what: "an npm access token",
+    source: "https://github.blog/security/announcing-npms-new-access-token-format/",
+    test: (text) => new RegExp(NPM_TOKEN_SRC).test(text),
   },
   {
     id: "inlineAssignment",

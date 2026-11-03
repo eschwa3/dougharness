@@ -4,6 +4,8 @@
 // Design: .doug/.state/reports/card-loop-contract/design.md. Seat hand-backs extend docs/worker-contract.md.
 
 export const SEATS = ["setup", "research", "lead", "tester", "coder", "reviewer", "gate", "commit"];
+// The text autopilot records for a gate-timeout rerun; it means "rerun the gate unchanged", never "fix something".
+export const RERUN_ALONE = "Rerun alone: no other queen is in flight now.";
 export const LANES = ["full", "lean", "tests-only"];
 export const STOP_REASONS = [
   "agent-null",
@@ -43,7 +45,7 @@ export const BRIEF_RULES = {
     seats: ALL,
   },
   "hook-block-report": {
-    text: "If a hook blocks a step, do not work around it: report it in hookBlocked with the hook's message.",
+    text: "If a hook blocks a step, do not work around it. Report it in hookBlocked with the hook's message only when the step finally failed; a block you recovered from in the seat (a retry that passed, a side step you did not need) goes in leftOut.",
     seats: ALL,
   },
   "relayed-message-outside-card": {
@@ -64,6 +66,10 @@ export const BRIEF_RULES = {
   },
   "lessons-fetch": {
     text: "For each indexed lesson the card needs, run memory.mjs lesson show <id> <repo-root> --card <card-id>, passing the REPO ROOT named in this brief as [dir], and append its output verbatim to lessons below the brief-lessons block; never cut or paraphrase a fetched lesson.",
+    seats: ["lead"],
+  },
+  "owned-files": {
+    text: "List every file the card will change, tests included, in ownedFiles; the contract adds the pin file of any pinned file you list, so a required pin update is in scope for the reviewer.",
     seats: ["lead"],
   },
   "facts-cited": {
@@ -151,6 +157,10 @@ export const BRIEF_RULES = {
     text: "Never edit, create, delete, or format a file: commit exactly the tree the gate seat passed (GATED TREE). A change the commit seems to need goes in blocked, never into the tree.",
     seats: ["commit"],
   },
+  "commit-precommit-log": {
+    text: "Run every git commit with its output redirected to a log in the card worktree, `git commit ... > <card worktree>/.doug/.state/commit/attempt-<n>.log 2>&1` (create the directory first; n counts attempts from 1), never piped and never left to the Bash tool output, which keeps only part of a long run. When an attempt exits non-zero, run `node .doug/hooks/lib/run.mjs failing-tests <that log>` and report the attempt in precommitFailures as {attempt, exitCode, log, tests}, tests being the names it printed (empty when none), before any retry. The log is under .doug/.state, outside the committed tree.",
+    seats: ["commit"],
+  },
   "commit-reports-tree": {
     text: "After git commit returns, run node .doug/hooks/lib/verified-tree.mjs commit-tree HEAD with the card worktree path as its second argument and report its output as tree: it hashes HEAD's tree without verified-tree's EXCLUDED paths, the same measure as GATED TREE; a tree that differs from GATED TREE stops the card. Never compare GATED TREE with git rev-parse HEAD^{tree}, which keeps .doug/anchor.md.",
     seats: ["commit"],
@@ -224,6 +234,7 @@ export const HAND_BACK_SCHEMAS = {
       unverified: STRS,
       testFiles: STRS,
       reviewerChecks: STRS,
+      ownedFiles: STRS,
       mutations: {
         type: "array",
         items: {
@@ -286,7 +297,23 @@ export const HAND_BACK_SCHEMAS = {
     { commands: { type: "array", items: CMD, minItems: 1 }, gateLine: NES, lockWaitMs: INT_OR_NULL, tree: TREE },
     ["commands", "gateLine", "tree"],
   ),
-  commit: schema("commit", { sha: { type: "string", pattern: "^[0-9a-f]{7,40}$" }, branch: S, tree: TREE }, ["sha", "branch", "tree"]),
+  commit: schema(
+    "commit",
+    {
+      sha: { type: "string", pattern: "^[0-9a-f]{7,40}$" },
+      branch: S,
+      tree: TREE,
+      precommitFailures: {
+        type: "array",
+        items: {
+          type: "object",
+          properties: { attempt: { type: "integer", minimum: 1 }, exitCode: INT_OR_NULL, log: NES, tests: STRS },
+          required: ["attempt", "log", "tests"],
+        },
+      },
+    },
+    ["sha", "branch", "tree"],
+  ),
 };
 
 // The schema a seat is handed on a lane. Only the tests-only tester may report notRun (validateHandBack's tester
@@ -382,6 +409,28 @@ function checkAnswers(answers) {
   });
 }
 
+// options.pins: { "<pin file>": ["<pinned path>", ...] }; a card owning a pinned path also owns the pin file.
+function checkPins(pins) {
+  if (pins === undefined || pins === null) return {};
+  if (!isObj(pins)) throw new TypeError("options.pins must be an object of string arrays");
+  const out = {};
+  for (const [k, v] of Object.entries(pins)) {
+    if (!Array.isArray(v) || !v.every((x) => typeof x === "string")) throw new TypeError("options.pins[" + k + "] must be an array of strings");
+    out[k] = v.slice();
+  }
+  return out;
+}
+
+export function ownedWithPins(owned, pins) {
+  const out = [];
+  for (const f of owned || []) if (!out.includes(f)) out.push(f);
+  for (const [pinFile, pinned] of Object.entries(pins || {})) {
+    if (out.includes(pinFile)) continue;
+    if (out.some((o) => pinned.some((p) => o === p || o.endsWith("/" + p)))) out.push(pinFile);
+  }
+  return out;
+}
+
 export function initialState(card, options = {}) {
   if (!isObj(card) || !nonBlank(card.id) || !isStr(card.goal)) {
     throw new TypeError("card needs an id and a goal string");
@@ -390,6 +439,7 @@ export function initialState(card, options = {}) {
   return {
     version: 1,
     answers: checkAnswers(o.answers),
+    pins: checkPins(o.pins),
     card: {
       id: card.id,
       title: card.title ?? null,
@@ -406,7 +456,7 @@ export function initialState(card, options = {}) {
     base: o.base ?? "main",
     worktree: null,
     researchNote: null,
-    material: { lessons: "", facts: [], unverified: [], testFiles: [], mutations: [], reviewerChecks: [] },
+    material: { lessons: "", facts: [], unverified: [], testFiles: [], mutations: [], reviewerChecks: [], ownedFiles: [] },
     notRun: [],
     redTests: [],
     counters: { coderRounds: 0, fixPasses: 0, redGates: 0 },
@@ -428,6 +478,7 @@ export function initialState(card, options = {}) {
       gateLine: null,
       lockWaitMs: 0,
       commit: null,
+      precommitFailures: [],
     },
   };
 }
@@ -464,6 +515,7 @@ function buildBrief(s) {
     facts: cp(s.material.facts),
     unverified: cp(s.material.unverified),
     testFiles: cp(s.material.testFiles),
+    ownedFiles: cp(s.material.ownedFiles || []),
     mutations: cp(effectiveMutations(s)),
     reviewerChecks: seat === "reviewer" ? cp(s.material.reviewerChecks || []) : [],
     notRun: seat === "reviewer" ? cp(s.notRun || []) : [],
@@ -478,7 +530,9 @@ function buildBrief(s) {
         (a) =>
           (a.seat === seat && (a.round === undefined || a.round <= (s.seatRuns[seat] || 0) + 1)) ||
           // A reviewer answer reaches the build seat once the reviewer round it targets has run.
-          (seat === buildSeat(s) && a.seat === "reviewer" && (a.round ?? 1) <= (s.seatRuns.reviewer || 0)),
+          (seat === buildSeat(s) && a.seat === "reviewer" && (a.round ?? 1) <= (s.seatRuns.reviewer || 0)) ||
+          // A gate answer reaches the build seat only for the extra round it caused (its round is marked consumed).
+          (seat === buildSeat(s) && a.seat === "gate" && (s.gateAnswerRounds || []).includes(a.round ?? 1)),
       )
       .map((a) => ({ question: a.question, answer: a.answer })),
     writeTestsFirst: seat === "coder" && s.counters.coderRounds === 0 && (s.lane === "lean" || !s.testerAgent),
@@ -520,6 +574,7 @@ function buildReport(s) {
     testsEdited: cp(s.acc.testsEdited),
     filesChanged: cp(s.acc.filesChanged),
     followUps: cp(s.acc.followUps),
+    precommitFailures: cp(s.acc.precommitFailures || []),
     researchNote: s.researchNote ?? null,
     cost: null,
   };
@@ -594,6 +649,7 @@ function validate(state, hb) {
       if (!strArr(hb.unverified)) errs.push("unverified must be an array of strings");
       if (!strArr(hb.testFiles)) errs.push("testFiles must be an array of strings");
       if (hb.reviewerChecks !== undefined && !strArr(hb.reviewerChecks)) errs.push("reviewerChecks must be an array of strings");
+      if (hb.ownedFiles !== undefined && !strArr(hb.ownedFiles)) errs.push("ownedFiles must be an array of strings");
       if (!Array.isArray(hb.mutations)) errs.push("mutations must be an array");
       else {
         const ids = new Set();
@@ -712,12 +768,29 @@ function validate(state, hb) {
       if (!(isStr(hb.sha) && /^[0-9a-f]{7,40}$/.test(hb.sha))) errs.push("sha must be 7 to 40 lowercase hex characters");
       if (!nonBlank(hb.branch)) errs.push("branch must be a non-empty string");
       if (!(isStr(hb.tree) && TREE_RE.test(hb.tree))) errs.push("tree must be 40 or 64 lowercase hex characters");
+      if (hb.precommitFailures !== undefined && !validPrecommitFailures(hb.precommitFailures)) {
+        errs.push("precommitFailures must be an array of {attempt (integer >= 1), exitCode (integer or null), log (non-empty string), tests (string array)}");
+      }
       break;
     }
     default:
       errs.push("unknown seat " + seat);
   }
   return errs;
+}
+
+function validPrecommitFailures(a) {
+  return (
+    Array.isArray(a) &&
+    a.every(
+      (e) =>
+        isObj(e) &&
+        Number.isInteger(e.attempt) && e.attempt >= 1 &&
+        (e.exitCode === undefined || e.exitCode === null || Number.isInteger(e.exitCode)) &&
+        nonBlank(e.log) &&
+        strArr(e.tests),
+    )
+  );
 }
 
 // ---- next ----
@@ -770,9 +843,31 @@ export function next(state, handBack) {
   const round = s.seatRuns[P];
   if (strArr(H.leftOut)) s.acc = { ...s.acc, followUps: union(s.acc.followUps, H.leftOut) };
 
+  if (P === "commit" && validPrecommitFailures(H.precommitFailures)) {
+    s.acc = {
+      ...s.acc,
+      precommitFailures: [...(s.acc.precommitFailures || []), ...cp(H.precommitFailures)],
+      followUps: union(
+        s.acc.followUps,
+        H.precommitFailures.map(
+          (e) =>
+            `commit seat: pre-commit attempt ${e.attempt} exited ${e.exitCode ?? "without a code"}: ${e.tests.length ? e.tests.join("; ") : "no failing test named"} (log ${e.log})`,
+        ),
+      ),
+    };
+  }
+
   // C3 .. C6
   const hbMsg = hookBlockMessage(H.hookBlocked);
-  if (hbMsg !== null) return stopWith(s, "hook-blocked", hbMsg);
+  if (hbMsg !== null) {
+    // A block the seat recovered from (complete valid result, nothing else raised) is a follow-up, not a stop.
+    const gateTimedOut = P === "gate" && Array.isArray(H.commands) && H.commands.some((c) => isObj(c) && c.timedOut === true);
+    const recovered =
+      !nonBlank(H.designQuestion) && !nonBlank(H.blocked) && !gateTimedOut &&
+      validateHandBack(s, H).length === 0 && (P !== "commit" || H.tree === s.gateTree);
+    if (!recovered) return stopWith(s, "hook-blocked", hbMsg);
+    s.acc = { ...s.acc, followUps: union(s.acc.followUps, [`${P} seat recovered from a hook block: ${hbMsg}`]) };
+  }
   if (nonBlank(H.designQuestion)) return stopWith(s, "design-decision", H.designQuestion);
   if (P === "gate" && Array.isArray(H.commands) && H.commands.some((c) => isObj(c) && c.timedOut === true)) {
     return stopWith({ ...s, lastGate: { commands: cp(H.commands), gateLine: H.gateLine } }, "gate-timeout", typeof H.gateLine === "string" ? H.gateLine : "a gate command timed out");
@@ -798,6 +893,7 @@ export function next(state, handBack) {
         testFiles: cp(H.testFiles),
         mutations: cp(H.mutations),
         reviewerChecks: strArr(H.reviewerChecks) ? cp(H.reviewerChecks) : [],
+        ownedFiles: ownedWithPins(strArr(H.ownedFiles) ? H.ownedFiles : [], s.pins),
       };
       const to = s.lane === "lean" || !s.testerAgent ? "coder" : "tester";
       return advance(s, to, "ok", { material });
@@ -890,7 +986,16 @@ export function next(state, handBack) {
       const blockers = findings.filter((f) => f.severity === "blocker");
       // An evidenced major gets the same one fix pass; a major without evidence and a minor stay advisory.
       const majors = findings.filter((f) => f.severity === "major" && nonBlank(f.evidence));
-      if (blockers.length === 0 && majors.length === 0) return advance(s, "gate", "ok", { acc });
+      if (blockers.length === 0 && majors.length === 0) {
+        // The gate seat only verifies, so a user answer to a gate stop runs one build-seat round first.
+        const gateGiven = s.gateAnswerRounds || [];
+        const gateFresh = (s.answers || [])
+          .filter((a) => a.seat === "gate" && a.answer !== RERUN_ALONE && (a.round ?? 1) <= (s.seatRuns.gate || 0) + 1)
+          .map((a) => a.round ?? 1)
+          .filter((r) => !gateGiven.includes(r));
+        if (gateFresh.length > 0) return advance(s, buildSeat(s), "ok", { acc, gateAnswerRounds: [...gateGiven, ...gateFresh] });
+        return advance(s, "gate", "ok", { acc });
+      }
       // Each user answer to a reviewer stop gets one coder round when the reviewer that carried it still has an open finding.
       const given = s.answerCoderRounds || [];
       const fresh = (s.answers || [])
@@ -994,6 +1099,7 @@ export function briefPrompt(brief, { repoRoot, worktreePath } = {}) {
   if (b.facts.length > 0) out.push("FACTS (with sources):\n" + bullets(b.facts.map((f) => `${f.text} [${f.source}]`)));
   if (b.unverified.length > 0) out.push("UNVERIFIED:\n" + bullets(b.unverified));
   if (b.testFiles.length > 0) out.push("TEST FILES:\n" + bullets(b.testFiles));
+  if (b.ownedFiles && b.ownedFiles.length > 0) out.push("OWNED FILES:\n" + bullets(b.ownedFiles));
   if (b.mutations.length > 0) {
     out.push("MUTATIONS:\n" + bullets(b.mutations.map((m) => `${m.id} (${m.case}): ${m.mutation}; test that must fail: ${m.test}`)));
     if ((b.rules || []).some((r) => r.id === "mutation-ids-verbatim")) {

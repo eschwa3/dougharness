@@ -69,7 +69,7 @@ See [docs/onboarding.md](onboarding.md) for what each step writes and never does
 |---|---|---|
 | protect-paths | PreToolUse Edit/Write | Denies edits to `.env*`, the lockfile, migrations, generated dirs, and anything outside the project. |
 | guard-bash | PreToolUse Bash | Denies `--no-verify`, force-push to protected branches, a catalogue of destructive commands, and the wrong package manager. |
-| secret-scan | PreToolUse Edit/Write, Bash | Denies writing text or running a command that carries a credential: AWS access key ids, PEM private-key headers, GitHub and Slack tokens, and inline password/secret/api_key/token assignments with a literal value. Placeholder prefixes are exempt; only new text is scanned, so removing a secret is never blocked. |
+| secret-scan | PreToolUse Edit/Write, Bash | Denies writing text or running a command that carries a credential: AWS access key ids, PEM private-key headers, GitHub and Slack tokens, Anthropic (`sk-ant-`), OpenAI (`sk-`, `sk-proj-`) and npm (`npm_`) tokens, and inline password/secret/api_key/token assignments with a literal value. Placeholder prefixes are exempt; only new text is scanned, so removing a secret is never blocked. The public export and the npm stage (`scripts/release.mjs stage`) run the same shared scanner over every shipped text file and fail naming `path:line [rule]` without echoing the value. |
 | format-on-edit | PostToolUse Edit/Write | Runs the detected formatter on the edited file. Reports parse failures back to Claude. |
 | edit-loop | PostToolUse Edit/Write | Counts edits per file per session and nudges after the threshold. |
 | turn-start | UserPromptSubmit | Records the working-tree fingerprint at the start of each turn (typed, scheduled, or a background subagent reporting back), whatever `trace.enabled` says; prints nothing. A main Stop whose tree still matches it (paths on `preCommit.noTestPaths` ignored) with no main-agent Edit traced since skips verification and notes any unverified changes left by other agents; a missing record verifies as before. |
@@ -83,7 +83,7 @@ Every hook is a plain ESM script with zero dependencies, fails open with a visib
 
 **Git pre-commit gate.** `.githooks/pre-commit` is a checked-in plain sh script activated by `core.hooksPath` (set on `pnpm install`, no husky). It runs `pnpm typecheck` and `pnpm test:unit` on every commit from any tool and refuses the commit with the failing output; `--no-verify` is denied by guard-bash.
 
-**Secret scan configuration.** When secret-scan denies a write or a command, the reason names the rule and the file or the command but never echoes the matched text, so the secret itself never lands in the transcript. It is configured under `secrets` in `.doug/config.json`: `secrets.enabled` turns the whole gate off, `secrets.rules.<awsKeyId|pemPrivateKey|githubToken|slackToken|inlineAssignment>: false` turns off one rule at a time, `secrets.placeholders` lists value prefixes compared case-insensitively against the assigned value, and `secrets.ignorePaths` lists globs matched against the project-relative file path.
+**Secret scan configuration.** When secret-scan denies a write or a command, the reason names the rule and the file or the command but never echoes the matched text, so the secret itself never lands in the transcript. It is configured under `secrets` in `.doug/config.json`: `secrets.enabled` turns the whole gate off, `secrets.rules.<awsKeyId|pemPrivateKey|githubToken|slackToken|anthropicKey|openaiKey|npmToken|inlineAssignment>: false` turns off one rule at a time, `secrets.placeholders` lists value prefixes compared case-insensitively against the assigned value, and `secrets.ignorePaths` lists globs matched against the project-relative file path.
 
 **Plan-versus-diff scope.** While `.doug/plan.json` is `approved` or `done`, the stop gate computes the union of the files the plan's tasks own and compares it with `git status`. Any changed file outside that union blocks the turn, naming each file and the nearest owning task; the fix is to revert or to widen the owning task and re-approve, never to work around the gate. `stopGate.planScope: false` turns it off.
 
@@ -203,7 +203,7 @@ doug board labels init [dir]  # migrates a board with no label groups: type hold
 `doug init` proposes `"statusLine": { "type": "command", "command": "node .doug/hooks/scripts/statusline.mjs" }` in `.claude/settings.json`. The script reads the status-line JSON on stdin and prints one line, e.g.:
 
 ```
-Doug 1.6.1 · Opus · main · ctx 8%
+Doug 1.6.2 · Opus · main · ctx 8%
 ```
 
 The segments are the product name from `.doug/config.json`, the installed `doug-gates` version (`.doug/hooks/VERSION`, falling back to config `doug.version`), `model.display_name`, the current git branch, and the used context-window percentage. Fallbacks: `ctx --` before the first API call or after `/compact`, no branch segment outside a git repo, and the bare line `Doug` on any error. Always exits 0. Tests in `plugins/doug-gates/tests/statusline.test.mjs`.

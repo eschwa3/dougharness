@@ -15,6 +15,7 @@ import {
   next,
   validateHandBack,
   briefPrompt,
+  ownedWithPins,
 } from "../lib/card-loop.mjs";
 
 // Card card-loop-contract: the hand card loop as a host-neutral contract. next(state, handBack) is pure;
@@ -92,6 +93,12 @@ function okHB(seat, state, over = {}) {
   const hb = { seat, ...base, ...over };
   for (const k of Object.keys(hb)) if (hb[k] === undefined) delete hb[k];
   return hb;
+}
+
+// A hand-back that carries a hook block and no result (commit without sha; other seats seat + hookBlocked only).
+function noResultHB(seat, state, hookBlocked) {
+  if (seat === "commit") return okHB(seat, state, { sha: undefined, hookBlocked });
+  return { seat, hookBlocked };
 }
 
 function go(state, hb) {
@@ -575,7 +582,7 @@ describe("stop reasons", () => {
   it("T26 hookBlocked stops with hook-blocked at the coder and at commit; detail is the message", () => {
     for (const seat of ["coder", "commit"]) {
       const s = stateAt(seat);
-      const r = go(s, okHB(seat, s, { hookBlocked: { message: "protect-paths refused the edit" } }));
+      const r = go(s, noResultHB(seat, s, { message: "protect-paths refused the edit" }));
       expect(r.action.kind).toBe("stopped");
       expect(r.action.reason).toBe("hook-blocked");
       expect(r.action.report.detail).toContain("protect-paths refused the edit");
@@ -729,7 +736,7 @@ describe("report and purity", () => {
 
   it("T37 the stopped report carries reason, stoppedAt, detail and a null commit", () => {
     const s = stateAt("coder");
-    const r = go(s, okHB("coder", s, { hookBlocked: { message: "guard-bash denied it" } }));
+    const r = go(s, noResultHB("coder", s, { message: "guard-bash denied it" }));
     const rep = r.action.report;
     expect(rep.outcome).toBe("stopped");
     expect(rep.reason).toBe("hook-blocked");
@@ -2267,11 +2274,300 @@ describe("hookBlocked placeholder message", () => {
   it("T107 a real hookBlocked message stops with hook-blocked even when it starts with none", () => {
     for (const m of ["protect-paths refused the edit", "none of the paths were writable: protect-paths refused", "n/a: guard-bash denied it", "nullified by hook"]) {
       for (const seat of ["coder", "commit"]) {
-        const r = stopsOrAdvances(seat, m);
+        const s = stateAt(seat);
+        const r = go(s, noResultHB(seat, s, { message: m }));
         expect(r.action.kind, m).toBe("stopped");
         expect(r.action.reason, m).toBe("hook-blocked");
         expect(r.action.report.detail).toContain(m);
       }
     }
+  });
+});
+
+// Card gate-answer-reaches-coder: an answer to a gate stop runs one build-seat round, then reviewer, gate.
+describe("card gate-answer-reaches-coder: gate answers", () => {
+  const QUESTION = "gate red: the test needs a fix";
+  const ANSWER = "Fix the test first.";
+  const RERUN = "Rerun alone: no other queen is in flight now.";
+  const gateAns = (answer = ANSWER) => ({ answers: [{ seat: "gate", question: QUESTION, answer, round: 1 }] });
+  const TESTS_ONLY = { ...CARD, class: "tests-only" };
+  const reviewerPass = (s) => go(s, okHB("reviewer", s));
+
+  it("G01 a passing reviewer with a gate answer goes to the coder, not the gate", () => {
+    const s = stateAt("reviewer", CARD, gateAns());
+    const r = reviewerPass(s);
+    expect(r.action.kind).toBe("seat");
+    expect(r.state.pending).toBe("coder");
+    expect(r.action.brief.round).toBe(2);
+  });
+
+  it("G02 the answer-driven coder brief carries the gate answer", () => {
+    const s = stateAt("reviewer", CARD, gateAns());
+    const brief = reviewerPass(s).action.brief;
+    expect(brief.answers).toEqual([{ question: QUESTION, answer: ANSWER }]);
+    expect(briefPrompt(brief, { worktreePath: WT })).toContain("Q: " + QUESTION + " A: " + ANSWER);
+  });
+
+  it("G03 the extra round runs once: coder, reviewer, gate, then done with two coder rounds", () => {
+    const s = stateAt("reviewer", CARD, gateAns());
+    const r1 = reviewerPass(s);
+    const r2 = ok(r1.state);
+    expect(r2.state.pending).toBe("reviewer");
+    const r3 = reviewerPass(r2.state);
+    expect(r3.state.pending).toBe("gate");
+    expect(r3.state.counters.coderRounds).toBe(2);
+    const r4 = ok(r3.state);
+    expect(r4.state.pending).toBe("commit");
+    const r5 = ok(r4.state);
+    expect(r5.action.kind).toBe("done");
+    expect(r5.state.counters.coderRounds).toBe(2);
+  });
+
+  it("G04 a gate answer leaves the round-1 coder and reviewer briefs unchanged (resume replay)", () => {
+    const plain = initialState(CARD, {});
+    const withAns = initialState(CARD, gateAns());
+    let a = plain;
+    let b = withAns;
+    while (a.pending !== "coder") {
+      a = ok(a).state;
+      b = ok(b).state;
+    }
+    expect(currentAction(b).brief).toEqual(currentAction(a).brief);
+    expect(briefPrompt(currentAction(b).brief, { worktreePath: WT })).toBe(briefPrompt(currentAction(a).brief, { worktreePath: WT }));
+    a = ok(a).state;
+    b = ok(b).state;
+    expect(b.pending).toBe("reviewer");
+    expect(currentAction(b).brief).toEqual(currentAction(a).brief);
+    expect(briefPrompt(currentAction(b).brief, { worktreePath: WT })).toBe(briefPrompt(currentAction(a).brief, { worktreePath: WT }));
+  });
+
+  it("G05 a rerun-alone gate answer reaches only the gate: reviewer pass goes straight to the gate", () => {
+    const s = stateAt("reviewer", CARD, gateAns(RERUN));
+    const r = reviewerPass(s);
+    expect(r.state.pending).toBe("gate");
+    expect(r.state.counters.coderRounds).toBe(1);
+    expect(r.action.brief.answers).toEqual([{ question: QUESTION, answer: RERUN }]);
+  });
+
+  it("G06 the gate seat's own brief still carries its answer", () => {
+    const s = stateAt("gate", CARD, gateAns());
+    expect(currentAction(s).brief.answers).toEqual([{ question: QUESTION, answer: ANSWER }]);
+  });
+
+  it("G07 tests-only lane routes the gate answer to the tester", () => {
+    const s = stateAt("reviewer", TESTS_ONLY, gateAns());
+    const r = reviewerPass(s);
+    expect(r.action.kind).toBe("seat");
+    expect(r.state.pending).toBe("tester");
+    expect(r.action.brief.answers).toEqual([{ question: QUESTION, answer: ANSWER }]);
+  });
+
+  it("G08 with no gate answer a passing reviewer goes to the gate", () => {
+    const s = stateAt("reviewer", CARD, {});
+    expect(reviewerPass(s).state.pending).toBe("gate");
+  });
+});
+
+// Card commit-seat-retry-not-blocked: a hook block a seat recovered from, with a complete valid result, is not a stop.
+describe("card commit-seat-retry-not-blocked: recovered hook blocks", () => {
+  const MSG = "First git commit attempt exited 1 (pre-commit hook). The retry passed and the commit landed";
+
+  it("R01 a commit hand-back with sha, matching tree and a real hookBlocked is done with the sha", () => {
+    const s = stateAt("commit");
+    const r = go(s, okHB("commit", s, { hookBlocked: { message: MSG } }));
+    expect(r.action.kind).toBe("done");
+    expect(r.action.report.commit).toBe("abc1234");
+  });
+
+  it("R02 a hookBlocked with no result still stops hook-blocked with the message as detail", () => {
+    for (const seat of ["commit", "coder", "reviewer"]) {
+      const s = stateAt(seat);
+      const r = go(s, noResultHB(seat, s, { message: MSG }));
+      expect(r.action.kind, seat).toBe("stopped");
+      expect(r.action.reason, seat).toBe("hook-blocked");
+      expect(r.action.report.detail, seat).toContain(MSG);
+    }
+  });
+
+  it("R03 a commit with sha, a tree differing from the gated tree and hookBlocked stops hook-blocked", () => {
+    const s = stateAt("commit");
+    const r = go(s, okHB("commit", s, { tree: TREE_B, hookBlocked: { message: MSG } }));
+    expect(r.action.kind).toBe("stopped");
+    expect(r.action.reason).toBe("hook-blocked");
+  });
+
+  it("R04 the rule is per seat: reviewer pass with mutationResults and hookBlocked goes to the gate; coder to the reviewer", () => {
+    const rs = stateAt("reviewer");
+    const rr = go(rs, okHB("reviewer", rs, { hookBlocked: { message: "git commit --no-verify refused in scratch clone" } }));
+    expect(rr.action.kind).toBe("seat");
+    expect(rr.action.seat).toBe("gate");
+    const cs = stateAt("coder");
+    const cr = go(cs, okHB("coder", cs, { hookBlocked: { message: "a side step was refused, recovered" } }));
+    expect(cr.action.kind).toBe("seat");
+    expect(cr.action.seat).toBe("reviewer");
+  });
+
+  it("R05 a recovered hook message is recorded in the final report followUps", () => {
+    const s = stateAt("commit");
+    const r = go(s, okHB("commit", s, { hookBlocked: { message: MSG } }));
+    expect(r.action.report.followUps.some((f) => String(f).includes(MSG))).toBe(true);
+    const rs = stateAt("reviewer");
+    let st = go(rs, okHB("reviewer", rs, { hookBlocked: { message: MSG } })).state;
+    let guard = 0;
+    let last;
+    while (st.pending) {
+      if (guard++ > 20) throw new Error("no end");
+      last = go(st, okHB(st.pending, st));
+      st = last.state;
+    }
+    expect(last.action.kind).toBe("done");
+    expect(last.action.report.followUps.some((f) => String(f).includes(MSG))).toBe(true);
+  });
+
+  it("R06 the hook-block-report rule tells seats to report hookBlocked only when the step finally failed", () => {
+    expect(BRIEF_RULES["hook-block-report"].text).toMatch(/finally failed/i);
+    const s = stateAt("coder");
+    const a = currentAction(s);
+    expect(briefPrompt(a.brief, { repoRoot: "/r", worktreePath: "/w" })).toMatch(/finally failed/i);
+  });
+});
+
+// Card skill-hashes-pin-owned: a card that changes a pinned file owns its pin file.
+describe("card skill-hashes-pin-owned: owned list carries the pin file", () => {
+  const PIN = "tests/replay/skill-hashes.json";
+  const QUEEN = "plugins/doug-flow/workflows/card-queen.js";
+  const PINS = { [PIN]: [QUEEN, "plugins/doug-flow/workflows/doug-implement.js"] };
+  const toReviewer = (owned, pins = PINS, extra = {}) => {
+    let st = ok(stateAt("lead", CARD, { pins }), { ownedFiles: owned, ...extra }).state;
+    while (st.pending !== "reviewer") st = ok(st).state;
+    return currentAction(st).brief;
+  };
+
+  it("P01 a lead owning card-queen.js yields an owned list with the pin file", () => {
+    expect(toReviewer([QUEEN]).ownedFiles).toEqual([QUEEN, PIN]);
+  });
+
+  it("P02 a lead owning no pinned file yields exactly its own list", () => {
+    expect(toReviewer(["plugins/doug-flow/lib/a.mjs"]).ownedFiles).toEqual(["plugins/doug-flow/lib/a.mjs"]);
+  });
+
+  it("P03 the owned list reaches the reviewer's brief text as OWNED FILES", () => {
+    const text = briefPrompt(toReviewer([QUEEN]));
+    expect(text).toContain("OWNED FILES:");
+    expect(text).toContain("- " + PIN);
+    expect(briefPrompt(toReviewer([]))).not.toContain("OWNED FILES:");
+  });
+
+  it("P04 an absolute owned path still pulls in the pin file", () => {
+    expect(toReviewer(["/abs/worktree/c1/" + QUEEN]).ownedFiles).toContain(PIN);
+  });
+
+  it("P05 ownedWithPins dedupes, keeps order, never duplicates an owned pin file", () => {
+    expect(ownedWithPins([QUEEN, QUEEN], PINS)).toEqual([QUEEN, PIN]);
+    expect(ownedWithPins([PIN, QUEEN], PINS)).toEqual([PIN, QUEEN]);
+    expect(ownedWithPins([QUEEN], {})).toEqual([QUEEN]);
+  });
+
+  it("P06 a malformed options.pins throws TypeError naming options.pins", () => {
+    expect(() => initialState(CARD, { pins: { [PIN]: "not-an-array" } })).toThrow(TypeError);
+    expect(() => initialState(CARD, { pins: { [PIN]: "not-an-array" } })).toThrow(/options\.pins/);
+  });
+
+  it("P07 lead ownedFiles must be an array of strings; absent stays valid; owned-files rule is lead-only", () => {
+    const s = stateAt("lead");
+    expect(validateHandBack(s, okHB("lead", s))).toEqual([]);
+    expect(validateHandBack(s, okHB("lead", s, { ownedFiles: ["a"] }))).toEqual([]);
+    expect(validateHandBack(s, okHB("lead", s, { ownedFiles: "a" })).join(" ")).toContain("ownedFiles must be an array of strings");
+    expect(currentAction(s).brief.rules.map((r) => r.id)).toContain("owned-files");
+    expect(currentAction(stateAt("coder")).brief.rules.map((r) => r.id)).not.toContain("owned-files");
+  });
+});
+
+// Card commit-seat-precommit-flake: the commit seat logs each git commit under .doug/.state and reports a failed
+// attempt's test names (precommitFailures), so a first-attempt pre-commit failure is never lost to truncation.
+describe("card commit-seat-precommit-flake: commit seat pre-commit log", () => {
+  const PF = [{ attempt: 1, exitCode: 1, log: "/w/.doug/.state/commit/attempt-1.log", tests: ["a.test.mjs > s > t"] }];
+  const toCommit = () => stateAt("commit");
+
+  it("P01 the commit brief carries commit-precommit-log naming the log path and the failing-tests command; no other seat does", () => {
+    const { actions } = walk(CARD, { research: true });
+    let seen = false;
+    for (const a of actions.filter((x) => x.kind === "seat")) {
+      const r = a.brief.rules.find((x) => x.id === "commit-precommit-log");
+      if (a.seat === "commit") {
+        seen = true;
+        expect(r, "commit").toBeDefined();
+        expect(r.text).toContain(".doug/.state/commit/attempt-");
+        expect(r.text).toContain("run.mjs failing-tests");
+        expect(r.text).toContain("precommitFailures");
+      } else expect(r, a.seat).toBeUndefined();
+    }
+    expect(seen).toBe(true);
+    expect(BRIEF_RULES["commit-precommit-log"].seats).toEqual(["commit"]);
+  });
+
+  it("P02 the commit schema declares precommitFailures as optional", () => {
+    expect(HAND_BACK_SCHEMAS.commit.properties.precommitFailures).toBeDefined();
+    expect(HAND_BACK_SCHEMAS.commit.required).not.toContain("precommitFailures");
+  });
+
+  it("P03 a commit hand-back with precommitFailures reports them and adds a followUps line naming tests and log", () => {
+    const s = toCommit();
+    const r = go(s, okHB("commit", s, { precommitFailures: PF }));
+    expect(r.action.kind).toBe("done");
+    expect(r.action.report.precommitFailures).toEqual(PF);
+    const fu = r.action.report.followUps.filter((f) => String(f).includes("a.test.mjs > s > t"));
+    expect(fu).toHaveLength(1);
+    expect(fu[0]).toContain("/w/.doug/.state/commit/attempt-1.log");
+    expect(fu[0]).toContain("attempt 1");
+  });
+
+  it("P04 an empty tests list reads 'no failing test named'; a null exitCode is accepted", () => {
+    const s = toCommit();
+    const pf = [{ attempt: 2, exitCode: null, log: "/w/l.log", tests: [] }];
+    const r = go(s, okHB("commit", s, { precommitFailures: pf }));
+    expect(r.action.kind).toBe("done");
+    expect(r.action.report.followUps.some((f) => String(f).includes("no failing test named"))).toBe(true);
+  });
+
+  it("P05 a report without precommitFailures carries an empty array", () => {
+    const s = toCommit();
+    const r = go(s, okHB("commit", s));
+    expect(r.action.report.precommitFailures).toEqual([]);
+  });
+
+  it("P06 a stopping commit seat (blocked) still reports its precommitFailures", () => {
+    const s = toCommit();
+    const r = go(s, okHB("commit", s, { blocked: "cannot commit", precommitFailures: PF }));
+    expect(r.action.kind).toBe("stopped");
+    expect(r.action.reason).toBe("seat-blocked");
+    expect(r.action.report.precommitFailures).toEqual(PF);
+    expect(r.action.report.followUps.some((f) => String(f).includes("a.test.mjs > s > t"))).toBe(true);
+  });
+
+  it("P07 malformed precommitFailures stop hand-back-invalid", () => {
+    const s = toCommit();
+    const good = PF[0];
+    const bad = [
+      "x",
+      [null],
+      [{ ...good, attempt: 0 }],
+      [{ ...good, attempt: 1.5 }],
+      [{ ...good, tests: "a" }],
+      [{ ...good, tests: [1] }],
+      [{ ...good, log: "" }],
+      [{ ...good, exitCode: "1" }],
+      [{ attempt: 1, exitCode: 1, tests: [] }],
+      [{ attempt: 1, exitCode: 1, log: "/l" }],
+    ];
+    for (const precommitFailures of bad) {
+      const r = go(s, okHB("commit", s, { precommitFailures }));
+      expect(r.action.kind, JSON.stringify(precommitFailures)).toBe("stopped");
+      expect(r.action.reason, JSON.stringify(precommitFailures)).toBe("hand-back-invalid");
+    }
+  });
+
+  it("P08 worker-contract.md names precommitFailures", () => {
+    expect(readFileSync(CONTRACT_DOC, "utf8")).toContain("precommitFailures");
   });
 });
